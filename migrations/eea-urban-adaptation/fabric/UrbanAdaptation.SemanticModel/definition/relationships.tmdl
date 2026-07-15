@@ -1,0 +1,24 @@
+relationship a1b2c3d4-0001-4a5b-8c6d-1e2f3a4b5c01
+	fromColumn: 'Land Use Flood Pct'.Name
+	toColumn: 'UA Cities'.Name
+
+relationship a1b2c3d4-0002-4a5b-8c6d-1e2f3a4b5c02
+	fromColumn: 'Land Use Flood Pct by Sector'.Name
+	toColumn: 'UA Cities'.Name
+
+relationship a1b2c3d4-0003-4a5b-8c6d-1e2f3a4b5c03
+	fromColumn: 'Sealed Surface Pct'.Name
+	toColumn: 'UA Cities'.Name
+
+relationship a1b2c3d4-0004-4a5b-8c6d-1e2f3a4b5c04
+	fromColumn: 'Climate Indicators'.City
+	toColumn: 'UA Cities'.Name
+
+relationship a1b2c3d4-0005-4a5b-8c6d-1e2f3a4b5c05
+	fromColumn: 'Social Vulnerability'.Name
+	toColumn: 'UA Cities'.Name
+
+relationship 'Forest Fires Pct_Name_UA Cities_Name'
+	fromColumn: 'Forest Fires Pct'.Name
+	toColumn: 'UA Cities'.Name
+

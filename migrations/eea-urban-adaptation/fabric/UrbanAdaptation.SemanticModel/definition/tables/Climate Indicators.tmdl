@@ -1,0 +1,99 @@
+/// City x climate-indicator grain (12684 rows = 906 cities x 14 climate variables), already in Tableau's post-pivot long shape. Source: Tableau data source 'table1' (extract-based .hyper). Relationship key: City (=NAME).
+table 'Climate Indicators'
+	lineageTag: 3ef2014f-43fd-4e41-89bd-f1dc5f7f5997
+
+	/// Row count (Tableau 'Number of Records' calculated field, formula: 1)
+	measure 'Number of Records (Climate Indicators)' = COUNTROWS('Climate Indicators')
+		formatString: #,##0
+		lineageTag: e709186d-0ef7-4eb9-b51a-ed83de316053
+
+	column City
+		dataType: string
+		lineageTag: 0d9508a0-346d-4dcd-936f-099757b67503
+		dataCategory: City
+		summarizeBy: none
+		sourceColumn: NAME
+
+	column 'Climate Variable'
+		dataType: string
+		lineageTag: 73bc3808-d52d-4edf-9afa-370007bef24d
+		summarizeBy: none
+		sourceColumn: Name1
+
+	/// Code: present in the extracted CSV (identical values to Variables_code/Pivot Field Names in every sampled row) but absent from the parsed spec's field list entirely. Materialized for fidelity/completeness per the extract; not referenced by any translated calculated field.
+	column Code
+		dataType: string
+		lineageTag: 5ef65d59-b8ae-4935-8282-533b2f4d596d
+		summarizeBy: none
+		sourceColumn: Code
+
+	/// Unit: present in the extracted CSV but absent from the parsed spec's field list, even though it is directly referenced by the Superscritps and Climate indicators formulas below. Materialized here as a critical fix - without it those two calculated columns cannot be reproduced.
+	column Unit
+		dataType: string
+		lineageTag: d1db9414-cc20-4ad5-bedc-87ebf4229465
+		summarizeBy: none
+		sourceColumn: Unit
+
+	column Rank
+		dataType: int64
+		lineageTag: 9a3c14ce-7854-4001-82d2-8fdfa3c8e712
+		summarizeBy: none
+		sourceColumn: Rank
+
+	column Group
+		dataType: int64
+		lineageTag: 6c5ad083-3080-4509-8f30-6bcb9556433b
+		summarizeBy: none
+		sourceColumn: Group
+
+	/// Superscritps (caption/typo kept verbatim from the source workbook): footnote letter a-f derived from Climate Variable / Unit text matching. 1:1 SWITCH(TRUE(),...) translation of the Tableau IF/ELSEIF Contains() chain; every one of the 14 real (Climate Variable, Unit) combinations in the extracted data resolves to a branch (verified), so no BLANK() fallback is expected in practice.
+	column Superscritps = SWITCH(TRUE(), FIND("Hot summer", 'Climate Indicators'[Climate Variable], 1, 0) > 0, "a", FIND("Combined summer", 'Climate Indicators'[Climate Variable], 1, 0) > 0, "a", FIND("Cooling degree", 'Climate Indicators'[Climate Variable], 1, 0) > 0, "a", FIND("in 33", 'Climate Indicators'[Unit], 1, 0) > 0, "b", FIND("forest", 'Climate Indicators'[Climate Variable], 1, 0) > 0, "c", FIND("mm/decade", 'Climate Indicators'[Unit], 1, 0) > 0, "d", FIND("%", 'Climate Indicators'[Unit], 1, 0) > 0, "e", FIND("events/decade", 'Climate Indicators'[Unit], 1, 0) > 0, "f", FIND("Months/30-", 'Climate Indicators'[Unit], 1, 0) > 0, "e", BLANK())
+		dataType: string
+		lineageTag: ef056461-d77d-4105-a5bc-f4dcec74875b
+		summarizeBy: none
+
+	/// Climate indicators: display label combining Climate Variable, Unit and the Superscritps footnote letter, e.g. "Cooling degree days [Average number per year] (a)". Table name/column name are similar ("Climate Indicators" table vs. "Climate indicators" caption, case differs only) - flagged in limitations to avoid confusion when referencing this column in DAX/reports.
+	column 'Climate indicators' = 'Climate Indicators'[Climate Variable] & " [" & 'Climate Indicators'[Unit] & "] " & "(" & 'Climate Indicators'[Superscritps] & ")"
+		dataType: string
+		lineageTag: afbd3216-d1ff-4f94-a913-8171b6bd1c94
+		summarizeBy: none
+
+	column 'Pivot Field Names'
+		dataType: string
+		lineageTag: 52af13f1-be6f-44b5-a395-eb317260c9f6
+		summarizeBy: none
+		sourceColumn: Pivot Field Names
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Pivot Field Values'
+		dataType: double
+		lineageTag: 8cbd0169-0482-44f7-9a5f-15bb43f0e377
+		summarizeBy: sum
+		sourceColumn: Pivot Field Values
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column 'Value (copy)'
+		dataType: double
+		lineageTag: 35160a24-4b99-4d3a-9ef1-e585b2739c4e
+		summarizeBy: sum
+		sourceColumn: Value (copy)
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition 'Climate Indicators' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.table1.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"NAME", type text}, {"Pivot Field Names", type text}, {"Pivot Field Values", type number}, {"Name1", type text}, {"Code", type text}, {"Unit", type text}, {"Rank", Int64.Type}, {"Group", Int64.Type}}, "en-US"),
+				    #"Duplicated Value" = Table.DuplicateColumn(#"Changed Type", "Pivot Field Values", "Value (copy)")
+				in
+				    #"Duplicated Value"
+

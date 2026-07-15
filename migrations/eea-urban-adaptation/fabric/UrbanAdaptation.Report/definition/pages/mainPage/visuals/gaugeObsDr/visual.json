@@ -1,0 +1,128 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "0f1855a6aaaf46b48a43",
+  "position": {
+    "x": 409.57711442786069,
+    "y": 470.46019900497504,
+    "z": 14000,
+    "height": 115,
+    "width": 297,
+    "tabOrder": 9000
+  },
+  "visual": {
+    "visualType": "gauge",
+    "query": {
+      "queryState": {
+        "MaxValue": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Obs Dr 0 1 Max"
+                }
+              },
+              "queryRef": "UA Cities.Obs Dr 0 1 Max",
+              "nativeQueryRef": "Obs Dr 0 1 Max"
+            }
+          ]
+        },
+        "MinValue": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Obs Dr 0 1 Min"
+                }
+              },
+              "queryRef": "UA Cities.Obs Dr 0 1 Min",
+              "nativeQueryRef": "Obs Dr 0 1 Min"
+            }
+          ]
+        },
+        "TargetValue": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Obs Dr 0 1 Target"
+                }
+              },
+              "queryRef": "UA Cities.Obs Dr 0 1 Target",
+              "nativeQueryRef": "Obs Dr 0 1 Target"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Obs Dr 0 1 Value"
+                }
+              },
+              "queryRef": "UA Cities.Obs Dr 0 1 Value",
+              "nativeQueryRef": "Obs Dr 0 1 Value"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Droughts'"
+                }
+              }
+            },
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "11D"
+                }
+              }
+            },
+            "bold": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

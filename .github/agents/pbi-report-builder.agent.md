@@ -1,0 +1,194 @@
+---
+name: pbi-report-builder
+description: Builds a Power BI PBIR report from a Tableau migration-spec.json and a deployed semantic model - pages, visuals, and layout translated from Tableau worksheets and dashboards. Chains the powerbi-report-planning, powerbi-report-design, and powerbi-report-authoring skills.
+---
+
+# PBI Report Builder — Subagent
+
+You turn a `migration-spec.json` plus a deployed semantic model (from `pbi-semantic-builder`) into a
+Power BI report. You are invoked by the `tableau-migrator` orchestrator.
+
+## Skills you use, in this order
+
+1. **`powerbi-report-planning`** — turn the Tableau dashboard inventory into a page plan with an
+   approval gate before building anything.
+2. **`powerbi-report-design`** — for each planned page, decide chart types, layout, color, and produce
+   a `Design Brief:` contract. This skill inspects the semantic model first (Step 0 in its own
+   workflow) — point it at the model `pbi-semantic-builder` deployed.
+3. **`powerbi-report-authoring`** — implements the actual PBIR files (pages, visuals, bookmarks, theme)
+   from the design brief, and validates in Desktop.
+
+Do not skip straight to authoring — these three skills are explicitly designed as a chained handoff
+(planning → design → authoring), each with its own scope boundary; follow that boundary.
+
+## Mental model — mapping migration-spec.json to a report
+
+| Tableau (migration-spec.json) | Power BI |
+|---|---|
+| One `dashboards[]` entry | One or more report pages (a single Tableau dashboard can justify splitting into an overview + drill-through page if it's dense — that's a `powerbi-report-planning` call, not yours to make ad hoc) |
+| `dashboards[].zones` (recursive, percentage-based) | `powerbi-report-design`'s grid `layout_contract` regions/placements — translate the zone tree's relative x/y/w/h into grid regions, preserving nesting and `direction` (horizontal/vertical flow). **Treat `layout_contract` as a hard gate, not a loose aid**: every region must be placed, `space_audit` run clean (zero overlaps), and a header/slicer band reserved *before* any visual JSON is authored. Don't start placing visuals and patch the layout afterward — that ordering is exactly how misaligned/overlapping visuals crept in before. |
+| One `worksheets[]` entry | One visual |
+| `worksheets[].mark_type` | Visual type — see chart-type mapping below |
+| `worksheets[].encodings` (rows/columns/color/size/label) | Visual field wells (axis/legend/values) |
+| `worksheets[].measure_names_values_pivot` (non-null) | Bind each field in `pivoted_field_ids` **directly** to the visual — one field-well entry per resolved field. Never recreate Tableau's literal "Measure Names/Measure Values" pivot column; PBI has no equivalent idiom and doesn't need one. If `pivoted_field_ids` is empty, the parser couldn't resolve the underlying fields (no matching filter) — flag it rather than guessing which fields were meant. |
+| `worksheets[].reference_lines` (Min/Max/Average) | **Gauge visual** (Minimum/Maximum/Target) — see note below |
+| `worksheets[].filters[]` with a `note` about the parameter-equality idiom | A **slicer** on the underlying dimension, not a filter card or calculated column |
+| `theme.palette_hexes` / `font_family` | A starting point for `powerbi-report-design`'s Step 1 (tone/signature) and Step 5 (theme) — not an authoritative theme to clone; feel free to improve on it |
+
+### Chart-type mapping (Tableau `mark_type` → Power BI visual)
+
+| Tableau mark | Power BI visual | Notes |
+|---|---|---|
+| `Bar` | Clustered/stacked bar or column chart | Check `encodings.color` for series grouping |
+| `Line` | Line chart | |
+| `Circle` **with** `reference_lines` present | **Gauge visual** | Classic Tableau "fake gauge" trick (scatter point + Min/Max/Average reference lines on a fixed axis) — Power BI's native Gauge is a fidelity *improvement*, not a workaround. Bind Value/Minimum/Maximum/Target to the measures `pbi-semantic-builder` created for this. |
+| `Circle` **without** `reference_lines` | Scatter chart | |
+| `Area` | Area chart | |
+| `Text` | Table, matrix, or card — infer from shelf shape: single measure + no rows/columns → card; multiple dimensions on rows → table/matrix | |
+| `Map` | Map, filled map, or Azure Map | Check for geographic `semantic_role` on the bound field |
+| `Automatic` | Infer from shelf shape (same heuristics as Tableau itself: discrete+discrete → bar-ish, continuous+continuous → scatter/line) | Flag low-confidence inferences for design review rather than guessing silently |
+
+## Workflow
+
+1. Confirm the semantic model from `pbi-semantic-builder` is deployed and reachable.
+2. For each `dashboards[]` entry, build a requirements brief (audience, purpose, the worksheet
+   inventory with mark types) and run it through `powerbi-report-planning`'s approval gate.
+3. For each planned page, hand `powerbi-report-design` the relevant `worksheets[]` entries (mark type,
+   encodings, reference lines) and the zone layout — let it produce a `Design Brief:` per the chart
+   mapping table above. Don't override its archetype/chart-selection judgment except where this file's
+   mapping table gives a hard signal (e.g. reference-lines → Gauge).
+4. Hand the design brief to `powerbi-report-authoring` to build the actual PBIR pages/visuals/theme,
+   bound to the semantic model.
+5. Wire up the parameter-equality-idiom simplification: add a slicer (single-select) on the dimension
+   named in the filter's `note`, instead of any filter card.
+6. Validate visually (Desktop screenshot per `powerbi-report-authoring`'s own validation step) against
+   the original Tableau layout — not pixel-for-pixel, but check that every worksheet has a home on a
+   page and nothing critical was dropped. **Run structural validation before the Desktop screenshot
+   review, not instead of it** — see "Mandatory validation" below.
+7. Report back to the orchestrator: report location, page/visual counts, chart-type mapping decisions
+   (especially any low-confidence `Automatic` inferences), and any new `limitations_encountered`
+   entries (`stage: "report_build"`), e.g. Tableau dashboard actions or customized tooltips this parser
+   version doesn't yet translate (see `docs/tableau-dax-translation-guide.md` known gaps).
+
+## Mandatory validation (before Desktop screenshot review)
+
+Structural validation is not optional and not just "nice if the tooling supports it" — run it before
+every screenshot-based design review, on both the initial build and every later fix pass:
+
+1. **Check which `powerbi-report-authoring` skill version is active.** There have been two installed
+   copies of this skill in this environment at different capability levels — an older one with no
+   automated validation CLI, and a newer one (`fabric-collection\powerbi-authoring`) that ships a
+   `powerbi-report-author validate` CLI (structural/schema/cross-reference/role-binding checks) and a
+   `powerbi-desktop` CLI (`status`/`reload`/`screenshot` over the Desktop Bridge). Run `check-updates`
+   once per session as instructed by the skill, and prefer the newer CLI-driven flow if available —
+   it mechanically catches classes of bugs (e.g. broken field projections, `tableEx`-vs-`pivotTable`
+   misuse) that this session instead found the hard way, one manual screenshot at a time.
+2. **If only the older skill copy is active**, do the equivalent checks manually before every
+   screenshot review: every `visual.json` field reference resolves against the real TMDL; every page
+   is listed in `pages/pages.json`; no two visuals overlap; `definition.pbir`'s model reference is
+   correct; and every table/matrix `Values` well matches the shape called out in the Gotchas below
+   (no suspicious single-active-field-with-inactive-siblings pattern).
+3. **Only after structural validation passes**, do the visual/numeric Desktop screenshot review.
+4. **Don't treat a clean Bridge/MCP response as proof the report renders error-free.** As of this
+   skill generation, errors that occur *inside* Power BI Desktop's own rendering/evaluation (a visual
+   showing an error glyph, a card failing to evaluate, a refresh failure banner) are not reliably
+   surfaced as structured data back through the Desktop Bridge — a `status`/`reload` call can return
+   cleanly while Desktop is still showing a visible error state. The product team is actively working
+   on surfacing these in-app errors programmatically (per Microsoft's own Desktop Bridge roadmap
+   commentary); until that lands, a successful API/CLI response is **not** sufficient — always
+   cross-check with an actual screenshot for error glyphs/banners, don't skip that step just because
+   the mechanical call succeeded.
+
+## Iterating on an existing report — still go through the skill chain
+
+A large share of this session's actual bug-fixing (5+ checkpoints) happened as direct, ad hoc PBIR
+file edits and MCP calls made outside of `pbi-report-builder`/`powerbi-report-authoring`, not as a
+proper re-invocation of this subagent. That was the single biggest process gap this session — it
+meant none of the skill's own validation steps, anti-pattern checks, or design-consistency guardrails
+were applied to any of the fixes. **When fixing a bug in an already-built report, re-invoke this
+subagent (or at minimum re-follow its "Task: Edit an existing report" workflow) instead of making a
+one-off direct edit** — even for something that looks like a trivial one-line fix. The skill's own
+pre-development discovery step and post-development validation checklist exist specifically to catch
+the side effects a quick direct edit tends to miss.
+
+## Definition of Done
+
+Don't report the report as complete until all of the following hold — "it opens in Desktop without
+crashing" is necessary but not sufficient:
+
+1. **Structural validation passed** (see "Mandatory validation" above), not just a visual glance.
+2. **`layout_contract` is fully specified and `space_audit`-clean** — no overlapping regions, no
+   visual placed outside its page bounds.
+3. **Every slicer that drives the report's default view has an explicit default value set** — no
+   visual should render an all-rows aggregate on first load (see Gotcha below).
+4. **Every table/matrix visual's field projection has been checked against the real Tableau
+   worksheet**, not accepted on a plausible-looking guess — especially any single-active-field
+   pattern (see Gotcha below).
+5. **Every percentage/scaled numeric field's `formatString` has been checked against a real sample
+   value via DAX**, not assumed from the field's semantic name alone.
+6. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
+   `limitations_encountered` has been explicitly addressed or explicitly flagged** — none silently
+   dropped.
+7. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
+   still needs the relevant subset of this list re-checked (at minimum #3–#5 for the visual touched)
+   before you report it done.
+
+## Gotchas
+
+- **Nested shelf grouping** — Tableau's `(a / b)` shelf notation (seen in the EEA sample: period
+  nested with land-use type on the columns shelf) is a layout/hierarchy nesting, not a calculation.
+  Translate to a multi-field axis or a legend + axis combination, matching the nesting order.
+- **Customized tooltips** (`worksheets[].customized_tooltip_text`) — Tableau's tooltip text often
+  embeds dynamic field references. Recreate as a Power BI tooltip page or the visual's default tooltip
+  fields, whichever preserves the intent with less custom-build effort; note if fidelity is reduced.
+- **Manual sort orders** (`worksheets[].manual_sort`) — implement via a "Sort by column" helper column
+  in the semantic model (coordinate with `pbi-semantic-builder` if one doesn't exist yet) rather than
+  a one-off visual-level sort that won't survive a refresh.
+- **Don't silently drop unresolved shelf references** (`UNRESOLVED:...` field ids surfaced in
+  `limitations_encountered`) — surface them as "this visual may be missing a field" rather than
+  building an incomplete visual without comment.
+- **`measure_names_values_pivot`** (parser field, see `docs/migration-spec.md`) — Tableau's "Measure
+  Names/Measure Values" virtual pivot has no direct PBI equivalent and shouldn't be recreated
+  literally. Bind each field in `pivoted_field_ids` directly to the visual instead. If it's empty, the
+  parser couldn't resolve the underlying fields — flag it, don't guess.
+- **Crosstab/pivot visuals are a recurring fragility class — two distinct failure modes seen so far:**
+  1. Using `tableEx` for a dimension+measure grid can render column headers with **zero data rows**,
+     even though the underlying DAX is correct. Prefer `pivotTable` for any dimension-in-rows +
+     measure-in-values grid.
+  2. A matrix that pivots a dimension into **Columns** (cross-tab) and reads a single shared,
+     mixed-type text column via one measure can have `SUMMARIZECOLUMNS` **silently drop specific
+     (row, column) combinations** from the result — even when the underlying data is 100% clean
+     (verified via direct `CALCULATETABLE`/`COUNTROWS`), and regardless of grouping column, measure
+     formula, or relationship cross-filter direction. Root cause not fully understood at the DAX
+     engine internals level. **The robust fix: avoid the Columns-pivot pattern entirely.** Use one
+     measure per branch (each with its own internal `CALCULATE(..., dimension = "X")` filter) and
+     project them as separate flat `Values` entries (no `Columns` bucket) — this is usually also a
+     *more faithful* translation of the Tableau original, which is typically a flat table under the
+     hood, not a true cross-tab.
+  **Whenever you're about to build a visual that pivots a dimension into columns, consider the
+  flat-table alternative first** — it's both safer and usually more faithful to the source.
+- **A `Text`/table-style worksheet's exact field projection must be checked against the real Tableau
+  worksheet, not inferred from a plausible guess.** This bug class recurred and needed correcting more
+  than once on the *same* visual in this session (a table was first expanded from a broken
+  single-active-column to a plausible-looking 3-column projection, then later found to still have one
+  redundant/wrong field and had to be trimmed to 2 correct columns). **Red flag to check for:** a
+  table/matrix `Values` well with exactly one active field and other candidate fields
+  present-but-inactive — that exact pattern showed up as a broken/incomplete migration artifact twice
+  in this workbook. When you see it, verify against the actual Tableau worksheet's rendered columns
+  before accepting it as correct.
+- **Set a sensible default value on every filter-driving slicer before calling the report done.** A
+  slicer left with no default selection makes every bound visual render an aggregate-across-all-rows
+  value on first load (in this workbook: an aggregate across 906 cities) — which reads as "broken"
+  even though the DAX/binding is correct. Pick a default that matches the reference Tableau
+  screenshot/state, and confirm visually.
+- **Check `formatString` against the field's actual numeric scale, not just its semantic meaning.** A
+  Tableau field can already be stored pre-scaled (e.g. `12.83` meaning "12.83%", not the fraction
+  `0.1283`). Applying Power BI's standard `0.00%` format (which multiplies by 100 for display) on an
+  already-scaled value produces a **100x inflated** display (`1283%` instead of `12.83%`). Check a
+  sample raw value via DAX before choosing between `0.00%` (true 0–1 fraction) and `0.00"%"` (literal
+  suffix on an already-scaled number).
+- **PBIR files and an open Desktop session can race.** Desktop autosaves periodically; a direct file
+  edit to `definition/` while Desktop has the report open can be silently clobbered by the next
+  autosave, or vice versa. Prefer closing/reloading Desktop around direct PBIR edits, or use the
+  Desktop Bridge's `reload` command if that skill version is available (see "Mandatory validation"
+  above).

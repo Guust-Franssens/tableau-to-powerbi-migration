@@ -1,0 +1,56 @@
+/// Reference/footnote lookup table for the Climate Indicators data-source citations (19 rows, one per superscript letter a-s used across the workbook's footnotes). Source: Tableau data source 'webreferences' (extract-based .hyper).
+table 'Web References'
+	lineageTag: 4d7631f4-9325-4d22-8e09-c007785e040b
+
+	/// Row count (Tableau 'Number of Records' calculated field, formula: 1)
+	measure 'Number of Records (Web References)' = COUNTROWS('Web References')
+		formatString: #,##0
+		lineageTag: 9ecbcf1a-091a-4dea-a0ff-e001ebbfc912
+
+	column Letter
+		dataType: string
+		lineageTag: e98bcbb1-e397-4483-aa40-f6d38b4f43b2
+		summarizeBy: none
+		sourceColumn: letter
+
+	column Word
+		dataType: string
+		lineageTag: 7a8bc8a7-cb37-4e00-b48f-fde5ec4ecef1
+		summarizeBy: none
+		sourceColumn: Word
+
+	/// URL: present in the extracted CSV but, like Code/Unit in Climate Indicators, absent from the parsed spec's field list entirely (the spec only enumerates letter, Word, Letter_And_Words, fila, Letter_And_Words (group), Number of Records - 6 fields). Materialized here for completeness since it is a genuinely useful footnote hyperlink column, even though no calculated field references it.
+	column URL
+		dataType: string
+		lineageTag: a668a6c3-b231-4422-aad6-c6a0ad0e542c
+		summarizeBy: none
+		sourceColumn: URL
+
+	/// Letter_And_Words: display label "(<letter>) <Word>", 1:1 translation of the Tableau '(' + [letter] + ') ' + [Word] concatenation.
+	column Letter_And_Words = "(" & 'Web References'[Letter] & ") " & 'Web References'[Word]
+		dataType: string
+		lineageTag: a7273e64-7ac5-46c3-9778-0482257916ec
+		summarizeBy: none
+
+	/// Letter_And_Words (group): Tableau Group field over Letter_And_Words. The parser does not capture Tableau group-membership mappings (which values are grouped together), so this is approximated as a passthrough duplicate of Letter_And_Words rather than a true grouped dimension - documented in limitations; if the actual grouping matters for the report, it must be re-created by hand from the source .twb.
+	column 'Letter_And_Words (group)' = 'Web References'[Letter_And_Words]
+		dataType: string
+		lineageTag: ec26f624-7869-4728-bf3d-67ad227aa22c
+		summarizeBy: none
+
+	/// fila: sort/bucket order (1/2/3) derived from letter via a CASE statement in the source workbook. Translated faithfully with SWITCH(TRUE(), ...) preserving the *original branch order*, including the source workbook's own bug: 'f' appears twice (THEN 1, then unreachable THEN 2) and 'h'/'i'/'j'/'k' appear twice (THEN 2, then unreachable THEN 3) - SWITCH matches first-hit exactly like Tableau's CASE, so behavior is bug-compatible. Flagged back as a likely source-workbook authoring bug, not "fixed" here, per the translation guide's explicit instruction to preserve unreachable-branch bugs faithfully.
+	column fila = SWITCH(TRUE(), 'Web References'[Letter] = "a", 1, 'Web References'[Letter] = "b", 1, 'Web References'[Letter] = "c", 1, 'Web References'[Letter] = "d", 1, 'Web References'[Letter] = "e", 1, 'Web References'[Letter] = "f", 1, 'Web References'[Letter] = "g", 2, 'Web References'[Letter] = "h", 2, 'Web References'[Letter] = "i", 2, 'Web References'[Letter] = "j", 2, 'Web References'[Letter] = "k", 2, 'Web References'[Letter] = "f", 2, 'Web References'[Letter] = "h", 3, 'Web References'[Letter] = "i", 3, 'Web References'[Letter] = "j", 3, 'Web References'[Letter] = "k", 3, 'Web References'[Letter] = "l", 3, 'Web References'[Letter] = "m", 3, 'Web References'[Letter] = "n", 3, BLANK())
+		dataType: int64
+		lineageTag: 7c4c2de9-c93a-43c1-a7e5-0bc7d99ab70a
+		summarizeBy: none
+
+	partition 'Web References' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.webreferences.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"letter", type text}, {"Word", type text}, {"URL", type text}}, "en-US")
+				in
+				    #"Changed Type"
+

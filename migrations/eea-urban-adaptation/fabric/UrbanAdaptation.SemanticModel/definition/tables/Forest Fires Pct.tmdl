@@ -1,0 +1,37 @@
+table 'Forest Fires Pct'
+	lineageTag: 245b7ada-adb5-4ccd-bca6-54a59e0d9c74
+
+	column Name
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Name]
+
+	column 'Fire Type'
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Fire Type]
+		sortByColumn: 'Fire Type Order'
+
+	column 'Fire Type Order'
+		isHidden
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Fire Type Order]
+
+	column Value
+		formatString: 0.00"%"
+		summarizeBy: sum
+		isNameInferred
+		sourceColumn: [Value]
+
+	partition 'Forest Fires Pct' = calculated
+		mode: import
+		source =
+				UNION(
+				    SELECTCOLUMNS('UA Cities', "Name", 'UA Cities'[Name], "Fire Type", "population", "Fire Type Order", 0, "Value", 'UA Cities'[Fire Perc Population]),
+				    SELECTCOLUMNS('UA Cities', "Name", 'UA Cities'[Name], "Fire Type", "city", "Fire Type Order", 1, "Value", 'UA Cities'[Fire Perc Area]),
+				    SELECTCOLUMNS('UA Cities', "Name", 'UA Cities'[Name], "Fire Type", "residential", "Fire Type Order", 2, "Value", 'UA Cities'[Fire Perc Residential]),
+				    SELECTCOLUMNS('UA Cities', "Name", 'UA Cities'[Name], "Fire Type", "transport", "Fire Type Order", 3, "Value", 'UA Cities'[Fire Perc Transport]),
+				    SELECTCOLUMNS('UA Cities', "Name", 'UA Cities'[Name], "Fire Type", "commercial", "Fire Type Order", 4, "Value", 'UA Cities'[Fire Perc Commercial])
+				)
+

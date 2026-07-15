@@ -1,0 +1,297 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://internal/tableau-to-pbi-migration/migration-spec.schema.json",
+  "title": "Tableau Migration Spec",
+  "description": "Normalized intermediate representation produced by scripts/parse_tableau.py from a .twb/.twbx workbook. This is the contract consumed by the pbi-semantic-builder and pbi-report-builder subagents.",
+  "type": "object",
+  "required": ["migration_spec_version", "source", "data_sources", "worksheets", "dashboards"],
+  "properties": {
+    "migration_spec_version": { "type": "string", "const": "1.0" },
+    "source": {
+      "type": "object",
+      "required": ["file_name"],
+      "properties": {
+        "file_name": { "type": "string" },
+        "tableau_version": { "type": ["string", "null"] },
+        "source_build": { "type": ["string", "null"] },
+        "repository_location_id": { "type": ["string", "null"] },
+        "parsed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "caption", "data_type", "domain_type"],
+        "properties": {
+          "id": { "type": "string" },
+          "internal_name": { "type": "string" },
+          "caption": { "type": "string" },
+          "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime"] },
+          "domain_type": { "type": "string", "enum": ["list", "range", "all"] },
+          "allowed_values": { "type": "array", "items": { "type": "string" } },
+          "current_value": { "type": ["string", "number", "boolean", "null"] }
+        }
+      }
+    },
+    "data_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "connection", "fields"],
+        "properties": {
+          "id": { "type": "string" },
+          "caption": { "type": "string" },
+          "internal_name": { "type": "string" },
+          "connection": {
+            "type": "object",
+            "required": ["class", "mode"],
+            "properties": {
+              "class": { "type": "string", "description": "Tableau connection class, e.g. hyper, sqlserver, excel-direct, textscan" },
+              "mode": { "type": "string", "enum": ["extract", "live"] },
+              "server": { "type": ["string", "null"] },
+              "database": { "type": ["string", "null"] },
+              "hyper_file": { "type": ["string", "null"], "description": "Relative path to the embedded .hyper file inside the .twbx, when mode=extract" },
+              "note": { "type": ["string", "null"] }
+            }
+          },
+          "tables": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "source_relation"],
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "source_relation": { "type": "string", "enum": ["table", "custom-sql", "join", "text", "pivot"] },
+                "custom_sql": { "type": ["string", "null"] }
+              }
+            }
+          },
+          "joins": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "left": { "type": "string" },
+                "right": { "type": "string" },
+                "type": { "type": "string", "enum": ["inner", "left", "right", "full"] },
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "left_field": { "type": "string" },
+                      "right_field": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "internal_name", "caption", "kind", "data_type", "role"],
+              "properties": {
+                "id": { "type": "string" },
+                "internal_name": { "type": "string", "description": "Raw Tableau [bracketed] field name" },
+                "caption": { "type": "string" },
+                "table_id": { "type": ["string", "null"] },
+                "kind": { "type": "string", "enum": ["column", "calculated", "group", "bin", "hierarchy"] },
+                "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime"] },
+                "role": { "type": "string", "enum": ["dimension", "measure"] },
+                "default_aggregation": { "type": ["string", "null"], "enum": ["SUM", "AVG", "COUNT", "COUNTD", "MIN", "MAX", "MEDIAN", "ATTR", "None", null] },
+                "hidden": { "type": "boolean", "default": false },
+                "semantic_role": { "type": ["string", "null"], "description": "e.g. geography.city if geo-coded" },
+                "formatting": {
+                  "type": "object",
+                  "properties": { "number_format": { "type": ["string", "null"] } }
+                },
+                "aliases": {
+                  "type": "object",
+                  "description": "Map of raw stored value -> display value, from Tableau <aliases>",
+                  "additionalProperties": { "type": "string" }
+                },
+                "tableau_formula": { "type": ["string", "null"], "description": "Raw formula text, required when kind=calculated" },
+                "referenced_fields": { "type": "array", "items": { "type": "string" }, "description": "field ids this calculation depends on" },
+                "is_lod": { "type": "boolean", "default": false },
+                "is_table_calc": { "type": "boolean", "default": false },
+                "reshape_hint": {
+                  "type": ["string", "null"],
+                  "enum": ["pivot_derived", null],
+                  "description": "Set when the field re-derives a category/date from a generic 'Pivot Field Names'/'Pivot Field Values' pair (Tableau's automatic cross-tab pivot). Signals the semantic builder to prefer a Power Query unpivot + conditional column over replicating the CONTAINS/LEFT/RIGHT string parsing as DAX."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "worksheets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "mark_type", "encodings"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "title_text": { "type": ["string", "null"] },
+          "data_source_ids": { "type": "array", "items": { "type": "string" } },
+          "mark_type": { "type": "string", "description": "Tableau mark class: Bar, Line, Circle, Area, Text, Map, Square, Automatic, ..." },
+          "encodings": {
+            "type": "object",
+            "properties": {
+              "rows": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
+              "columns": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
+              "color": { "anyOf": [{ "$ref": "#/definitions/shelfField" }, { "type": "null" }] },
+              "size": { "anyOf": [{ "$ref": "#/definitions/shelfField" }, { "type": "null" }] },
+              "shape": { "anyOf": [{ "$ref": "#/definitions/shelfField" }, { "type": "null" }] },
+              "label": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
+              "detail": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
+              "tooltip": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } }
+            }
+          },
+          "reference_lines": {
+            "type": "array",
+            "description": "Tableau reference lines/bands (min/max/average/constant) - the source pattern for KPI-gauge-style worksheets. Maps naturally to a PBI Gauge visual (Value/Minimum/Maximum/Target).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "label": { "type": "string" },
+                "formula": { "type": "string", "enum": ["constant", "computed"] },
+                "value": { "type": ["number", "string", "null"] },
+                "scope": { "type": "string", "enum": ["per-table", "per-cell", "per-pane"] }
+              }
+            }
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field_id": { "type": "string" },
+                "type": { "type": "string", "enum": ["categorical", "quantitative", "relative_date", "parameter_binding", "context"] },
+                "exclude_nulls": { "type": "boolean", "default": false },
+                "members": { "type": "array", "items": { "type": "string" } },
+                "note": { "type": ["string", "null"], "description": "e.g. 'parameter-equality idiom: field = IF [Param]=[Dim] THEN [Dim] END, filtered to exclude null -> collapses to a plain PBI slicer on the dimension, no calculated column needed'" }
+              }
+            }
+          },
+          "manual_sort": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field_id": { "type": "string" },
+                "order": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          },
+          "measure_names_values_pivot": {
+            "anyOf": [
+              {
+                "type": "object",
+                "description": "Tableau's built-in 'Measure Names/Measure Values' virtual pivot (dragging the Measure Names pseudo-dimension onto rows/columns/label so Measure Values can carry N real measures at once). No direct Power BI equivalent - resolved here so consumers don't have to reverse-parse an UNRESOLVED:... shelf reference themselves.",
+                "properties": {
+                  "axis": { "type": "string", "enum": ["rows", "columns", "label"], "description": "Which shelf carried the 'Measure Names' (or, as a fallback signal, 'Multiple Values') marker." },
+                  "pivoted_field_ids": { "type": "array", "items": { "type": "string" }, "description": "Real field ids Measure Values would have shown, resolved from the accompanying 'Measure Names' filter's member list. Empty if no such filter was found - inspect the worksheet by hand." },
+                  "note": { "type": "string" }
+                }
+              },
+              { "type": "null" }
+            ]
+          },
+          "customized_tooltip_text": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "dashboards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "size", "zones"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "size": {
+            "type": "object",
+            "properties": {
+              "width": { "type": "number" },
+              "height": { "type": "number" },
+              "sizing_mode": { "type": "string", "enum": ["fixed", "automatic", "range"] }
+            }
+          },
+          "zones": { "$ref": "#/definitions/zone" },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "enum": ["filter", "highlight", "url", "parameter"] },
+                "field_id": { "type": ["string", "null"] },
+                "source_worksheet_id": { "type": ["string", "null"] },
+                "target_worksheet_ids": { "type": "array", "items": { "type": "string" } },
+                "run_on": { "type": "string", "enum": ["select", "hover", "menu"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "theme": {
+      "type": "object",
+      "properties": {
+        "palette_hexes": { "type": "array", "items": { "type": "string" } },
+        "font_family": { "type": ["string", "null"] },
+        "background": { "type": ["string", "null"] },
+        "source_note": { "type": "string", "description": "Tableau has no single global theme file - this is a best-effort aggregation from per-worksheet color encodings/palettes; treat as a starting point, not an authoritative theme to clone." }
+      }
+    },
+    "limitations_encountered": {
+      "type": "array",
+      "description": "Appended to by every pipeline stage (parser + subagents). Raw material for the capabilities & limitations writeup.",
+      "items": {
+        "type": "object",
+        "required": ["item", "issue", "severity"],
+        "properties": {
+          "item": { "type": "string", "description": "id of the affected worksheet/dashboard/field" },
+          "issue": { "type": "string" },
+          "severity": { "type": "string", "enum": ["info", "low", "medium", "high"] },
+          "stage": { "type": "string", "enum": ["parse", "semantic_build", "report_build", "deploy", "validate"] }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "shelfField": {
+      "type": "object",
+      "properties": {
+        "field_id": { "type": "string" },
+        "aggregation": { "type": ["string", "null"] },
+        "derivation": { "type": ["string", "null"], "description": "Tableau column-instance derivation, e.g. Sum, None, User, Year, Quarter" },
+        "nested_with": { "type": ["string", "null"], "description": "field_id this is grouped/nested with on the same shelf, from Tableau's (a / b) shelf notation" }
+      }
+    },
+    "zone": {
+      "type": "object",
+      "required": ["type", "x", "y", "w", "h"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["layout-basic", "layout-flow", "worksheet", "text", "image", "title", "filter", "parameter", "legend"] },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "w": { "type": "number" },
+        "h": { "type": "number" },
+        "direction": { "type": ["string", "null"], "enum": ["horizontal", "vertical", null] },
+        "worksheet_id": { "type": ["string", "null"] },
+        "field_id": { "type": ["string", "null"] },
+        "text_html": { "type": ["string", "null"] },
+        "background_color": { "type": ["string", "null"] },
+        "children": { "type": "array", "items": { "$ref": "#/definitions/zone" } }
+      }
+    }
+  }
+}

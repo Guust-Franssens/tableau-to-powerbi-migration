@@ -1,0 +1,39 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "a9595493d0c04a8c93c9",
+  "position": {
+    "x": 169,
+    "y": 827,
+    "z": 23000,
+    "height": 32,
+    "width": 1189,
+    "tabOrder": 23000
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Web References"
+                    }
+                  },
+                  "Property": "Letter_And_Words (group)"
+                }
+              },
+              "queryRef": "Web References.Letter_And_Words (group)",
+              "nativeQueryRef": "Letter_And_Words (group)",
+              "active": true
+            }
+          ]
+        }
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

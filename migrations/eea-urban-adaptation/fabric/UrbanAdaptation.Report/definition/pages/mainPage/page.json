@@ -1,0 +1,8 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.4.0/schema.json",
+  "name": "45a548481ab543c99a90",
+  "displayName": "City Factsheet",
+  "displayOption": "FitToPage",
+  "height": 890,
+  "width": 1366
+}

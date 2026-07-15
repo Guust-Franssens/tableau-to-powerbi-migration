@@ -1,0 +1,23 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["UA Cities","Land Use Flood Pct","Land Use Flood Pct by Sector","Sealed Surface Pct","Climate Indicators","Social Vulnerability","Web References","DataFolder"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+annotation PBI_ProTooling = ["MCP-PBIModeling","DevMode"]
+
+ref table 'UA Cities'
+ref table 'Land Use Flood Pct'
+ref table 'Land Use Flood Pct by Sector'
+ref table 'Sealed Surface Pct'
+ref table 'Climate Indicators'
+ref table 'Social Vulnerability'
+ref table 'Web References'
+ref table 'Forest Fires Pct'
+

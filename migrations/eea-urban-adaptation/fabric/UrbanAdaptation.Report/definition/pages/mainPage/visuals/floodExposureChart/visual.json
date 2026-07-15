@@ -1,0 +1,117 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "d20d86b0ce8949a2a054",
+  "position": {
+    "x": 726.16915422885563,
+    "y": 253.49502487562188,
+    "z": 10000,
+    "height": 327.66169154228857,
+    "width": 294.45273631840791,
+    "tabOrder": 5000
+  },
+  "visual": {
+    "visualType": "clusteredColumnChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Land Use Flood Pct"
+                    }
+                  },
+                  "Property": "typeLandUses"
+                }
+              },
+              "queryRef": "Land Use Flood Pct.typeLandUses",
+              "nativeQueryRef": "typeLandUses",
+              "active": true
+            }
+          ]
+        },
+        "Series": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Land Use Flood Pct"
+                    }
+                  },
+                  "Property": "typePeriod"
+                }
+              },
+              "queryRef": "Land Use Flood Pct.typePeriod",
+              "nativeQueryRef": "typePeriod",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Land Use Flood Pct"
+                        }
+                      },
+                      "Property": "Pivot Field Values"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Land Use Flood Pct.Pivot Field Values)",
+              "nativeQueryRef": "Sum of Pivot Field Values"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Flood Exposure'"
+                }
+              }
+            },
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "11D"
+                }
+              }
+            },
+            "bold": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

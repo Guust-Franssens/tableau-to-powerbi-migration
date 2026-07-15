@@ -1,0 +1,70 @@
+/// Land-use flood-risk percentages broken out by sector, in Tableau's post-pivot long shape (NAME + Pivot Field Names/Values), 8 rows per city x 906 cities = 7248 rows. Source: Tableau data source 'able_pivot_2' (extract-based .hyper). Structurally near-identical to 'Land Use Flood Pct' but retained as its own table (per the source workbook's separate data source) since Tableau exposes the pivot-key split differently here (Sector/Flood/Base_future via space-delimited SPLIT() rather than CONTAINS()).
+table 'Land Use Flood Pct by Sector'
+	lineageTag: 6641a167-9f56-45e0-ab5e-9e87cf469b45
+
+	/// Row count (Tableau 'Number of Records' calculated field, formula: 1)
+	measure 'Number of Records (Land Use Flood Pct by Sector)' = COUNTROWS('Land Use Flood Pct by Sector')
+		formatString: #,##0
+		lineageTag: adeb9eb1-85bb-49e2-9f71-39925f2e4e4b
+
+	column Name
+		dataType: string
+		lineageTag: dd98048d-53fa-44e0-87fe-98c5507f3fb7
+		dataCategory: City
+		summarizeBy: none
+		sourceColumn: NAME
+
+	/// Sector: 2nd space-delimited token of Pivot Field Names (Tableau SPLIT([Pivot Field Names],' ',2)), e.g. 'UMZ'/'Transport'/'Residential'/'Commercial'. All observed values have exactly 4 tokens, confirmed against distinct Pivot Field Names values in the extracted data.
+	column Sector
+		dataType: string
+		lineageTag: 48a75235-05f4-4eb0-ad7e-e6d7122a288d
+		summarizeBy: none
+		sourceColumn: Sector
+
+	/// Flood: 3rd space-delimited token of Pivot Field Names (Tableau SPLIT([Pivot Field Names],' ',3)), e.g. 'flood'/'flooded'.
+	column Flood
+		dataType: string
+		lineageTag: 8ee6cc2f-6530-4b89-8a41-391aec68df6c
+		summarizeBy: none
+		sourceColumn: Flood
+
+	/// Base_future: 4th space-delimited token of Pivot Field Names (Tableau SPLIT([Pivot Field Names],' ',4)), e.g. 'baseline'/'future'.
+	column Base_future
+		dataType: string
+		lineageTag: c4094854-b05e-4cae-97c2-96275b430cff
+		summarizeBy: none
+		sourceColumn: Base_future
+
+	column 'Pivot Field Names'
+		dataType: string
+		lineageTag: 68fceb76-98c1-418d-8285-e7c99913fc62
+		summarizeBy: none
+		sourceColumn: Pivot Field Names
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Pivot Field Values'
+		dataType: double
+		lineageTag: c3e7eedd-e073-4617-aa6e-44c6158e8e26
+		summarizeBy: sum
+		sourceColumn: Pivot Field Values
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition 'Land Use Flood Pct by Sector' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.able_pivot_2_tableau_spreadsheet_final_10122018_check.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"NAME", type text}, {"Pivot Field Names", type text}, {"Pivot Field Values", type number}}, "en-US"),
+				    #"Split Tokens" = Table.AddColumn(#"Changed Type", "SplitTokens", each Text.Split([#"Pivot Field Names"], " ")),
+				    #"Added Sector" = Table.AddColumn(#"Split Tokens", "Sector", each try [SplitTokens]{1} otherwise null, type text),
+				    #"Added Flood" = Table.AddColumn(#"Added Sector", "Flood", each try [SplitTokens]{2} otherwise null, type text),
+				    #"Added Base_future" = Table.AddColumn(#"Added Flood", "Base_future", each try [SplitTokens]{3} otherwise null, type text),
+				    #"Removed SplitTokens" = Table.RemoveColumns(#"Added Base_future",{"SplitTokens"})
+				in
+				    #"Removed SplitTokens"
+

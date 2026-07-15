@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Source Tableau workbooks may contain customer data - never commit
+migrations/*/source/*.twb
+migrations/*/source/*.twbx
+migrations/*/source/*.hyper
+migrations/*/data/
+
+# Fabric/PBI build output can be regenerated - keep repo lean (comment out if you want to version it)
+# migrations/*/fabric/
+
+# Power BI Desktop local cache/settings - machine-specific, regenerated automatically on open
+**/.pbi/cache.abf
+**/.pbi/localSettings.json
+**/.pbi/editorSettings.json
+
+.env
+.env.local
+*.log
+
+# Compiled/binary Power BI files - always commit the unpacked PBIP/TMDL/PBIR instead
+*.pbix
+
+# OS cruft
+.DS_Store
+Thumbs.db

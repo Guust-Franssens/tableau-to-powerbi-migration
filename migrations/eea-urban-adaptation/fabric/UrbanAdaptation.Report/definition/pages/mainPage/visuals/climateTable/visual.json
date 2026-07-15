@@ -1,0 +1,90 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "71ec0922fe2a45feb52e",
+  "position": {
+    "x": 12.176616915422885,
+    "y": 125.0870646766169,
+    "z": 9000,
+    "height": 463.81840796019895,
+    "width": 397.40049751243777,
+    "tabOrder": 4000
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Climate Indicators"
+                    }
+                  },
+                  "Property": "Climate indicators"
+                }
+              },
+              "queryRef": "Climate Indicators.Climate indicators",
+              "nativeQueryRef": "Climate indicators",
+              "active": true
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Climate Indicators"
+                    }
+                  },
+                  "Property": "Pivot Field Values"
+                }
+              },
+              "queryRef": "Climate Indicators.Pivot Field Values",
+              "nativeQueryRef": "Pivot Field Values",
+              "active": true
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Climate Indicators'"
+                }
+              }
+            },
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "11D"
+                }
+              }
+            },
+            "bold": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

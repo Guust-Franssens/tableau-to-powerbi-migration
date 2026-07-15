@@ -1,0 +1,128 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "e7f5bbd42e0a496fa25f",
+  "position": {
+    "x": 726,
+    "y": 123,
+    "z": 13000,
+    "height": 120,
+    "width": 295,
+    "tabOrder": 8000
+  },
+  "visual": {
+    "visualType": "gauge",
+    "query": {
+      "queryState": {
+        "MaxValue": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Green 0 1 Max"
+                }
+              },
+              "queryRef": "UA Cities.Green 0 1 Max",
+              "nativeQueryRef": "Green 0 1 Max"
+            }
+          ]
+        },
+        "MinValue": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Green 0 1 Min"
+                }
+              },
+              "queryRef": "UA Cities.Green 0 1 Min",
+              "nativeQueryRef": "Green 0 1 Min"
+            }
+          ]
+        },
+        "TargetValue": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Green 0 1 Target"
+                }
+              },
+              "queryRef": "UA Cities.Green 0 1 Target",
+              "nativeQueryRef": "Green 0 1 Target"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "UA Cities"
+                    }
+                  },
+                  "Property": "Green 0 1 Value"
+                }
+              },
+              "queryRef": "UA Cities.Green 0 1 Value",
+              "nativeQueryRef": "Green 0 1 Value"
+            }
+          ]
+        }
+      }
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Green Space'"
+                }
+              }
+            },
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "11D"
+                }
+              }
+            },
+            "bold": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

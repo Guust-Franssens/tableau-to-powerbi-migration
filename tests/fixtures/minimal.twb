@@ -1,0 +1,125 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<workbook source-build='2019.2.2 (20192.19.0718.1543)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <repository-location derived-from='https://public.tableau.com/workbooks/test?rev=1.2' id='test_workbook' path='/workbooks' revision='1.2' />
+  <datasources>
+    <datasource hasconnection='false' inline='true' name='Parameters' version='18.1'>
+      <column caption='City_param' datatype='string' name='[Parameter 1]' param-domain-type='list' role='measure' type='nominal' value='&quot;Springfield&quot;'>
+        <calculation class='tableau' formula='&quot;Springfield&quot;' />
+        <members>
+          <member value='&quot;Springfield&quot;' />
+          <member value='&quot;Shelbyville&quot;' />
+        </members>
+      </column>
+    </datasource>
+    <datasource caption='Cities' inline='true' name='federated.testds1' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='cities' name='excel-direct.abc123'>
+            <connection class='excel-direct' />
+          </named-connection>
+        </named-connections>
+        <relation connection='excel-direct.abc123' name='Cities' table='[Cities$]' type='table' />
+      </connection>
+      <column caption='Name' datatype='string' name='[NAME]' role='dimension' type='nominal' />
+      <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />
+      <column caption='City filter' datatype='string' name='[Calculation_1]' role='dimension' type='nominal'>
+        <calculation class='tableau' formula='if [Parameters].[Parameter 1]=[NAME] then [NAME] END' />
+      </column>
+      <column caption='Sales Scaled' datatype='real' name='[Calculation_2]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='SUM([SALES])*100' />
+      </column>
+      <column-instance column='[NAME]' derivation='None' name='[none:NAME:nk]' pivot='key' type='nominal' />
+      <column-instance column='[SALES]' derivation='Sum' name='[sum:SALES:qk]' pivot='key' type='quantitative' />
+      <column-instance column='[Calculation_1]' derivation='None' name='[none:Calculation_1:nk]' pivot='key' type='nominal' />
+      <column-instance column='[Calculation_2]' derivation='Sum' name='[sum:Calculation_2:qk]' pivot='key' type='quantitative' />
+      <extract count='-1' enabled='true' units='records'>
+        <connection class='hyper' dbname='Data/test.twb Files/federated.hyper' />
+      </extract>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Sales Gauge'>
+      <layout-options>
+        <title>
+          <formatted-text>
+            <run bold='true'>Sales Gauge</run>
+          </formatted-text>
+        </title>
+      </layout-options>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Cities' name='federated.testds1' />
+            <datasource name='Parameters' />
+          </datasources>
+          <datasource-dependencies datasource='federated.testds1'>
+            <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />
+          </datasource-dependencies>
+          <filter class='categorical' column='[federated.testds1].[none:Calculation_1:nk]'>
+            <groupfilter function='except' user:ui-domain='relevant'>
+              <groupfilter function='level-members' level='[none:Calculation_1:nk]' />
+              <groupfilter function='member' level='[none:Calculation_1:nk]' member='%null%' />
+            </groupfilter>
+          </filter>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Circle' />
+            <encodings>
+              <color column='[federated.testds1].[sum:SALES:qk]' />
+            </encodings>
+            <reference-line axis-column='[federated.testds1].[sum:SALES:qk]' formula='constant' id='refline0' label='Min' scope='per-table' value='0.0' />
+            <reference-line axis-column='[federated.testds1].[sum:SALES:qk]' formula='constant' id='refline1' label='Max' scope='per-table' value='100.0' />
+          </pane>
+        </panes>
+        <rows>[federated.testds1].[sum:SALES:qk]</rows>
+        <cols>[federated.testds1].[none:NAME:nk]</cols>
+      </table>
+      <simple-id uuid='{00000000-0000-0000-0000-000000000001}' />
+    </worksheet>
+    <worksheet name='Measure Values Chart'>
+      <layout-options>
+        <title>
+          <formatted-text>
+            <run bold='true'>Measure Values Chart</run>
+          </formatted-text>
+        </title>
+      </layout-options>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Cities' name='federated.testds1' />
+          </datasources>
+          <filter class='categorical' column='[:Measure Names]'>
+            <groupfilter function='member' member='&quot;[federated.testds1].[sum:SALES:qk]&quot;' />
+            <groupfilter function='member' member='&quot;[federated.testds1].[sum:Calculation_2:qk]&quot;' />
+          </filter>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Automatic' />
+            <encodings />
+          </pane>
+        </panes>
+        <rows>[federated.testds1].[Multiple Values]</rows>
+        <cols>[federated.testds1].[:Measure Names]</cols>
+      </table>
+      <simple-id uuid='{00000000-0000-0000-0000-000000000002}' />
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='main'>
+      <size maxheight='800' maxwidth='1000' />
+      <zones>
+        <zone h='100000' id='1' type='layout-basic' w='100000' x='0' y='0'>
+          <zone h='50000' id='2' name='Sales Gauge' w='100000' x='0' y='0' />
+          <zone forceUpdate='true' h='10000' id='3' type='text' w='100000' x='0' y='50000'>
+            <formatted-text>
+              <run>Footer note</run>
+            </formatted-text>
+          </zone>
+        </zone>
+      </zones>
+    </dashboard>
+  </dashboards>
+</workbook>

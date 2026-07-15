@@ -1,0 +1,75 @@
+/// Land-use flood-risk percentages per city, already in Tableau's post-pivot long shape (URAU_CODE/NAME/country_short + Pivot Field Names/Values), 8 rows per city x 906 cities = 7248 rows. Source: Tableau data source 'perclandusesumz' (extract-based .hyper).
+table 'Land Use Flood Pct'
+	lineageTag: 61f5e66e-a160-49a3-ba3c-47365c69e329
+
+	/// Row count (Tableau 'Number of Records' calculated field, formula: 1)
+	measure 'Number of Records (Land Use Flood Pct)' = COUNTROWS('Land Use Flood Pct')
+		formatString: #,##0
+		lineageTag: c370f1b0-e4a2-42c8-bc7b-8b361ed5e23b
+
+	column 'Urau Code'
+		dataType: string
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: f891a6e4-227c-44aa-8ca5-a94f38ca1cfa
+		summarizeBy: none
+		sourceColumn: URAU_CODE
+
+	column Name
+		dataType: string
+		lineageTag: 4b314504-28fd-419e-a58c-9969f6a0bbda
+		dataCategory: City
+		summarizeBy: none
+		sourceColumn: NAME
+
+	/// Note: the parsed spec's caption for this field is the raw lowercase "country_short" in this data source (vs. "Country Short" in UA Cities) — a caption-casing inconsistency in the parsed spec across data sources. Normalized here to Title Case for a consistent, presentable display name; documented in limitations_encountered.
+	column 'Country Short'
+		dataType: string
+		lineageTag: 94eaf409-4e0f-459e-8ede-74c8b4c07b10
+		summarizeBy: none
+		sourceColumn: country_short
+
+	/// typePeriod: Baseline (1961-1990) vs Future (2071-2100), parsed from Pivot Field Names in Power Query (reshape_hint: pivot_derived). 1:1 translation of the Tableau IF CONTAINS(...,'aseline')/'uture' calculated field.
+	column typePeriod
+		dataType: string
+		lineageTag: cde145f6-f57e-4c85-8279-0587264e3331
+		summarizeBy: none
+		sourceColumn: typePeriod
+
+	/// typeLandUses: UMZ / Transport / Residential / Commercial, parsed from Pivot Field Names in Power Query (reshape_hint: pivot_derived).
+	column typeLandUses
+		dataType: string
+		lineageTag: badaea75-c1bf-415c-8f61-f55ca9591b2d
+		summarizeBy: none
+		sourceColumn: typeLandUses
+
+	column 'Pivot Field Names'
+		dataType: string
+		lineageTag: 0977b24a-a65c-4313-8e0c-7423b7e26076
+		summarizeBy: none
+		sourceColumn: Pivot Field Names
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Pivot Field Values'
+		dataType: double
+		lineageTag: 5340e508-1345-4d0a-b602-781d63b94a9f
+		summarizeBy: sum
+		sourceColumn: Pivot Field Values
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition 'Land Use Flood Pct' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.perclandusesumz.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"URAU_CODE", type text}, {"NAME", type text}, {"country_short", type text}, {"Pivot Field Names", type text}, {"Pivot Field Values", type number}}, "en-US"),
+				    #"Added typePeriod" = Table.AddColumn(#"Changed Type", "typePeriod", each if Text.Contains([#"Pivot Field Names"], "aseline") then "Baseline" else if Text.Contains([#"Pivot Field Names"], "uture") then "Future" else null, type text),
+				    #"Added typeLandUses" = Table.AddColumn(#"Added typePeriod", "typeLandUses", each if Text.Contains([#"Pivot Field Names"], "UMZ") then "UMZ" else if Text.Contains([#"Pivot Field Names"], "Transport") then "Transport" else if Text.Contains([#"Pivot Field Names"], "Residential") then "Residential" else if Text.Contains([#"Pivot Field Names"], "Commercial") then "Commercial" else null, type text)
+				in
+				    #"Added typeLandUses"
+

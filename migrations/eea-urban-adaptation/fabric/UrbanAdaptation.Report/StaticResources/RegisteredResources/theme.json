@@ -1,0 +1,22 @@
+{
+  "name": "UrbanAdaptationTheme",
+  "dataColors": [
+    "#006699",
+    "#F28E2B",
+    "#59A14F",
+    "#E15759",
+    "#76B7B2",
+    "#EDC948",
+    "#B07AA1",
+    "#9C755F"
+  ],
+  "background": "#FFFFFF",
+  "foreground": "#262626",
+  "tableAccent": "#006699",
+  "maximum": "#006699",
+  "center": "#76B7B2",
+  "minimum": "#F1F1F1",
+  "good": "#59A14F",
+  "neutral": "#EDC948",
+  "bad": "#E15759"
+}

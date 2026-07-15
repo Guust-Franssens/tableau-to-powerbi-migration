@@ -1,0 +1,77 @@
+/// Sealed-surface percentages per city, already in Tableau's post-pivot long shape (URAU_CODE/country_short/NAME + Pivot Field Names/Values), 8 rows per city x 906 cities = 7248 rows. Source: Tableau data source 'percsealedsurface' (extract-based .hyper).
+table 'Sealed Surface Pct'
+	lineageTag: 54adc1f7-6cf3-477b-97f5-291138057700
+
+	/// Row count (Tableau 'Number of Records' calculated field, formula: 1)
+	measure 'Number of Records (Sealed Surface Pct)' = COUNTROWS('Sealed Surface Pct')
+		formatString: #,##0
+		lineageTag: 5d14f6de-5008-4608-9cf9-46c25d3471cf
+
+	column 'Urau Code'
+		dataType: string
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: 58e63b25-5427-4b7d-abc9-879d48a099b7
+		summarizeBy: none
+		sourceColumn: URAU_CODE
+
+	column 'Country Short'
+		dataType: string
+		lineageTag: 69fd4205-2a0a-42ae-b5d7-1b0b34423a58
+		summarizeBy: none
+		sourceColumn: country_short
+
+	column Name
+		dataType: string
+		lineageTag: 2e6a742d-c754-408f-a692-164aad2b3abc
+		dataCategory: City
+		summarizeBy: none
+		sourceColumn: NAME
+
+	/// typeMeasure: 'UMZ' (Urban Morphological Zone total) vs 'Seal' (core-city only, alias "core city"), parsed via LEFT(3)/LEFT(4) of Pivot Field Names. All 8 distinct Pivot Field Names values in the extracted data resolve to UMZ or Seal - the Tableau formula's 'Unknown' fallback branch is never hit (verified against extracted data).
+	column typeMeasure
+		dataType: string
+		lineageTag: d108f1f1-59e8-4822-9272-c7e63a421e5e
+		summarizeBy: none
+		sourceColumn: typeMeasure
+
+	/// year: reference year (2006/2009/2012/2015) parsed from Pivot Field Names - RIGHT(4) when typeMeasure='Seal', else matched on the '_06'/'_09'/'_12'/'_15' substring for UMZ rows. Materialized as Jan-1 of the parsed year (Tableau's DATE(DATEPARSE("yyyy", ...)) collapses to a year-only date).
+	column year
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 80be11fb-2430-4d55-9f90-55456ded9159
+		summarizeBy: none
+		sourceColumn: year
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column 'Pivot Field Names'
+		dataType: string
+		lineageTag: eaa76cba-1a21-4155-853c-655f4257cf1d
+		summarizeBy: none
+		sourceColumn: Pivot Field Names
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Pivot Field Values'
+		dataType: double
+		lineageTag: d83302f5-d231-4d75-9542-23b7e9b4ec5b
+		summarizeBy: sum
+		sourceColumn: Pivot Field Values
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	partition 'Sealed Surface Pct' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.percsealedsurface.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"URAU_CODE", type text}, {"country_short", type text}, {"NAME", type text}, {"Pivot Field Names", type text}, {"Pivot Field Values", type number}}, "en-US"),
+				    #"Added typeMeasure" = Table.AddColumn(#"Changed Type", "typeMeasure", each if Text.Start([#"Pivot Field Names"], 3) = "UMZ" then "UMZ" else if Text.Start([#"Pivot Field Names"], 4) = "Seal" then "Seal" else "Unknown", type text),
+				    #"Added year" = Table.AddColumn(#"Added typeMeasure", "year", each Date.FromText((if [typeMeasure] = "Seal" then Text.End([#"Pivot Field Names"], 4) else if Text.Contains([#"Pivot Field Names"], "_06") then "2006" else if Text.Contains([#"Pivot Field Names"], "_09") then "2009" else if Text.Contains([#"Pivot Field Names"], "_12") then "2012" else if Text.Contains([#"Pivot Field Names"], "_15") then "2015" else "1900") & "-01-01", "en-US"), type date)
+				in
+				    #"Added year"
+

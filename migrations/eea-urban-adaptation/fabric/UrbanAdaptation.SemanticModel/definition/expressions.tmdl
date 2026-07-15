@@ -1,0 +1,5 @@
+expression DataFolder = "C:\path\to\tableau-to-pbi-migration\migrations\eea-urban-adaptation\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: 17918626-750c-420a-84c8-d43d1e1ee616
+
+	annotation PBI_ResultType = Text
+

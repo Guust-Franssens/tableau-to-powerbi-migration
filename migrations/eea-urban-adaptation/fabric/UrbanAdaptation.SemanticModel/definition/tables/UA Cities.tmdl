@@ -1,0 +1,709 @@
+/// City-grain dimension + pre-computed indicator table (906 cities, one row per city). Source: Tableau data source 'UA_cities_tableau_all_05122018' (extract-based .hyper). Primary key: Name.
+table 'UA Cities'
+	lineageTag: 500bbae2-29c9-4e17-9949-5c76bd521f9e
+
+	/// Row count for the UA Cities table (Tableau 'Number of Records' calculated field, formula: 1)
+	measure 'Number of Records (UA Cities)' = COUNTROWS('UA Cities')
+		formatString: #,##0
+		lineageTag: 67e46b07-ee9d-4a8c-84bb-a935ac76b8a5
+
+	/// Gauge value for the 'Cdd 0 1' scatter-point worksheet: raw 0-1 index rescaled to the -5..105 reference-line axis used by the original Tableau worksheet (SUM(['CDD_0_1']) * 100).
+	measure 'Cdd 0 1 Value' = SUM('UA Cities'[Cdd 0 1]) * 100
+		formatString: #,##0.0
+		displayFolder: Gauge Support
+		lineageTag: c56c3473-db43-4310-8bcb-45a713af2866
+
+	/// Gauge minimum (Tableau reference line 'Min'/'Decrease', constant -5)
+	measure 'Cdd 0 1 Min' = -5
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: e76baa6b-659b-40f8-9139-c605944bafc7
+
+	/// Gauge maximum (Tableau reference line 'Max'/'Increase', constant 105)
+	measure 'Cdd 0 1 Max' = 105
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 79af43ad-12d6-466a-b729-d237a30b7ab4
+
+	/// Gauge target (Average reference line, constant 50)
+	measure 'Cdd 0 1 Target' = 50
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 4ec285a3-bce2-424e-b763-4ce188739abc
+
+	/// Gauge value for the 'Obs Dr 0 1' scatter-point worksheet: raw 0-1 index rescaled to the -5..105 reference-line axis used by the original Tableau worksheet (SUM(['obs_dr_0_1']) * 100).
+	measure 'Obs Dr 0 1 Value' = SUM('UA Cities'[Obs Dr 0 1]) * 100
+		formatString: #,##0.0
+		displayFolder: Gauge Support
+		lineageTag: adc52f56-2144-49a5-a25e-393e78e79959
+
+	/// Gauge minimum (Tableau reference line 'Min'/'Decrease', constant -5)
+	measure 'Obs Dr 0 1 Min' = -5
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 8048de38-1d54-44cb-8fbc-dc186c8a4642
+
+	/// Gauge maximum (Tableau reference line 'Max'/'Increase', constant 105)
+	measure 'Obs Dr 0 1 Max' = 105
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 4cd2913c-1c30-4f07-807a-83888c43cc8e
+
+	/// Gauge target (No change reference line, constant 35)
+	measure 'Obs Dr 0 1 Target' = 35
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 51f07260-6d9d-4410-8fee-a15e73eeef81
+
+	/// Gauge value for the 'Prec Obs Win 0 1' scatter-point worksheet: raw 0-1 index rescaled to the -5..105 reference-line axis used by the original Tableau worksheet (SUM(['prec_obs_win_0_1']) * 100).
+	measure 'Prec Obs Win 0 1 Value' = SUM('UA Cities'[Prec Obs Win 0 1]) * 100
+		formatString: #,##0.0
+		displayFolder: Gauge Support
+		lineageTag: 628d78dc-7aec-46db-88b9-819e7a348e7c
+
+	/// Gauge minimum (Tableau reference line 'Min'/'Decrease', constant -5)
+	measure 'Prec Obs Win 0 1 Min' = -5
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: f7269f06-d1dd-48e0-ae46-0dbb471c1422
+
+	/// Gauge maximum (Tableau reference line 'Max'/'Increase', constant 105)
+	measure 'Prec Obs Win 0 1 Max' = 105
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: d6d5aaa1-bb33-47cf-8c87-a4031d13f290
+
+	/// Gauge target (No change reference line, constant 47)
+	measure 'Prec Obs Win 0 1 Target' = 47
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 1e065aa2-b79c-47cd-a4f0-2cd242c5c711
+
+	/// Gauge value for the 'Ssr 0 1' scatter-point worksheet: raw 0-1 index rescaled to the -5..105 reference-line axis used by the original Tableau worksheet (SUM(['SSR_0_1']) * 100).
+	measure 'Ssr 0 1 Value' = SUM('UA Cities'[Ssr 0 1]) * 100
+		formatString: #,##0.0
+		displayFolder: Gauge Support
+		lineageTag: ac99ddfe-b7f9-4b6f-a7f3-4af554c093dd
+
+	/// Gauge minimum (Tableau reference line 'Min'/'Decrease', constant -5)
+	measure 'Ssr 0 1 Min' = -5
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 8800e071-76ba-412a-8095-05d870a14294
+
+	/// Gauge maximum (Tableau reference line 'Max'/'Increase', constant 105)
+	measure 'Ssr 0 1 Max' = 105
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 0999211b-88af-47ee-bcf0-4d6a0530c2bb
+
+	/// Gauge target (Average reference line, constant 50)
+	measure 'Ssr 0 1 Target' = 50
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 550aaed5-630a-42c3-9934-c5f3849290b9
+
+	/// Gauge value for the 'Green 0 1' scatter-point worksheet: raw 0-1 index rescaled to the -5..105 reference-line axis used by the original Tableau worksheet (SUM(['green_0_1']) * 100).
+	measure 'Green 0 1 Value' = SUM('UA Cities'[Green 0 1]) * 100
+		formatString: #,##0.0
+		displayFolder: Gauge Support
+		lineageTag: 056593fd-84a6-4e94-b914-aed0788b8758
+
+	/// Gauge minimum (Tableau reference line 'Min'/'Decrease', constant -5)
+	measure 'Green 0 1 Min' = -5
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: e25c00e9-bf91-4c07-8f94-b96b09763263
+
+	/// Gauge maximum (Tableau reference line 'Max'/'Increase', constant 105)
+	measure 'Green 0 1 Max' = 105
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 11448f5b-920b-4ebf-988c-844580a0470d
+
+	/// Gauge target (Average (approximated - no reference line in source) reference line, constant 50)
+	measure 'Green 0 1 Target' = 50
+		formatString: #,##0
+		displayFolder: Gauge Support
+		lineageTag: 69697a09-b1f0-4c1e-904b-1811261ab0bb
+
+	/// Adaptation text: row-level narrative built from Name / Initiative / EU project; blank when no initiative is recorded. 1:1 translation of the Tableau IF ISNULL([initiative]) calculated field. Fixed to treat empty-string Initiative (post-CSV-import artifact of Tableau NULL) as blank, matching Tableau's ISNULL semantics.
+	column 'Adaptation Text' = IF(ISBLANK('UA Cities'[Initiative]) || 'UA Cities'[Initiative] = "", "", 'UA Cities'[Name] & " " & 'UA Cities'[Initiative] & " has participated in the following recent EU-funded projects on adaptation: " & 'UA Cities'[EU project])
+		dataType: string
+		lineageTag: e209abaf-f845-4bd5-8c1e-5d8b9f290e5b
+		summarizeBy: none
+
+	/// Dynamic parragraph: multi-line narrative combining RAMSES cluster/description and RESIN group fields. Row grain is one row per city, so Tableau's ATTR() collapses to a plain column reference (guide sec. "ATTR()"). Caption/typo ("parragraph") kept verbatim from the source workbook.
+	column 'Dynamic parragraph' = "According to RAMSES project (l) the city is in cluster " & 'UA Cities'[RAMSES cluster] & " " & 'UA Cities'[RAMSES description] & UNICHAR(10) & UNICHAR(10) & "According to the RESIN project (m), the city belongs to the group " & 'UA Cities'[RESIN group name] & ", which includes " & 'UA Cities'[RESIN group description] & "." & UNICHAR(10) & UNICHAR(10) & "Cities of similar size " & 'UA Cities'[Population Brackets] & " in the group " & 'UA Cities'[RESIN group name] & "  are " & 'UA Cities'[Cities In Group] & "."
+		dataType: string
+		lineageTag: 3eb6d5cb-0c56-42b4-8b95-d7053743d719
+		summarizeBy: none
+
+	column 'Urau Code'
+		dataType: string
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: 8c94b667-d74f-466a-81ca-d71791845b42
+		summarizeBy: none
+		sourceColumn: URAU_CODE
+
+	column Name
+		dataType: string
+		isKey
+		lineageTag: 7718f30c-2970-41b1-8800-964afd521468
+		dataCategory: City
+		summarizeBy: none
+		sourceColumn: NAME
+
+	column 'Drought Rcp45 2041'
+		dataType: double
+		lineageTag: c8cb6784-0b07-4ed4-88c0-2b5d0a779de6
+		sourceColumn: drought_rcp45_2041
+
+	column 'Drought Rcp85 2071'
+		dataType: double
+		lineageTag: f31e1f37-7790-407b-82e7-185370356a33
+		sourceColumn: drought_rcp85_2071
+
+	column 'Drought Rcp45 2071'
+		dataType: double
+		lineageTag: 227d16a3-2a64-446f-8b5b-c6d3a1782cae
+		sourceColumn: drought_rcp45_2071
+
+	column 'Drought Rcp85 2041'
+		dataType: double
+		lineageTag: dbc687be-613d-4b3b-b0eb-155bc9e32fc0
+		sourceColumn: drought_rcp85_2041
+
+	column 'heat RCP45 2052'
+		dataType: double
+		lineageTag: 6ff3c344-2929-4743-9513-a8b17bb4be51
+		sourceColumn: heat_RCP45_2052
+
+	column 'heat RCP85 2052'
+		dataType: double
+		lineageTag: 2d39f904-6a45-4c55-92cc-b80ce44f4a29
+		sourceColumn: heat_RCP85_2052
+
+	column 'heat RCP45 6800'
+		dataType: double
+		lineageTag: 90bb5402-3a78-4057-925d-f26a55388648
+		sourceColumn: heat_RCP45_6800
+
+	column 'heat RCP85 6800'
+		dataType: double
+		lineageTag: 0a400430-81d9-4b90-8ce4-4a1bfa58d4d4
+		sourceColumn: heat_RCP85_6800
+
+	column 'Ssr 2071 2100'
+		dataType: double
+		lineageTag: 5541db45-a3d3-47c5-816d-a82bd1822016
+		sourceColumn: SSR_2071_2100
+
+	column 'Ssr 1981 2010'
+		dataType: double
+		lineageTag: 6edd75f1-9794-4156-9ce6-1c661699fc7f
+		sourceColumn: SSR_1981_2010
+
+	column 'SSR rank'
+		dataType: int64
+		lineageTag: 3e78c8d4-8c34-4b8c-bef6-392ecb6500c2
+		summarizeBy: none
+		sourceColumn: SSR_rank
+
+	column 'Ssr 0 1'
+		dataType: double
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: b8ecec48-df7b-43f5-b9e0-e6729ab3d4f2
+		summarizeBy: none
+		sourceColumn: SSR_0_1
+
+	column 'Prec Obs Tr Sum'
+		dataType: double
+		lineageTag: b2e81ca5-6219-48eb-a248-f8681b18b0c4
+		sourceColumn: PREC_OBS_TR_SUM
+
+	column 'Prec Obs Tr Win'
+		dataType: double
+		lineageTag: 3a721bde-c764-46c3-b63f-2c31d95d25ff
+		sourceColumn: PREC_OBS_TR_WIN
+
+	column 'Prec Obs Win Rank'
+		dataType: int64
+		lineageTag: d69537bd-d08e-446d-ae68-31bc8811946d
+		sourceColumn: prec_obs_win_rank
+
+	column 'Prec Obs Win 0 1'
+		dataType: double
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: 1cc8e154-4f8c-4867-8ccd-15ec992d05d3
+		summarizeBy: none
+		sourceColumn: prec_obs_win_0_1
+
+	column 'Obs Drought'
+		dataType: double
+		lineageTag: edb77e50-c0a7-4a06-a8f6-1df26946fb69
+		sourceColumn: OBS_DROUGHT
+
+	column 'Obs Dr Rank'
+		dataType: int64
+		lineageTag: 56e66a1a-2115-46c8-8fb8-a82d73516126
+		sourceColumn: obs_dr_rank
+
+	column 'Obs Dr 0 1'
+		dataType: double
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: 39ea6b11-6038-44d1-84e6-0928b4831ada
+		summarizeBy: none
+		sourceColumn: obs_dr_0_1
+
+	column 'Proj Prec Winter'
+		dataType: double
+		lineageTag: cf642f52-bf36-4c98-8b1b-0497718d167f
+		sourceColumn: PROJ_PREC_WINTER
+
+	column 'Proj Prec Summer'
+		dataType: double
+		lineageTag: ef7c9f84-76dc-4cf4-89be-02f8347b2bb6
+		sourceColumn: PROJ_PREC_SUMMER
+
+	column 'Edu Isced5'
+		dataType: double
+		lineageTag: 288a1d04-8b1a-45a9-a42e-86eeebdcd06a
+		sourceColumn: EDU_ISCED5
+
+	column Under5
+		dataType: double
+		lineageTag: bf5549c5-05ea-4d37-9d47-e60aaada433a
+		sourceColumn: UNDER5
+
+	column 'Under5 1'
+		dataType: double
+		lineageTag: 8e4712bd-2aa3-4db4-90b9-802a1c03a851
+		sourceColumn: under5_1
+
+	column 'Under5 Rank'
+		dataType: string
+		lineageTag: ed9ae4a4-7cf7-4740-abf3-7ae11551ef1b
+		summarizeBy: none
+		sourceColumn: under5_rank
+
+	column Over75
+		dataType: double
+		lineageTag: 1bca49ec-60ad-4fff-87d1-dd90f453c046
+		sourceColumn: OVER75
+
+	column 'Over75 1'
+		dataType: double
+		lineageTag: 7fe0e2ab-2deb-4fbc-9bda-ea9184a595ef
+		sourceColumn: over75_1
+
+	column 'Over75 Rank'
+		dataType: string
+		lineageTag: d88d4d11-91ba-410e-ac64-61e48d279d62
+		summarizeBy: none
+		sourceColumn: over75_rank
+
+	column Unemployment
+		dataType: double
+		lineageTag: 690d1135-099b-4a71-9939-f83ac7001cfc
+		sourceColumn: UNEMPLOYMENT
+
+	column Unemploy1
+		dataType: double
+		lineageTag: e4479bab-f44c-4355-a51e-0d17e20e936b
+		sourceColumn: unemploy1
+
+	column 'Unemploy Rank'
+		dataType: string
+		lineageTag: 5c627b2c-5a88-421c-be65-d02caaf3aa16
+		summarizeBy: none
+		sourceColumn: unemploy_rank
+
+	column Tn20
+		dataType: int64
+		lineageTag: ae51911b-f772-4a0e-a6c9-271c8b04f56e
+		sourceColumn: tn20
+
+	column Sd35
+		dataType: int64
+		lineageTag: d9ee9f95-55bb-4a39-8869-f026bd8240ff
+		sourceColumn: SD35
+
+	column Sd30Tn20
+		dataType: int64
+		lineageTag: 5432caf6-1699-4557-b47a-78deb7b851cd
+		sourceColumn: sd30tn20
+
+	column 'CDD ranks'
+		dataType: int64
+		lineageTag: b944e220-b974-4980-8d0f-54236d8c9fcc
+		summarizeBy: none
+		sourceColumn: CDD_ranks
+
+	column 'Cdd 0 1'
+		dataType: double
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: 4eb57e43-7366-4724-bd5b-9dcacd05c7e2
+		summarizeBy: none
+		sourceColumn: CDD_0_1
+
+	column 'CDD ave'
+		dataType: double
+		lineageTag: c591597b-79ef-4a76-b1d4-2d656f1fe4f2
+		sourceColumn: CDD_ave
+
+	column 'RESIN group'
+		dataType: int64
+		lineageTag: 7ac5e546-2469-41cb-a10c-0216b002edc5
+		summarizeBy: none
+		sourceColumn: RESIN_group
+
+	column 'RESIN group name'
+		dataType: string
+		lineageTag: 4a56115f-5511-4c92-b44e-bdd4a5ee3e19
+		summarizeBy: none
+		sourceColumn: RESIN_group_name
+
+	column 'RESIN group description'
+		dataType: string
+		lineageTag: 8315b818-f01a-41db-9951-3104cdde4d59
+		summarizeBy: none
+		sourceColumn: RESIN_group_description
+
+	column 'RESIN subgroup'
+		dataType: int64
+		lineageTag: 76967c8a-8623-46b6-af29-1249e3de384f
+		summarizeBy: none
+		sourceColumn: RESIN_subgroup
+
+	column Population
+		dataType: int64
+		lineageTag: feed96a5-78f6-4d69-bafc-bf517f2a0283
+		sourceColumn: population_current
+
+	column Year
+		dataType: int64
+		lineageTag: 7d248c3e-2a0b-450c-bc09-2613c4c8d60e
+		summarizeBy: none
+		sourceColumn: pop_year
+
+	column 'Pop Coded'
+		dataType: int64
+		lineageTag: 923c99bb-2e39-4768-b2cb-13a448e85868
+		summarizeBy: none
+		sourceColumn: pop_coded
+
+	column 'Cities In Group'
+		dataType: string
+		lineageTag: 51523289-6a98-432d-9381-0691c3d8820b
+		summarizeBy: none
+		sourceColumn: cities_in_group
+
+	column 'Population Brackets'
+		dataType: string
+		lineageTag: 3090c8be-31a1-4f89-98eb-5ce9f02517c5
+		summarizeBy: none
+		sourceColumn: population_brackets
+
+	column 'Pop 2050'
+		dataType: int64
+		lineageTag: 9de6c4e4-4bb3-47ca-a5d4-f66eb5dada02
+		sourceColumn: pop_2050
+
+	column 'Seal 2006'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: c7d6641b-679a-43b0-aa4e-420d08e2f61a
+		sourceColumn: seal_2006
+
+	column 'Seal 2009'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 44e8017c-03b1-48ea-b846-d7824b42b4e7
+		sourceColumn: seal_2009
+
+	column 'Seal 2012'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 088baca0-e091-42fa-b78d-9b1d4dd8c00f
+		sourceColumn: seal_2012
+
+	column 'Seal 2015'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 1eba76c3-3c2b-4ed0-a488-be7c8502d7d0
+		sourceColumn: seal_2015
+
+	column 'Se Ch 15 0'
+		dataType: double
+		lineageTag: 74e3c68f-154f-4a75-a086-cda2c92f05b5
+		sourceColumn: se_ch_15_0
+
+	column 'UMZ 06seal'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: afb5e206-11ad-4a68-b374-bda4536b943e
+		sourceColumn: UMZ_06seal
+
+	column 'UMZ 09seal'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 1e17847f-71ab-4294-81cd-236659022789
+		sourceColumn: UMZ_09seal
+
+	column 'UMZ 12seal'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 52746090-1c13-4c5d-8b50-34066b709962
+		sourceColumn: UMZ_12seal
+
+	column 'UMZ 15 seal'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 8995208d-acc2-4bf9-91d6-a7b69586d95e
+		sourceColumn: UMZ_15_seal
+
+	column 'Country Short'
+		dataType: string
+		lineageTag: 78c8c779-a6ac-489d-8def-a327724d70a1
+		summarizeBy: none
+		sourceColumn: country_short
+
+	column Country
+		dataType: string
+		lineageTag: 72ea4f6a-c92c-4da4-9533-341a0251c8f0
+		summarizeBy: none
+		sourceColumn: country_name
+
+	column 'Fire Perc Area'
+		dataType: double
+		formatString: 0.00"%"
+		lineageTag: a6090865-b03a-4608-b8ff-7e1c4bba2c95
+		sourceColumn: fire_perc_area
+
+	column 'Fire Perc Population'
+		dataType: double
+		formatString: 0.00"%"
+		lineageTag: 1bfca810-413c-4c6c-ba5a-f4330efd62bb
+		sourceColumn: fire_perc_population
+
+	column 'Fire Perc Residential'
+		dataType: double
+		formatString: 0.00"%"
+		lineageTag: a867ef2f-9766-4e46-a986-1bde38304044
+		sourceColumn: fire_perc_residential
+
+	column 'Fire Perc Transport'
+		dataType: double
+		formatString: 0.00"%"
+		lineageTag: 8ae01a96-a597-44de-9c4e-c67e0dab2cc2
+		sourceColumn: fire_perc_transport
+
+	column 'Fire Perc Commercial'
+		dataType: double
+		formatString: 0.00"%"
+		lineageTag: 0a5e86a9-a014-446e-9f23-7616544bb104
+		sourceColumn: fire_perc_commercial
+
+	column 'Perc Green'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: ccba49be-e03e-4c8b-a726-69f0aaaa4516
+		sourceColumn: perc_green
+
+	column 'Green Rank'
+		dataType: int64
+		lineageTag: 02ca1ec6-d27c-4021-ad0d-782b2d46ea54
+		summarizeBy: none
+		sourceColumn: green_rank
+
+	column 'Green 0 1'
+		dataType: double
+		isHidden
+		isAvailableInMdx: false
+		lineageTag: 0d804850-e7d5-4c07-9a6a-487b816bad76
+		summarizeBy: none
+		sourceColumn: green_0_1
+
+	column 'perc UMZ flood baseline'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 794c6514-3c5a-401f-80c6-2fbc983f97da
+		sourceColumn: perc_UMZ_flood_baseline
+
+	column 'perc UMZ flooded future'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 8c15c015-d84b-4079-8862-ac21572ab250
+		sourceColumn: perc_UMZ_flooded_future
+
+	column 'Perc Transport Flooded Baseline'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 2978ebd9-a2d1-415d-8807-3e68b9e0b913
+		sourceColumn: perc_transport_flooded_baseline
+
+	column 'Perc Transport Flooded Future'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 557ac5e4-3297-4da9-8731-ca5a11bc76af
+		sourceColumn: perc_transport_flooded_future
+
+	column 'Perc Residential Flooded Baseline'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 67d8642f-9eb1-4217-b038-0fb0f5f096c2
+		sourceColumn: perc_residential_flooded_baseline
+
+	column 'Perc Residential Flooded Future'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 43d8ca56-32da-4a64-bea9-53e1cf494859
+		sourceColumn: perc_residential_flooded_future
+
+	column 'Perc Commercial Flooded Baseline'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 9e194d67-bcd0-42ec-aab7-88de8639ecb0
+		sourceColumn: perc_commercial_flooded_baseline
+
+	column 'Perc Commercial Flooded Future'
+		dataType: double
+		formatString: 0.00\%
+		lineageTag: 3b757b56-01cb-421d-a034-743bad8609df
+		sourceColumn: perc_commercial_flooded_future
+
+	column 'RAMSES cluster'
+		dataType: int64
+		lineageTag: aafcaa36-4cef-47ea-aefc-52c2c9f9589f
+		summarizeBy: none
+		sourceColumn: RAMSES_cluster
+
+	column 'RAMSES description'
+		dataType: string
+		lineageTag: 1af45ef8-5c45-4e1b-972d-4cdb7ce34f39
+		summarizeBy: none
+		sourceColumn: RAMSES_description
+
+	column 'Adapt Plan'
+		dataType: string
+		lineageTag: adc2800e-9ed8-4d6e-9f29-b3bdb99cc3e6
+		summarizeBy: none
+		sourceColumn: adapt_plan
+
+	column 'EU project'
+		dataType: string
+		lineageTag: ea7e2d8b-253f-42e6-84e9-8236fcb50715
+		summarizeBy: none
+		sourceColumn: EU_project
+
+	column Initiative
+		dataType: string
+		lineageTag: 6fb9223b-7c0e-4ce1-a496-f406c9aca005
+		summarizeBy: none
+		sourceColumn: initiative
+
+	column 'Eu Com'
+		dataType: string
+		lineageTag: 440a4e7b-9cfe-442c-a015-7335a3480cfe
+		summarizeBy: none
+		sourceColumn: EU_COM
+
+	column Oneperhous
+		dataType: double
+		lineageTag: 2c08a228-bc42-4deb-bb53-c16e13676b19
+		sourceColumn: oneperhous
+
+	column 'Lone Parent'
+		dataType: double
+		lineageTag: 370b6516-b4bc-4055-aaca-b2de4c65aea2
+		sourceColumn: lone_parent
+
+	column 'Lone Pens'
+		dataType: double
+		lineageTag: c52fbc22-183e-490c-9233-9099201b531a
+		sourceColumn: lone_pens
+
+	column 'Tot Foreig'
+		dataType: double
+		lineageTag: f6fc1dd1-5757-46ea-a432-f6f8f2391311
+		sourceColumn: tot_foreig
+
+	column 'Lone Par 1'
+		dataType: double
+		lineageTag: 0a5f4402-6e8f-44bb-854a-4d0992000935
+		sourceColumn: lone_par_1
+
+	column 'Lone Parent Rank'
+		dataType: string
+		lineageTag: fb14757e-981e-4e7f-ada5-0428f74c5ac9
+		summarizeBy: none
+		sourceColumn: lone_parent_rank
+
+	column 'Lone Pens 1'
+		dataType: double
+		lineageTag: 490f4715-5151-4ba3-b80c-f8f93fd6f35f
+		sourceColumn: lone_pens_1
+
+	column 'Lone Pens Rank'
+		dataType: string
+		lineageTag: 4fd3491e-6760-4ec5-9d0a-2f08d7d3ccde
+		summarizeBy: none
+		sourceColumn: lone_pens_rank
+
+	column 'Foreign 1'
+		dataType: string
+		lineageTag: 5d5b678c-8f94-4791-9db4-006898ea1ac2
+		summarizeBy: none
+		sourceColumn: foreign_1
+
+	column 'Foreign Rank'
+		dataType: string
+		lineageTag: f90dcae5-3f89-40af-acb7-6b4cf649244d
+		summarizeBy: none
+		sourceColumn: foreign_rank
+
+	column 'NAME 1'
+		dataType: string
+		lineageTag: 61928843-31a9-4eee-a332-6445cb4e652f
+		summarizeBy: none
+		sourceColumn: NAME 1
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'group of cities'
+		dataType: int64
+		formatString: 0
+		lineageTag: 682e8355-0110-4ee6-9928-4ccf81763310
+		summarizeBy: sum
+		sourceColumn: group of cities
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'URAU_CODE 1'
+		dataType: string
+		lineageTag: 7f7e3dd2-5718-465d-ac97-9da7eadfd35c
+		summarizeBy: none
+		sourceColumn: URAU_CODE 1
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Full Adaptation activities narrative, 1:1 translation of Tableau's ws.adaptation title_text template: paragraph 1 built from Name/Adapt Plan/Eu Com ('{Name} {Adapt Plan} an adaptation plan (n). It {Eu Com} a signatory...'), blank-line separator, then paragraph 2 (the existing 'Adaptation Text' EU-projects sentence, itself blank when no Initiative is recorded).
+	column 'Adaptation Narrative' = 'UA Cities'[Name] & " " & 'UA Cities'[Adapt Plan] & " an adaptation plan (n). It " & 'UA Cities'[Eu Com] & " a signatory on adaptation to the Covenant of Mayors on Climate and Energy." & IF('UA Cities'[Adaptation Text] = "", "", UNICHAR(10) & UNICHAR(10) & 'UA Cities'[Adaptation Text])
+		lineageTag: 6c12115a-5575-40a3-8027-86b294c6b0f6
+
+	partition 'UA Cities' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.ua_cities_tableau_all_05122018_tableau_spreadsheet_final_10122018_check.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"URAU_CODE", type text}, {"NAME", type text}, {"drought_rcp45_2041", type number}, {"drought_rcp85_2071", type number}, {"drought_rcp45_2071", type number}, {"drought_rcp85_2041", type number}, {"heat_RCP45_2052", type number}, {"heat_RCP85_2052", type number}, {"heat_RCP45_6800", type number}, {"heat_RCP85_6800", type number}, {"SSR_2071_2100", type number}, {"SSR_1981_2010", type number}, {"SSR_rank", Int64.Type}, {"SSR_0_1", type number}, {"PREC_OBS_TR_SUM", type number}, {"PREC_OBS_TR_WIN", type number}, {"prec_obs_win_rank", Int64.Type}, {"prec_obs_win_0_1", type number}, {"OBS_DROUGHT", type number}, {"obs_dr_rank", Int64.Type}, {"obs_dr_0_1", type number}, {"PROJ_PREC_WINTER", type number}, {"PROJ_PREC_SUMMER", type number}, {"EDU_ISCED5", type number}, {"UNDER5", type number}, {"under5_1", type number}, {"under5_rank", type text}, {"OVER75", type number}, {"over75_1", type number}, {"over75_rank", type text}, {"UNEMPLOYMENT", type number}, {"unemploy1", type number}, {"unemploy_rank", type text}, {"tn20", Int64.Type}, {"SD35", Int64.Type}, {"sd30tn20", Int64.Type}, {"CDD_ranks", Int64.Type}, {"CDD_0_1", type number}, {"CDD_ave", type number}, {"RESIN_group", Int64.Type}, {"RESIN_group_name", type text}, {"RESIN_group_description", type text}, {"RESIN_subgroup", Int64.Type}, {"NAME 1", type text}, {"population_current", Int64.Type}, {"pop_year", Int64.Type}, {"pop_coded", Int64.Type}, {"group of cities", Int64.Type}, {"cities_in_group", type text}, {"population_brackets", type text}, {"pop_2050", Int64.Type}, {"seal_2006", type number}, {"seal_2009", type number}, {"seal_2012", type number}, {"seal_2015", type number}, {"se_ch_15_0", type number}, {"UMZ_06seal", type number}, {"UMZ_09seal", type number}, {"UMZ_12seal", type number}, {"UMZ_15_seal", type number}, {"country_short", type text}, {"country_name", type text}, {"fire_perc_area", type number}, {"fire_perc_population", type number}, {"fire_perc_residential", type number}, {"fire_perc_transport", type number}, {"fire_perc_commercial", type number}, {"perc_green", type number}, {"green_rank", Int64.Type}, {"green_0_1", type number}, {"perc_UMZ_flood_baseline", type number}, {"perc_UMZ_flooded_future", type number}, {"perc_transport_flooded_baseline", type number}, {"perc_transport_flooded_future", type number}, {"perc_residential_flooded_baseline", type number}, {"perc_residential_flooded_future", type number}, {"perc_commercial_flooded_baseline", type number}, {"perc_commercial_flooded_future", type number}, {"RAMSES_cluster", Int64.Type}, {"RAMSES_description", type text}, {"adapt_plan", type text}, {"EU_project", type text}, {"initiative", type text}, {"EU_COM", type text}, {"URAU_CODE 1", type text}, {"oneperhous", type number}, {"lone_parent", type number}, {"lone_pens", type number}, {"tot_foreig", type number}, {"lone_par_1", type number}, {"lone_parent_rank", type text}, {"lone_pens_1", type number}, {"lone_pens_rank", type text}, 				    {"foreign_1", type text}, {"foreign_rank", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
