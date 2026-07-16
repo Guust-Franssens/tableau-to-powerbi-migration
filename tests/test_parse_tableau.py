@@ -58,6 +58,26 @@ def test_worksheet_shelf_and_reference_lines_resolved():
     assert labels == {"Min", "Max"}
 
 
+def test_metadata_only_physical_column_recovered():
+    """Physical/extract columns that appear only in <metadata-records> (no <column> element) must be
+    recovered into fields[] with from_metadata_record=True, deduped against existing <column> fields,
+    and role-inferred from local-type (integer/real -> measure)."""
+    spec = parse_workbook(FIXTURE)
+    fields = {f["caption"]: f for f in spec["data_sources"][0]["fields"]}
+    # 'Region Code' exists only as a metadata-record -> recovered.
+    assert "Region Code" in fields
+    region = fields["Region Code"]
+    assert region["from_metadata_record"] is True
+    assert region["kind"] == "column"
+    assert region["data_type"] == "integer"
+    assert region["role"] == "measure"
+    # 'Name' has a real <column> element AND a metadata-record with the same [NAME] internal name ->
+    # must NOT be duplicated, and the surfaced <column> entry (not the metadata one) is kept.
+    name_entries = [f for f in spec["data_sources"][0]["fields"] if f["internal_name"] == "[NAME]"]
+    assert len(name_entries) == 1
+    assert name_entries[0].get("from_metadata_record", False) is False
+
+
 def test_measure_names_values_pivot_detected_and_resolved():
     """Tableau's 'Measure Names/Measure Values' virtual pivot has no direct Power BI equivalent - it
     should be detected structurally (not left as an opaque UNRESOLVED:... shelf/filter reference) and

@@ -185,6 +185,42 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
     return entry
 
 
+_METADATA_MEASURE_TYPES = {"integer", "real"}
+
+
+def _build_metadata_column_entry(
+    rec: etree._Element, ds_id: str, table_id: str | None, ids: IdRegistry
+) -> dict[str, Any] | None:
+    """Build a field entry from a <metadata-record class='column'> that has no matching <column>
+    element. Tableau lists every physical/extract column in metadata-records even when it was never
+    dragged onto a shelf or given a <column> definition, so scanning them recovers physical columns
+    that fields[] would otherwise silently omit (verified across two workbooks: extract-based sources
+    dropped e.g. 'Billable Miles'/'Status' and 'Adj Close', some the basis of downstream calcs)."""
+    local_name_el = rec.find("local-name")
+    if local_name_el is None or not local_name_el.text:
+        return None
+    internal_name = local_name_el.text
+    remote_el = rec.find("remote-name")
+    caption = remote_el.text if remote_el is not None and remote_el.text else internal_name.strip("[]")
+    local_type_el = rec.find("local-type")
+    data_type = local_type_el.text if local_type_el is not None and local_type_el.text else "string"
+    return {
+        "id": ids.make("fld", ds_id, caption),
+        "internal_name": internal_name,
+        "caption": caption,
+        "table_id": table_id,
+        "kind": "column",
+        "data_type": data_type,
+        "role": "measure" if data_type in _METADATA_MEASURE_TYPES else "dimension",
+        "default_aggregation": None,
+        "hidden": False,
+        "semantic_role": None,
+        "formatting": {},
+        "aliases": {},
+        "from_metadata_record": True,
+    }
+
+
 def _resolve_field_dependencies(fields: list[dict[str, Any]], name_to_id: dict[str, str]) -> None:
     """Second pass: now that every internal name in this datasource is known, resolve each
     calculated field's raw [bracketed] formula references to field ids, in place."""
@@ -203,9 +239,19 @@ def _resolve_field_dependencies(fields: list[dict[str, Any]], name_to_id: dict[s
 def _parse_fields(
     ds_el: etree._Element, ds_id: str, table_id: str | None, ids: IdRegistry
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Parse <column> definitions (incl. calculated fields) directly under the datasource.
-    Returns (fields, internal_name -> field_id map) for later cross-referencing."""
+    """Parse <column> definitions (incl. calculated fields) directly under the datasource, then
+    supplement with any physical columns that appear only in <metadata-records> (never surfaced as a
+    <column>). Returns (fields, internal_name -> field_id map) for later cross-referencing."""
     fields = [_build_field_entry(col, ds_id, table_id, ids) for col in ds_el.findall("column")]
+    known_internal_names = {f["internal_name"] for f in fields}
+    for rec in ds_el.findall(".//metadata-record[@class='column']"):
+        local_name_el = rec.find("local-name")
+        if local_name_el is None or not local_name_el.text or local_name_el.text in known_internal_names:
+            continue
+        entry = _build_metadata_column_entry(rec, ds_id, table_id, ids)
+        if entry is not None:
+            fields.append(entry)
+            known_internal_names.add(entry["internal_name"])
     name_to_id = {f["internal_name"]: f["id"] for f in fields}
     _resolve_field_dependencies(fields, name_to_id)
     return fields, name_to_id

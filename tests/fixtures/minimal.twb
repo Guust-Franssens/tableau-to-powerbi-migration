@@ -36,6 +36,20 @@
       <column-instance column='[SALES]' derivation='Sum' name='[sum:SALES:qk]' pivot='key' type='quantitative' />
       <column-instance column='[Calculation_1]' derivation='None' name='[none:Calculation_1:nk]' pivot='key' type='nominal' />
       <column-instance column='[Calculation_2]' derivation='Sum' name='[sum:Calculation_2:qk]' pivot='key' type='quantitative' />
+      <metadata-records>
+        <metadata-record class='column'>
+          <remote-name>NAME</remote-name>
+          <local-name>[NAME]</local-name>
+          <local-type>string</local-type>
+          <aggregation>Count</aggregation>
+        </metadata-record>
+        <metadata-record class='column'>
+          <remote-name>Region Code</remote-name>
+          <local-name>[Region Code]</local-name>
+          <local-type>integer</local-type>
+          <aggregation>Sum</aggregation>
+        </metadata-record>
+      </metadata-records>
       <extract count='-1' enabled='true' units='records'>
         <connection class='hyper' dbname='Data/test.twb Files/federated.hyper' />
       </extract>

@@ -104,6 +104,7 @@
                 "role": { "type": "string", "enum": ["dimension", "measure"] },
                 "default_aggregation": { "type": ["string", "null"], "enum": ["SUM", "AVG", "COUNT", "COUNTD", "MIN", "MAX", "MEDIAN", "ATTR", "None", null] },
                 "hidden": { "type": "boolean", "default": false },
+                "from_metadata_record": { "type": "boolean", "default": false, "description": "true if recovered from <metadata-records> (a physical/extract column with no <column> element) rather than a user-surfaced Tableau field" },
                 "semantic_role": { "type": ["string", "null"], "description": "e.g. geography.city if geo-coded" },
                 "formatting": {
                   "type": "object",
