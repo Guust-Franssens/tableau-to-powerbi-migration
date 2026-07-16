@@ -161,6 +161,31 @@ def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]
     return tables
 
 
+def _parse_joins(ds_el: etree._Element) -> list[dict[str, Any]]:
+    """Extract every <relation type='join'> operand pair, join type, and on-clause into a join graph so
+    pbi-semantic-builder can rebuild Power BI model relationships. Conditions carry the raw Tableau
+    [Table].[Field] references from each equality expression in the join clause."""
+    outer_conn = ds_el.find("connection")
+    if outer_conn is None:
+        return []
+    joins = []
+    for jrel in outer_conn.iter("relation"):
+        if jrel.get("type") != "join":
+            continue
+        operands = jrel.findall("relation")
+        conditions = []
+        clause = jrel.find("clause")
+        if clause is not None:
+            for eq in clause.iter("expression"):
+                sides = eq.findall("expression")
+                if eq.get("op") == "=" and len(sides) == 2:
+                    conditions.append({"left_field": sides[0].get("op", ""), "right_field": sides[1].get("op", "")})
+        left = operands[0].get("name") or operands[0].get("table") if operands else None
+        right = operands[1].get("name") or operands[1].get("table") if len(operands) > 1 else None
+        joins.append({"left": left, "right": right, "type": jrel.get("join", "inner"), "conditions": conditions})
+    return joins
+
+
 def _classify_calculation(formula: str) -> dict[str, bool | str | None]:
     reshape_hint = None
     if "Pivot Field Names" in formula or "Pivot Field Values" in formula:
@@ -300,7 +325,7 @@ def _parse_single_data_source(
         "internal_name": internal_name,
         "connection": _parse_connection(ds_el, hyper_files),
         "tables": tables,
-        "joins": [],  # TODO: parse nested <relation type='join'> - not present in EEA sample
+        "joins": _parse_joins(ds_el),
         "fields": fields,
     }
     return data_source, internal_name, instance_map, name_to_id

@@ -73,6 +73,19 @@ def test_detail_and_tooltip_shelves_resolved():
     assert fields["Sales Scaled"] in tooltip_ids
 
 
+def test_join_relation_graph_extracted():
+    """<relation type='join'> operands, join type, and on-clause conditions must be captured into the
+    data source's joins[] so the semantic builder can rebuild Power BI relationships (here: an inner
+    join Cities <-> Regions on [Region ID])."""
+    spec = parse_workbook(FIXTURE)
+    joins = spec["data_sources"][0]["joins"]
+    assert len(joins) == 1
+    join = joins[0]
+    assert join["type"] == "inner"
+    assert {join["left"], join["right"]} == {"Cities", "Regions"}
+    assert join["conditions"] == [{"left_field": "[Cities$].[Region ID]", "right_field": "[Regions$].[Region ID]"}]
+
+
 def test_collection_relation_descends_to_leaf_tables():
     """A <relation type='collection'> (or join/union) is a container wrapping child relations (a
     multi-file union). The parser must descend it to the underlying leaf tables rather than emitting

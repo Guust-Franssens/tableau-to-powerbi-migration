@@ -19,8 +19,16 @@
           </named-connection>
         </named-connections>
         <relation type='collection'>
-          <relation connection='excel-direct.abc123' name='Cities' table='[Cities$]' type='table' />
-          <relation connection='excel-direct.abc123' name='Regions' table='[Regions$]' type='table' />
+          <relation type='join' join='inner'>
+            <relation connection='excel-direct.abc123' name='Cities' table='[Cities$]' type='table' />
+            <relation connection='excel-direct.abc123' name='Regions' table='[Regions$]' type='table' />
+            <clause type='join'>
+              <expression op='='>
+                <expression op='[Cities$].[Region ID]' />
+                <expression op='[Regions$].[Region ID]' />
+              </expression>
+            </clause>
+          </relation>
         </relation>
       </connection>
       <column caption='Name' datatype='string' name='[NAME]' role='dimension' type='nominal' />
