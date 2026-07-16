@@ -2,10 +2,11 @@
 
 Reference playbook for the `pbi-semantic-builder` subagent. Patterns marked **[seen]** are drawn
 directly from real migrated workbooks — the 94 calculated fields in the EEA "Urban Adaptation" sample
-workbook (iteration 1), and the 63 calculated fields + 15 parameters in the "Superstore Sales
-Performance" sample workbook (iteration 2, source-tagged **[seen, Superstore]** below). Patterns
-marked **[general]** are common in the wild but weren't present in either workbook — keep them here
-because real-world workbooks likely will have them.
+workbook (iteration 1), the 63 calculated fields + 15 parameters in the "Superstore Sales
+Performance" sample workbook (iteration 2, source-tagged **[seen, Superstore]** below), and parser-
+level structural idioms found while triaging the "Airline Alliance Activity" workbook (iteration 3,
+source-tagged **[seen, Airline Alliance]**). Patterns marked **[general]** are common in the wild but
+weren't present in any workbook yet — keep them here because real-world workbooks likely will have them.
 
 ## 1. Direct expression translations
 
@@ -232,6 +233,34 @@ recomputes correctly if the seed is changed via a slicer, but the specific "type
 text/date box" interaction style is lost. Call this out to the customer as its own named capability
 gap, distinct from ordinary measure-translation limitations that a better prompt or more effort could
 close — this one is a genuine Power BI product-surface gap, not an execution shortfall.
+
+**A parser-level structural idiom, not a translation gap — internal relationship-model table-anchor
+pseudo-columns [seen, Airline Alliance].** Tableau data sources built on the newer relationship model
+(as opposed to the older join-based model) carry one synthetic `<column>` per physical table with
+`datatype="table"` and an `internal_name` prefixed `[__tableau_internal_object_id__]` (its `caption`
+is just the source file/table name, e.g. `airline_alliance_performance_2022_2025.csv`). This is
+Tableau's internal anchor for the relationship graph, not a real, queryable field — `pbi-semantic-
+builder` should exclude it from the semantic model entirely (no column/measure), the same treatment as
+a vestigial field. The parser still surfaces it in `fields[]` and flags it via `limitations_encountered`
+(`severity: low`) rather than silently dropping it, matching this repo's "never silently drop, always
+route through limitations" discipline.
+
+**A durable capability-gap class, not a translation shortfall — `spatial` (MAKEPOINT`/`MAKELINE`)
+geometry fields [seen, Airline Alliance, high severity].** Tableau supports calculated fields with
+`datatype="spatial"`, built from `MAKEPOINT(lat, lon)` (a map point) and `MAKELINE(point1, point2)` (a
+line/arc between two points) — the standard idiom behind origin-destination "flight route"/network
+maps (seen here driving an airline alliance route map: `Origin Point` → `Destination Point` →
+`Flight Line`). Power BI has **no native DAX or Power Query equivalent** for a geometry-typed
+column — there's nothing to translate a `MAKELINE` into. Options, in order of preference, are:
+1. A custom/AppSource visual that natively supports origin-destination arcs (e.g. an arc/flow-map
+   visual) fed by plain lat/long measure columns (the underlying `[LAT]`/`[LON]` fields the spatial
+   calc references still translate normally — only the `MAKEPOINT`/`MAKELINE` wrapper itself has no
+   home).
+2. A reduced-fidelity fallback: plot origin and destination as two separate point layers on a native
+   Map/Shape Map visual, accepting the loss of the connecting line.
+3. An R/Python custom visual, if exact line rendering is a hard requirement.
+Flag this to the customer explicitly as a genuine Power BI product-surface gap (like live user-input
+parameters above), not something a better prompt would close.
 
 **Bottom line for the demo:** AI-assisted migration turns a multi-week manual rebuild into an
 automated first draft plus a focused validation pass — it does not eliminate human review, especially

@@ -677,6 +677,42 @@ def annotate_known_idioms(spec: dict[str, Any]) -> None:
                 )
 
 
+_DATA_TYPE_LIMITATIONS = {
+    "table": (
+        "low",
+        "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column "
+        "(not real data) - exclude from the semantic model entirely, do not create a column/measure "
+        "for it",
+    ),
+    "spatial": (
+        "high",
+        "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query "
+        "equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns "
+        "with reduced fidelity (e.g. no native origin-destination line rendering)",
+    ),
+}
+
+
+def _field_limitations(f: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per-field risk checks (LOD/table-calc translation risk, non-tabular data_type values) shared
+    by every data source's field loop in collect_limitations."""
+    found = []
+    if f.get("is_lod") or f.get("is_table_calc"):
+        found.append(
+            {
+                "item": f["id"],
+                "issue": f"{'LOD expression' if f.get('is_lod') else 'table calculation'} - verify "
+                "DAX translation grain/filter-context against a known Tableau value",
+                "severity": "high",
+                "stage": "parse",
+            }
+        )
+    if f["data_type"] in _DATA_TYPE_LIMITATIONS:
+        severity, issue = _DATA_TYPE_LIMITATIONS[f["data_type"]]
+        found.append({"item": f["id"], "issue": issue, "severity": severity, "stage": "parse"})
+    return found
+
+
 def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """Scan the parsed spec for known risk areas (extract-based sources, LOD/table calcs, unresolved
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
@@ -694,16 +730,7 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
         for f in ds["fields"]:
-            if f.get("is_lod") or f.get("is_table_calc"):
-                limitations.append(
-                    {
-                        "item": f["id"],
-                        "issue": f"{'LOD expression' if f.get('is_lod') else 'table calculation'} - "
-                        "verify DAX translation grain/filter-context against a known Tableau value",
-                        "severity": "high",
-                        "stage": "parse",
-                    }
-                )
+            limitations.extend(_field_limitations(f))
     for ws in spec["worksheets"]:
         pivot = ws.get("measure_names_values_pivot")
         for enc_name in ("rows", "columns"):

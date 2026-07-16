@@ -28,6 +28,10 @@
       <column caption='Sales Scaled' datatype='real' name='[Calculation_2]' role='measure' type='quantitative'>
         <calculation class='tableau' formula='SUM([SALES])*100' />
       </column>
+      <column caption='cities.csv' datatype='table' name='[__tableau_internal_object_id__].[cities.csv_ABC123]' role='measure' type='quantitative' />
+      <column caption='City Point' datatype='spatial' name='[Calculation_3]' role='measure' type='nominal'>
+        <calculation class='tableau' formula='MAKEPOINT([LAT],[LON])' />
+      </column>
       <column-instance column='[NAME]' derivation='None' name='[none:NAME:nk]' pivot='key' type='nominal' />
       <column-instance column='[SALES]' derivation='Sum' name='[sum:SALES:qk]' pivot='key' type='quantitative' />
       <column-instance column='[Calculation_1]' derivation='None' name='[none:Calculation_1:nk]' pivot='key' type='nominal' />

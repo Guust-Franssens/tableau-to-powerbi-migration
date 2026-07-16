@@ -99,6 +99,32 @@ def test_limitations_are_collected_not_silently_dropped():
     assert any(item["item"] == spec["data_sources"][0]["id"] for item in spec["limitations_encountered"])
 
 
+def test_internal_object_id_pseudo_column_flagged_not_silently_dropped():
+    """Tableau's relationship-model data sources carry a '[__tableau_internal_object_id__]'-prefixed
+    pseudo-column per physical table (datatype='table') that isn't real data. It must still be parsed
+    (never silently dropped) but flagged so pbi-semantic-builder knows to exclude it."""
+    spec = parse_workbook(FIXTURE)
+    fields = {f["caption"]: f for f in spec["data_sources"][0]["fields"]}
+    pseudo_col = fields["cities.csv"]
+    assert pseudo_col["data_type"] == "table"
+    assert any(
+        item["item"] == pseudo_col["id"] and "internal" in item["issue"] for item in spec["limitations_encountered"]
+    )
+
+
+def test_spatial_field_flagged_as_high_severity_capability_gap():
+    """MAKEPOINT/MAKELINE-derived 'spatial' fields (map geometry) have no native DAX/Power Query
+    equivalent - flagged high severity so it's triaged as a design decision, not silently dropped."""
+    spec = parse_workbook(FIXTURE)
+    fields = {f["caption"]: f for f in spec["data_sources"][0]["fields"]}
+    spatial_field = fields["City Point"]
+    assert spatial_field["data_type"] == "spatial"
+    assert any(
+        item["item"] == spatial_field["id"] and item["severity"] == "high" and "spatial" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+
+
 def test_floating_dashboard_captures_all_sibling_zones():
     """A Tableau 'Floating' layout dashboard serializes <zones> as flat sibling <zone> elements with
     no wrapping root container. All siblings must be captured (as a synthesized 'layout-floating'

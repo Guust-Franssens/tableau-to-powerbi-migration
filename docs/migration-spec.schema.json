@@ -100,7 +100,7 @@
                 "caption": { "type": "string" },
                 "table_id": { "type": ["string", "null"] },
                 "kind": { "type": "string", "enum": ["column", "calculated", "group", "bin", "hierarchy"] },
-                "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime"] },
+                "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime", "table", "spatial"], "description": "'table' is Tableau's internal relationship-model table-anchor pseudo-column (internal_name prefixed '[__tableau_internal_object_id__]') - not real data. 'spatial' is a MAKEPOINT/MAKELINE-derived geometry field (map point/line) with no native DAX/PQ equivalent - see migration-spec.md" },
                 "role": { "type": "string", "enum": ["dimension", "measure"] },
                 "default_aggregation": { "type": ["string", "null"], "enum": ["SUM", "AVG", "COUNT", "COUNTD", "MIN", "MAX", "MEDIAN", "ATTR", "None", null] },
                 "hidden": { "type": "boolean", "default": false },

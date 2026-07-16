@@ -100,6 +100,16 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
   (including the `(copy)`/`(copy N)` suffix itself, which is *not* a reliable "this is a duplicate of
   X" signal either) will misattribute the field's purpose. This applies to worksheet/dashboard zone
   `param` references too — always resolve through the spec's `field_id`, never the raw XML name.
+- **Two non-tabular `data_type` values need special handling, never a plain column/measure** (seen in
+  the Airline Alliance workbook — see `docs/tableau-dax-translation-guide.md` §8 for full detail):
+  - `data_type: "table"` — Tableau's internal relationship-model table-anchor pseudo-column
+    (`internal_name` prefixed `[__tableau_internal_object_id__]`). Not real data — exclude it from the
+    semantic model entirely, same treatment as a vestigial field.
+  - `data_type: "spatial"` (`MAKEPOINT`/`MAKELINE`-derived map geometry) — no native DAX/Power Query
+    equivalent exists. Don't attempt to force it into a column; instead surface the underlying
+    lat/long fields it references (still ordinary `real` columns) and flag the geometry field itself
+    as a capability gap in `limitations_encountered` for `pbi-report-builder` to handle via a
+    custom/AppSource visual or a reduced-fidelity two-point fallback.
 
 ### TMDL hand-authoring pitfalls (learned the hard way — validate every one of these before reporting success)
 
