@@ -61,6 +61,18 @@ def test_worksheet_shelf_and_reference_lines_resolved():
     assert "total" in {rl["formula"] for rl in worksheet["reference_lines"]}
 
 
+def test_detail_and_tooltip_shelves_resolved():
+    """Tableau's Detail shelf serializes as <lod> elements and the Tooltip shelf as <tooltip>
+    elements (both multi-field); the parser must resolve them to field ids rather than stubbing []."""
+    spec = parse_workbook(FIXTURE)
+    enc = spec["worksheets"][0]["encodings"]
+    detail_ids = {f["field_id"] for f in enc["detail"]}
+    tooltip_ids = {f["field_id"] for f in enc["tooltip"]}
+    fields = {f["caption"]: f["id"] for f in spec["data_sources"][0]["fields"]}
+    assert fields["Name"] in detail_ids
+    assert fields["Sales Scaled"] in tooltip_ids
+
+
 def test_collection_relation_descends_to_leaf_tables():
     """A <relation type='collection'> (or join/union) is a container wrapping child relations (a
     multi-file union). The parser must descend it to the underlying leaf tables rather than emitting

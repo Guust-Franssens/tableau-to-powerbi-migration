@@ -397,6 +397,28 @@ def _resolve_encoding_field(
     return {"field_id": instance_map.get(instance_name, f"UNRESOLVED:{instance_name}")}
 
 
+def _resolve_encoding_fields(
+    encodings_el: etree._Element | None, tag: str, instance_map: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Resolve a multi-field encoding shelf to a list of field ids, deduped in document order.
+    Tableau's Detail shelf serializes as one <lod> element per field and the Tooltip shelf as one
+    <tooltip> element per field (both carry a `column` attribute like color/size)."""
+    if encodings_el is None:
+        return []
+    resolved: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for el in encodings_el.findall(tag):
+        match = _SHELF_FIELD_RE.search(el.get("column", ""))
+        if not match:
+            continue
+        instance_name = f"[{match.group(2)}]"
+        field_id = instance_map.get(instance_name, f"UNRESOLVED:{instance_name}")
+        if field_id not in seen:
+            seen.add(field_id)
+            resolved.append({"field_id": field_id})
+    return resolved
+
+
 def _resolve_mark_type(pane: etree._Element | None) -> str:
     """Return the worksheet's Tableau mark class (Bar/Line/Circle/.../Automatic), defaulting safely
     when the pane or its <mark> child is absent."""
@@ -532,8 +554,8 @@ def _parse_single_worksheet(
         "size": _resolve_encoding_field(encodings_el, "size", instance_map),
         "shape": _resolve_encoding_field(encodings_el, "shape", instance_map),
         "label": [label_field] if label_field else [],
-        "detail": [],
-        "tooltip": [],
+        "detail": _resolve_encoding_fields(encodings_el, "lod", instance_map),
+        "tooltip": _resolve_encoding_fields(encodings_el, "tooltip", instance_map),
     }
     filters = _parse_worksheet_filters(view, instance_map)
 

@@ -91,6 +91,8 @@
             <mark class='Circle' />
             <encodings>
               <color column='[federated.testds1].[sum:SALES:qk]' />
+              <lod column='[federated.testds1].[none:NAME:nk]' />
+              <tooltip column='[federated.testds1].[sum:Calculation_2:qk]' />
             </encodings>
             <reference-line axis-column='[federated.testds1].[sum:SALES:qk]' formula='constant' id='refline0' label='Min' scope='per-table' value='0.0' />
             <reference-line axis-column='[federated.testds1].[sum:SALES:qk]' formula='constant' id='refline1' label='Max' scope='per-table' value='100.0' />
