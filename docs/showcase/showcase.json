@@ -51,7 +51,8 @@
         {
           "name": "Tale of 100 Entrepreneurs",
           "tableau": "migrations/tale-of-100-entrepreneurs/reference/tableau-tale-of-100.png",
-          "powerbi": null
+          "powerbi": "migrations/tale-of-100-entrepreneurs/reference/powerbi-tale-of-100.png",
+          "powerbi_crop": { "right": 0.13 }
         }
       ]
     },

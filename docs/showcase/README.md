@@ -32,7 +32,9 @@ Interactive what-if commission calculator. Three What-If parameters (New Quota /
 
 Company revenue-growth analysis. Exercised the pipeline's first real Tableau table calculations (LOOKUP first/last, running INDEX) translated to verified DAX.
 
-- **Tale of 100 Entrepreneurs** — Power BI screenshot pending Desktop capture.
+**Tale of 100 Entrepreneurs**
+
+![Tale of 100 Entrepreneurs - Tale of 100 Entrepreneurs](assets/tale-of-100-entrepreneurs-1.png)
 
 ### Superstore Sales Performance
 
