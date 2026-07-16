@@ -155,6 +155,19 @@ def test_parameter_equality_filter_idiom_flagged():
     assert "plain PBI slicer" in filt["note"]
 
 
+def test_dashboard_actions_parsed_and_attached_to_source_dashboard():
+    """Workbook <actions> (cross-sheet filter/highlight/URL wiring) must be parsed and attached to their
+    source dashboard, with type + run_on + source worksheet resolved (here: an on-select filter action
+    on the 'main' dashboard sourced from the 'Sales Gauge' worksheet)."""
+    spec = parse_workbook(FIXTURE)
+    main_dash = next(d for d in spec["dashboards"] if d["name"] == "main")
+    assert len(main_dash["actions"]) == 1
+    action = main_dash["actions"][0]
+    assert action["type"] == "filter"
+    assert action["run_on"] == "select"
+    assert action["source_worksheet_id"] == spec["worksheets"][0]["id"]
+
+
 def test_dashboard_zone_tree_resolves_worksheet_reference():
     spec = parse_workbook(FIXTURE)
     top_zone = spec["dashboards"][0]["zones"]

@@ -688,6 +688,48 @@ def _parse_zone(
     return zone
 
 
+_ACTION_TYPE_BY_COMMAND = {"tsc:brush": "highlight", "tsc:filter": "filter"}
+_RUN_ON_BY_ACTIVATION = {"on-select": "select", "on-hover": "hover", "on-menu": "menu"}
+
+
+def _action_type(action: etree._Element) -> str:
+    """Classify a dashboard action: a <link> is a URL action; otherwise map the <command> (tsc:brush →
+    highlight, tsc:filter → filter, anything mentioning 'parameter' → parameter), defaulting to filter."""
+    if action.find("link") is not None:
+        return "url"
+    command = action.find("command")
+    cmd = command.get("command", "") if command is not None else ""
+    if "parameter" in cmd:
+        return "parameter"
+    return _ACTION_TYPE_BY_COMMAND.get(cmd, "filter")
+
+
+def _parse_actions(root: etree._Element, worksheet_ids_by_name: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+    """Parse workbook <actions>/<action> (filter/highlight/URL/parameter interactivity) and group them
+    by their source dashboard name, so each dashboard carries the cross-sheet wiring it drives. Actions
+    whose source is a datasource (not a dashboard) are skipped - they can't be attached to one dashboard.
+    Precise target-worksheet and driving-field resolution is left to the LLM (best-effort empty here)."""
+    by_dashboard: dict[str, list[dict[str, Any]]] = {}
+    for action in root.findall(".//actions/action"):
+        source = action.find("source")
+        dash_name = source.get("dashboard") if source is not None else None
+        if not dash_name:
+            continue
+        activation = action.find("activation")
+        activation_type = activation.get("type", "") if activation is not None else ""
+        source_ws = source.get("worksheet")
+        by_dashboard.setdefault(dash_name, []).append(
+            {
+                "type": _action_type(action),
+                "field_id": None,
+                "source_worksheet_id": worksheet_ids_by_name.get(source_ws) if source_ws else None,
+                "target_worksheet_ids": [],
+                "run_on": _RUN_ON_BY_ACTIVATION.get(activation_type, "select"),
+            }
+        )
+    return by_dashboard
+
+
 def parse_dashboards(
     root: etree._Element,
     worksheets: list[dict[str, Any]],
@@ -704,6 +746,7 @@ def parse_dashboards(
     'layout-floating' synthetic root so nothing is lost."""
     worksheet_ids_by_name = {ws["name"]: ws["id"] for ws in worksheets}
     param_ids_by_name = {p["internal_name"].strip("[]"): p["id"] for p in parameters}
+    actions_by_dashboard = _parse_actions(root, worksheet_ids_by_name)
     dashboards = []
     for dash_el in root.findall("dashboards/dashboard"):
         name = dash_el.get("name", "")
@@ -738,7 +781,7 @@ def parse_dashboards(
                     "sizing_mode": (size_el.get("sizing-mode", "fixed") if size_el is not None else "automatic"),
                 },
                 "zones": zones,
-                "actions": [],  # TODO: parse <actions> - none present in the EEA sample (single-page dashboard)
+                "actions": actions_by_dashboard.get(name, []),
             }
         )
     logger.info("Parsed %d dashboard(s)", len(dashboards))

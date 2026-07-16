@@ -165,4 +165,13 @@
       </zones>
     </dashboard>
   </dashboards>
+  <actions>
+    <action caption='Filter Cities' name='[Action1]'>
+      <activation type='on-select' />
+      <source dashboard='main' type='sheet' worksheet='Sales Gauge' />
+      <command command='tsc:filter'>
+        <param name='target' value='main' />
+      </command>
+    </action>
+  </actions>
 </workbook>
