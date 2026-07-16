@@ -108,6 +108,15 @@ def test_measure_names_values_pivot_detected_and_resolved():
     assert resolved_captions == {"Sales", "Sales Scaled"}
 
 
+def test_relative_date_filter_class_captured():
+    """Tableau filter classes use hyphens (relative-date, parameter-binding), not underscores. The
+    parser emits the raw class verbatim, so the schema enum must accept the hyphenated forms (a real
+    'relative-date' filter surfaced from Tableau Public's CaseOverview-ServiceDesk workbook)."""
+    spec = parse_workbook(FIXTURE)
+    filter_types = {f["type"] for ws in spec["worksheets"] for f in ws["filters"]}
+    assert "relative-date" in filter_types
+
+
 def test_parameter_equality_filter_idiom_flagged():
     """The IF [Param]=[Dim] THEN [Dim] END + exclude-null pattern should be recognized and annotated
     so pbi-semantic-builder simplifies it to a plain slicer instead of recreating it as DAX."""

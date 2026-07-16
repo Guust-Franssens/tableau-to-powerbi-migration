@@ -82,6 +82,9 @@
               <groupfilter function='member' level='[none:Calculation_1:nk]' member='%null%' />
             </groupfilter>
           </filter>
+          <filter class='relative-date' column='[federated.testds1].[none:NAME:nk]'>
+            <groupfilter function='member' level='[none:NAME:nk]' member='%all%' />
+          </filter>
         </view>
         <panes>
           <pane>
