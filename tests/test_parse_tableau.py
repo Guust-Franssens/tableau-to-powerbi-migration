@@ -20,7 +20,7 @@ def test_parses_top_level_shape():
     assert spec["migration_spec_version"] == "1.0"
     assert len(spec["data_sources"]) == 1
     assert len(spec["worksheets"]) == 2
-    assert len(spec["dashboards"]) == 1
+    assert len(spec["dashboards"]) == 2
     assert len(spec["parameters"]) == 1
 
 
@@ -97,3 +97,24 @@ def test_dashboard_zone_tree_resolves_worksheet_reference():
 def test_limitations_are_collected_not_silently_dropped():
     spec = parse_workbook(FIXTURE)
     assert any(item["item"] == spec["data_sources"][0]["id"] for item in spec["limitations_encountered"])
+
+
+def test_floating_dashboard_captures_all_sibling_zones():
+    """A Tableau 'Floating' layout dashboard serializes <zones> as flat sibling <zone> elements with
+    no wrapping root container. All siblings must be captured (as a synthesized 'layout-floating'
+    root's children), not just the first one a naive .find() would grab."""
+    spec = parse_workbook(FIXTURE)
+    floating = next(d for d in spec["dashboards"] if d["name"] == "floating")
+    assert floating["size"]["sizing_mode"] == "automatic"
+    root_zone = floating["zones"]
+    assert root_zone["type"] == "layout-floating"
+    assert len(root_zone["children"]) == 3
+
+
+def test_floating_dashboard_paramctrl_and_bitmap_zone_types_resolved():
+    spec = parse_workbook(FIXTURE)
+    floating = next(d for d in spec["dashboards"] if d["name"] == "floating")
+    children_by_type = {z["type"]: z for z in floating["zones"]["children"]}
+    assert set(children_by_type) == {"parameter", "worksheet", "image"}
+    assert children_by_type["parameter"]["field_id"] == spec["parameters"][0]["id"]
+    assert children_by_type["worksheet"]["worksheet_id"] == spec["worksheets"][0]["id"]

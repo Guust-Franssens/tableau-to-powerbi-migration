@@ -1,8 +1,10 @@
 # Tableau calculation → DAX translation guide
 
 Reference playbook for the `pbi-semantic-builder` subagent. Patterns marked **[seen]** are drawn
-directly from the 94 calculated fields in the EEA "Urban Adaptation" sample workbook; patterns marked
-**[general]** are common in the wild but weren't present in that specific workbook — keep them here
+directly from real migrated workbooks — the 94 calculated fields in the EEA "Urban Adaptation" sample
+workbook (iteration 1), and the 63 calculated fields + 15 parameters in the "Superstore Sales
+Performance" sample workbook (iteration 2, source-tagged **[seen, Superstore]** below). Patterns
+marked **[general]** are common in the wild but weren't present in either workbook — keep them here
 because real-world workbooks likely will have them.
 
 ## 1. Direct expression translations
@@ -74,7 +76,86 @@ performs better (reshaping is a load-time concern, not a query-time one). Fields
 `reshape_hint: "pivot_derived"` in the migration spec should route here first; only fall back to a
 DAX calculated column if Power Query reshaping isn't feasible in the timeline.
 
-## 3. LOD expressions [general — not present in the EEA sample, expect these in real-world workbooks]
+**Click-to-highlight / cross-filter helper fields [seen, Superstore, 4 occurrences]**
+```
+Tableau calc: IF [Region] = [Region Parameter] THEN "CLICK TO HIGHLIGHT" ELSE NULL END
+              (bound to a Detail/Tooltip shelf; a dashboard click-action keys off whether it's non-null)
+```
+Tableau has no native click-to-cross-highlight action — workbooks fake it with a calculated field
+bound to Detail/Tooltip, gated by an `IF`, that a dashboard action then reads. **Do not build these as
+TMDL columns/measures.** Power BI has native cross-visual highlighting and cross-filter-on-click with
+no calculated-field workaround required — the equivalent interactivity (if the customer wants it) is
+wired up by `pbi-report-builder` as a plain visual interaction or drillthrough action, not modeled as
+data. Superseded, not vestigial: these fields have a real Tableau purpose, it's just one Power BI's
+native capability makes unnecessary to reproduce. Flag as a positive simplification in
+`limitations_encountered`, same as the parameter-equality-filter idiom above.
+
+## 3. Field Parameters — parameter-driven measure/dimension switching [seen, Superstore, 5 occurrences]
+
+A Tableau parameter that lets the end user pick *which measure or dimension* a worksheet plots (e.g.
+a "Y-Axis" parameter listing `Sales`/`Profit`/`Quantity`/...) maps directly to Power BI's native
+**Field Parameters** feature: a small calculated table where each row is
+`(Label, NAMEOF(<measure or column>), Order)`, bound to a visual's field well and switched with a
+slicer. This is a first-class primitive, not a workaround — prefer it over a hand-rolled
+disconnected-table-plus-`SWITCH`-measure pattern whenever a parameter genuinely swaps a shelf binding.
+
+**Not every Tableau parameter is a Field Parameter candidate — verify consumption before choosing:**
+- **Field Parameter**: confirmed by checking every worksheet's shelves for the parameter feeding a
+  computed field that's actually *bound to* Rows/Columns/Values, not just referenced in a filter.
+- **Plain disconnected slicer table + `SELECTEDVALUE`**: the parameter is only ever read inside one or
+  two measures/`IF`s (e.g. baked into a filter argument) — it never swaps a shelf binding. Building
+  this as a Field Parameter is unnecessary ceremony. **[seen]** Superstore's `Region Parameter` (read
+  via `SELECTEDVALUE` inside CP/PP measures' region-restriction `FILTER`, never a join key or a shelf
+  swap) and `Date Comparison` (feeds one `IF` converting a text choice into a day-count offset) were
+  both plain slicers, alongside 5 genuine Field Parameters (`Y-Axis`, `X-Axis`, `Map KPI`,
+  `Scatter Plot Detail`, `Date Granularity`) in the same workbook.
+
+**Gotcha — `sourceColumn` must be `Value1`/`Value2`/`Value3`, never the display name [high severity,
+found and fixed].** A DAX table-constructor row like `{("Label", NAMEOF(...), Order), ...}` with 3
+columns always produces columns **physically named `Value1`/`Value2`/`Value3`** internally — never
+the friendly names given via TMDL `column '<Name>'`. Writing `sourceColumn: <FriendlyName>` instead of
+`sourceColumn: Value1` (etc.) passes `TmdlSerializer` structural validation cleanly (it only checks
+TMDL syntax, not whether a declared `sourceColumn` matches what the DAX constructor actually produces)
+but fails only at live refresh/commit time with a column-not-found error. This is the same
+name-vs-`sourceColumn` trap already documented for M-sourced/renamed columns (see the "TMDL authoring"
+Gotcha in `pbi-semantic-builder.agent.md`), now confirmed to have a direct analogue for
+DAX-calculated-table columns specifically.
+
+## 4. Comparison-period (CP/PP) pattern → `CALCULATE` + `DATESBETWEEN` [seen, Superstore]
+
+Workbooks with a "Current Period" (CP) vs "Prior Period" (PP) comparison are typically hand-rolled
+from boolean-flag calculated fields (e.g. `Date Filter CP`/`Date Filter PP`) consumed as
+`SUM(IF(...))` inside each CP*/PP* field, with the comparison window itself driven by live date
+parameters and a `Date Comparison` (Prior Period vs. Prior Year) mode switch. **Translate to a real
+`Date` dimension table plus `CALCULATE(<aggregation>, DATESBETWEEN('Date'[Date], <start>, <end>))`,
+not a literal port of the boolean-flag mechanism** — it's simpler, composes better with visual filter
+context, and DAX has no efficient equivalent of scanning a boolean helper column per row.
+
+```dax
+CP Sales = CALCULATE(SUM('Fact'[Sales]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]))
+PP Sales = CALCULATE(SUM('Fact'[Sales]), DATESBETWEEN('Date'[Date], [PP Start], [PP End]))
+```
+
+For a **trend/sparkline chart** that needs CP and PP plotted on the *same relative axis positions*
+(Tableau's `Date Equalizer with Granularity` shared-axis technique), a per-bucket shift works better
+than a single fixed offset: `VAR _bucketStart = MIN('Date'[Date])` / `_bucketEnd = MAX('Date'[Date])`
+inside `CALCULATE(..., ALL('Date'), <shifted date filter>)`, so every axis bucket (Week/Month/Quarter/
+Year, itself often a `Date Granularity` Field Parameter — see §3) is independently shifted back by the
+comparison offset rather than the whole visual being re-filtered once.
+
+**Gotcha — bake region/dimension restriction into the measure itself when no shelf carries that
+field [medium severity].** If a visual type has no natural place for a restricting dimension (KPI
+cards, Bullet bars, Trend sparklines, Scatter plots, Maps with no Region field on any shelf), a
+Tableau-style external worksheet-level filter has no report-level equivalent to bind to. Bake the
+restriction directly into the default measure instead
+(`FILTER(ALL('Dim'), 'Dim'[Key] = [Parameter Value] || [Parameter Value] = "<show-all sentinel>")`),
+and add a parallel `(All <Dim>)` measure family for any visual (region-comparison dot-plots,
+average/target reference lines) that needs the *unrestricted* per-group breakdown instead. This is
+behaviorally equivalent to Tableau but architecturally different (filter baked into the measure vs.
+applied externally) — flag it in `limitations_encountered` so future maintenance isn't surprised the
+measure doesn't respond to a page-level Region filter the way a Tableau worksheet would.
+
+## 5. LOD expressions [general — not present in the EEA sample, expect these in real-world workbooks]
 
 | Tableau LOD | DAX equivalent |
 |---|---|
@@ -85,7 +166,7 @@ DAX calculated column if Power Query reshaping isn't feasible in the timeline.
 LOD expressions are the highest-risk translation category — always validate the DAX result against
 a known Tableau value (via `semantic-model-consumption` EVALUATE) before trusting it.
 
-## 4. Table calculations [general — not present in the EEA sample]
+## 6. Table calculations [general — not present in the EEA sample]
 
 | Tableau | DAX equivalent |
 |---|---|
@@ -94,7 +175,7 @@ a known Tableau value (via `semantic-model-consumption` EVALUATE) before trustin
 | `WINDOW_SUM(SUM([Sales]), -2, 0)` | `CALCULATE(SUM('T'[Sales]), DATESINPERIOD('T'[Date], MAX('T'[Date]), -3, DAY))` (adjust window) |
 | `INDEX()` | `RANKX(ALL(...), ..., , ASC)` or a surrogate row-number column, context-dependent |
 
-## 5. Visual pattern note — reference lines → Gauge visual
+## 7. Visual pattern note — reference lines → Gauge visual
 
 Several worksheets (e.g. `CDD_0_1`) use a Tableau-specific trick: a single `Circle` mark plotted on a
 fixed continuous axis, annotated with `Min`/`Max`/`Average` reference lines, to fake a gauge (classic
@@ -104,7 +185,7 @@ a workaround. This is a `pbi-report-builder` concern (see `powerbi-report-design
 reference), noted here because it's discovered from the same `reference_lines` data the semantic
 layer also touches (Min/Max/Average become the Gauge's Minimum/Maximum/Target measures).
 
-## 6. Capabilities & limitations (what to tell the customer)
+## 8. Capabilities & limitations (what to tell the customer)
 
 Directly answers the question that started this: *"Are there Microsoft-recommended AI tools that can
 help migrate dashboards to Power BI, and what are their limitations?"*
@@ -115,19 +196,42 @@ help migrate dashboards to Power BI, and what are their limitations?"*
 - Straightforward calculated fields: string building, conditionals, `SUM`/`AVG`-style aggregations,
   date parsing — translate to DAX with high confidence (§1).
 - Recognizing and *simplifying* Tableau-specific workarounds (parameter-equality filters, pivot
-  string-parsing, scatter-based gauges) into more idiomatic, often more capable Power BI equivalents,
-  rather than blindly transliterating them (§2, §5).
+  string-parsing, scatter-based gauges, click-to-highlight helper fields) into more idiomatic, often
+  more capable Power BI equivalents, rather than blindly transliterating them (§2, §7).
+- Parameter-driven measure/dimension switching (§3) and period-over-period comparison patterns (§4) —
+  both translate to genuine native Power BI primitives (Field Parameters, `CALCULATE`+`DATESBETWEEN`)
+  rather than needing a manual workaround port, provided each parameter's actual consumption is
+  verified first (Field Parameter vs. plain slicer, §3).
 
 **What needs human validation, every time:**
-- **LOD expressions and table calculations** (§3, §4) — translation patterns exist, but grain and
+- **LOD expressions and table calculations** (§5, §6) — translation patterns exist, but grain and
   filter-context assumptions must be verified per field against real Tableau output.
 - **Extract-based (`.hyper`) data sources with no live upstream** — structure migrates automatically;
   actual row data requires a separate extraction step (`tableauhyperapi` → Parquet, or repointing to
   the true upstream system if one exists behind the extract).
 - **Visual fidelity** — chart-type and layout mapping is automated, but final polish (colors, spacing,
   exact fonts) benefits from a design pass, not a pixel-diff guarantee.
+- **Field Parameter table constructors** (§3) — the `Value1`/`Value2`/`Value3` `sourceColumn` gotcha
+  passes structural TMDL validation but fails at live refresh, so a live Desktop/Fabric round-trip is
+  the only way to fully close this verification gap.
 - **Any formula this guide doesn't yet cover** — flagged in `limitations_encountered` for manual
   follow-up rather than silently guessed.
+
+**A durable capability-gap class, not a translation shortfall — live user-input parameters
+[seen, Superstore, high severity].** Tableau supports two live end-user-input mechanisms Power BI has
+no direct equivalent for:
+- **Live free-text entry** bound to a visual (e.g. Superstore's 3 "Insight" text boxes feeding a
+  live preview and downstream callouts). Power BI has no native writeback UI — true writeback needs
+  Power Apps integration, out of scope for a like-for-like migration.
+- **Live date-entry parameters** (as opposed to a date-range *slicer* over real data). Power BI
+  What-if parameters are numeric-slider-only; there's no native live date-text-entry control.
+
+Both were implemented as **static seed tables/measures** defaulted to the Tableau workbook's current
+values — the downstream logic they feed (e.g. the CP/PP comparison window) remains fully dynamic and
+recomputes correctly if the seed is changed via a slicer, but the specific "type a value into a live
+text/date box" interaction style is lost. Call this out to the customer as its own named capability
+gap, distinct from ordinary measure-translation limitations that a better prompt or more effort could
+close — this one is a genuine Power BI product-surface gap, not an execution shortfall.
 
 **Bottom line for the demo:** AI-assisted migration turns a multi-week manual rebuild into an
 automated first draft plus a focused validation pass — it does not eliminate human review, especially

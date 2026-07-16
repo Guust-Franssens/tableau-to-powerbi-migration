@@ -27,6 +27,8 @@ Do not skip straight to authoring — these three skills are explicitly designed
 |---|---|
 | One `dashboards[]` entry | One or more report pages (a single Tableau dashboard can justify splitting into an overview + drill-through page if it's dense — that's a `powerbi-report-planning` call, not yours to make ad hoc) |
 | `dashboards[].zones` (recursive, percentage-based) | `powerbi-report-design`'s grid `layout_contract` regions/placements — translate the zone tree's relative x/y/w/h into grid regions, preserving nesting and `direction` (horizontal/vertical flow). **Treat `layout_contract` as a hard gate, not a loose aid**: every region must be placed, `space_audit` run clean (zero overlaps), and a header/slicer band reserved *before* any visual JSON is authored. Don't start placing visuals and patch the layout afterward — that ordering is exactly how misaligned/overlapping visuals crept in before. |
+| `dashboards[].zones.type == "layout-floating"` | A synthetic root the parser generates for Tableau "Floating" (freeform/absolute-position) dashboards — every `children[]` entry is independently absolute-positioned (real `x`/`y`/`w`/`h` in Tableau's 0-100000 percentage-space, not nested percentages of a parent). Treat each child as its own top-level placement in the grid; don't expect the neat nested-flow structure that a "Tiled" dashboard's `layout-flow` tree has. Floating dashboards are commonly dense (20+ sibling zones) — expect to split into multiple pages or a tighter grid, and check `powerbi-report-planning`'s page-split judgment rather than force everything onto one page. |
+| `dashboards[].zones[...].type == "parameter"` with a resolved `field_id` | A parameter/field-switcher control — usually a **Field Parameter** slicer if `pbi-semantic-builder` built one for it (check its report for which parameters became Field Parameters vs. plain slicers vs. nothing). Bind the slicer to the Field Parameter table, not the raw Tableau parameter name. |
 | One `worksheets[]` entry | One visual |
 | `worksheets[].mark_type` | Visual type — see chart-type mapping below |
 | `worksheets[].encodings` (rows/columns/color/size/label) | Visual field wells (axis/legend/values) |
@@ -57,15 +59,27 @@ Do not skip straight to authoring — these three skills are explicitly designed
    encodings, reference lines) and the zone layout — let it produce a `Design Brief:` per the chart
    mapping table above. Don't override its archetype/chart-selection judgment except where this file's
    mapping table gives a hard signal (e.g. reference-lines → Gauge).
-4. Hand the design brief to `powerbi-report-authoring` to build the actual PBIR pages/visuals/theme,
-   bound to the semantic model.
-5. Wire up the parameter-equality-idiom simplification: add a slicer (single-select) on the dimension
+4. **Build an empty layout skeleton before authoring any real visual.** Place a blank/placeholder
+   shape (a rectangle, or the target visual type with no field wells bound yet) for *every* zone in
+   the `layout_contract` at its correct region — position and size only. Screenshot or render this
+   skeleton and compare its gestalt (proportions, density, header/footer/slicer bands, where the eye
+   lands first) against the whole-dashboard Tableau reference screenshot **before** binding a single
+   field. This is cheap to redo if wrong; a fully-populated page is not. It directly targets a lesson
+   from iteration 1: polishing each visual in isolation can all look individually reasonable while the
+   page as a whole reads completely differently from the source — catch that at the skeleton stage,
+   not after every visual is already built and formatted. Only proceed to step 5 once the skeleton's
+   gestalt is a good match.
+5. Hand the design brief to `powerbi-report-authoring` to build the actual PBIR visuals bound to the
+   semantic model (fields, formatting, theme) inside the already-placed, already-verified skeleton
+   from step 4 — this step is about populating positions that were already confirmed correct, not
+   about placement.
+6. Wire up the parameter-equality-idiom simplification: add a slicer (single-select) on the dimension
    named in the filter's `note`, instead of any filter card.
-6. Validate visually (Desktop screenshot per `powerbi-report-authoring`'s own validation step) against
+7. Validate visually (Desktop screenshot per `powerbi-report-authoring`'s own validation step) against
    the original Tableau layout — not pixel-for-pixel, but check that every worksheet has a home on a
    page and nothing critical was dropped. **Run structural validation before the Desktop screenshot
    review, not instead of it** — see "Mandatory validation" below.
-7. Report back to the orchestrator: report location, page/visual counts, chart-type mapping decisions
+8. Report back to the orchestrator: report location, page/visual counts, chart-type mapping decisions
    (especially any low-confidence `Automatic` inferences), and any new `limitations_encountered`
    entries (`stage: "report_build"`), e.g. Tableau dashboard actions or customized tooltips this parser
    version doesn't yet translate (see `docs/tableau-dax-translation-guide.md` known gaps).
@@ -151,6 +165,13 @@ crashing" is necessary but not sufficient:
   Names/Measure Values" virtual pivot has no direct PBI equivalent and shouldn't be recreated
   literally. Bind each field in `pivoted_field_ids` directly to the visual instead. If it's empty, the
   parser couldn't resolve the underlying fields — flag it, don't guess.
+- **Never infer a parameter/field's purpose from its raw internal name** — always use the resolved
+  `field_id`/`caption`. Tableau's internal names go permanently stale after a Ctrl-drag duplication
+  (e.g. a zone's `param` reference resolving to a field internally named `[Y-Axis (copy 2)]` whose
+  real caption is "Map KPI" — nothing to do with any Y-axis control). This applies to parameter-control
+  zones (`type: "parameter"`) just as much as to semantic-model fields: if a zone's `field_id` is
+  `null`, that's the parser telling you the parameter reference didn't resolve — flag it, don't guess
+  from the XML name text.
 - **Crosstab/pivot visuals are a recurring fragility class — two distinct failure modes seen so far:**
   1. Using `tableEx` for a dimension+measure grid can render column headers with **zero data rows**,
      even though the underlying DAX is correct. Prefer `pivotTable` for any dimension-in-rows +

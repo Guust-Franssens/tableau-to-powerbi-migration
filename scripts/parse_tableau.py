@@ -507,15 +507,27 @@ def parse_worksheets(
     return worksheets
 
 
-def _parse_zone(zone_el: etree._Element, worksheet_ids_by_name: dict[str, str]) -> dict[str, Any]:
+def _parse_zone(
+    zone_el: etree._Element,
+    worksheet_ids_by_name: dict[str, str],
+    param_ids_by_name: dict[str, str],
+) -> dict[str, Any]:
     """Recursively parse a Tableau dashboard <zone> (percentage-based layout tree) into the spec's
     zone shape, resolving worksheet-name zones back to their worksheet id.
 
     Tableau typically omits the type='...' attribute entirely for worksheet zones (a zone with a
     name attribute and no type is implicitly a worksheet reference); only container/text/etc. zones
-    carry an explicit type. Infer 'worksheet' in that case rather than defaulting to layout-basic."""
+    carry an explicit type. Infer 'worksheet' in that case rather than defaulting to layout-basic.
+
+    Tableau's real XML uses 'paramctrl' and 'bitmap' as raw type strings (not 'parameter'/'image' -
+    those are this spec's friendlier aliases), and overloads the zone's 'param' attribute for two
+    unrelated purposes depending on context: on a layout-flow container it is the flow direction
+    ('horz'/'vert'); on a parameter/filter/legend control it is a '[Parameters].[Name]' reference
+    that must resolve to the referenced parameter's field_id, not be treated as a direction."""
     raw_type = zone_el.get("type")
     has_name = bool(zone_el.get("name"))
+    type_aliases = {"paramctrl": "parameter", "bitmap": "image"}
+    raw_type = type_aliases.get(raw_type, raw_type)
     if raw_type is None:
         zone_type = "worksheet" if has_name else "layout-basic"
     elif raw_type in (
@@ -539,13 +551,21 @@ def _parse_zone(zone_el: etree._Element, worksheet_ids_by_name: dict[str, str]) 
         "y": float(zone_el.get("y", 0)),
         "w": float(zone_el.get("w", 0)),
         "h": float(zone_el.get("h", 0)),
-        "direction": {"horz": "horizontal", "vert": "vertical"}.get(zone_el.get("param", "")),
+        "direction": None,
         "worksheet_id": None,
         "field_id": None,
         "text_html": None,
         "background_color": None,
         "children": [],
     }
+    param_attr = zone_el.get("param", "")
+    if zone_type == "layout-flow":
+        zone["direction"] = {"horz": "horizontal", "vert": "vertical"}.get(param_attr)
+    elif zone_type in ("parameter", "filter", "legend") and param_attr:
+        # param_attr is often dotted, e.g. '[Parameters].[Insight 1]' - split first to isolate the
+        # final bracketed segment, THEN strip its brackets (stripping first would eat into the
+        # dotted separator and leave a mangled 'Parameters].[Insight 1' key that never matches).
+        zone["field_id"] = param_ids_by_name.get(param_attr.split("].[")[-1].strip("[]"))
     if has_name and zone_type not in ("layout-basic", "layout-flow"):
         zone["worksheet_id"] = worksheet_ids_by_name.get(zone_el.get("name", ""))
     text_el = zone_el.find("formatted-text")
@@ -554,18 +574,52 @@ def _parse_zone(zone_el: etree._Element, worksheet_ids_by_name: dict[str, str]) 
     bg = zone_el.find("zone-style/format[@attr='background-color']")
     if bg is not None:
         zone["background_color"] = bg.get("value")
-    zone["children"] = [_parse_zone(child, worksheet_ids_by_name) for child in zone_el.findall("zone")]
+    zone["children"] = [
+        _parse_zone(child, worksheet_ids_by_name, param_ids_by_name) for child in zone_el.findall("zone")
+    ]
     return zone
 
 
-def parse_dashboards(root: etree._Element, worksheets: list[dict[str, Any]], ids: IdRegistry) -> list[dict[str, Any]]:
-    """Parse every <dashboard> in the workbook into its migration-spec representation."""
+def parse_dashboards(
+    root: etree._Element,
+    worksheets: list[dict[str, Any]],
+    parameters: list[dict[str, Any]],
+    ids: IdRegistry,
+) -> list[dict[str, Any]]:
+    """Parse every <dashboard> in the workbook into its migration-spec representation.
+
+    Tableau dashboards built entirely with 'Floating' containers (every object independently
+    absolute-positioned, no 'Tiled' auto-layout) serialize <zones> as N flat sibling <zone> elements
+    with no wrapping root container at all - unlike the single-root-zone shape a Tiled-layout
+    dashboard produces. Grabbing only the first <zone> (as a naive .find() would) silently drops
+    every other object on the dashboard. Detect the flat-multi-child case and synthesize a
+    'layout-floating' synthetic root so nothing is lost."""
     worksheet_ids_by_name = {ws["name"]: ws["id"] for ws in worksheets}
+    param_ids_by_name = {p["internal_name"].strip("[]"): p["id"] for p in parameters}
     dashboards = []
     for dash_el in root.findall("dashboards/dashboard"):
         name = dash_el.get("name", "")
         size_el = dash_el.find("size")
-        top_zone = dash_el.find("zones/zone")
+        top_zones = dash_el.findall("zones/zone")
+        if len(top_zones) == 1:
+            zones = _parse_zone(top_zones[0], worksheet_ids_by_name, param_ids_by_name)
+        elif len(top_zones) > 1:
+            zones = {
+                "id": "",
+                "type": "layout-floating",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 100000.0,
+                "direction": None,
+                "worksheet_id": None,
+                "field_id": None,
+                "text_html": None,
+                "background_color": None,
+                "children": [_parse_zone(z, worksheet_ids_by_name, param_ids_by_name) for z in top_zones],
+            }
+        else:
+            zones = {}
         dashboards.append(
             {
                 "id": ids.make("dash", name),
@@ -573,9 +627,9 @@ def parse_dashboards(root: etree._Element, worksheets: list[dict[str, Any]], ids
                 "size": {
                     "width": float(size_el.get("maxwidth", 1000)) if size_el is not None else 1000,
                     "height": float(size_el.get("maxheight", 800)) if size_el is not None else 800,
-                    "sizing_mode": "fixed" if size_el is not None else "automatic",
+                    "sizing_mode": (size_el.get("sizing-mode", "fixed") if size_el is not None else "automatic"),
                 },
-                "zones": _parse_zone(top_zone, worksheet_ids_by_name) if top_zone is not None else {},
+                "zones": zones,
                 "actions": [],  # TODO: parse <actions> - none present in the EEA sample (single-page dashboard)
             }
         )
@@ -696,7 +750,7 @@ def parse_workbook(path: Path) -> dict[str, Any]:
     parameters = parse_parameters(root, ids)
     data_sources, instance_maps, name_to_id_maps = parse_data_sources(root, hyper_files, ids)
     worksheets = parse_worksheets(root, instance_maps, name_to_id_maps, ids)
-    dashboards = parse_dashboards(root, worksheets, ids)
+    dashboards = parse_dashboards(root, worksheets, parameters, ids)
     theme = infer_theme(root)
 
     spec: dict[str, Any] = {

@@ -92,6 +92,14 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
   `pbi-report-builder` will bind them to a Power BI Gauge visual's Minimum/Maximum/Target fields —
   coordinate naming so the report builder can find them predictably (suffix pattern:
   `<base measure> Min` / `Max` / `Target`).
+- **Never pattern-match a Tableau parameter/field's internal name (`internal_name`) to infer its
+  meaning — always use the parser-resolved `caption`.** Tableau's internal names become permanently
+  stale after a Ctrl-drag duplication: e.g. a parameter internally named `[Y-Axis (copy 2)]` can have
+  the real caption "Map KPI", entirely unrelated to any Y-axis control (seen in the Superstore sample
+  workbook, which has several parameters duplicated this way). Reasoning from the internal name text
+  (including the `(copy)`/`(copy N)` suffix itself, which is *not* a reliable "this is a duplicate of
+  X" signal either) will misattribute the field's purpose. This applies to worksheet/dashboard zone
+  `param` references too — always resolve through the spec's `field_id`, never the raw XML name.
 
 ### TMDL hand-authoring pitfalls (learned the hard way — validate every one of these before reporting success)
 
@@ -113,6 +121,15 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   the measure (e.g. `'X Value'`) instead.
 - **The `.pbip` file's `$schema` must end in a literal numeric version** (e.g.
   `.../pbipProperties/1.0.0/schema.json`) — never the placeholder text `1.x.x`.
+- **Field Parameter tables: `sourceColumn` must be `Value1`/`Value2`/`Value3`, never the friendly
+  display name.** A DAX table-constructor row like `{("Label", NAMEOF(...), Order), ...}` with 3
+  columns always produces columns physically named `Value1`/`Value2`/`Value3` internally, regardless
+  of what friendly name you give the column via TMDL `column '<Name>'`. Writing
+  `sourceColumn: <FriendlyName>` instead of `sourceColumn: Value1` (etc.) is the exact same trap as
+  the M-sourced/renamed-column case above, just for DAX-calculated tables — it passes
+  `TmdlSerializer` structural validation cleanly (syntax-only check) but fails at live refresh/commit
+  with a column-not-found error. Found in all 5 Field Parameter tables of the Superstore build; see
+  `docs/tableau-dax-translation-guide.md` §3 for the full pattern.
 - **Validate before reporting success.** After writing TMDL files, load
   `Microsoft.AnalysisServices.Tabular.dll` (ships with Tabular Editor, bundled in this skill's
   `scripts/_tools/TabularEditor/`) and call

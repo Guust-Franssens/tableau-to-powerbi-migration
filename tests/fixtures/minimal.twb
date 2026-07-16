@@ -121,5 +121,13 @@
         </zone>
       </zones>
     </dashboard>
+    <dashboard name='floating'>
+      <size sizing-mode='automatic' />
+      <zones>
+        <zone h='6000' id='10' param='[Parameters].[Parameter 1]' type='paramctrl' w='30000' x='0' y='0' />
+        <zone h='50000' id='11' name='Sales Gauge' w='100000' x='0' y='6000' />
+        <zone h='10000' id='12' type='bitmap' w='20000' x='0' y='56000' />
+      </zones>
+    </dashboard>
   </dashboards>
 </workbook>
