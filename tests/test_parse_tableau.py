@@ -55,7 +55,10 @@ def test_worksheet_shelf_and_reference_lines_resolved():
     assert worksheet["encodings"]["rows"][0]["field_id"].endswith("__sales")
     assert worksheet["encodings"]["rows"][0]["aggregation"] == "SUM"
     labels = {rl["label"] for rl in worksheet["reference_lines"]}
-    assert labels == {"Min", "Max"}
+    assert labels == {"Min", "Max", "Total"}
+    # Tableau reference-line aggregation formulas beyond constant/computed (e.g. 'total') must be
+    # captured verbatim and accepted by the schema (surfaced from the Dis-OrderPodcast workbook).
+    assert "total" in {rl["formula"] for rl in worksheet["reference_lines"]}
 
 
 def test_collection_relation_descends_to_leaf_tables():

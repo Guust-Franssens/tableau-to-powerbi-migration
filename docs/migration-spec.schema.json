@@ -162,7 +162,7 @@
               "properties": {
                 "id": { "type": "string" },
                 "label": { "type": "string" },
-                "formula": { "type": "string", "enum": ["constant", "computed", "average", "median", "sum", "min", "max", "percentile"] },
+                "formula": { "type": "string", "enum": ["constant", "computed", "average", "median", "sum", "min", "max", "percentile", "total", "count", "countd", "attr", "stdev", "stdevp", "var", "varp"] },
                 "value": { "type": ["number", "string", "null"] },
                 "scope": { "type": "string", "enum": ["per-table", "per-cell", "per-pane"] }
               }
