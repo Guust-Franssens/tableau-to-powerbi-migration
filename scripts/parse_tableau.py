@@ -126,23 +126,38 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
     return connection
 
 
+_CONTAINER_RELATION_TYPES = {"collection", "join", "union"}
+
+
+def _collect_leaf_relations(rel: etree._Element) -> list[etree._Element]:
+    """Descend container relations (collection/join/union wrappers) to their leaf table/text relations,
+    so a multi-file collection or a join surfaces each underlying physical table instead of one opaque
+    wrapper. Falls back to the wrapper itself if it has no nested <relation> children."""
+    if rel.get("type", "table") in _CONTAINER_RELATION_TYPES:
+        leaves = [leaf for child in rel.findall("relation") for leaf in _collect_leaf_relations(child)]
+        return leaves or [rel]
+    return [rel]
+
+
 def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]]:
-    """Parse top-level <relation> entries (skip the nested extract/[Extract].[Extract] relation)."""
+    """Parse top-level <relation> entries (descending collection/join/union containers to leaf tables;
+    skipping the nested extract/[Extract].[Extract] relation, which lives under <extract>)."""
     tables = []
     outer_conn = ds_el.find("connection")
     if outer_conn is None:
         return tables
-    for rel in outer_conn.findall("relation"):
-        rel_type = rel.get("type", "table")
-        name = rel.get("name") or rel.get("table", "table")
-        tables.append(
-            {
-                "id": ids.make("tbl", name),
-                "name": name,
-                "source_relation": "custom-sql" if rel_type == "text" else rel_type,
-                "custom_sql": rel.text if rel_type == "text" else None,
-            }
-        )
+    for top in outer_conn.findall("relation"):
+        for rel in _collect_leaf_relations(top):
+            rel_type = rel.get("type", "table")
+            name = rel.get("name") or rel.get("table", "table")
+            tables.append(
+                {
+                    "id": ids.make("tbl", name),
+                    "name": name,
+                    "source_relation": "custom-sql" if rel_type == "text" else rel_type,
+                    "custom_sql": rel.text if rel_type == "text" else None,
+                }
+            )
     return tables
 
 

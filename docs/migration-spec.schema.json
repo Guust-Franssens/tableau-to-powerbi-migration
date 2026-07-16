@@ -63,7 +63,7 @@
               "properties": {
                 "id": { "type": "string" },
                 "name": { "type": "string" },
-                "source_relation": { "type": "string", "enum": ["table", "custom-sql", "join", "text", "pivot"] },
+                "source_relation": { "type": "string", "enum": ["table", "custom-sql", "join", "text", "pivot", "collection", "union"] },
                 "custom_sql": { "type": ["string", "null"] }
               }
             }

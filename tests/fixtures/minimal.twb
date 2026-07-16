@@ -18,7 +18,10 @@
             <connection class='excel-direct' />
           </named-connection>
         </named-connections>
-        <relation connection='excel-direct.abc123' name='Cities' table='[Cities$]' type='table' />
+        <relation type='collection'>
+          <relation connection='excel-direct.abc123' name='Cities' table='[Cities$]' type='table' />
+          <relation connection='excel-direct.abc123' name='Regions' table='[Regions$]' type='table' />
+        </relation>
       </connection>
       <column caption='Name' datatype='string' name='[NAME]' role='dimension' type='nominal' />
       <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />

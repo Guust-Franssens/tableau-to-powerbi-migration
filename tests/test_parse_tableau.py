@@ -58,6 +58,19 @@ def test_worksheet_shelf_and_reference_lines_resolved():
     assert labels == {"Min", "Max"}
 
 
+def test_collection_relation_descends_to_leaf_tables():
+    """A <relation type='collection'> (or join/union) is a container wrapping child relations (a
+    multi-file union). The parser must descend it to the underlying leaf tables rather than emitting
+    one opaque 'collection' table, so each physical table is captured."""
+    spec = parse_workbook(FIXTURE)
+    tables = spec["data_sources"][0]["tables"]
+    names = {t["name"] for t in tables}
+    assert {"Cities", "Regions"} <= names
+    # the wrapper itself must NOT surface as a table
+    assert all(t["source_relation"] != "collection" for t in tables)
+    assert all(t["source_relation"] == "table" for t in tables if t["name"] in {"Cities", "Regions"})
+
+
 def test_metadata_only_physical_column_recovered():
     """Physical/extract columns that appear only in <metadata-records> (no <column> element) must be
     recovered into fields[] with from_metadata_record=True, deduped against existing <column> fields,
