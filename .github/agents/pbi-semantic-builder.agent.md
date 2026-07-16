@@ -187,6 +187,64 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   referenced by any report visual or other measure. Confirm they're unreferenced, then delete them —
   don't ship a model with unexplained dead weight.
 
+### Iteration-3 hard-won gotchas (Telecom, Sales Commission, Shipping, Tale-of-100, Airline, Superstore)
+
+**Model-integrity checks the offline `TmdlSerializer` does NOT catch (add these to your validation):**
+- **Model-wide DUPLICATE MEASURE NAMES break Desktop load.** Tableau auto-generates a `Number of
+  Records = 1` measure *per data source*, so a multi-source workbook yields several measures all named
+  `Number of Records`. `TmdlSerializer.DeserializeDatabaseFromFolder` deserializes this cleanly, but
+  Power BI Desktop **refuses to open the `.pbip`** ("Could not add Measure with the name X because a
+  Measure with the same name already exists"). **Rename duplicates to distinct names** (e.g. keep one
+  `Number of Records`, rename the others `Securities Row Count` / `SP Data Row Count`). This shipped
+  and broke a Desktop open — do not repeat it.
+- **Offline validation recipe (do this when no live engine):** after `DeserializeDatabaseFromFolder`,
+  programmatically assert (a) **model-wide measure-name uniqueness**, (b) **no measure name equal to a
+  column name in the same table** (the commit-time trap), and (c) **every DAX `[bracket]` token resolves**
+  to a real column/measure. These three catch the highest-frequency hand-authoring failures the
+  structural parse misses. Also: an offline measure `DataType=Unknown` is **normal** (TOM infers it at
+  refresh) — don't chase it.
+
+**Table calculations & compat level:**
+- **Prefer the `ALLEXCEPT`/`FILTER`/`EARLIER` form for table calcs at compat 1606** so the DAX validates
+  offline; the window-function alternatives (`OFFSET`/`INDEX`/`WINDOW`) need compat **1702+ and a live
+  Desktop** to author/verify, so don't ship them when you can't ground-truth them. Verified patterns:
+  `LOOKUP(agg,FIRST()/LAST())` → per-partition MIN/MAX-date helper calc column; `INDEX()` →
+  `CALCULATE(COUNTROWS(t),FILTER(ALLEXCEPT(t,[part]),t[order]<=EARLIER(t[order])))`; `IF MIN(Date)=LOOKUP(MIN(Date),LAST())`
+  → an is-last-row guard. See `docs/tableau-dax-translation-guide.md` §5–6.
+- **Ground-truth EACH table calc two independent ways in Python** (Tableau semantics via sorted-partition
+  `.iloc`/`cumcount`, and a literal DAX-mechanics replica via boolean masks over the raw table) and assert
+  equality per probe row — two independent codings agreeing is far stronger than restating one formula.
+
+**Cross-agent — the report builder needs these FROM you (decide at model-design time):**
+- **Azure Map route/great-circle maps (Tableau `MAKELINE`/`MAKEPOINT`): build an endpoint-unpivoted PATH
+  table** (one row per endpoint, with a shared path id + point order) so the report can feed azureMap's
+  `PathID`+`PointOrder` wells. Origin+destination lat/long as four columns on a single fact row **cannot**
+  draw an arc — the report is then stuck with endpoint bubbles. This is a model-shape decision, not a
+  report one.
+- **Provision EVERY dashboard-visible metric.** If a Tableau dashboard shows a KPI tile/value, the model
+  must have a backing measure or column for it — the report builder works against a *frozen* model and can
+  only render a static placeholder card for a metric that has no backing field (seen: 3 Airline tiles).
+- **Dimension-flavored Field Parameters need the `ParameterMetadata` marker**, or the report can't native-
+  swap the dimension (measure-flavored FPs switch fine via `SELECTEDVALUE` wrapper measures).
+
+**Modeling at scale / fidelity:**
+- **Reconcile near-duplicate data sources by WORKSHEET BINDING, not row content** — byte-identical CSVs in
+  a different row order have different MD5s; check which source the worksheets actually bind to, model the
+  one that's used, and exclude the vestigial one (don't duplicate hundreds of thousands of rows).
+- **Deduplicate large measure sets with a base-registry + period cross-product generator** (recognize
+  CY/PY/CM/PM × {region-wide, entity-specific} families) and emit them from a re-runnable script rather
+  than hand-writing 100+ measures — far safer and trivially re-runnable for fix passes.
+- **`referenced_fields` tracks identity but NOT operand order** — for operand fidelity in a heavily
+  Ctrl-drag-duplicated workbook, do an in-place internal-name→current-caption substitution on the raw
+  formula; internal names are systematically scrambled (and can carry source typos like `Orignial`).
+- **Extract-baked custom-SQL UNION → model one flat table** (the UNION is already materialized in the
+  `.hyper`/CSV; don't rebuild it in Power Query). **Mixed numeric/alphanumeric keys** (e.g. `117` vs
+  `WA-SNO457`) must be forced to **String** in the M type step or refresh nulls the alphanumeric ids.
+- **BPA "Hide fact table columns" is an EXPECTED deviation for faithful Tableau migrations** — keep base
+  numerics visible with `summarizeBy=sum` (Tableau exposed them as draggable measures); don't "fix" it.
+  The bundled `bpa.ps1` runs Tabular Editor with `-G` (silent stdout, exit 0 even on violations) — to see
+  the human-readable list, run `TabularEditor.exe <def> -A <rules>` **without** `-G`.
+
 ## Definition of Done
 
 Don't report the semantic model as complete until all of the following hold — "it deployed without
@@ -211,3 +269,8 @@ throwing an error" is necessary but not sufficient:
 6. **This checklist applies to fix/iteration passes too, not just the initial build** — if you're
    called again later to patch a bug, the same validation bar applies before you report the patch
    done.
+7. **Model-wide measure-name uniqueness is verified** — no two measures share a name anywhere in the
+   model, and no measure name equals a column name within the same table. `TmdlSerializer` does NOT
+   catch either (both deserialize clean but fail at Desktop load / commit). Assert this programmatically
+   before reporting done (see the "Model-integrity checks" gotcha above — this is the exact class that
+   shipped a broken `.pbip` in iteration 3).

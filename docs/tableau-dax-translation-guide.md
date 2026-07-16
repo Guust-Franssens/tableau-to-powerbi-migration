@@ -156,7 +156,7 @@ behaviorally equivalent to Tableau but architecturally different (filter baked i
 applied externally) — flag it in `limitations_encountered` so future maintenance isn't surprised the
 measure doesn't respond to a page-level Region filter the way a Tableau worksheet would.
 
-## 5. LOD expressions [general — not present in the EEA sample, expect these in real-world workbooks]
+## 5. LOD expressions [seen, Shipping — a FIXED per-shipment ratio]
 
 | Tableau LOD | DAX equivalent |
 |---|---|
@@ -165,16 +165,42 @@ measure doesn't respond to a page-level Region filter the way a Tableau workshee
 | `{INCLUDE [Dim] : SUM([Measure])}` | Usually needs a finer grain first: `SUMX(VALUES('T'[Dim]), CALCULATE(SUM('T'[Measure])))` — treat case-by-case, verify grain matches the visual |
 
 LOD expressions are the highest-risk translation category — always validate the DAX result against
-a known Tableau value (via `semantic-model-consumption` EVALUATE) before trusting it.
+a known Tableau value (via `semantic-model-consumption` EVALUATE, or a Python replica against the
+extract CSV when no live engine) before trusting it.
 
-## 6. Table calculations [general — not present in the EEA sample]
+**Gotcha [seen, Shipping]: use `DIVIDE`, never `/`, for a FIXED-LOD *ratio* calc column.** Real
+extracts contain zero/blank denominators (Shipping had 67 shipment ids with `SUM(Pay)=0`). `DIVIDE`
+returns BLANK (which `AVERAGE` then excludes, matching Tableau's overall value); a bare `/` yields
+infinity/errors and corrupts the overall average. The guard is load-bearing, not cosmetic.
 
-| Tableau | DAX equivalent |
+## 6. Table calculations [seen, Tale-of-100 — 9 real table calcs, all ground-truthed]
+
+Prefer forms that validate at **compat 1606** (so they can be ground-truthed offline). The window
+functions `OFFSET`/`INDEX`/`WINDOW` need compat **1702+ and a live Desktop** — don't ship them when
+you can't verify them.
+
+| Tableau | DAX equivalent (offline-verifiable) |
 |---|---|
 | `RANK(SUM([Sales]))` | `RANKX(ALL('T'[Category]), [Sales Measure])` |
 | `RUNNING_SUM(SUM([Sales]))` | `CALCULATE(SUM('T'[Sales]), FILTER(ALL('T'[Date]), 'T'[Date] <= MAX('T'[Date])))` |
-| `WINDOW_SUM(SUM([Sales]), -2, 0)` | `CALCULATE(SUM('T'[Sales]), DATESINPERIOD('T'[Date], MAX('T'[Date]), -3, DAY))` (adjust window) |
-| `INDEX()` | `RANKX(ALL(...), ..., , ASC)` or a surrogate row-number column, context-dependent |
+| `INDEX()` (1-based running position in a partition) | calc column `CALCULATE(COUNTROWS('T'), FILTER(ALLEXCEPT('T',[part]), 'T'[order] <= EARLIER('T'[order])))` |
+| `LOOKUP(agg, FIRST())` / `LOOKUP(agg, LAST())` | hidden helper calc column `CALCULATE(agg, ALLEXCEPT('T',[part]), 'T'[Date] = CALCULATE(MIN/MAX('T'[Date]), ALLEXCEPT('T',[part])))`, then "growth of $X" measures divide by it |
+| `IF MIN([Date]) = LOOKUP(MIN([Date]), LAST()) THEN <expr> END` (is-last-row guard) | `IF(MAX('T'[Date]) = CALCULATE(MAX('T'[Date]), ALLEXCEPT('T',[part])), <expr>)`; OR-FIRST variant adds `\|\| MAX(...) = CALCULATE(MIN(...), ...)`; Tableau `END`-without-`ELSE` → omit the DAX else (BLANK on non-endpoint rows) |
+| `% of Total` / `pcto:` table calc | `DIVIDE([m], CALCULATE([m], ALLSELECTED('T')))` (verify addressing/partitioning against Tableau when a live engine exists) |
+
+**Validate every table calc two independent ways in Python** (Tableau semantics via sorted-partition
+`.iloc`/`cumcount`, and a literal DAX-mechanics replica via boolean masks over the raw table); two
+independent codings agreeing is far stronger than restating one formula.
+
+**Faithful-translation-of-source-quirks [seen, Shipping]:** `datediff('unit',[a],[b])` computes
+**b − a**. A source workbook with swapped arguments silently makes "late" durations negative and
+inverts any threshold KPI built on it. Translate exactly as authored and **flag it to the customer**
+as a probable source bug — don't silently "fix" it.
+
+**Color-encoding fidelity loss [seen, Airline]:** a Tableau "color helper" field that returns an
+indicator *string* (e.g. `… Circle Col` → "Up"/"Down") cannot drive a Power BI data-color rule (those
+need a numeric/categorical driver on the visual). Such series render single-color; note the fidelity
+loss rather than forcing it.
 
 ## 7. Visual pattern note — reference lines → Gauge visual
 

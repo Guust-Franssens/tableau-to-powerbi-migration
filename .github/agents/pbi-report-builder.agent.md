@@ -213,3 +213,79 @@ crashing" is necessary but not sufficient:
   autosave, or vice versa. Prefer closing/reloading Desktop around direct PBIR edits, or use the
   Desktop Bridge's `reload` command if that skill version is available (see "Mandatory validation"
   above).
+
+### Iteration-3 hard-won gotchas (Telecom, Sales Commission, Shipping, Tale-of-100, Airline, Superstore)
+
+**Validation-invisible rendering bugs — these pass `powerbi-report-author validate` but render wrong;
+only a live Desktop screenshot catches them, so treat structural validation as necessary-not-sufficient:**
+- **Conditional/Cases `Else` is IGNORED by Desktop for table `fontColor`** — the top/else band renders
+  **black**. Fix: append an explicit always-true final `Case` (e.g. `driver < 1e12` → the else color)
+  instead of relying on `Else`.
+- **azureMap `Location` role + explicit Lat/Long = a Desktop error** ("Remove Location… or set aggregate
+  to Average"). Fix: keep `Location`, set Lat/Long to **Average** aggregation (lossless when the grain
+  is one coordinate per point).
+- **`field.Aggregation.Function` enum: Sum=0, Avg=1, Max=2, Min=3, Count=4.** A wrong value is not a
+  field reference, so it passes validation but **silently aggregates wrong**.
+- **Projection-level `format` overrides** (`proj.format = "0.00%"`) and **`expansionStates`** both pass
+  validation but their Desktop honoring is unconfirmed offline — `expansionStates` in particular is a
+  **no-op on initial render** (matrix still shows collapsed); don't burn cycles chasing it, document a
+  collapsed default or use a flat `tableEx` when the grain is one row per leaf.
+
+**Data colors / conditional formatting (see `conditional-formatting.md`):**
+- **Discrete/banded data colors use `dataPoint.fill.solid.color.expr.Conditional.Cases[]`, NOT
+  `fillRule.cases`** (`fillRule` is gradient/`linearGradient` only). Each case = a `Comparison`
+  (`Left = SelectRef.ExpressionName` of a projection's `queryRef`, cascading first-match) plus a
+  top-level `Else`, with `selector.data = [{dataViewWildcard:{matchingOption:0}}]`.
+- **Scatter/chart per-point color must reference a PROJECTED field.** A `dataPoint.fill` expr over an
+  *unprojected* measure (e.g. a text KPI measure in no field well) silently falls back to one solid
+  color — carry the numeric driver on an axis or in Tooltips so it's in the visual query.
+- **`scopeId` per-point coloring is the confirmed-good mode for many series** (verified with 81
+  per-company line `dataPoint.fill` entries — all render, no disappearing-line issue).
+- **String-valued "color helper" measures (Tableau `… Circle Col` returning glyph/indicator strings)
+  cannot drive PBIR data-color rules** → static colors; a recurring color-encoding fidelity loss.
+
+**PBIR mechanics facts:**
+- **Visual-level filter = a top-level `filterConfig` key in `visual.json` (sibling to `visual`, NOT
+  nested under it)**, `type:"Categorical"`, `Version:2` `In`-condition. Nesting it under `visual` is
+  silently ignored.
+- **Stacked bar = `barChart` visualType (not `clusteredBarChart`); the first Y projection stacks from
+  0.** Per-series colors via `dataPoint[]` with `selector.metadata = <queryRef>` (queryRef, not
+  nativeQueryRef).
+- **`displayName` on a projection is the header-rename mechanism** — Desktop auto-labels non-default
+  aggregations "Average of X"; `nativeQueryRef` does not control the header.
+- **Reference-line `value` needs a type-suffixed numeric literal** (`{Literal:{Value:"100D"}}`); a bare
+  `"100"` parses to 0 and pins the line to the axis baseline with no validation error.
+- **azureMap draws true 2-point route/line maps via `PathID` + `PointOrder` + `pathLayer`** (a fidelity
+  win over Tableau's dual-axis workaround) — but this needs **one data row per endpoint**. If the fact
+  stores origin+destination lat/long as columns on a single row, the arc can't render — that reshape
+  is a **semantic-model decision** (coordinate with `pbi-semantic-builder` up front for any Tableau
+  `MAKELINE`/`MAKEPOINT` route map; otherwise fall back to endpoint bubbles + a documented note).
+- **Theme: custom `visualStyles` are strictly validated per-visual-object and `fillPoint` is not valid
+  for scatterChart/filledMap** — keep custom themes minimal (set visual-specific formatting in each
+  `visual.json`); the theme file's internal `name` must exactly equal the `report.json` `customTheme`
+  reference including `.json`. Single-line caption/legend textboxes need ≥3.4 grid rows or they trip
+  `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR`.
+- **What-if % slicer format: `0.0"%"` (quoted) when the stored value is pre-scaled (e.g. 22.8); `0.0%`
+  (unquoted) only when it's a true 0–1 fraction** — mixing them mis-scales the display by 100×.
+
+**Desktop verification mechanics (when a live check is possible):**
+- **The `powerbi-desktop` bridge has NO refresh command** (only `application.state.get` /
+  `report.snapshot.capture` / `file.reload`), and PBIP stores no data cache, so a freshly-opened import
+  report renders **empty** ("tables have incomplete or no data"). A clean screenshot with empty visuals
+  is an unrefreshed-model artifact, not a binding defect. **Workaround (proven):** refresh via TOM/XMLA
+  against the child `msmdsrv` port — load `Microsoft.AnalysisServices.AdomdClient` (copy the DLL out of
+  WindowsApps first; direct load = Access Denied), find the port via `Get-NetTCPConnection`, resolve the
+  catalog GUID via `$SYSTEM.DBSCHEMA_CATALOGS`, and `ExecuteNonQuery` a TMSL
+  `{"refresh":{"type":"full","objects":[{"database":"<guid>"}]}}`. **Refresh report-bound tables only**
+  (a full refresh can hang 6+ min on a large orphaned table); never kill `SaveChanges` mid-flight; the
+  refreshed data **survives `reload`**, so the steady-state loop is regenerate→validate→reload→screenshot.
+- **External XMLA refresh does NOT clear Desktop's "calculated columns need refresh" banner** (UI
+  dirty-flag only; data underneath is correct).
+- **Store/MSIX Desktop** needs `$env:PBI_DESKTOP_PATH` set to the WindowsApps `PBIDesktop.exe` on each
+  fresh PowerShell process; `reload` can deadlock (`BRIDGE_ERROR "Another operation is already in
+  progress"`, `-32511`) while idle — recover by killing **your own** Desktop PID and relaunching.
+- **In a parallel batch the single Desktop bridge is a hard serialization point** — only one build can
+  hold it; do NOT force-open into an instance owned by another build with unsaved changes, and never
+  screen-scrape as a substitute (focus-steal + privacy risk). Base sign-off on structural validation +
+  an independent field-reference cross-check against the model TMDL when contended. `PBIR_SCHEMA_UNREACHABLE`
+  offline is benign but means JSON-schema validation was skipped — back it with the field cross-check.
