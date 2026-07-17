@@ -43,11 +43,11 @@
                       "Entity": "Sample Superstore"
                     }
                   },
-                  "Property": "CP Sales"
+                  "Property": "CP Sales (Trend)"
                 }
               },
-              "queryRef": "Sample Superstore.CP Sales",
-              "nativeQueryRef": "CP Sales"
+              "queryRef": "Sample Superstore.CP Sales (Trend)",
+              "nativeQueryRef": "CP Sales (Trend)"
             },
             {
               "field": {

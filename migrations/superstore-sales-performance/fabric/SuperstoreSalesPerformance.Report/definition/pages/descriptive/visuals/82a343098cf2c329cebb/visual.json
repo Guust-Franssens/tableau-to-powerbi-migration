@@ -43,11 +43,11 @@
                       "Entity": "Sample Superstore"
                     }
                   },
-                  "Property": "CP Profit Ratio"
+                  "Property": "CP Profit Ratio (Trend)"
                 }
               },
-              "queryRef": "Sample Superstore.CP Profit Ratio",
-              "nativeQueryRef": "CP Profit Ratio"
+              "queryRef": "Sample Superstore.CP Profit Ratio (Trend)",
+              "nativeQueryRef": "CP Profit Ratio (Trend)"
             },
             {
               "field": {

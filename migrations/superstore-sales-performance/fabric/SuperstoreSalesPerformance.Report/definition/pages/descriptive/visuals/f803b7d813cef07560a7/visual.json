@@ -43,11 +43,11 @@
                       "Entity": "Sample Superstore"
                     }
                   },
-                  "Property": "CP Days To Ship"
+                  "Property": "CP Days To Ship (Trend)"
                 }
               },
-              "queryRef": "Sample Superstore.CP Days To Ship",
-              "nativeQueryRef": "CP Days To Ship"
+              "queryRef": "Sample Superstore.CP Days To Ship (Trend)",
+              "nativeQueryRef": "CP Days To Ship (Trend)"
             },
             {
               "field": {
