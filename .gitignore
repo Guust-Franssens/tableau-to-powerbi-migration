@@ -31,6 +31,11 @@ migrations/*/_build/
 [Bb]in/
 [Oo]bj/
 
+# Tableau Public harvester downloads + parsed specs (bulk .twbx + specs, transient
+# corpus for parser stress-testing / hard-workbook selection - never commit).
+/_harvest/
+candidates.json
+
 # Power BI Desktop local cache/settings - machine-specific, regenerated automatically on open
 **/.pbi/cache.abf
 **/.pbi/localSettings.json
