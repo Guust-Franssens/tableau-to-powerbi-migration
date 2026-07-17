@@ -86,6 +86,19 @@ def test_join_relation_graph_extracted():
     assert join["conditions"] == [{"left_field": "[Cities$].[Region ID]", "right_field": "[Regions$].[Region ID]"}]
 
 
+def test_nested_join_table_recovered_from_condition_ref():
+    """A join operand that is itself a nested join carries no name/table attribute; the parser must
+    recover the participating table from the on-clause's [Table].[Field] reference instead of emitting
+    left=null (regression: UNICEF SOWC 2016's 13-way star join emitted 13 null lefts and failed schema
+    validation with 'None is not of type string')."""
+    from parse_tableau import _table_from_ref
+
+    assert _table_from_ref("[Table 1].[Countries and areas]") == "Table 1"
+    assert _table_from_ref("[Regions$].[Region ID]") == "Regions$"
+    assert _table_from_ref(None) is None
+    assert _table_from_ref("unqualified") is None
+
+
 def test_collection_relation_descends_to_leaf_tables():
     """A <relation type='collection'> (or join/union) is a container wrapping child relations (a
     multi-file union). The parser must descend it to the underlying leaf tables rather than emitting

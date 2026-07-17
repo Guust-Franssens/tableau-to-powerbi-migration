@@ -161,6 +161,14 @@ def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]
     return tables
 
 
+def _table_from_ref(ref: str | None) -> str | None:
+    """Recover the participating table name from a Tableau '[Table].[Field]' join-condition
+    reference. Used when a join operand is itself a nested <relation type='join'> (a chained
+    star-schema join) and so carries no direct name/table attribute of its own."""
+    match = re.match(r"\[([^\]]+)\]\.\[", ref or "")
+    return match.group(1) if match else None
+
+
 def _parse_joins(ds_el: etree._Element) -> list[dict[str, Any]]:
     """Extract every <relation type='join'> operand pair, join type, and on-clause into a join graph so
     pbi-semantic-builder can rebuild Power BI model relationships. Conditions carry the raw Tableau
@@ -182,6 +190,12 @@ def _parse_joins(ds_el: etree._Element) -> list[dict[str, Any]]:
                     conditions.append({"left_field": sides[0].get("op", ""), "right_field": sides[1].get("op", "")})
         left = operands[0].get("name") or operands[0].get("table") if operands else None
         right = operands[1].get("name") or operands[1].get("table") if len(operands) > 1 else None
+        # A join operand that is itself a nested join (chained star-schema) has no name/table;
+        # recover the table from the on-clause's [Table].[Field] reference instead of emitting null.
+        if left is None and conditions:
+            left = _table_from_ref(conditions[0]["left_field"])
+        if right is None and conditions:
+            right = _table_from_ref(conditions[0]["right_field"])
         joins.append({"left": left, "right": right, "type": jrel.get("join", "inner"), "conditions": conditions})
     return joins
 

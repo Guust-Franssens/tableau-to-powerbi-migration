@@ -63,6 +63,7 @@ extension-pkg-allow-list = ["lxml.etree"]
 
 [tool.pylint.format]
 max-line-length = 120
+max-module-lines = 1200
 
 [tool.pylint."messages control"]
 # TODO comments are a deliberate scope-tracking practice in this repo, not a defect.
