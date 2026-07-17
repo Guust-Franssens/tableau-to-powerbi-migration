@@ -1,0 +1,128 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "82d80c5f5568a05ab655",
+  "position": { "x": 6, "y": 66, "z": 2000, "height": 441, "width": 726, "tabOrder": 2000 },
+  "visual": {
+    "visualType": "hundredPercentStackedBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Regional Group (group)" } },
+              "queryRef": "Cell Links.Regional Group (group)",
+              "nativeQueryRef": "Regional Group (group)"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Total Capacity" } },
+              "queryRef": "Cell Links.Total Capacity",
+              "nativeQueryRef": "Total Capacity"
+            }
+          ]
+        },
+        "Series": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } },
+              "queryRef": "Cell Links.Link Status",
+              "nativeQueryRef": "Link Status"
+            }
+          ]
+        },
+        "Tooltips": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "% of Total Capacity" } },
+              "queryRef": "Cell Links.% of Total Capacity",
+              "nativeQueryRef": "% of Total Capacity"
+            },
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Avg Capacity" } },
+              "queryRef": "Cell Links.Avg Capacity",
+              "nativeQueryRef": "Avg Capacity"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "dataPoint": [
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#4E79A7'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Planned'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#B5A72C'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Build'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#4E9A51'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Operational'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#A9D18E'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Operational Backup'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#D6272A'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Cancelled'" } } } } }] }
+        }
+      ],
+      "labels": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "enableValueDataLabel": { "expr": { "Literal": { "Value": "true" } } },
+            "labelPosition": { "expr": { "Literal": { "Value": "'InsideCenter'" } } },
+            "color": { "solid": { "color": { "expr": { "Literal": { "Value": "'#1A1A1A'" } } } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "8D" } } }
+          }
+        }
+      ],
+      "legend": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "categoryAxis": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } },
+            "titleText": { "expr": { "Literal": { "Value": "''" } } },
+            "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } }
+          }
+        }
+      ],
+      "valueAxis": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "titleText": { "expr": { "Literal": { "Value": "'Capacity (Mb/s)'" } } },
+            "showAxisTitle": { "expr": { "Literal": { "Value": "true" } } }
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "text": { "expr": { "Literal": { "Value": "'Network Overview (Select bar to filter)'" } } },
+            "fontColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#C8791E'" } } } } },
+            "fontSize": { "expr": { "Literal": { "Value": "12D" } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } },
+            "alignment": { "expr": { "Literal": { "Value": "'left'" } } }
+          }
+        }
+      ],
+      "subTitle": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ]
+    }
+  }
+}

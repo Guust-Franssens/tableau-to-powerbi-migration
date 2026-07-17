@@ -1,0 +1,5 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\tale-of-100-entrepreneurs\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: 4d714793-956c-5d65-b264-ba6473318eb5
+
+	annotation PBI_ResultType = Text
+

@@ -1,0 +1,37 @@
+/// Disconnected calendar-list table backing the Tableau 'Minimum Date' parameter (internal name '[Parameter 4]', "any" date domain, default 2016-09-01). Tableau's date parameter accepts a genuinely free-form date pick (any date, not a fixed list); Power BI has no native live date-entry parameter (What-if parameters are numeric only) - this table approximates it as a bounded date-list slicer (2014-01-01 to 2018-12-31, comfortably spanning the real 'Order Date 2017' domain of 2014-01-03 to 2017-12-30 with a buffer at each end) rather than a truly unrestricted date picker. See limitations_encountered (capability-gap class: live end-user date-parameter entry has no native PBI equivalent, same class as the Insight text-parameter gap).
+table 'Minimum Date'
+	lineageTag: 2c7ce586-097f-457b-9482-3adde4df2878
+
+	/// Reads the current slicer selection on 'Minimum Date'[Minimum Date], defaulting to Tableau's default 2016-09-01 when nothing is selected.
+	measure 'Minimum Date Value' = SELECTEDVALUE('Minimum Date'[Minimum Date], DATE(2016, 9, 1))
+		formatString: Short Date
+		displayFolder: Date Window
+		lineageTag: 8bc1efcd-ef5f-49df-ba06-eccb09b45637
+
+	/// Selectable date value.
+	column 'Minimum Date'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 59e4bf07-f5ae-47ef-a86e-556006d95b6f
+		summarizeBy: none
+		sourceColumn: Minimum Date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	partition 'Minimum Date' = m
+		mode: import
+		source =
+				let
+					StartDate = #date(2014, 1, 1),
+					EndDate = #date(2018, 12, 31),
+					NumberOfDays = Duration.Days(EndDate - StartDate) + 1,
+					DateList = List.Dates(StartDate, NumberOfDays, #duration(1, 0, 0, 0)),
+					#"Converted to Table" = Table.FromList(DateList, Splitter.SplitByNothing(), {"Minimum Date"}),
+					#"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Minimum Date", type date}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,184 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "930c1408e27b89223561",
+  "position": { "x": 8, "y": 180, "z": 3000, "height": 502, "width": 588, "tabOrder": 600 },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Sales Person" } },
+              "queryRef": "Sales Planning.Sales Person",
+              "nativeQueryRef": "Sales Person",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Achievement (estimated)" } },
+              "queryRef": "Sales Planning.Achievement (estimated)",
+              "nativeQueryRef": "Achievement (estimated)"
+            }
+          ]
+        },
+        "Tooltips": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "% of quota achieved" } },
+              "queryRef": "Sales Planning.% of quota achieved",
+              "nativeQueryRef": "% of quota achieved"
+            },
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Sort by field" } },
+              "queryRef": "Sales Planning.Sort by field",
+              "nativeQueryRef": "Sort by field"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Sort by field" } },
+            "direction": "Ascending"
+          }
+        ],
+        "isDefaultSort": true
+      }
+    },
+    "objects": {
+      "categoryAxis": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "titleText": { "expr": { "Literal": { "Value": "'Sales Person'" } } },
+            "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "8D" } } },
+            "labelColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#404040'" } } } } }
+          }
+        }
+      ],
+      "valueAxis": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "start": { "expr": { "Literal": { "Value": "0D" } } },
+            "labelDisplayUnits": { "expr": { "Literal": { "Value": "1000D" } } },
+            "titleText": { "expr": { "Literal": { "Value": "'Sales ($)'" } } },
+            "showAxisTitle": { "expr": { "Literal": { "Value": "true" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } },
+            "labelColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#606060'" } } } } }
+          }
+        }
+      ],
+      "legend": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "dataPoint": [
+        {
+          "properties": {
+            "fill": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Conditional": {
+                      "Cases": [
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": { "SelectRef": { "ExpressionName": "Sales Planning.% of quota achieved" } },
+                              "Right": { "Literal": { "Value": "0.5D" } }
+                            }
+                          },
+                          "Value": { "Literal": { "Value": "'#5FA052'" } }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": { "SelectRef": { "ExpressionName": "Sales Planning.% of quota achieved" } },
+                              "Right": { "Literal": { "Value": "0.75D" } }
+                            }
+                          },
+                          "Value": { "Literal": { "Value": "'#4577A8'" } }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": { "SelectRef": { "ExpressionName": "Sales Planning.% of quota achieved" } },
+                              "Right": { "Literal": { "Value": "1D" } }
+                            }
+                          },
+                          "Value": { "Literal": { "Value": "'#E08A2B'" } }
+                        }
+                      ],
+                      "Else": { "Literal": { "Value": "'#7FBEB0'" } }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": { "data": [{ "dataViewWildcard": { "matchingOption": 0 } }] }
+        }
+      ],
+      "labels": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "labelPosition": { "expr": { "Literal": { "Value": "'OutsideEnd'" } } },
+            "enableValueDataLabel": { "expr": { "Literal": { "Value": "false" } } },
+            "showDynamicLabels": { "expr": { "Literal": { "Value": "true" } } },
+            "dynamicLabelValue": {
+              "expr": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "% of quota achieved" } }
+            },
+            "color": { "solid": { "color": { "expr": { "Literal": { "Value": "'#555555'" } } } } },
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } }
+          }
+        }
+      ],
+      "y1AxisReferenceLine": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "value": { "expr": { "Literal": { "Value": "500000D" } } },
+            "style": { "expr": { "Literal": { "Value": "'dashed'" } } },
+            "lineColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#8A8A8A'" } } } } },
+            "displayName": { "expr": { "Literal": { "Value": "'New quota at $500K'" } } },
+            "dataLabelShow": { "expr": { "Literal": { "Value": "true" } } },
+            "dataLabelText": { "expr": { "Literal": { "Value": "'Name'" } } },
+            "dataLabelColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#8A8A8A'" } } } } },
+            "dataLabelHorizontalPosition": { "expr": { "Literal": { "Value": "'right'" } } },
+            "shadeShow": { "expr": { "Literal": { "Value": "true" } } },
+            "shadeRegion": { "expr": { "Literal": { "Value": "'before'" } } },
+            "shadeColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#E4E4E4'" } } } } },
+            "shadeTransparency": { "expr": { "Literal": { "Value": "40D" } } }
+          },
+          "selector": { "id": "newQuotaLine" }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "title": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "padding": [
+        {
+          "properties": {
+            "top": { "expr": { "Literal": { "Value": "0D" } } },
+            "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+            "left": { "expr": { "Literal": { "Value": "0D" } } },
+            "right": { "expr": { "Literal": { "Value": "0D" } } }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

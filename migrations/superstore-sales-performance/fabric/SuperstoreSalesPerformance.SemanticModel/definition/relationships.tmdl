@@ -1,0 +1,4 @@
+relationship 'Sample Superstore_Order Date 2017_Date_Date'
+	fromColumn: 'Sample Superstore'.'Order Date 2017'
+	toColumn: Date.Date
+

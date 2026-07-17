@@ -10,6 +10,11 @@ real, publicly available 16-worksheet Tableau dashboard, with every bug found al
 documented honestly. See [`docs/capabilities-and-limitations.md`](docs/capabilities-and-limitations.md)
 for the full, evidence-based writeup of what worked automatically and what needed human validation.
 
+![Architecture: a deterministic parser extracts a schema-validated migration-spec.json contract, then LLM agents translate it to a Fabric Power BI semantic model + report](docs/architecture.png)
+
+**[See the migration showcase](docs/showcase/README.md)** — original Tableau dashboards side-by-side
+with the Power BI reports the pipeline generated from them.
+
 ## Why a separate parser instead of an LLM doing everything
 
 Tableau's `.twb` XML (datasources, shelves, zones) is exact and structural — a deterministic parser
@@ -39,6 +44,22 @@ scripts/parse_tableau.py  ──────►  migration-spec.json
 
 Both agents are orchestrated by `tableau-migrator`, a custom Copilot CLI agent
 (`.github/agents/tableau-migrator.agent.md`).
+
+## Setup: Copilot plugins & MCP (self-configuring)
+
+This toolkit's agents build on Microsoft's official Fabric/Power BI **skill plugin** and talk to Power
+BI through **MCP servers**. Those dependencies are declared in the repo so a clone is self-configuring:
+
+- [`AGENTS.md`](AGENTS.md) — auto-loaded by Copilot CLI; declares the required plugin
+  (`powerbi-authoring@fabric-collection` from `microsoft/skills-for-fabric`), the MCP servers, and the
+  conventions every agent inherits. **Read this first.**
+- [`.vscode/mcp.json`](.vscode/mcp.json) — MCP server definitions (auto-read by VS Code Copilot; CLI
+  users add the same with `/mcp`).
+- Repo-local agents (`.github/agents/`) and skills (`.github/skills/`) are committed and load
+  automatically.
+
+In Copilot CLI, install the plugin once with `/plugin` (add marketplace `microsoft/skills-for-fabric`,
+enable `powerbi-authoring`) and register the MCP servers with `/mcp` — then the agents below just work.
 
 ## Quickstart
 

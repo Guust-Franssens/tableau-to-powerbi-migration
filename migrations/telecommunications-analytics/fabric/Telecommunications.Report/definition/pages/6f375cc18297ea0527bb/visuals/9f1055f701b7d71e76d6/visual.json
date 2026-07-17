@@ -1,0 +1,43 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "9f1055f701b7d71e76d6",
+  "position": { "x": 0, "y": 10, "z": 1000, "height": 46, "width": 1280, "tabOrder": 0 },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Radio Towers Dashboard",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI Semibold",
+                      "fontSize": "26px",
+                      "color": "#2C3E50"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "center"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }],
+      "border": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }],
+      "padding": [{
+        "properties": {
+          "top": { "expr": { "Literal": { "Value": "0D" } } },
+          "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+          "left": { "expr": { "Literal": { "Value": "0D" } } },
+          "right": { "expr": { "Literal": { "Value": "0D" } } }
+        }
+      }]
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.4.0/schema.json",
+  "name": "0f100e0a7a1e0d000001",
+  "displayName": "Tale of 100 Entrepreneurs",
+  "displayOption": "FitToPage",
+  "height": 800,
+  "width": 1280
+}

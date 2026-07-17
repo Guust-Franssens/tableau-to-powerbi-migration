@@ -1,0 +1,45 @@
+/// Disconnected single-select slicer table backing the Tableau 'Aircraft Type Parameter' parameter (default "A330"). Native-slicer + SELECTEDVALUE equivalent of a Tableau live parameter (parameter-equality idiom).
+table 'Aircraft Type Parameter'
+
+	/// Reads the current 'Aircraft Type Parameter' slicer selection, defaulting to the Tableau default "A330".
+	measure 'Aircraft Parameter Value' = SELECTEDVALUE('Aircraft Type Parameter'[Aircraft Type], "A330")
+		displayFolder: Parameters
+
+	column 'Aircraft Type'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Aircraft Type
+		sortByColumn: 'Aircraft Type Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper preserving the Tableau parameter's list order.
+	column 'Aircraft Type Order'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Aircraft Type Order
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Aircraft Type Parameter' = m
+		mode: import
+		source =
+			let
+				Source = #table(
+					{"Aircraft Type", "Aircraft Type Order"},
+					{
+					{"A320", 0},
+					{"A330", 1},
+					{"A350", 2},
+					{"B737", 3},
+					{"B777", 4},
+					{"B787", 5}
+					}
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source, {{"Aircraft Type", type text}, {"Aircraft Type Order", Int64.Type}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

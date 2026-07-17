@@ -1,0 +1,50 @@
+/// Disconnected single-column table backing the Tableau 'Region Parameter' (internal name '[Parameter 3]', list domain, default "East"). Deliberately NOT a Field Parameter and NOT a relationship-bound dimension - this is a plain single-select list slicer, matching the "parameter-equality idiom" pattern from the translation guide (verified: every worksheet-level use of Region Parameter is either (a) a direct SELECTEDVALUE read via ['Region Parameter Value'] baked into the CP/PP measures' region-restriction FILTER, or (b) the 'Region = Region Parameter'/'Region Filter' comparison measures - never a join-key), so a native slicer + SELECTEDVALUE measure is the idiomatic Power BI equivalent, no Field Parameter machinery needed.
+table 'Region Parameter'
+	lineageTag: 0a75ead2-8515-43fc-8c15-efaa3251df3a
+
+	/// Reads the current slicer selection on 'Region Parameter'[Region], defaulting to Tableau's default "East" when nothing is selected (e.g. model freshly opened with no user interaction yet). Referenced (bare, unqualified) from CP/PP/Trend measures on 'Sample Superstore' and from 'Region Filter'/'Region = Region Parameter'/'US Map Color' - measure names are model-wide unique in Tabular, so table placement doesn't affect resolution.
+	measure 'Region Parameter Value' = SELECTEDVALUE('Region Parameter'[Region], "East")
+		displayFolder: Region Parameter Support
+		lineageTag: 04266180-54be-44f2-bf7a-836e58fc3945
+
+	/// Region choice: US ("show all regions" / map-visibility toggle) or one of the 4 real sales regions. Sort order fixed via 'Region Order' to match the Tableau parameter's own list order (US, Central, East, South, West) rather than falling back to alphabetical.
+	column Region
+		dataType: string
+		lineageTag: 27025f43-5ede-43ca-bef5-61ac5d8a2c93
+		summarizeBy: none
+		sourceColumn: Region
+		sortByColumn: 'Region Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper for 'Region' (0=US ... 4=West, matching the Tableau parameter's list order).
+	column 'Region Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		lineageTag: 813bf5a9-5826-4926-a66f-408593cc8979
+		summarizeBy: none
+		sourceColumn: Region Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Region Parameter' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Region", "Region Order"},
+						{
+							{"US", 0},
+							{"Central", 1},
+							{"East", 2},
+							{"South", 3},
+							{"West", 4}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Region", type text}, {"Region Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

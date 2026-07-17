@@ -1,0 +1,8 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.4.0/schema.json",
+  "name": "51c062066e7c504dcbb5",
+  "displayName": "Shipping KPI",
+  "displayOption": "FitToPage",
+  "height": 1024,
+  "width": 1280
+}

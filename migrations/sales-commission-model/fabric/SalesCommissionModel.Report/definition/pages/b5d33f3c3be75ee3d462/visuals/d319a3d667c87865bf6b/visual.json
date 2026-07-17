@@ -1,0 +1,84 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "d319a3d667c87865bf6b",
+  "position": { "x": 1132, "y": 182, "z": 4000, "height": 160, "width": 140, "tabOrder": 800 },
+  "visual": {
+    "visualType": "slicer",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Sort by" } }, "Property": "Sort by" } },
+              "queryRef": "Sort by.Sort by",
+              "nativeQueryRef": "Sort by"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "data": [{ "properties": { "mode": { "expr": { "Literal": { "Value": "'Basic'" } } } } }],
+      "selection": [
+        {
+          "properties": {
+            "strictSingleSelect": { "expr": { "Literal": { "Value": "true" } } },
+            "selectAllCheckboxEnabled": { "expr": { "Literal": { "Value": "false" } } }
+          }
+        }
+      ],
+      "header": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "text": { "expr": { "Literal": { "Value": "'Sort By'" } } },
+            "fontColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#404040'" } } } } },
+            "textSize": { "expr": { "Literal": { "Value": "10D" } } }
+          }
+        }
+      ],
+      "items": [
+        {
+          "properties": {
+            "fontColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#404040'" } } } } },
+            "textSize": { "expr": { "Literal": { "Value": "9D" } } }
+          }
+        }
+      ],
+      "general": [
+        {
+          "properties": {
+            "filter": {
+              "filter": {
+                "Version": 2,
+                "From": [{ "Name": "s", "Entity": "Sort by", "Type": 0 }],
+                "Where": [
+                  {
+                    "Condition": {
+                      "In": {
+                        "Expressions": [{ "Column": { "Expression": { "SourceRef": { "Source": "s" } }, "Property": "Sort by" } }],
+                        "Values": [[{ "Literal": { "Value": "'Names'" } }]]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "padding": [
+        {
+          "properties": {
+            "top": { "expr": { "Literal": { "Value": "6D" } } },
+            "bottom": { "expr": { "Literal": { "Value": "6D" } } },
+            "left": { "expr": { "Literal": { "Value": "6D" } } },
+            "right": { "expr": { "Literal": { "Value": "6D" } } }
+          }
+        }
+      ]
+    }
+  }
+}

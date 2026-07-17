@@ -1,0 +1,31 @@
+/// Disconnected slicer table for the Tableau 'Dollar amount' parameter (internal '[Parameter 1]', real, range, default 100). This is the parameter actually placed on the dashboard; feeds Top 100 IPOs Calculation1/2/3. Value measure defaults to 100.
+table 'Dollar Amount'
+	lineageTag: 13db93c1-f5d7-5e0f-a2ce-f1b0d804c029
+
+	/// Reads the current slicer selection on 'Dollar Amount'[Dollar Amount], defaulting to Tableau's current value when nothing is selected.
+	measure 'Dollar Amount Value' = SELECTEDVALUE('Dollar Amount'[Dollar Amount], 100)
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Parameter
+		lineageTag: c8d4be65-3f16-501e-a9ea-254516079ab0
+
+	column 'Dollar Amount'
+		dataType: double
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		lineageTag: af9fa5d6-7c84-5169-883b-a3f63c070da4
+		summarizeBy: none
+		sourceColumn: Dollar Amount
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Dollar Amount' = m
+		mode: import
+		source =
+				let
+				    Source = {0, 25, 50, 100, 250, 500, 1000},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Dollar Amount"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Dollar Amount", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

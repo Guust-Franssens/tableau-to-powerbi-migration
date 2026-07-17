@@ -1,0 +1,47 @@
+/// Disconnected single-column table backing the Tableau 'Date Comparison' PARAMETER (internal name '[Parameter 6]', list domain, default "Prior Period"). Named identically to the Tableau calculated field 'Date Comparison' (renamed to 'Date Comparison Offset' in this model to avoid ambiguity) - these are two genuinely distinct Tableau objects that happened to share a caption; see limitations_encountered for the stale/duplicate-naming trap this workbook has throughout.
+table 'Date Comparison'
+	lineageTag: bf30eaf5-1caf-4b8d-8a2d-b9e2d54e5006
+
+	/// Reads the current slicer selection on 'Date Comparison'[Date Comparison], defaulting to Tableau's default "Prior Period". Consumed by the 'Date Comparison Offset' measure on 'Sample Superstore', which converts the text choice into a day-count shift.
+	measure 'Date Comparison Value' = SELECTEDVALUE('Date Comparison'[Date Comparison], "Prior Period")
+		displayFolder: Date Window
+		lineageTag: 5a5af759-d6bb-499b-9b2c-d3f291c039a4
+
+	/// Comparison mode choice: "Prior Period" (shift back by the same number of days as the selected window) or "Prior Year" (fixed 365-day shift).
+	column 'Date Comparison'
+		dataType: string
+		lineageTag: 28363014-f923-4808-b7ee-c09d12eebacc
+		summarizeBy: none
+		sourceColumn: Date Comparison
+		sortByColumn: 'Date Comparison Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper for 'Date Comparison' (0=Prior Period, 1=Prior Year, matching the Tableau parameter's own list order).
+	column 'Date Comparison Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		lineageTag: a74a1041-2f85-45ca-8423-0706dfa6a528
+		summarizeBy: none
+		sourceColumn: Date Comparison Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Date Comparison' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Date Comparison", "Date Comparison Order"},
+						{
+							{"Prior Period", 0},
+							{"Prior Year", 1}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Date Comparison", type text}, {"Date Comparison Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

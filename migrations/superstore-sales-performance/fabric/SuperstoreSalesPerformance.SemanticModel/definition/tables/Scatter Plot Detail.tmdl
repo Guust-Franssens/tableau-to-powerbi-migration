@@ -1,0 +1,35 @@
+/// Field Parameter backing the Tableau 'Scatter Plot Detail' parameter (internal name '[Parameter 8]', list domain: Segment/Ship Mode/Customer Name/Category/Sub-Category/Product Name, default "Sub-Category"). This is a dimension-flavored Field Parameter (unlike Y-Axis/X-Axis/Map KPI's measure-flavored ones) - it drives which column from 'Sample Superstore' is used as the Detail/Color encoding on the Prescriptive Scatter Plot, replacing the Tableau 'Scatter Plot Breakdown' CASE-based calculated field entirely. No wrapper measure is needed on 'Sample Superstore' for this one: report authors bind this table's 'Scatter Plot Detail' column directly to the visual's field well and Power BI dynamically swaps the underlying column - that's the mechanism's whole advantage over a manual SWITCH measure for a categorical/detail-level field. sourceColumn values are Value1/Value2/Value3 (the DAX table-constructor's default column names per dax.guide), not the friendly Names - see 'Y-Axis' table's doc comment for the full explanation.
+table 'Scatter Plot Detail'
+	lineageTag: 0a4541a7-d47d-4567-8223-581c371d6a4c
+
+	column 'Scatter Plot Detail'
+		lineageTag: 6cc5b39b-e33d-4cb8-b257-beb2c9cf2e44
+		summarizeBy: none
+		sourceColumn: [Value1]
+		sortByColumn: 'Scatter Plot Detail Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Scatter Plot Detail Fields'
+		isHidden
+		lineageTag: 000f275b-0c1f-4aa5-a003-7df0e27a025e
+		summarizeBy: none
+		sourceColumn: [Value2]
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Scatter Plot Detail Order'
+		isHidden
+		formatString: #,##0
+		lineageTag: bdef17b9-638c-4e0a-a202-8a31f79e4fd1
+		summarizeBy: none
+		sourceColumn: [Value3]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Scatter Plot Detail' = calculated
+		mode: import
+		source = {("Segment", NAMEOF('Sample Superstore'[Segment]), 0), ("Ship Mode", NAMEOF('Sample Superstore'[Ship Mode]), 1), ("Customer Name", NAMEOF('Sample Superstore'[Customer Name]), 2), ("Category", NAMEOF('Sample Superstore'[Category]), 3), ("Sub-Category", NAMEOF('Sample Superstore'[Sub-Category]), 4), ("Product Name", NAMEOF('Sample Superstore'[Product Name]), 5)}
+
+	annotation PBI_ResultType = Table
+

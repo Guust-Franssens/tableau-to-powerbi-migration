@@ -1,0 +1,43 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "952eca5f83dd1d1fd230",
+  "position": { "x": 8, "y": 44, "z": 1010, "height": 22, "width": 950, "tabOrder": 100 },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Enter new quota, commission rate and base salary to estimate sales and compensation",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "11pt",
+                      "color": "#6B6B6B"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "left"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }],
+      "border": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }],
+      "padding": [{
+        "properties": {
+          "top": { "expr": { "Literal": { "Value": "0D" } } },
+          "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+          "left": { "expr": { "Literal": { "Value": "0D" } } },
+          "right": { "expr": { "Literal": { "Value": "0D" } } }
+        }
+      }]
+    }
+  }
+}

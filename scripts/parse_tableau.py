@@ -126,24 +126,64 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
     return connection
 
 
+_CONTAINER_RELATION_TYPES = {"collection", "join", "union"}
+
+
+def _collect_leaf_relations(rel: etree._Element) -> list[etree._Element]:
+    """Descend container relations (collection/join/union wrappers) to their leaf table/text relations,
+    so a multi-file collection or a join surfaces each underlying physical table instead of one opaque
+    wrapper. Falls back to the wrapper itself if it has no nested <relation> children."""
+    if rel.get("type", "table") in _CONTAINER_RELATION_TYPES:
+        leaves = [leaf for child in rel.findall("relation") for leaf in _collect_leaf_relations(child)]
+        return leaves or [rel]
+    return [rel]
+
+
 def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]]:
-    """Parse top-level <relation> entries (skip the nested extract/[Extract].[Extract] relation)."""
+    """Parse top-level <relation> entries (descending collection/join/union containers to leaf tables;
+    skipping the nested extract/[Extract].[Extract] relation, which lives under <extract>)."""
     tables = []
     outer_conn = ds_el.find("connection")
     if outer_conn is None:
         return tables
-    for rel in outer_conn.findall("relation"):
-        rel_type = rel.get("type", "table")
-        name = rel.get("name") or rel.get("table", "table")
-        tables.append(
-            {
-                "id": ids.make("tbl", name),
-                "name": name,
-                "source_relation": "custom-sql" if rel_type == "text" else rel_type,
-                "custom_sql": rel.text if rel_type == "text" else None,
-            }
-        )
+    for top in outer_conn.findall("relation"):
+        for rel in _collect_leaf_relations(top):
+            rel_type = rel.get("type", "table")
+            name = rel.get("name") or rel.get("table", "table")
+            tables.append(
+                {
+                    "id": ids.make("tbl", name),
+                    "name": name,
+                    "source_relation": "custom-sql" if rel_type == "text" else rel_type,
+                    "custom_sql": rel.text if rel_type == "text" else None,
+                }
+            )
     return tables
+
+
+def _parse_joins(ds_el: etree._Element) -> list[dict[str, Any]]:
+    """Extract every <relation type='join'> operand pair, join type, and on-clause into a join graph so
+    pbi-semantic-builder can rebuild Power BI model relationships. Conditions carry the raw Tableau
+    [Table].[Field] references from each equality expression in the join clause."""
+    outer_conn = ds_el.find("connection")
+    if outer_conn is None:
+        return []
+    joins = []
+    for jrel in outer_conn.iter("relation"):
+        if jrel.get("type") != "join":
+            continue
+        operands = jrel.findall("relation")
+        conditions = []
+        clause = jrel.find("clause")
+        if clause is not None:
+            for eq in clause.iter("expression"):
+                sides = eq.findall("expression")
+                if eq.get("op") == "=" and len(sides) == 2:
+                    conditions.append({"left_field": sides[0].get("op", ""), "right_field": sides[1].get("op", "")})
+        left = operands[0].get("name") or operands[0].get("table") if operands else None
+        right = operands[1].get("name") or operands[1].get("table") if len(operands) > 1 else None
+        joins.append({"left": left, "right": right, "type": jrel.get("join", "inner"), "conditions": conditions})
+    return joins
 
 
 def _classify_calculation(formula: str) -> dict[str, bool | str | None]:
@@ -185,6 +225,42 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
     return entry
 
 
+_METADATA_MEASURE_TYPES = {"integer", "real"}
+
+
+def _build_metadata_column_entry(
+    rec: etree._Element, ds_id: str, table_id: str | None, ids: IdRegistry
+) -> dict[str, Any] | None:
+    """Build a field entry from a <metadata-record class='column'> that has no matching <column>
+    element. Tableau lists every physical/extract column in metadata-records even when it was never
+    dragged onto a shelf or given a <column> definition, so scanning them recovers physical columns
+    that fields[] would otherwise silently omit (verified across two workbooks: extract-based sources
+    dropped e.g. 'Billable Miles'/'Status' and 'Adj Close', some the basis of downstream calcs)."""
+    local_name_el = rec.find("local-name")
+    if local_name_el is None or not local_name_el.text:
+        return None
+    internal_name = local_name_el.text
+    remote_el = rec.find("remote-name")
+    caption = remote_el.text if remote_el is not None and remote_el.text else internal_name.strip("[]")
+    local_type_el = rec.find("local-type")
+    data_type = local_type_el.text if local_type_el is not None and local_type_el.text else "string"
+    return {
+        "id": ids.make("fld", ds_id, caption),
+        "internal_name": internal_name,
+        "caption": caption,
+        "table_id": table_id,
+        "kind": "column",
+        "data_type": data_type,
+        "role": "measure" if data_type in _METADATA_MEASURE_TYPES else "dimension",
+        "default_aggregation": None,
+        "hidden": False,
+        "semantic_role": None,
+        "formatting": {},
+        "aliases": {},
+        "from_metadata_record": True,
+    }
+
+
 def _resolve_field_dependencies(fields: list[dict[str, Any]], name_to_id: dict[str, str]) -> None:
     """Second pass: now that every internal name in this datasource is known, resolve each
     calculated field's raw [bracketed] formula references to field ids, in place."""
@@ -203,9 +279,19 @@ def _resolve_field_dependencies(fields: list[dict[str, Any]], name_to_id: dict[s
 def _parse_fields(
     ds_el: etree._Element, ds_id: str, table_id: str | None, ids: IdRegistry
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Parse <column> definitions (incl. calculated fields) directly under the datasource.
-    Returns (fields, internal_name -> field_id map) for later cross-referencing."""
+    """Parse <column> definitions (incl. calculated fields) directly under the datasource, then
+    supplement with any physical columns that appear only in <metadata-records> (never surfaced as a
+    <column>). Returns (fields, internal_name -> field_id map) for later cross-referencing."""
     fields = [_build_field_entry(col, ds_id, table_id, ids) for col in ds_el.findall("column")]
+    known_internal_names = {f["internal_name"] for f in fields}
+    for rec in ds_el.findall(".//metadata-record[@class='column']"):
+        local_name_el = rec.find("local-name")
+        if local_name_el is None or not local_name_el.text or local_name_el.text in known_internal_names:
+            continue
+        entry = _build_metadata_column_entry(rec, ds_id, table_id, ids)
+        if entry is not None:
+            fields.append(entry)
+            known_internal_names.add(entry["internal_name"])
     name_to_id = {f["internal_name"]: f["id"] for f in fields}
     _resolve_field_dependencies(fields, name_to_id)
     return fields, name_to_id
@@ -239,7 +325,7 @@ def _parse_single_data_source(
         "internal_name": internal_name,
         "connection": _parse_connection(ds_el, hyper_files),
         "tables": tables,
-        "joins": [],  # TODO: parse nested <relation type='join'> - not present in EEA sample
+        "joins": _parse_joins(ds_el),
         "fields": fields,
     }
     return data_source, internal_name, instance_map, name_to_id
@@ -334,6 +420,28 @@ def _resolve_encoding_field(
         return None
     instance_name = f"[{match.group(2)}]"
     return {"field_id": instance_map.get(instance_name, f"UNRESOLVED:{instance_name}")}
+
+
+def _resolve_encoding_fields(
+    encodings_el: etree._Element | None, tag: str, instance_map: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Resolve a multi-field encoding shelf to a list of field ids, deduped in document order.
+    Tableau's Detail shelf serializes as one <lod> element per field and the Tooltip shelf as one
+    <tooltip> element per field (both carry a `column` attribute like color/size)."""
+    if encodings_el is None:
+        return []
+    resolved: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for el in encodings_el.findall(tag):
+        match = _SHELF_FIELD_RE.search(el.get("column", ""))
+        if not match:
+            continue
+        instance_name = f"[{match.group(2)}]"
+        field_id = instance_map.get(instance_name, f"UNRESOLVED:{instance_name}")
+        if field_id not in seen:
+            seen.add(field_id)
+            resolved.append({"field_id": field_id})
+    return resolved
 
 
 def _resolve_mark_type(pane: etree._Element | None) -> str:
@@ -471,8 +579,8 @@ def _parse_single_worksheet(
         "size": _resolve_encoding_field(encodings_el, "size", instance_map),
         "shape": _resolve_encoding_field(encodings_el, "shape", instance_map),
         "label": [label_field] if label_field else [],
-        "detail": [],
-        "tooltip": [],
+        "detail": _resolve_encoding_fields(encodings_el, "lod", instance_map),
+        "tooltip": _resolve_encoding_fields(encodings_el, "tooltip", instance_map),
     }
     filters = _parse_worksheet_filters(view, instance_map)
 
@@ -507,15 +615,27 @@ def parse_worksheets(
     return worksheets
 
 
-def _parse_zone(zone_el: etree._Element, worksheet_ids_by_name: dict[str, str]) -> dict[str, Any]:
+def _parse_zone(
+    zone_el: etree._Element,
+    worksheet_ids_by_name: dict[str, str],
+    param_ids_by_name: dict[str, str],
+) -> dict[str, Any]:
     """Recursively parse a Tableau dashboard <zone> (percentage-based layout tree) into the spec's
     zone shape, resolving worksheet-name zones back to their worksheet id.
 
     Tableau typically omits the type='...' attribute entirely for worksheet zones (a zone with a
     name attribute and no type is implicitly a worksheet reference); only container/text/etc. zones
-    carry an explicit type. Infer 'worksheet' in that case rather than defaulting to layout-basic."""
+    carry an explicit type. Infer 'worksheet' in that case rather than defaulting to layout-basic.
+
+    Tableau's real XML uses 'paramctrl' and 'bitmap' as raw type strings (not 'parameter'/'image' -
+    those are this spec's friendlier aliases), and overloads the zone's 'param' attribute for two
+    unrelated purposes depending on context: on a layout-flow container it is the flow direction
+    ('horz'/'vert'); on a parameter/filter/legend control it is a '[Parameters].[Name]' reference
+    that must resolve to the referenced parameter's field_id, not be treated as a direction."""
     raw_type = zone_el.get("type")
     has_name = bool(zone_el.get("name"))
+    type_aliases = {"paramctrl": "parameter", "bitmap": "image"}
+    raw_type = type_aliases.get(raw_type, raw_type)
     if raw_type is None:
         zone_type = "worksheet" if has_name else "layout-basic"
     elif raw_type in (
@@ -539,13 +659,21 @@ def _parse_zone(zone_el: etree._Element, worksheet_ids_by_name: dict[str, str]) 
         "y": float(zone_el.get("y", 0)),
         "w": float(zone_el.get("w", 0)),
         "h": float(zone_el.get("h", 0)),
-        "direction": {"horz": "horizontal", "vert": "vertical"}.get(zone_el.get("param", "")),
+        "direction": None,
         "worksheet_id": None,
         "field_id": None,
         "text_html": None,
         "background_color": None,
         "children": [],
     }
+    param_attr = zone_el.get("param", "")
+    if zone_type == "layout-flow":
+        zone["direction"] = {"horz": "horizontal", "vert": "vertical"}.get(param_attr)
+    elif zone_type in ("parameter", "filter", "legend") and param_attr:
+        # param_attr is often dotted, e.g. '[Parameters].[Insight 1]' - split first to isolate the
+        # final bracketed segment, THEN strip its brackets (stripping first would eat into the
+        # dotted separator and leave a mangled 'Parameters].[Insight 1' key that never matches).
+        zone["field_id"] = param_ids_by_name.get(param_attr.split("].[")[-1].strip("[]"))
     if has_name and zone_type not in ("layout-basic", "layout-flow"):
         zone["worksheet_id"] = worksheet_ids_by_name.get(zone_el.get("name", ""))
     text_el = zone_el.find("formatted-text")
@@ -554,18 +682,95 @@ def _parse_zone(zone_el: etree._Element, worksheet_ids_by_name: dict[str, str]) 
     bg = zone_el.find("zone-style/format[@attr='background-color']")
     if bg is not None:
         zone["background_color"] = bg.get("value")
-    zone["children"] = [_parse_zone(child, worksheet_ids_by_name) for child in zone_el.findall("zone")]
+    zone["children"] = [
+        _parse_zone(child, worksheet_ids_by_name, param_ids_by_name) for child in zone_el.findall("zone")
+    ]
     return zone
 
 
-def parse_dashboards(root: etree._Element, worksheets: list[dict[str, Any]], ids: IdRegistry) -> list[dict[str, Any]]:
-    """Parse every <dashboard> in the workbook into its migration-spec representation."""
+_ACTION_TYPE_BY_COMMAND = {"tsc:brush": "highlight", "tsc:filter": "filter"}
+_RUN_ON_BY_ACTIVATION = {"on-select": "select", "on-hover": "hover", "on-menu": "menu"}
+
+
+def _action_type(action: etree._Element) -> str:
+    """Classify a dashboard action: a <link> is a URL action; otherwise map the <command> (tsc:brush →
+    highlight, tsc:filter → filter, anything mentioning 'parameter' → parameter), defaulting to filter."""
+    if action.find("link") is not None:
+        return "url"
+    command = action.find("command")
+    cmd = command.get("command", "") if command is not None else ""
+    if "parameter" in cmd:
+        return "parameter"
+    return _ACTION_TYPE_BY_COMMAND.get(cmd, "filter")
+
+
+def _parse_actions(root: etree._Element, worksheet_ids_by_name: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+    """Parse workbook <actions>/<action> (filter/highlight/URL/parameter interactivity) and group them
+    by their source dashboard name, so each dashboard carries the cross-sheet wiring it drives. Actions
+    whose source is a datasource (not a dashboard) are skipped - they can't be attached to one dashboard.
+    Precise target-worksheet and driving-field resolution is left to the LLM (best-effort empty here)."""
+    by_dashboard: dict[str, list[dict[str, Any]]] = {}
+    for action in root.findall(".//actions/action"):
+        source = action.find("source")
+        dash_name = source.get("dashboard") if source is not None else None
+        if not dash_name:
+            continue
+        activation = action.find("activation")
+        activation_type = activation.get("type", "") if activation is not None else ""
+        source_ws = source.get("worksheet")
+        by_dashboard.setdefault(dash_name, []).append(
+            {
+                "type": _action_type(action),
+                "field_id": None,
+                "source_worksheet_id": worksheet_ids_by_name.get(source_ws) if source_ws else None,
+                "target_worksheet_ids": [],
+                "run_on": _RUN_ON_BY_ACTIVATION.get(activation_type, "select"),
+            }
+        )
+    return by_dashboard
+
+
+def parse_dashboards(
+    root: etree._Element,
+    worksheets: list[dict[str, Any]],
+    parameters: list[dict[str, Any]],
+    ids: IdRegistry,
+) -> list[dict[str, Any]]:
+    """Parse every <dashboard> in the workbook into its migration-spec representation.
+
+    Tableau dashboards built entirely with 'Floating' containers (every object independently
+    absolute-positioned, no 'Tiled' auto-layout) serialize <zones> as N flat sibling <zone> elements
+    with no wrapping root container at all - unlike the single-root-zone shape a Tiled-layout
+    dashboard produces. Grabbing only the first <zone> (as a naive .find() would) silently drops
+    every other object on the dashboard. Detect the flat-multi-child case and synthesize a
+    'layout-floating' synthetic root so nothing is lost."""
     worksheet_ids_by_name = {ws["name"]: ws["id"] for ws in worksheets}
+    param_ids_by_name = {p["internal_name"].strip("[]"): p["id"] for p in parameters}
+    actions_by_dashboard = _parse_actions(root, worksheet_ids_by_name)
     dashboards = []
     for dash_el in root.findall("dashboards/dashboard"):
         name = dash_el.get("name", "")
         size_el = dash_el.find("size")
-        top_zone = dash_el.find("zones/zone")
+        top_zones = dash_el.findall("zones/zone")
+        if len(top_zones) == 1:
+            zones = _parse_zone(top_zones[0], worksheet_ids_by_name, param_ids_by_name)
+        elif len(top_zones) > 1:
+            zones = {
+                "id": "",
+                "type": "layout-floating",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 100000.0,
+                "direction": None,
+                "worksheet_id": None,
+                "field_id": None,
+                "text_html": None,
+                "background_color": None,
+                "children": [_parse_zone(z, worksheet_ids_by_name, param_ids_by_name) for z in top_zones],
+            }
+        else:
+            zones = {}
         dashboards.append(
             {
                 "id": ids.make("dash", name),
@@ -573,10 +778,10 @@ def parse_dashboards(root: etree._Element, worksheets: list[dict[str, Any]], ids
                 "size": {
                     "width": float(size_el.get("maxwidth", 1000)) if size_el is not None else 1000,
                     "height": float(size_el.get("maxheight", 800)) if size_el is not None else 800,
-                    "sizing_mode": "fixed" if size_el is not None else "automatic",
+                    "sizing_mode": (size_el.get("sizing-mode", "fixed") if size_el is not None else "automatic"),
                 },
-                "zones": _parse_zone(top_zone, worksheet_ids_by_name) if top_zone is not None else {},
-                "actions": [],  # TODO: parse <actions> - none present in the EEA sample (single-page dashboard)
+                "zones": zones,
+                "actions": actions_by_dashboard.get(name, []),
             }
         )
     logger.info("Parsed %d dashboard(s)", len(dashboards))
@@ -623,6 +828,42 @@ def annotate_known_idioms(spec: dict[str, Any]) -> None:
                 )
 
 
+_DATA_TYPE_LIMITATIONS = {
+    "table": (
+        "low",
+        "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column "
+        "(not real data) - exclude from the semantic model entirely, do not create a column/measure "
+        "for it",
+    ),
+    "spatial": (
+        "high",
+        "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query "
+        "equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns "
+        "with reduced fidelity (e.g. no native origin-destination line rendering)",
+    ),
+}
+
+
+def _field_limitations(f: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per-field risk checks (LOD/table-calc translation risk, non-tabular data_type values) shared
+    by every data source's field loop in collect_limitations."""
+    found = []
+    if f.get("is_lod") or f.get("is_table_calc"):
+        found.append(
+            {
+                "item": f["id"],
+                "issue": f"{'LOD expression' if f.get('is_lod') else 'table calculation'} - verify "
+                "DAX translation grain/filter-context against a known Tableau value",
+                "severity": "high",
+                "stage": "parse",
+            }
+        )
+    if f["data_type"] in _DATA_TYPE_LIMITATIONS:
+        severity, issue = _DATA_TYPE_LIMITATIONS[f["data_type"]]
+        found.append({"item": f["id"], "issue": issue, "severity": severity, "stage": "parse"})
+    return found
+
+
 def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """Scan the parsed spec for known risk areas (extract-based sources, LOD/table calcs, unresolved
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
@@ -640,16 +881,7 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
         for f in ds["fields"]:
-            if f.get("is_lod") or f.get("is_table_calc"):
-                limitations.append(
-                    {
-                        "item": f["id"],
-                        "issue": f"{'LOD expression' if f.get('is_lod') else 'table calculation'} - "
-                        "verify DAX translation grain/filter-context against a known Tableau value",
-                        "severity": "high",
-                        "stage": "parse",
-                    }
-                )
+            limitations.extend(_field_limitations(f))
     for ws in spec["worksheets"]:
         pivot = ws.get("measure_names_values_pivot")
         for enc_name in ("rows", "columns"):
@@ -696,7 +928,7 @@ def parse_workbook(path: Path) -> dict[str, Any]:
     parameters = parse_parameters(root, ids)
     data_sources, instance_maps, name_to_id_maps = parse_data_sources(root, hyper_files, ids)
     worksheets = parse_worksheets(root, instance_maps, name_to_id_maps, ids)
-    dashboards = parse_dashboards(root, worksheets, ids)
+    dashboards = parse_dashboards(root, worksheets, parameters, ids)
     theme = infer_theme(root)
 
     spec: dict[str, Any] = {

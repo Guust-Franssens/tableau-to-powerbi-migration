@@ -28,7 +28,7 @@
           "internal_name": { "type": "string" },
           "caption": { "type": "string" },
           "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime"] },
-          "domain_type": { "type": "string", "enum": ["list", "range", "all"] },
+          "domain_type": { "type": "string", "enum": ["list", "range", "all", "any"] },
           "allowed_values": { "type": "array", "items": { "type": "string" } },
           "current_value": { "type": ["string", "number", "boolean", "null"] }
         }
@@ -63,7 +63,7 @@
               "properties": {
                 "id": { "type": "string" },
                 "name": { "type": "string" },
-                "source_relation": { "type": "string", "enum": ["table", "custom-sql", "join", "text", "pivot"] },
+                "source_relation": { "type": "string", "enum": ["table", "custom-sql", "join", "text", "pivot", "collection", "union"] },
                 "custom_sql": { "type": ["string", "null"] }
               }
             }
@@ -100,10 +100,11 @@
                 "caption": { "type": "string" },
                 "table_id": { "type": ["string", "null"] },
                 "kind": { "type": "string", "enum": ["column", "calculated", "group", "bin", "hierarchy"] },
-                "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime"] },
+                "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime", "table", "spatial"], "description": "'table' is Tableau's internal relationship-model table-anchor pseudo-column (internal_name prefixed '[__tableau_internal_object_id__]') - not real data. 'spatial' is a MAKEPOINT/MAKELINE-derived geometry field (map point/line) with no native DAX/PQ equivalent - see migration-spec.md" },
                 "role": { "type": "string", "enum": ["dimension", "measure"] },
                 "default_aggregation": { "type": ["string", "null"], "enum": ["SUM", "AVG", "COUNT", "COUNTD", "MIN", "MAX", "MEDIAN", "ATTR", "None", null] },
                 "hidden": { "type": "boolean", "default": false },
+                "from_metadata_record": { "type": "boolean", "default": false, "description": "true if recovered from <metadata-records> (a physical/extract column with no <column> element) rather than a user-surfaced Tableau field" },
                 "semantic_role": { "type": ["string", "null"], "description": "e.g. geography.city if geo-coded" },
                 "formatting": {
                   "type": "object",
@@ -161,7 +162,7 @@
               "properties": {
                 "id": { "type": "string" },
                 "label": { "type": "string" },
-                "formula": { "type": "string", "enum": ["constant", "computed"] },
+                "formula": { "type": "string", "enum": ["constant", "computed", "average", "median", "sum", "min", "max", "percentile", "total", "count", "countd", "attr", "stdev", "stdevp", "var", "varp"] },
                 "value": { "type": ["number", "string", "null"] },
                 "scope": { "type": "string", "enum": ["per-table", "per-cell", "per-pane"] }
               }
@@ -173,7 +174,7 @@
               "type": "object",
               "properties": {
                 "field_id": { "type": "string" },
-                "type": { "type": "string", "enum": ["categorical", "quantitative", "relative_date", "parameter_binding", "context"] },
+                "type": { "type": "string", "enum": ["categorical", "quantitative", "relative_date", "relative-date", "parameter_binding", "parameter-binding", "context"] },
                 "exclude_nulls": { "type": "boolean", "default": false },
                 "members": { "type": "array", "items": { "type": "string" } },
                 "note": { "type": ["string", "null"], "description": "e.g. 'parameter-equality idiom: field = IF [Param]=[Dim] THEN [Dim] END, filtered to exclude null -> collapses to a plain PBI slicer on the dimension, no calculated column needed'" }
@@ -280,7 +281,7 @@
       "required": ["type", "x", "y", "w", "h"],
       "properties": {
         "id": { "type": "string" },
-        "type": { "type": "string", "enum": ["layout-basic", "layout-flow", "worksheet", "text", "image", "title", "filter", "parameter", "legend"] },
+        "type": { "type": "string", "enum": ["layout-basic", "layout-flow", "layout-floating", "worksheet", "text", "image", "title", "filter", "parameter", "legend"] },
         "x": { "type": "number" },
         "y": { "type": "number" },
         "w": { "type": "number" },

@@ -1,0 +1,4 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\sales-commission-model\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+	annotation PBI_ResultType = Text
+

@@ -1,0 +1,1057 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "Telecommunications.twbx",
+    "tableau_version": "9.0",
+    "source_build": null,
+    "repository_location_id": "Telecommunications_2",
+    "parsed_at": "2026-07-16T17:45:45.318212+00:00"
+  },
+  "parameters": [],
+  "data_sources": [
+    {
+      "id": "ds.cell_links",
+      "caption": "cell-links",
+      "internal_name": "cell-links",
+      "connection": {
+        "class": "excel",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/cell_links.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.tableausql",
+          "name": "TableauSQL",
+          "source_relation": "custom-sql",
+          "custom_sql": "SELECT\r\n  1 as [path order],\r\n  'source' as [link position],\r\n  [source].[Availability (%)] AS [Availability (%)],\r\n  [source].[BH Survey Method] AS [BH Survey Method],\r\n  [source].[Cand ID Source] AS [Cand ID],\r\n  [source].[Capacity (Mb/s)] AS [Capacity (Mb/s)],\r\n  [source].[Distance (miles)] AS [Distance (miles)],\r\n  [source].[Forecast Decision] AS [Forecast Decision],\r\n  [source].[Freq Band (GHz)] AS [Freq Band (GHz)],\r\n  [source].[Lat Source] AS [Lat],\r\n  [source].[Link ID] AS [Link ID],\r\n  [source].[Link Status] AS [Link Status],\r\n  [source].[Link Type] AS [Link Type],\r\n  [source].[Long Source] AS [Long],\r\n  [source].[Polarization Source] AS [Polarization],\r\n  [source].[Radio Model] AS [Radio Model],\r\n  [source].[Site ID Source] AS [Site ID],\r\n  [source].[Site Status Source] AS [Site Status],\r\n  [source].[Site Type BH Source] AS [Site Type BH],\r\n  [source].[SLA] AS [SLA],\r\n  [source].[Survey Date] AS [Survey Date],\r\n  [source].[Survey Status] AS [Survey Status],\r\n  [source].[TX Type Source] AS [TX Type],\r\n  [source].[Vendor] AS [Vendor]\r\nFROM [celldata$] [source]\r\nUNION\r\nSELECT\r\n  2 as [path order],\r\n  'target' as [link position],\r\n  [target].[Availability (%)] AS [Availability (%)],\r\n  [target].[BH Survey Method] AS [BH Survey Method],\r\n  [target].[Cand ID Target] AS [Cand ID],\r\n  [target].[Capacity (Mb/s)] AS [Capacity (Mb/s)],\r\n  [target].[Distance (miles)] AS [Distance (miles)],\r\n  [target].[Forecast Decision] AS [Forecast Decision],\r\n  [target].[Freq Band (GHz)] AS [Freq Band (GHz)],\r\n  [target].[Lat Target] AS [Lat],\r\n  [target].[Link ID] AS [Link ID],\r\n  [target].[Link Status] AS [Link Status],\r\n  [target].[Link Type] AS [Link Type],\r\n  [target].[Long Target] AS [Long],\r\n  [target].[Polarization Target] AS [Polarization],\r\n  [target].[Radio Model] AS [Radio Model],\r\n  [target].[Site ID Target] AS [Site ID],\r\n  [target].[Site Status Target] AS [Site Status],\r\n  [target].[Site Type BH Target] AS [Site Type BH],\r\n  [target].[SLA] AS [SLA],\r\n  [target].[Survey Date] AS [Survey Date],\r\n  [target].[Survey Status] AS [Survey Status],\r\n  [target].[TX Type Target] AS [TX Type],\r\n  [target].[Vendor] AS [Vendor]\r\nFROM [celldata$] [target]"
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_cell_links__measure_names",
+          "internal_name": "[:Measure Names]",
+          "caption": ":Measure Names",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "[cell-links].[avg:Availability (\\%):qk]": "Availability (%) ",
+            "[cell-links].[avg:Freq Band (GHz):qk]": "Freq Band (GHz) ",
+            "[cell-links].[sum:Availability (\\%):qk]": "Availability (%)",
+            "[cell-links].[sum:Capacity (Mb/s):qk]": "Capacity (Mb/s)",
+            "[cell-links].[sum:Distance (miles):qk]": "Distance (miles)",
+            "[cell-links].[sum:Freq Band (GHz):qk]": "Freq Band (GHz)"
+          }
+        },
+        {
+          "id": "fld.ds_cell_links__availability",
+          "internal_name": "[Availability (%)]",
+          "caption": "Availability (%)",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__capacity_mb_s",
+          "internal_name": "[Capacity (Mb/s)]",
+          "caption": "Capacity (Mb/s)",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__distance_miles",
+          "internal_name": "[Distance (miles)]",
+          "caption": "Distance (miles)",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__freq_band_ghz",
+          "internal_name": "[Freq Band (GHz)]",
+          "caption": "Freq Band (GHz)",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__lat",
+          "internal_name": "[Lat]",
+          "caption": "Lat",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__link_id",
+          "internal_name": "[Link ID]",
+          "caption": "Link ID",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__link_status",
+          "internal_name": "[Link Status]",
+          "caption": "Link Status",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__long",
+          "internal_name": "[Long]",
+          "caption": "Long",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.tableausql",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_cell_links__regional_group_group",
+          "internal_name": "[Regional Group (group)]",
+          "caption": "Regional Group (group)",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "47.4-122.1": "South",
+            "47.5-122.1": "South West",
+            "47.6-121.9": "Central East",
+            "47.6-122.3": "Central West",
+            "47.7-122.0": "North",
+            "47.7-122.4": "North East",
+            "47.8-122.2": "North West"
+          }
+        },
+        {
+          "id": "fld.ds_cell_links__regional_grouping_group",
+          "internal_name": "[Regional Grouping (group)]",
+          "caption": "Regional Grouping (group)",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__regional_group",
+          "internal_name": "[Rounded Lat (copy)]",
+          "caption": "Regional Group",
+          "table_id": "tbl.tableausql",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "str(ROUND([Lat],1))+str(ROUND([Long],1))",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_cell_links__lat",
+            "fld.ds_cell_links__long"
+          ]
+        },
+        {
+          "id": "fld.ds_cell_links__rounded_lat",
+          "internal_name": "[Rounded Lat]",
+          "caption": "Rounded Lat",
+          "table_id": "tbl.tableausql",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "ROUND([Lat],2)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_cell_links__lat"
+          ]
+        },
+        {
+          "id": "fld.ds_cell_links__regional_grouping",
+          "internal_name": "[Rounded Long]",
+          "caption": "Regional Grouping",
+          "table_id": "tbl.tableausql",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "ROUND([Long],2)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_cell_links__long"
+          ]
+        },
+        {
+          "id": "fld.ds_cell_links__fk_link_status_0",
+          "internal_name": "[fk:Link Status:0]",
+          "caption": "fk:Link Status:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_link_type_0",
+          "internal_name": "[fk:Link Type:0]",
+          "caption": "fk:Link Type:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_polarization_0",
+          "internal_name": "[fk:Polarization:0]",
+          "caption": "fk:Polarization:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_radio_model_0",
+          "internal_name": "[fk:Radio Model:0]",
+          "caption": "fk:Radio Model:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_site_id_0",
+          "internal_name": "[fk:Site ID:0]",
+          "caption": "fk:Site ID:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_site_status_0",
+          "internal_name": "[fk:Site Status:0]",
+          "caption": "fk:Site Status:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_survey_date_0",
+          "internal_name": "[fk:Survey Date:0]",
+          "caption": "fk:Survey Date:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_survey_status_0",
+          "internal_name": "[fk:Survey Status:0]",
+          "caption": "fk:Survey Status:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_tx_type_0",
+          "internal_name": "[fk:TX Type:0]",
+          "caption": "fk:TX Type:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__fk_vendor_0",
+          "internal_name": "[fk:Vendor:0]",
+          "caption": "fk:Vendor:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__path_order",
+          "internal_name": "[path order]",
+          "caption": "path order",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_link_status_0",
+          "internal_name": "[pk:Link Status:0]",
+          "caption": "pk:Link Status:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_link_type_0",
+          "internal_name": "[pk:Link Type:0]",
+          "caption": "pk:Link Type:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_polarization_0",
+          "internal_name": "[pk:Polarization:0]",
+          "caption": "pk:Polarization:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_radio_model_0",
+          "internal_name": "[pk:Radio Model:0]",
+          "caption": "pk:Radio Model:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_site_id_0",
+          "internal_name": "[pk:Site ID:0]",
+          "caption": "pk:Site ID:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_site_status_0",
+          "internal_name": "[pk:Site Status:0]",
+          "caption": "pk:Site Status:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_survey_date_0",
+          "internal_name": "[pk:Survey Date:0]",
+          "caption": "pk:Survey Date:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_survey_status_0",
+          "internal_name": "[pk:Survey Status:0]",
+          "caption": "pk:Survey Status:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_tx_type_0",
+          "internal_name": "[pk:TX Type:0]",
+          "caption": "pk:TX Type:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_cell_links__pk_vendor_0",
+          "internal_name": "[pk:Vendor:0]",
+          "caption": "pk:Vendor:0",
+          "table_id": "tbl.tableausql",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.cell_map",
+      "name": "Cell Map",
+      "title_text": "Link Map",
+      "data_source_ids": [
+        "cell-links"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_cell_links__lat",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_cell_links__long",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_cell_links__link_status"
+        },
+        "size": {
+          "field_id": "fld.ds_cell_links__capacity_mb_s"
+        },
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Link Status,Regional Group (group))]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Link ID:\t<[cell-links].[Link ID]>Æ\nCapacity:\t<[cell-links].[Capacity (Mb/s)]> Mb/s\nLink Status:\t<[cell-links].[Link Status]>"
+    },
+    {
+      "id": "ws.link_data",
+      "name": "Link Data",
+      "title_text": "<Sheet Name> (Select link to highlight)",
+      "data_source_ids": [
+        "cell-links"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Regional Group (group)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_cell_links__link_id",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:none:Site ID:nk",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED::Measure Names",
+            "aggregation": null,
+            "derivation": "",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_cell_links__link_status"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[Multiple Values]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[:Measure Names]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"[cell-links].[sum:Capacity (Mb/s):qk]\"",
+            "\"[cell-links].[avg:Freq Band (GHz):qk]\"",
+            "\"[cell-links].[sum:Distance (miles):qk]\"",
+            "\"[cell-links].[avg:Availability (\\%):qk]\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Link Status,Regional Group (group))]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": {
+        "axis": "columns",
+        "pivoted_field_ids": [
+          "fld.ds_cell_links__capacity_mb_s",
+          "fld.ds_cell_links__freq_band_ghz",
+          "fld.ds_cell_links__distance_miles",
+          "UNRESOLVED:avg:Availability (\\%):qk"
+        ],
+        "note": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column."
+      },
+      "manual_sort": [],
+      "customized_tooltip_text": "Link ID:\t<[cell-links].[Link ID]>\nLink Status:\t<[cell-links].[Link Status]>\nÆ\nBH Survey Method:\t<[cell-links].[BH Survey Method]>\nCand ID:\t<[cell-links].[Cand ID]>\nForecast Decision:\t<[cell-links].[Forecast Decision]>\nLat:\t<[cell-links].[Lat]>\nLong:\t<[cell-links].[Long]>\nPolarization:\t<[cell-links].[Polarization]>\nRadio Model:\t<[cell-links].[Radio Model]>\nRegional Group (group):\t<[cell-links].[Regional Group (group)]>\nSite ID:\t<[cell-links].[Site ID]>\nSite Status:\t<[cell-links].[Site Status]>\nSite Type BH:\t<[cell-links].[Site Type BH]>\nSurvey Status:\t<[cell-links].[Survey Status]>\nTX Type:\t<[cell-links].[TX Type]>\nVendor:\t<[cell-links].[Vendor]>\n<[cell-links].[:Measure Names]>:\t<[cell-links].[Multiple Values]>"
+    },
+    {
+      "id": "ws.overview",
+      "name": "Overview",
+      "title_text": "Network Overview (Select bar to filter)",
+      "data_source_ids": [
+        "cell-links"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Regional Group (group)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_cell_links__capacity_mb_s",
+            "aggregation": null,
+            "derivation": "pcto",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_cell_links__link_status"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_cell_links__capacity_mb_s"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[cell-links].[Regional Group (group)]> (<[cell-links].[Link Status]>)Æ\n% of Total Capacity (Mb/s):\t<[cell-links].[pcto:sum:Capacity (Mb/s):qk:1]>\nAvg. Capacity (Mb/s):\t<[cell-links].[avg:Capacity (Mb/s):qk]>"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.dashboard",
+      "name": "Dashboard",
+      "size": {
+        "width": 800.0,
+        "height": 570.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "4",
+        "type": "layout-basic",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "3",
+            "type": "worksheet",
+            "x": 0.0,
+            "y": 55833.0,
+            "w": 57375.0,
+            "h": 44167.0,
+            "direction": null,
+            "worksheet_id": "ws.link_data",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "1",
+            "type": "worksheet",
+            "x": 57375.0,
+            "y": 7000.0,
+            "w": 42625.0,
+            "h": 70544.0,
+            "direction": null,
+            "worksheet_id": "ws.cell_map",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "8",
+            "type": "title",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 7000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "24",
+            "type": "layout-flow",
+            "x": 57375.0,
+            "y": 77544.0,
+            "w": 42625.0,
+            "h": 22456.0,
+            "direction": "horizontal",
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "5",
+                "type": "layout-basic",
+                "x": 57375.0,
+                "y": 77544.0,
+                "w": 21000.0,
+                "h": 22456.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "23",
+                "type": "layout-basic",
+                "x": 78375.0,
+                "y": 77544.0,
+                "w": 21000.0,
+                "h": 22456.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "26",
+            "type": "layout-flow",
+            "x": 0.0,
+            "y": 7000.0,
+            "w": 57375.0,
+            "h": 48833.0,
+            "direction": "vertical",
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "2",
+                "type": "worksheet",
+                "x": 0.0,
+                "y": 7000.0,
+                "w": 57375.0,
+                "h": 48830.0,
+                "direction": null,
+                "worksheet_id": "ws.overview",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      "actions": []
+    }
+  ],
+  "theme": {
+    "palette_hexes": [],
+    "font_family": null,
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.cell_links",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.link_data",
+      "issue": "could not resolve shelf reference UNRESOLVED:Regional Group (group)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.link_data",
+      "issue": "could not resolve shelf reference UNRESOLVED:none:Site ID:nk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.link_data",
+      "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: columns, resolved fields: 4)",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.overview",
+      "issue": "could not resolve shelf reference UNRESOLVED:Regional Group (group)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.cell_links -> Cell Links",
+      "issue": "Extract-based .hyper source materialized to data/ds.cell_links.csv (808 rows x 24 cols) and loaded as an import-mode table via Csv.Document with explicit en-US culture on Table.TransformColumnTypes. This is a structure-preserving migration against extracted data; repoint to the live upstream if one exists behind the extract before production use.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "tbl.tableausql -> Cell Links",
+      "issue": "Tableau table is a custom-SQL UNION stacking each link's source endpoint (link position='source', path order=1) and target endpoint (path order=2): 404 links x 2 = 808 rows. The UNION is already baked into the extract CSV, so it is modeled as one flat import table (grain = link endpoint), not reconstructed in Power Query.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Cell Links[Lat], Cell Links[Long]",
+      "issue": "Geographic coordinates typed as Double (deliberate exception to the avoid-Double modeling guideline) to preserve source precision, with dataCategory Latitude/Longitude for native map binding and summarizeBy none.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Cell Links[Regional Group (group)] (calc column)",
+      "issue": "Tableau manual group is PARTIAL: only 240 of 808 rows (7 named regions: South, South West, Central East, Central West, North, North East, North West) are grouped; the other 568 rows were left ungrouped by the author and render as their raw rounded 'lat-long' coordinate label. Reproduced as a DAX calc column: SWITCH over integer lat*10/long*10 (exact HALF_UP == Tableau ROUND), with an ungrouped FORMAT fallback. Named/ungrouped split (240/568) and per-region capacity share validated in fabric/_validation/groundtruth_check.py.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Regional Group / Rounded Lat / Regional Grouping / Rounded Long / Regional Grouping (group)",
+      "issue": "Calc-field dispositions: 'Regional Group' (internal_name [Rounded Lat (copy)], formula str(ROUND([Lat],1))+str(ROUND([Long],1))) CONSOLIDATED into the Regional Group (group) calc-column definition (its only purpose was to feed the group). EXCLUDED as vestigial/unreferenced: 'Rounded Lat' (ROUND([Lat],2)), 'Regional Grouping' (internal_name [Rounded Long], ROUND([Long],2)), and the empty group 'Regional Grouping (group)'. Note stale internal names (caption != internal_name) confirmed here - always resolve by caption.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Cell Links aggregated measures",
+      "issue": "Aggregated Tableau shelf pills mapped to 7 explicit DAX measures: Total Capacity (sum), Avg Capacity (avg), % of Total Capacity, Avg Availability (avg), Avg Freq Band (avg), Total Distance (sum), and hidden Number of Records (COUNTROWS). The 4 raw numeric base columns (Availability (%), Capacity (Mb/s), Distance (miles), Freq Band (GHz)) are hidden with summarizeBy none so consumers use the measures. All 6 aggregates ground-truth verified (MATCH) in fabric/_validation/groundtruth_check.py.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Cell Links[% of Total Capacity]",
+      "issue": "Tableau table calc pcto:sum:Capacity (Mb/s) ('Percent of Total') translated to DIVIDE([Total Capacity], CALCULATE([Total Capacity], ALLSELECTED('Cell Links'))). Denominator = grand total across the visual selection (validated to equal 115212). Table-calc addressing/partitioning should be re-checked against Tableau if a live comparison becomes available.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Cell Links[Number of Records]",
+      "issue": "Tableau 'Number of Records' calc field (formula: 1) modeled as a hidden COUNTROWS measure; not bound to any worksheet shelf in this workbook (kept for parity / forward use, matching prior builds' convention).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.cell_links internal pk/fk + Measure Names",
+      "issue": "Excluded from the model: 10 fk:* and 10 pk:* hidden Tableau internal group-index columns (absent from the extract CSV) and the ':Measure Names' pseudo-dimension. These are Tableau-internal plumbing with no Power BI equivalent.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Cell Links[Survey Date]",
+      "issue": "Typed as dateTime from ISO 'yyyy-MM-dd HH:mm:ss' strings (only 54 of 808 rows populated) with explicit en-US culture. Verify date parse on live refresh (no live engine available at build time).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ws.link_data measure-values pivot -> report binding",
+      "issue": "The 4 pivoted measures for the report builder to bind individually (Measure Names/Values has no native PBI equivalent): Total Capacity, Avg Availability, Avg Freq Band, Total Distance.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "report.overview + report.link_data row-header (Regional Group (group))",
+      "issue": "The frozen calc column 'Regional Group (group)' resolves to 27 distinct row values (7 named regions + 20 coordinate-label fallbacks using 1-decimal longitude: 47.5-122.0 .. 47.8-122.6), whereas the Tableau reference screenshot shows only 11 (7 named + 4 integer-longitude labels like '47.5-122'). The calc column faithfully reproduces the workbook author's PARTIAL manual group (validated 240 grouped / 568 ungrouped by the semantic build), so the reference screenshot reflects a different/earlier grouping state or integer-rounded longitude display. Cannot be reconciled without modifying the frozen model. Overview bar therefore renders 27 segments/bars rather than 11.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "report.overview data labels",
+      "issue": "Handoff requested the segment label = '% of Total Capacity'. That measure uses ALLSELECTED('Cell Links') as a GRAND-TOTAL denominator (per semantic build), so a per-segment (Regional Group x Link Status) value yields sub-1% figures, not a readable per-bar share, and the Tableau reference labels are absolute Mb/s. DEVIATION: bound the segment data label to the absolute 'Total Capacity' value (matches reference) and moved '% of Total Capacity' + 'Avg Capacity' into the visual tooltip instead.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report.cell_map capacity encoding",
+      "issue": "Tableau encodes link capacity as LINE THICKNESS on the microwave-link path marks. The Power BI azureMap pathLayer strokeWidth is a single scalar and cannot be data-bound to a Size role. FIDELITY GAP: capacity is instead bound to the bubbleLayer Size role (endpoint bubble radius). Native azureMap DID reproduce the 2-endpoint line map itself via PathID (Link ID) + PointOrder (path order) + pathLayer (a fidelity win over Tableau's dual-axis workaround).",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report.link_data columns",
+      "issue": "Two deviations: (1) the 'Regional Group (group)' row header present on Tableau's rows shelf is OMITTED from the matrix (its header was hidden in the source worksheet + it is the 27-group problem field); rows = [Link ID, Site ID] reproduces the screenshot's two-endpoint merged pattern (e.g. one Link ID -> two Site IDs). (2) Tableau colors the numeric text green/olive by Link Status; per-cell text color driven by an off-table dimension is not achievable against the frozen model, so numbers render in the default theme color.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report.overview / report.link_data number format",
+      "issue": "'Total Capacity' uses the frozen model formatString '#,##0' so a value renders as e.g. '54' where the Tableau reference shows '54.0' (one decimal). Trivial format-only gap; not changed because the semantic model is frozen.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report.dashboard filter actions",
+      "issue": "Tableau dashboard filter actions on Link Status and Regional Group are reproduced via native Power BI cross-highlighting (drillFilterOtherVisuals) rather than helper slicer visuals, per handoff. No explicit slicers exist on the page, so no slicer-default gotcha applies.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report.cell_map Location vs Latitude/Longitude conflict",
+      "issue": "azureMap requires the Category (Location) role AND was given explicit Lat/Long overrides; Power BI Desktop rendered a visual error ('Remove Location to display latitude and longitude pairs, or set the aggregate for Latitude and Longitude to Average'). Structural validation did NOT catch this (schema-valid). FIX: kept Site ID in Category (Location) and converted the Lat (Y) and Long (X) projections to Average aggregations (Aggregation.Function=1). Verified lossless: every (Link ID, path order) endpoint grain maps to exactly one coordinate (808/808), so Avg over the visual grain returns the exact coordinate. Re-verified in Desktop: error glyph gone, azureMap renders.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "report.desktop_verification",
+      "issue": "Power BI Desktop (Microsoft Store/MSIX build 2.156.879.0) became available mid-build (launched by a parallel report build). Opened this report in its OWN new instance (pid 11444, via PBI_DESKTOP_PATH to the WindowsApps exe) without disrupting the concurrent build. STRUCTURAL validation CLEAN and the Desktop screenshot caught + fixed a real azureMap binding error (see Location vs Lat/Long entry). REMAINING GAP: the import model shows 'calculated columns need to be manually refreshed' + 'tables have incomplete or no data', so bars/matrix rows/map points render EMPTY. The Desktop Bridge manifest exposes only application.state.get, report.snapshot.capture, and file.reload -- NO data-refresh method -- so a headless refresh is not possible. DataFolder resolves to a valid local CSV (data/ds.cell_links.csv, 808 rows), so data will populate on a manual 'Refresh now'. Data-populated visual verification (bar segments, matrix rows, map path lines, legend color+size) therefore remains PENDING a manual refresh.",
+      "severity": "medium",
+      "stage": "report_build"
+    }
+  ]
+}

@@ -18,7 +18,18 @@
             <connection class='excel-direct' />
           </named-connection>
         </named-connections>
-        <relation connection='excel-direct.abc123' name='Cities' table='[Cities$]' type='table' />
+        <relation type='collection'>
+          <relation type='join' join='inner'>
+            <relation connection='excel-direct.abc123' name='Cities' table='[Cities$]' type='table' />
+            <relation connection='excel-direct.abc123' name='Regions' table='[Regions$]' type='table' />
+            <clause type='join'>
+              <expression op='='>
+                <expression op='[Cities$].[Region ID]' />
+                <expression op='[Regions$].[Region ID]' />
+              </expression>
+            </clause>
+          </relation>
+        </relation>
       </connection>
       <column caption='Name' datatype='string' name='[NAME]' role='dimension' type='nominal' />
       <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />
@@ -28,10 +39,28 @@
       <column caption='Sales Scaled' datatype='real' name='[Calculation_2]' role='measure' type='quantitative'>
         <calculation class='tableau' formula='SUM([SALES])*100' />
       </column>
+      <column caption='cities.csv' datatype='table' name='[__tableau_internal_object_id__].[cities.csv_ABC123]' role='measure' type='quantitative' />
+      <column caption='City Point' datatype='spatial' name='[Calculation_3]' role='measure' type='nominal'>
+        <calculation class='tableau' formula='MAKEPOINT([LAT],[LON])' />
+      </column>
       <column-instance column='[NAME]' derivation='None' name='[none:NAME:nk]' pivot='key' type='nominal' />
       <column-instance column='[SALES]' derivation='Sum' name='[sum:SALES:qk]' pivot='key' type='quantitative' />
       <column-instance column='[Calculation_1]' derivation='None' name='[none:Calculation_1:nk]' pivot='key' type='nominal' />
       <column-instance column='[Calculation_2]' derivation='Sum' name='[sum:Calculation_2:qk]' pivot='key' type='quantitative' />
+      <metadata-records>
+        <metadata-record class='column'>
+          <remote-name>NAME</remote-name>
+          <local-name>[NAME]</local-name>
+          <local-type>string</local-type>
+          <aggregation>Count</aggregation>
+        </metadata-record>
+        <metadata-record class='column'>
+          <remote-name>Region Code</remote-name>
+          <local-name>[Region Code]</local-name>
+          <local-type>integer</local-type>
+          <aggregation>Sum</aggregation>
+        </metadata-record>
+      </metadata-records>
       <extract count='-1' enabled='true' units='records'>
         <connection class='hyper' dbname='Data/test.twb Files/federated.hyper' />
       </extract>
@@ -61,15 +90,21 @@
               <groupfilter function='member' level='[none:Calculation_1:nk]' member='%null%' />
             </groupfilter>
           </filter>
+          <filter class='relative-date' column='[federated.testds1].[none:NAME:nk]'>
+            <groupfilter function='member' level='[none:NAME:nk]' member='%all%' />
+          </filter>
         </view>
         <panes>
           <pane>
             <mark class='Circle' />
             <encodings>
               <color column='[federated.testds1].[sum:SALES:qk]' />
+              <lod column='[federated.testds1].[none:NAME:nk]' />
+              <tooltip column='[federated.testds1].[sum:Calculation_2:qk]' />
             </encodings>
             <reference-line axis-column='[federated.testds1].[sum:SALES:qk]' formula='constant' id='refline0' label='Min' scope='per-table' value='0.0' />
             <reference-line axis-column='[federated.testds1].[sum:SALES:qk]' formula='constant' id='refline1' label='Max' scope='per-table' value='100.0' />
+            <reference-line axis-column='[federated.testds1].[sum:SALES:qk]' formula='total' id='refline2' label='Total' scope='per-pane' />
           </pane>
         </panes>
         <rows>[federated.testds1].[sum:SALES:qk]</rows>
@@ -121,5 +156,22 @@
         </zone>
       </zones>
     </dashboard>
+    <dashboard name='floating'>
+      <size sizing-mode='automatic' />
+      <zones>
+        <zone h='6000' id='10' param='[Parameters].[Parameter 1]' type='paramctrl' w='30000' x='0' y='0' />
+        <zone h='50000' id='11' name='Sales Gauge' w='100000' x='0' y='6000' />
+        <zone h='10000' id='12' type='bitmap' w='20000' x='0' y='56000' />
+      </zones>
+    </dashboard>
   </dashboards>
+  <actions>
+    <action caption='Filter Cities' name='[Action1]'>
+      <activation type='on-select' />
+      <source dashboard='main' type='sheet' worksheet='Sales Gauge' />
+      <command command='tsc:filter'>
+        <param name='target' value='main' />
+      </command>
+    </action>
+  </actions>
 </workbook>

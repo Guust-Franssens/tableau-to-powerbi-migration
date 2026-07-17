@@ -1,0 +1,112 @@
+/// Commission calculator fact (43 rows, 41 managers). Primary table of the single migrated 'Sales Planning' worksheet.
+table 'Sales Planning'
+
+	/// Tableau 'Achievement (estimated)' = [Sales Total]; per-person Total Sales.
+	measure 'Achievement (estimated)' = SUM('Sales Planning'[Sales])
+		formatString: "$"#,##0
+		displayFolder: Compensation
+
+	/// Tableau 'Avg. Sales per Person' = SUM(Sales Total)/COUNTD(Manager Name).
+	measure 'Avg. Sales per Person' = DIVIDE(SUM('Sales Planning'[Sales]), DISTINCTCOUNT('Sales Planning'[Sales Person]))
+		formatString: "$"#,##0
+		displayFolder: Compensation
+
+	/// Tableau 'Commission (Variable)' = (Commission Rate * Sales Total)/100.
+	measure 'Commission (Variable)' = DIVIDE([Commission Rate Value] * SUM('Sales Planning'[Sales]), 100)
+		formatString: "$"#,##0
+		displayFolder: Compensation
+
+	/// Tableau 'OTE (Variable)' = Base Salary + (Commission Rate*New Quota)/100.
+	measure 'OTE (Variable)' = [Base Salary Value] + DIVIDE([Commission Rate Value] * [New Quota Value], 100)
+		formatString: "$"#,##0
+		displayFolder: Compensation
+
+	/// Tableau 'Total Compensation' = Base Salary (const) + Commission (Variable).
+	measure 'Total Compensation' = [Base Salary Value] + [Commission (Variable)]
+		formatString: "$"#,##0
+		displayFolder: Compensation
+
+	/// Tableau '% of quota achieved' = AVG(Achievement)/New Quota param.
+	measure '% of quota achieved' = DIVIDE(AVERAGE('Sales Planning'[Sales]), [New Quota Value])
+		formatString: 0.0%
+		displayFolder: Quota Attainment
+
+	/// Tableau 'Achieved Quota' band by SUM(Achievement) vs New Quota thresholds.
+	measure 'Achieved Quota' = SWITCH(TRUE(), SUM('Sales Planning'[Sales]) >= [New Quota Value], "100% +", SUM('Sales Planning'[Sales]) >= 0.75 * [New Quota Value], "75-100%", SUM('Sales Planning'[Sales]) >= 0.5 * [New Quota Value], "50-75%", "Below 50%")
+		displayFolder: Quota Attainment
+
+	/// Tableau 'Quota' hardcoded constant 275000 (not consumed by the migrated worksheet).
+	measure Quota = 275000
+		formatString: "$"#,##0
+		displayFolder: Quota Attainment
+
+	/// Tableau 'Sort by field' sort key driven by the 'Sort by' slicer.
+	measure 'Sort by field' = IF([Sort By Selection] = "Names", 0, IF([Sort By Selection] = "% Quota Descending", -[% of quota achieved], [% of quota achieved]))
+		formatString: #,##0.00
+		displayFolder: Sort & Layout
+
+	/// Tableau 'Rank over 3' = ROUND(INDEX()/3-0.6,0)+1. INDEX() is positional/sort-dependent; APPROXIMATED via RANKX by Sales desc. HIGH-SEVERITY table-calc gap.
+	measure 'Rank over 3' = ROUND(DIVIDE(RANKX(ALLSELECTED('Sales Planning'[Sales Person]), CALCULATE(SUM('Sales Planning'[Sales])), , DESC, DENSE), 3) - 0.6, 0) + 1
+		formatString: #,##0
+		displayFolder: Sort & Layout
+
+	/// Tableau auto 'Number of Records' (=1 per row); row count.
+	measure 'Number of Records' = COUNTROWS('Sales Planning')
+		formatString: #,##0
+		displayFolder: General
+		isHidden
+
+	/// Tableau 'Estimate Compensation label' static text.
+	measure 'Estimate Compensation label' = "Estimated Compensation:"
+		displayFolder: Labels
+
+	/// Tableau 'Total Sales label' static text.
+	measure 'Total Sales label' = "Total Sales:"
+		displayFolder: Labels
+
+	/// Tableau 'Region' (internal [Call Center]): Central / East / West.
+	column Region
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Call Center
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Sales Person' (internal [Manager Name]).
+	column 'Sales Person'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Manager Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// All rows 2002-01-01 in source extract.
+	column 'Order Date'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: Order Date
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Sales' (internal [Sales Total]); hidden, surfaced via measures.
+	column Sales
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Sales Total
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Sales Planning' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "ds.sales_planning.csv"),[Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Call Center", type text}, {"Manager Name", type text}, {"Order Date", type datetime}, {"Sales Total", type number}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "3d4dcd6fc8845fa8dfc0",
+  "position": {
+    "x": 14,
+    "y": 78,
+    "z": 1,
+    "width": 1044,
+    "height": 26,
+    "tabOrder": 1
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "■ ",
+                    "textStyle": {
+                      "fontFamily": "'Segoe UI', helvetica, arial, sans-serif",
+                      "fontSize": "13px",
+                      "color": "#D86372"
+                    }
+                  },
+                  {
+                    "value": "Rocket Ship      ",
+                    "textStyle": {
+                      "fontFamily": "'Segoe UI', helvetica, arial, sans-serif",
+                      "fontSize": "11px",
+                      "color": "#4F4F4F"
+                    }
+                  },
+                  {
+                    "value": "■ ",
+                    "textStyle": {
+                      "fontFamily": "'Segoe UI', helvetica, arial, sans-serif",
+                      "fontSize": "13px",
+                      "color": "#F1B26B"
+                    }
+                  },
+                  {
+                    "value": "Hot Company      ",
+                    "textStyle": {
+                      "fontFamily": "'Segoe UI', helvetica, arial, sans-serif",
+                      "fontSize": "11px",
+                      "color": "#4F4F4F"
+                    }
+                  },
+                  {
+                    "value": "■ ",
+                    "textStyle": {
+                      "fontFamily": "'Segoe UI', helvetica, arial, sans-serif",
+                      "fontSize": "13px",
+                      "color": "#627CA4"
+                    }
+                  },
+                  {
+                    "value": "Slow Burner",
+                    "textStyle": {
+                      "fontFamily": "'Segoe UI', helvetica, arial, sans-serif",
+                      "fontSize": "11px",
+                      "color": "#4F4F4F"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "left"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "padding": [
+        {
+          "properties": {
+            "top": {
+              "expr": {
+                "Literal": {
+                  "Value": "0D"
+                }
+              }
+            },
+            "bottom": {
+              "expr": {
+                "Literal": {
+                  "Value": "0D"
+                }
+              }
+            },
+            "left": {
+              "expr": {
+                "Literal": {
+                  "Value": "2D"
+                }
+              }
+            },
+            "right": {
+              "expr": {
+                "Literal": {
+                  "Value": "2D"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

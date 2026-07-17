@@ -1,0 +1,5228 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "superstore-sales-performance.twbx",
+    "tableau_version": "10.3",
+    "source_build": "2023.1.0 (20231.23.0417.1258)",
+    "repository_location_id": "VGContest_SuperSampleSuperstore_RyanSleeper",
+    "parsed_at": "2026-07-16T12:40:59.671622+00:00"
+  },
+  "parameters": [
+    {
+      "id": "param.insight_2",
+      "internal_name": "[Insight 1 (copy)]",
+      "caption": "Insight 2",
+      "data_type": "string",
+      "domain_type": "any",
+      "allowed_values": [],
+      "current_value": "Let's keep an eye on days to ship as it was up slightly in three of four regions. Standard Class shipping appears to be the culprit."
+    },
+    {
+      "id": "param.insight_2_indicator",
+      "internal_name": "[Insight 1 Indicator (copy)]",
+      "caption": "Insight 2 Indicator",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Positive",
+        "Neutral",
+        "Negative"
+      ],
+      "current_value": "Neutral"
+    },
+    {
+      "id": "param.insight_3",
+      "internal_name": "[Insight 2 (copy)]",
+      "caption": "Insight 3",
+      "data_type": "string",
+      "domain_type": "any",
+      "allowed_values": [],
+      "current_value": "Profit ratio was down in the East driven by a -134% profit ratio in Machines; this needs to be addressed immediately."
+    },
+    {
+      "id": "param.insight_3_indicator",
+      "internal_name": "[Insight 2 Indicator (copy)]",
+      "caption": "Insight 3 Indicator",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Positive",
+        "Neutral",
+        "Negative"
+      ],
+      "current_value": "Negative"
+    },
+    {
+      "id": "param.insight_1_indicator",
+      "internal_name": "[Parameter 10]",
+      "caption": "Insight 1 Indicator",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Positive",
+        "Neutral",
+        "Negative"
+      ],
+      "current_value": "Positive"
+    },
+    {
+      "id": "param.region_parameter",
+      "internal_name": "[Parameter 3]",
+      "caption": "Region Parameter",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "US",
+        "Central",
+        "East",
+        "South",
+        "West"
+      ],
+      "current_value": "East"
+    },
+    {
+      "id": "param.minimum_date",
+      "internal_name": "[Parameter 4]",
+      "caption": "Minimum Date",
+      "data_type": "date",
+      "domain_type": "any",
+      "allowed_values": [],
+      "current_value": "#2016-09-01#"
+    },
+    {
+      "id": "param.date_granularity",
+      "internal_name": "[Parameter 5]",
+      "caption": "Date Granularity",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Week",
+        "Month",
+        "Quarter",
+        "Year"
+      ],
+      "current_value": "Month"
+    },
+    {
+      "id": "param.date_comparison",
+      "internal_name": "[Parameter 6]",
+      "caption": "Date Comparison",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Prior Period",
+        "Prior Year"
+      ],
+      "current_value": "Prior Period"
+    },
+    {
+      "id": "param.y_axis",
+      "internal_name": "[Parameter 7]",
+      "caption": "Y-Axis",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Days to Ship",
+        "Discount",
+        "Profit",
+        "Profit Ratio",
+        "Quantity",
+        "Returns",
+        "Sales"
+      ],
+      "current_value": "Sales"
+    },
+    {
+      "id": "param.scatter_plot_detail",
+      "internal_name": "[Parameter 8]",
+      "caption": "Scatter Plot Detail",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Segment",
+        "Ship Mode",
+        "Customer Name",
+        "Category",
+        "Sub-Category",
+        "Product Name"
+      ],
+      "current_value": "Sub-Category"
+    },
+    {
+      "id": "param.insight_1",
+      "internal_name": "[Parameter 9]",
+      "caption": "Insight 1",
+      "data_type": "string",
+      "domain_type": "any",
+      "allowed_values": [],
+      "current_value": "Sales are up on average nationwide across all three of our product categories. How can we improve profitablility of Furniture?"
+    },
+    {
+      "id": "param.maximum_date",
+      "internal_name": "[Start Date (copy)]",
+      "caption": "Maximum Date",
+      "data_type": "date",
+      "domain_type": "any",
+      "allowed_values": [],
+      "current_value": "#2017-03-31#"
+    },
+    {
+      "id": "param.map_kpi",
+      "internal_name": "[Y-Axis (copy 2)]",
+      "caption": "Map KPI",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Days to Ship",
+        "Discount",
+        "Profit",
+        "Profit Ratio",
+        "Quantity",
+        "Returns",
+        "Sales"
+      ],
+      "current_value": "Sales"
+    },
+    {
+      "id": "param.x_axis",
+      "internal_name": "[Y-Axis (copy)]",
+      "caption": "X-Axis",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Days to Ship",
+        "Discount",
+        "Profit",
+        "Profit Ratio",
+        "Quantity",
+        "Returns",
+        "Sales"
+      ],
+      "current_value": "Discount"
+    }
+  ],
+  "data_sources": [
+    {
+      "id": "ds.sample_superstore",
+      "caption": "Sample - Superstore",
+      "internal_name": "Sample - Superstore",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/Sample _ Superstore.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.table",
+          "name": "table",
+          "source_relation": "join",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sample_superstore__click_to_highlight_us",
+          "internal_name": "[CLICK TO HIGHLIGHT (copy)]",
+          "caption": "CLICK TO HIGHLIGHT (US)",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Parameters].[Parameter 3] = \"US\" THEN \"CLICK TO HIGHLIGHT\"\r\nELSE NULL\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__pp_days_to_ship",
+          "internal_name": "[CP Days To Ship (copy)]",
+          "caption": "PP Days To Ship",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "AVG(IF [Calculation_200128753923641349] = True THEN [Calculation_633318743171944449] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_pp",
+            "fld.ds_sample_superstore__days_to_ship"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pp_discount",
+          "internal_name": "[CP Discount (copy 2)]",
+          "caption": "PP Discount",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "AVG(IF [Calculation_200128753923641349] = True THEN [Discount] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_pp",
+            "fld.ds_sample_superstore__discount"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__cp_days_to_ship",
+          "internal_name": "[CP Discount (copy)]",
+          "caption": "CP Days To Ship",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "AVG(IF [Calculation_200128753923452932] = True THEN [Calculation_633318743171944449] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_cp",
+            "fld.ds_sample_superstore__days_to_ship"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pp_profit",
+          "internal_name": "[CP Profit (copy 2)]",
+          "caption": "PP Profit",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM(IF [Calculation_200128753923641349] = True THEN [Profit] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_pp",
+            "fld.ds_sample_superstore__profit"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__cp_quantity",
+          "internal_name": "[CP Profit (copy)]",
+          "caption": "CP Quantity",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM(IF [Calculation_200128753923452932] = True THEN [Quantity] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_cp",
+            "fld.ds_sample_superstore__quantity"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pp_profit_ratio",
+          "internal_name": "[CP Profit Ratio (copy)]",
+          "caption": "PP Profit Ratio",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[CP Profit (copy 2)]/[CP Sales (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__pp_profit",
+            "fld.ds_sample_superstore__pp_sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pp_quantity",
+          "internal_name": "[CP Quantity (copy)]",
+          "caption": "PP Quantity",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM(IF [Calculation_200128753923641349] = True THEN [Quantity] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_pp",
+            "fld.ds_sample_superstore__quantity"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pp_returns",
+          "internal_name": "[CP Returns (copy)]",
+          "caption": "PP Returns",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "COUNTD(IF [Calculation_200128753923641349] = True AND [Returned] = \"Yes\" THEN [Order ID] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_pp"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__cp_discount",
+          "internal_name": "[CP Sales (copy 2)]",
+          "caption": "CP Discount",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "AVG(IF [Calculation_200128753923452932] = True THEN [Discount] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_cp",
+            "fld.ds_sample_superstore__discount"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__cp_profit",
+          "internal_name": "[CP Sales (copy 3)]",
+          "caption": "CP Profit",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM(IF [Calculation_200128753923452932] = True THEN [Profit] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_cp",
+            "fld.ds_sample_superstore__profit"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__cp_returns",
+          "internal_name": "[CP Sales (copy 4)]",
+          "caption": "CP Returns",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "COUNTD(IF [Calculation_200128753923452932] = True AND [Returned] = \"Yes\" THEN [Order ID] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_cp"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pp_sales",
+          "internal_name": "[CP Sales (copy)]",
+          "caption": "PP Sales",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM(IF [Calculation_200128753923641349] = True THEN [Sales] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_pp",
+            "fld.ds_sample_superstore__sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__filtered_state",
+          "internal_name": "[Calculation_1170935953892237312]",
+          "caption": "Filtered State",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Calculation_200128753908195328] THEN [State]\r\nELSE NULL\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__region_region_parameter",
+            "fld.ds_sample_superstore__state"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__region_region_parameter",
+          "internal_name": "[Calculation_200128753908195328]",
+          "caption": "Region = Region Parameter",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Region] = [Parameters].[Parameter 3]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__region"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__us_map_color",
+          "internal_name": "[Calculation_200128753909805057]",
+          "caption": "US Map Color",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 3]\r\nWHEN \"US\" THEN \"US\"\r\nELSE \"NULL\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__order_date_2017",
+          "internal_name": "[Calculation_200128753919090690]",
+          "caption": "Order Date 2017",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Order Date]+365",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__days_in_range",
+          "internal_name": "[Calculation_200128753922646019]",
+          "caption": "Days in Range",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATEDIFF('day',[Parameters].[Parameter 4],[Parameters].[Start Date (copy)])+1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__date_filter_cp",
+          "internal_name": "[Calculation_200128753923452932]",
+          "caption": "Date Filter CP",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_200128753919090690] >= [Parameters].[Parameter 4] AND [Calculation_200128753919090690] <= [Parameters].[Start Date (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__order_date_2017"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__date_filter_pp",
+          "internal_name": "[Calculation_200128753923641349]",
+          "caption": "Date Filter PP",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_200128753919090690] >= [Parameters].[Parameter 4] - [Calculation_200128753924255750]\r\nAND [Calculation_200128753919090690] <= [Parameters].[Start Date (copy)] - [Calculation_200128753924255750]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_comparison",
+            "fld.ds_sample_superstore__order_date_2017"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__date_comparison",
+          "internal_name": "[Calculation_200128753924255750]",
+          "caption": "Date Comparison",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 6]\r\nWHEN \"Prior Period\" THEN [Calculation_200128753922646019]\r\nWHEN \"Prior Year\" THEN 365\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__days_in_range"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__date_equalizer",
+          "internal_name": "[Calculation_200128753924587527]",
+          "caption": "Date Equalizer",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Calculation_200128753923452932] = True THEN [Calculation_200128753919090690]\r\nELSEIF [Calculation_200128753923641349] = True THEN [Calculation_200128753919090690] + [Calculation_200128753924255750]\r\nELSE NULL\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_comparison",
+            "fld.ds_sample_superstore__date_filter_cp",
+            "fld.ds_sample_superstore__date_filter_pp",
+            "fld.ds_sample_superstore__order_date_2017"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__cp_sales",
+          "internal_name": "[Calculation_200128753924792328]",
+          "caption": "CP Sales",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM(IF [Calculation_200128753923452932] = True THEN [Sales] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_filter_cp",
+            "fld.ds_sample_superstore__sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__cp_profit_ratio",
+          "internal_name": "[Calculation_408983187798249472]",
+          "caption": "CP Profit Ratio",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[CP Sales (copy 3)]/[Calculation_200128753924792328]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_profit",
+            "fld.ds_sample_superstore__cp_sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__profit_ratio",
+          "internal_name": "[Calculation_5571209093911105]",
+          "caption": "Profit Ratio",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM([Profit])/SUM([Sales])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__profit",
+            "fld.ds_sample_superstore__sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__days_to_ship",
+          "internal_name": "[Calculation_633318743171944449]",
+          "caption": "Days to Ship",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Ship Date]-[Order Date]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__returns",
+          "internal_name": "[Calculation_633318743176151042]",
+          "caption": "Returns",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "COUNTD(IF [Returned] = \"Yes\" THEN [Order ID] END)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__y_axis",
+          "internal_name": "[Calculation_633318743176773635]",
+          "caption": "Y-Axis",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 7]\r\nWHEN \"Sales\" THEN [Calculation_200128753924792328]\r\nWHEN \"Profit\" THEN [CP Sales (copy 3)]\r\nWHEN \"Quantity\" THEN [CP Profit (copy)]\r\nWHEN \"Discount\" THEN [CP Sales (copy 2)]*100\r\nWHEN \"Returns\" THEN [CP Sales (copy 4)]\r\nWHEN \"Days to Ship\" THEN [CP Discount (copy)]\r\nWHEN \"Profit Ratio\" THEN [Calculation_408983187798249472]*100\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_days_to_ship",
+            "fld.ds_sample_superstore__cp_discount",
+            "fld.ds_sample_superstore__cp_profit",
+            "fld.ds_sample_superstore__cp_profit_ratio",
+            "fld.ds_sample_superstore__cp_quantity",
+            "fld.ds_sample_superstore__cp_returns",
+            "fld.ds_sample_superstore__cp_sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__scatter_plot_breakdown",
+          "internal_name": "[Calculation_633318743177879556]",
+          "caption": "Scatter Plot Breakdown",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 8]\r\nWHEN \"Segment\" THEN [Segment]\r\nWHEN \"Ship Mode\" THEN [Ship Mode]\r\nWHEN \"Customer Name\" THEN [Customer Name]\r\nWHEN \"Category\" THEN [Category]\r\nWHEN \"Sub-Category\" THEN [Sub-Category]\r\nWHEN \"Product Name\" THEN [Product Name]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__customer_name",
+            "fld.ds_sample_superstore__product_name"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__map_kpi_difference_0",
+          "internal_name": "[Calculation_633318743180435461]",
+          "caption": "Map KPI Difference >= 0",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Map KPI (copy)] >= 0",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__map_kpi_difference"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__x_axis_label",
+          "internal_name": "[Calculation_633318743183020038]",
+          "caption": "X-Axis Label",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "UPPER([Parameters].[Y-Axis (copy)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__x_axis"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__blank",
+          "internal_name": "[Calculation_633318743183515655]",
+          "caption": "Blank",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__sales_difference",
+          "internal_name": "[Calculation_705094862170877952]",
+          "caption": "Sales Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_200128753924792328]-[CP Sales (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_sales",
+            "fld.ds_sample_superstore__pp_sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__region_filter",
+          "internal_name": "[Calculation_705094862173495298]",
+          "caption": "Region Filter",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 3] = \"US\" OR [Parameters].[Parameter 3] = [Region]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__region"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__region_abbreviation",
+          "internal_name": "[Calculation_705094862177599491]",
+          "caption": "Region Abbreviation",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "LEFT([Region],1)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__region"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__date_equalizer_with_granularity",
+          "internal_name": "[Calculation_964614790693441536]",
+          "caption": "Date Equalizer with Granularity",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATE(CASE [Parameters].[Parameter 5]\r\nWHEN \"Week\" THEN DATETRUNC('week',[Calculation_200128753924587527])\r\nWHEN \"Month\" THEN DATETRUNC('month',[Calculation_200128753924587527])\r\nWHEN \"Quarter\" THEN DATETRUNC('quarter',[Calculation_200128753924587527])\r\nWHEN \"Year\" THEN DATETRUNC('year',[Calculation_200128753924587527])\r\nEND)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__date_equalizer"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__city",
+          "internal_name": "[City]",
+          "caption": "City",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__country",
+          "internal_name": "[Country]",
+          "caption": "Country",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__customer_id",
+          "internal_name": "[Customer ID]",
+          "caption": "Customer ID",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__customer_name",
+          "internal_name": "[Customer Name]",
+          "caption": "Customer Name",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__discount",
+          "internal_name": "[Discount]",
+          "caption": "Discount",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__filtered_state_us",
+          "internal_name": "[Filtered State (copy 2)]",
+          "caption": "Filtered State (US)",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Parameters].[Parameter 3] = \"US\" THEN [State]\r\nELSE NULL\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__state"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__click_to_highlight",
+          "internal_name": "[Filtered State (copy)]",
+          "caption": "CLICK TO HIGHLIGHT",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Calculation_200128753908195328] THEN \"CLICK TO HIGHLIGHT\"\r\nELSE NULL\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__region_region_parameter"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__map_kpi_prefix",
+          "internal_name": "[Map KPI (copy 2)]",
+          "caption": "Map KPI Prefix",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Y-Axis (copy 2)]\r\nWHEN \"Sales\" THEN \"$\"\r\nWHEN \"Profit\" THEN \"$\"\r\nWHEN \"Quantity\" THEN \"\"\r\nWHEN \"Discount\" THEN \"\"\r\nWHEN \"Returns\" THEN \"\"\r\nWHEN \"Days to Ship\" THEN \"\"\r\nWHEN \"Profit Ratio\" THEN \"\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__y_axis_prefix"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__map_kpi_difference",
+          "internal_name": "[Map KPI (copy)]",
+          "caption": "Map KPI Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Y-Axis (copy 2)]\r\nWHEN \"Sales\" THEN [Calculation_705094862170877952]\r\nWHEN \"Profit\" THEN [Sales Difference (copy 3)]\r\nWHEN \"Quantity\" THEN [Profit Difference (copy)]\r\nWHEN \"Discount\" THEN -[Profit Difference (copy 2)]\r\nWHEN \"Returns\" THEN -[Profit Difference (copy 3)]\r\nWHEN \"Days to Ship\" THEN -[Sales Difference (copy)]\r\nWHEN \"Profit Ratio\" THEN [Sales Difference (copy 2)]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__days_to_ship_difference",
+            "fld.ds_sample_superstore__discount_difference",
+            "fld.ds_sample_superstore__profit_difference",
+            "fld.ds_sample_superstore__profit_ratio_difference",
+            "fld.ds_sample_superstore__quantity_difference",
+            "fld.ds_sample_superstore__returns_difference",
+            "fld.ds_sample_superstore__sales_difference",
+            "fld.ds_sample_superstore__y_axis_prefix"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__map_kpi_suffix",
+          "internal_name": "[Map KPI Prefix (copy)]",
+          "caption": "Map KPI Suffix",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Y-Axis (copy 2)]\r\nWHEN \"Sales\" THEN \"\"\r\nWHEN \"Profit\" THEN \"\"\r\nWHEN \"Quantity\" THEN \"\"\r\nWHEN \"Discount\" THEN \"%\"\r\nWHEN \"Returns\" THEN \"\"\r\nWHEN \"Days to Ship\" THEN \"\"\r\nWHEN \"Profit Ratio\" THEN \"%\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__y_axis_prefix"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__order_id_returns",
+          "internal_name": "[Order ID (Returns)]",
+          "caption": "Order ID (Returns)",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__postal_code",
+          "internal_name": "[Postal Code]",
+          "caption": "Postal Code",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__product_id",
+          "internal_name": "[Product ID]",
+          "caption": "Product ID",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__manufacturer",
+          "internal_name": "[Product Name (group)]",
+          "caption": "Manufacturer",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__product_name",
+          "internal_name": "[Product Name]",
+          "caption": "Product Name",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__profit_bin",
+          "internal_name": "[Profit (bin)]",
+          "caption": "Profit (bin)",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Profit]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__profit"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__discount_difference",
+          "internal_name": "[Profit Difference (copy 2)]",
+          "caption": "Discount Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[CP Sales (copy 2)]-[CP Discount (copy 2)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_discount",
+            "fld.ds_sample_superstore__pp_discount"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__returns_difference",
+          "internal_name": "[Profit Difference (copy 3)]",
+          "caption": "Returns Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[CP Sales (copy 4)]-[CP Returns (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_returns",
+            "fld.ds_sample_superstore__pp_returns"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__quantity_difference",
+          "internal_name": "[Profit Difference (copy)]",
+          "caption": "Quantity Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[CP Profit (copy)]-[CP Quantity (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_quantity",
+            "fld.ds_sample_superstore__pp_quantity"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__profit",
+          "internal_name": "[Profit]",
+          "caption": "Profit",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__quantity",
+          "internal_name": "[Quantity]",
+          "caption": "Quantity",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__region",
+          "internal_name": "[Region]",
+          "caption": "Region",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__row_id",
+          "internal_name": "[Row ID]",
+          "caption": "Row ID",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__profit_ratio_difference",
+          "internal_name": "[Sales Difference (copy 2)]",
+          "caption": "Profit Ratio Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "([Calculation_408983187798249472]-[CP Profit Ratio (copy)])*100",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_profit_ratio",
+            "fld.ds_sample_superstore__pp_profit_ratio"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__profit_difference",
+          "internal_name": "[Sales Difference (copy 3)]",
+          "caption": "Profit Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[CP Sales (copy 3)]-[CP Profit (copy 2)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_profit",
+            "fld.ds_sample_superstore__pp_profit"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__days_to_ship_difference",
+          "internal_name": "[Sales Difference (copy)]",
+          "caption": "Days to Ship Difference",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[CP Discount (copy)]-[CP Days To Ship (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_days_to_ship",
+            "fld.ds_sample_superstore__pp_days_to_ship"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__sales",
+          "internal_name": "[Sales]",
+          "caption": "Sales",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__state",
+          "internal_name": "[State]",
+          "caption": "State",
+          "table_id": "tbl.table",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__map_kpi",
+          "internal_name": "[X-Axis (copy)]",
+          "caption": "Map KPI",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Y-Axis (copy 2)]\r\nWHEN \"Sales\" THEN [Calculation_200128753924792328]\r\nWHEN \"Profit\" THEN [CP Sales (copy 3)]\r\nWHEN \"Quantity\" THEN [CP Profit (copy)]\r\nWHEN \"Discount\" THEN [CP Sales (copy 2)]*100\r\nWHEN \"Returns\" THEN [CP Sales (copy 4)]\r\nWHEN \"Days to Ship\" THEN [CP Discount (copy)]\r\nWHEN \"Profit Ratio\" THEN [Calculation_408983187798249472]*100\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_days_to_ship",
+            "fld.ds_sample_superstore__cp_discount",
+            "fld.ds_sample_superstore__cp_profit",
+            "fld.ds_sample_superstore__cp_profit_ratio",
+            "fld.ds_sample_superstore__cp_quantity",
+            "fld.ds_sample_superstore__cp_returns",
+            "fld.ds_sample_superstore__cp_sales",
+            "fld.ds_sample_superstore__y_axis_prefix"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__y_axis_label",
+          "internal_name": "[X-Axis Label (copy)]",
+          "caption": "Y-Axis Label",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "UPPER([Parameters].[Parameter 7])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__y_axis_prefix",
+          "internal_name": "[Y-Axis (copy 2)]",
+          "caption": "Y-Axis Prefix",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 7]\r\nWHEN \"Sales\" THEN \"$\"\r\nWHEN \"Profit\" THEN \"$\"\r\nWHEN \"Quantity\" THEN \"\"\r\nWHEN \"Discount\" THEN \"\"\r\nWHEN \"Returns\" THEN \"\"\r\nWHEN \"Days to Ship\" THEN \"\"\r\nWHEN \"Profit Ratio\" THEN \"\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__x_axis",
+          "internal_name": "[Y-Axis (copy)]",
+          "caption": "X-Axis",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Y-Axis (copy)]\r\nWHEN \"Sales\" THEN [Calculation_200128753924792328]\r\nWHEN \"Profit\" THEN [CP Sales (copy 3)]\r\nWHEN \"Quantity\" THEN [CP Profit (copy)]\r\nWHEN \"Discount\" THEN [CP Sales (copy 2)]*100\r\nWHEN \"Returns\" THEN [CP Sales (copy 4)]\r\nWHEN \"Days to Ship\" THEN [CP Discount (copy)]\r\nWHEN \"Profit Ratio\" THEN [Calculation_408983187798249472]*100\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__cp_days_to_ship",
+            "fld.ds_sample_superstore__cp_discount",
+            "fld.ds_sample_superstore__cp_profit",
+            "fld.ds_sample_superstore__cp_profit_ratio",
+            "fld.ds_sample_superstore__cp_quantity",
+            "fld.ds_sample_superstore__cp_returns",
+            "fld.ds_sample_superstore__cp_sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__y_axis_suffix",
+          "internal_name": "[Y-Axis Prefix (copy 2)]",
+          "caption": "Y-Axis Suffix",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 7]\r\nWHEN \"Sales\" THEN \"\"\r\nWHEN \"Profit\" THEN \"\"\r\nWHEN \"Quantity\" THEN \"\"\r\nWHEN \"Discount\" THEN \"%\"\r\nWHEN \"Returns\" THEN \"\"\r\nWHEN \"Days to Ship\" THEN \"\"\r\nWHEN \"Profit Ratio\" THEN \"%\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__x_axis_prefix",
+          "internal_name": "[Y-Axis Prefix (copy)]",
+          "caption": "X-Axis Prefix",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Y-Axis (copy)]\r\nWHEN \"Sales\" THEN \"$\"\r\nWHEN \"Profit\" THEN \"$\"\r\nWHEN \"Quantity\" THEN \"\"\r\nWHEN \"Discount\" THEN \"\"\r\nWHEN \"Returns\" THEN \"\"\r\nWHEN \"Days to Ship\" THEN \"\"\r\nWHEN \"Profit Ratio\" THEN \"\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__x_axis"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__x_axis_suffix",
+          "internal_name": "[Y-Axis Suffix (copy)]",
+          "caption": "X-Axis Suffix",
+          "table_id": "tbl.table",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Y-Axis (copy)]\r\nWHEN \"Sales\" THEN \"\"\r\nWHEN \"Profit\" THEN \"\"\r\nWHEN \"Quantity\" THEN \"\"\r\nWHEN \"Discount\" THEN \"%\"\r\nWHEN \"Returns\" THEN \"\"\r\nWHEN \"Days to Ship\" THEN \"\"\r\nWHEN \"Profit Ratio\" THEN \"%\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__x_axis"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ds.toc_annotations",
+      "caption": "TOC & Annotations",
+      "internal_name": "federated.1yv3g051gjjnme1dofc3r1i85dld",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1yv3g051gjjnme1dofc3r1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1",
+          "name": "Sheet1",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_toc_annotations__annotations_value",
+          "internal_name": "[Annotations Value]",
+          "caption": "Annotations Value",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_toc_annotations__insight_1",
+          "internal_name": "[Calculation_1075515935722782720]",
+          "caption": "Insight 1",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 9]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_toc_annotations__insight_1_indicator",
+          "internal_name": "[Calculation_1075515935729479681]",
+          "caption": "Insight 1 Indicator",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 10]\r\nWHEN \"Positive\" THEN \"1\"\r\nWHEN \"Neutral\" THEN \"2\"\r\nWHEN \"Negative\" THEN \"3\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_toc_annotations__descriptive_value",
+          "internal_name": "[Descriptive Value]",
+          "caption": "Descriptive Value",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_toc_annotations__insight_2",
+          "internal_name": "[Insight 1 (copy)]",
+          "caption": "Insight 2",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Insight 1 (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_toc_annotations__insight_2_indicator",
+          "internal_name": "[Insight 1 Indicator (copy)]",
+          "caption": "Insight 2 Indicator",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Insight 1 Indicator (copy)]\r\nWHEN \"Positive\" THEN \"1\"\r\nWHEN \"Neutral\" THEN \"2\"\r\nWHEN \"Negative\" THEN \"3\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_toc_annotations__insight_3",
+          "internal_name": "[Insight 2 (copy)]",
+          "caption": "Insight 3",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Insight 2 (copy)]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_toc_annotations__insight_3_indicator",
+          "internal_name": "[Insight 2 Indicator (copy)]",
+          "caption": "Insight 3 Indicator",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Insight 2 Indicator (copy)]\r\nWHEN \"Positive\" THEN \"1\"\r\nWHEN \"Neutral\" THEN \"2\"\r\nWHEN \"Negative\" THEN \"3\"\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_toc_annotations__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_toc_annotations__predictive_value",
+          "internal_name": "[Predictive Value]",
+          "caption": "Predictive Value",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_toc_annotations__prescriptive_value",
+          "internal_name": "[Prescriptive Value]",
+          "caption": "Prescriptive Value",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.all_us_map",
+      "name": "All US Map",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Multipolygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__us_map_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__region",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "%null%"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[attr:Filtered State (copy 2):nk]>\n\n<[Sample - Superstore].[attr:CLICK TO HIGHLIGHT (copy):nk]>"
+    },
+    {
+      "id": "ws.annotations_button_active",
+      "name": "Annotations Button: Active",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Dashboard:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[none:Dashboard:nk]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"ANNOTATIONS\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Dashboard:\t<[federated.1yv3g051gjjnme1dofc3r1i85dld].[none:Dashboard:nk]>"
+    },
+    {
+      "id": "ws.annotations_button_inactive",
+      "name": "Annotations Button: Inactive",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Dashboard:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[none:Dashboard:nk]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"ANNOTATIONS\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Dashboard:\t<[federated.1yv3g051gjjnme1dofc3r1i85dld].[none:Dashboard:nk]>"
+    },
+    {
+      "id": "ws.central_map",
+      "name": "Central Map",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Multipolygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__region_region_parameter"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__region",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Central\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[attr:Calculation_1170935953892237312:nk]>Æ\n\n<[Sample - Superstore].[attr:Filtered State (copy):nk]>"
+    },
+    {
+      "id": "ws.days_to_ship_bullet",
+      "name": "Days to Ship Bullet",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_days_to_ship",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__days_to_ship_difference"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "average",
+          "value": null,
+          "scope": "per-pane"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[usr:CP Discount (copy):qk]> CURRENT PERIOD DAYS TO SHIP\n<[Sample - Superstore].[usr:CP Days To Ship (copy):qk]> PRIOR PERIOD DAYS TO SHIP\n_______________\n<[Sample - Superstore].[usr:Sales Difference (copy):qk]> DIFFERENCE"
+    },
+    {
+      "id": "ws.days_to_ship_difference",
+      "name": "Days to Ship Difference",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_days_to_ship"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "CP Sales:\t<[Sample - Superstore].[usr:CP Discount (copy):qk]>\nSales Difference:\t<[Sample - Superstore].[usr:Sales Difference (copy):qk]>"
+    },
+    {
+      "id": "ws.days_to_ship_region_comp",
+      "name": "Days to Ship Region Comp",
+      "title_text": "REGION COMPARISON",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_days_to_ship",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__region_region_parameter"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__region_abbreviation"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "average",
+          "value": null,
+          "scope": "per-pane"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:Region:nk]>\n<[Sample - Superstore].[usr:CP Discount (copy):qk]> CP Days to Ship"
+    },
+    {
+      "id": "ws.days_to_ship_trend",
+      "name": "Days to Ship Trend",
+      "title_text": "TREND",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Multiple Values",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__date_equalizer_with_granularity",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[:Measure Names]"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[:Measure Names]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"[Sample - Superstore].[usr:CP Discount (copy):qk]\"",
+            "\"[Sample - Superstore].[usr:CP Days To Ship (copy):qk]\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": {
+        "axis": "rows",
+        "pivoted_field_ids": [
+          "fld.ds_sample_superstore__cp_days_to_ship",
+          "fld.ds_sample_superstore__pp_days_to_ship"
+        ],
+        "note": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column."
+      },
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:Calculation_964614790693441536:qk]>\n<[Sample - Superstore].[Multiple Values]>Æ <[Sample - Superstore].[:Measure Names]>"
+    },
+    {
+      "id": "ws.descriptive_button_active",
+      "name": "Descriptive Button: Active",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Dashboard:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[none:Dashboard:nk]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"DESCRIPTIVE\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Dashboard:\t<[federated.1yv3g051gjjnme1dofc3r1i85dld].[none:Dashboard:nk]>"
+    },
+    {
+      "id": "ws.descriptive_button_inactive",
+      "name": "Descriptive Button: Inactive",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Dashboard:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[none:Dashboard:nk]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"DESCRIPTIVE\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Dashboard:\t<[federated.1yv3g051gjjnme1dofc3r1i85dld].[none:Dashboard:nk]>"
+    },
+    {
+      "id": "ws.east_map",
+      "name": "East Map",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Multipolygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__region_region_parameter"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__region",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"East\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[attr:Calculation_1170935953892237312:nk]>\n\n<[Sample - Superstore].[attr:Filtered State (copy):nk]>"
+    },
+    {
+      "id": "ws.insight_1",
+      "name": "Insight 1",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_toc_annotations__insight_1"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Insight 1:\t<[federated.1yv3g051gjjnme1dofc3r1i85dld].[none:Calculation_1075515935722782720:nk]>"
+    },
+    {
+      "id": "ws.insight_1_indicator",
+      "name": "Insight 1 Indicator",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_toc_annotations__insight_1_indicator"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_toc_annotations__insight_1_indicator"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.insight_2",
+      "name": "Insight 2",
+      "title_text": "Enter Insight 2",
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_toc_annotations__insight_2"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.insight_3",
+      "name": "Insight 3",
+      "title_text": "Enter Insight 2",
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_toc_annotations__insight_3"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.insight_indicator_2",
+      "name": "Insight Indicator 2",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_toc_annotations__insight_2_indicator"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_toc_annotations__insight_2_indicator"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.insight_indicator_3",
+      "name": "Insight Indicator 3",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_toc_annotations__insight_3_indicator"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_toc_annotations__insight_3_indicator"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.prescriptive_button_active",
+      "name": "Prescriptive Button: Active",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Dashboard:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Insight 2 Indicator)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[none:Dashboard:nk]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"PRESCRIPTIVE\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Dashboard:\t<[federated.1yv3g051gjjnme1dofc3r1i85dld].[none:Dashboard:nk]>"
+    },
+    {
+      "id": "ws.prescriptive_button_inactive",
+      "name": "Prescriptive Button: Inactive",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1yv3g051gjjnme1dofc3r1i85dld"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Dashboard:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[none:Dashboard:nk]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"PRESCRIPTIVE\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Dashboard:\t<[federated.1yv3g051gjjnme1dofc3r1i85dld].[none:Dashboard:nk]>"
+    },
+    {
+      "id": "ws.prescriptive_map",
+      "name": "Prescriptive Map",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__map_kpi_difference"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:State:nk]>\n<[Sample - Superstore].[attr:Map KPI (copy 2):nk]><[Sample - Superstore].[usr:X-Axis (copy):qk]><[Sample - Superstore].[attr:Map KPI Prefix (copy):nk]>Æ SELECTED KPI\n<[Sample - Superstore].[attr:Map KPI (copy 2):nk]><[Sample - Superstore].[usr:Map KPI (copy):qk]><[Sample - Superstore].[attr:Map KPI Prefix (copy):nk]>Æ DIFFERENCE TO PRIOR PERIOD"
+    },
+    {
+      "id": "ws.prescriptive_scatter_plot",
+      "name": "Prescriptive Scatter Plot",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sample_superstore__y_axis_label",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sample_superstore__y_axis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__x_axis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__map_kpi_difference_0"
+        },
+        "size": {
+          "field_id": "fld.ds_sample_superstore__map_kpi"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__scatter_plot_breakdown"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:Calculation_633318743177879556:nk]>Æ (<[Sample - Superstore].[none:AdhocCluster:1:ok]>) | <[Sample - Superstore].[attr:Category:nk]>Æ\n\t\n<[Sample - Superstore].[attr:Y-Axis (copy 2):nk]><[Sample - Superstore].[usr:Calculation_633318743176773635:qk]><[Sample - Superstore].[attr:Y-Axis Prefix (copy 2):nk]>Æ <[Sample - Superstore].[none:X-Axis Label (copy):nk]>\n<[Sample - Superstore].[attr:Y-Axis Prefix (copy):nk]><[Sample - Superstore].[usr:Y-Axis (copy):qk]><[Sample - Superstore].[attr:Y-Axis Suffix (copy):nk]>Æ <[Sample - Superstore].[attr:Calculation_633318743183020038:nk]>"
+    },
+    {
+      "id": "ws.profit_ratio_bullet",
+      "name": "Profit Ratio Bullet",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_profit_ratio",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__profit_ratio_difference"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "average",
+          "value": null,
+          "scope": "per-pane"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[usr:Calculation_408983187798249472:qk]> CURRENT PERIOD PROFIT RATIO\n<[Sample - Superstore].[usr:CP Profit Ratio (copy):qk]> PRIOR PERIOD PROFIT RATIO\n_______________\n<[Sample - Superstore].[usr:Sales Difference (copy 2):qk]> DIFFERENCE"
+    },
+    {
+      "id": "ws.profit_ratio_callout",
+      "name": "Profit Ratio Callout",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_profit_ratio"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "CP Sales:\t<[Sample - Superstore].[usr:Calculation_408983187798249472:qk]>\nSales Difference:\t<[Sample - Superstore].[usr:Sales Difference (copy 2):qk]>"
+    },
+    {
+      "id": "ws.profit_ratio_region_comp",
+      "name": "Profit Ratio Region Comp",
+      "title_text": "REGION COMPARISON",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_profit_ratio",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__region_region_parameter"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__region_abbreviation"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "average",
+          "value": null,
+          "scope": "per-pane"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:Region:nk]>\n<[Sample - Superstore].[usr:Calculation_408983187798249472:qk]> CP Profit Ratio"
+    },
+    {
+      "id": "ws.profit_ratio_trend",
+      "name": "Profit Ratio Trend",
+      "title_text": "TREND",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Multiple Values",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__date_equalizer_with_granularity",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[:Measure Names]"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[:Measure Names]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"[Sample - Superstore].[usr:Calculation_408983187798249472:qk]\"",
+            "\"[Sample - Superstore].[usr:CP Profit Ratio (copy):qk]\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": {
+        "axis": "rows",
+        "pivoted_field_ids": [
+          "fld.ds_sample_superstore__cp_profit_ratio",
+          "fld.ds_sample_superstore__pp_profit_ratio"
+        ],
+        "note": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column."
+      },
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:Calculation_964614790693441536:qk]>\n<[Sample - Superstore].[Multiple Values]>Æ <[Sample - Superstore].[:Measure Names]>"
+    },
+    {
+      "id": "ws.sales_bullet",
+      "name": "Sales Bullet",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_sales",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__sales_difference"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "average",
+          "value": null,
+          "scope": "per-pane"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[usr:Calculation_200128753924792328:qk]> CURRENT PERIOD SALES\n<[Sample - Superstore].[usr:CP Sales (copy):qk]> PRIOR PERIOD SALES\n_______________\n<[Sample - Superstore].[usr:Calculation_705094862170877952:qk]> DIFFERENCE"
+    },
+    {
+      "id": "ws.sales_callout",
+      "name": "Sales Callout",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_sales"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "CP Sales:\t<[Sample - Superstore].[usr:Calculation_200128753924792328:qk]>\nSales Difference:\t<[Sample - Superstore].[usr:Calculation_705094862170877952:qk]>"
+    },
+    {
+      "id": "ws.sales_region_comp",
+      "name": "Sales Region Comp",
+      "title_text": "REGION COMPARISON",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__cp_sales",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__region_region_parameter"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__region_abbreviation"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "average",
+          "value": null,
+          "scope": "per-pane"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:Region:nk]>\n<[Sample - Superstore].[usr:Calculation_200128753924792328:qk]> CP Sales"
+    },
+    {
+      "id": "ws.sales_trend",
+      "name": "Sales Trend",
+      "title_text": "TREND",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Multiple Values",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__date_equalizer_with_granularity",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[:Measure Names]"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[:Measure Names]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"[Sample - Superstore].[usr:Calculation_200128753924792328:qk]\"",
+            "\"[Sample - Superstore].[usr:CP Sales (copy):qk]\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Country,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,Region Abbreviation,Region)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Region = Region Parameter,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (US Map Color,State)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sample_superstore__region_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": {
+        "axis": "rows",
+        "pivoted_field_ids": [
+          "fld.ds_sample_superstore__cp_sales",
+          "fld.ds_sample_superstore__pp_sales"
+        ],
+        "note": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column."
+      },
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[none:Calculation_964614790693441536:qk]>\n<[Sample - Superstore].[Multiple Values]>Æ <[Sample - Superstore].[:Measure Names]>"
+    },
+    {
+      "id": "ws.south_map",
+      "name": "South Map",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Multipolygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__region_region_parameter"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__region",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"South\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[attr:Calculation_1170935953892237312:nk]>\n\n<[Sample - Superstore].[attr:Filtered State (copy):nk]>"
+    },
+    {
+      "id": "ws.west_map",
+      "name": "West Map",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Multipolygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sample_superstore__region_region_parameter"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__region",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"West\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sample - Superstore].[attr:Calculation_1170935953892237312:nk]>\n\n<[Sample - Superstore].[attr:Filtered State (copy):nk]>"
+    },
+    {
+      "id": "ws.x_axis_label",
+      "name": "X-Axis Label",
+      "title_text": null,
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sample_superstore__x_axis_label"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "X-Axis Label:\t<[Sample - Superstore].[none:Calculation_633318743183020038:nk]>"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.super_annotations",
+      "name": "Super: Annotations",
+      "size": {
+        "width": 1000.0,
+        "height": 800.0,
+        "sizing_mode": "automatic"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "56",
+            "type": "parameter",
+            "x": 4883.0,
+            "y": 39974.0,
+            "w": 90137.0,
+            "h": 7813.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.insight_2",
+            "text_html": "ENTER INSIGHT 2",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "61",
+            "type": "parameter",
+            "x": 4883.0,
+            "y": 56901.0,
+            "w": 90137.0,
+            "h": 7813.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.insight_3",
+            "text_html": "ENTER INSIGHT 3",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "1",
+            "type": "text",
+            "x": 0.0,
+            "y": 93490.0,
+            "w": 100000.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "2",
+            "type": "text",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "3",
+            "type": "text",
+            "x": 1270.0,
+            "y": 1042.0,
+            "w": 43750.0,
+            "h": 4036.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Super Sample Superstore Dashboard",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "4",
+            "type": "text",
+            "x": 879.0,
+            "y": 94401.0,
+            "w": 75684.0,
+            "h": 4427.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "This workbook was created by Ryan Sleeper using the Sample - Superstore.xlsx data source.",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "5",
+            "type": "text",
+            "x": 0.0,
+            "y": 19531.0,
+            "w": 100000.0,
+            "h": 130.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "17",
+            "type": "image",
+            "x": 93750.0,
+            "y": 94401.0,
+            "w": 5762.0,
+            "h": 4557.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "37",
+            "type": "worksheet",
+            "x": 56250.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.descriptive_button_inactive",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "39",
+            "type": "text",
+            "x": 0.0,
+            "y": 78125.0,
+            "w": 100000.0,
+            "h": 130.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "42",
+            "type": "worksheet",
+            "x": 70801.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.prescriptive_button_inactive",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "43",
+            "type": "worksheet",
+            "x": 85352.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.annotations_button_active",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "45",
+            "type": "parameter",
+            "x": 4883.0,
+            "y": 22786.0,
+            "w": 90234.0,
+            "h": 7813.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.insight_1",
+            "text_html": "ENTER INSIGHT 1",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "46",
+            "type": "text",
+            "x": 2441.0,
+            "y": 9766.0,
+            "w": 69531.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Enter your insights here to have them appear on the prescriptive dashboard.",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "47",
+            "type": "worksheet",
+            "x": 5859.0,
+            "y": 79948.0,
+            "w": 89160.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_1",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "48",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 79427.0,
+            "w": 2930.0,
+            "h": 3906.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_1_indicator",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "50",
+            "type": "parameter",
+            "x": 4883.0,
+            "y": 29036.0,
+            "w": 15625.0,
+            "h": 10417.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.insight_1_indicator",
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "51",
+            "type": "text",
+            "x": 2441.0,
+            "y": 74349.0,
+            "w": 57910.0,
+            "h": 3906.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "PREVIEW",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "52",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 83854.0,
+            "w": 2930.0,
+            "h": 3906.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_indicator_2",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "54",
+            "type": "parameter",
+            "x": 4883.0,
+            "y": 46224.0,
+            "w": 15625.0,
+            "h": 10417.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.insight_2_indicator",
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "55",
+            "type": "worksheet",
+            "x": 5859.0,
+            "y": 84505.0,
+            "w": 89160.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_2",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "57",
+            "type": "worksheet",
+            "x": 5859.0,
+            "y": 88932.0,
+            "w": 89160.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_3",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "58",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 88281.0,
+            "w": 2930.0,
+            "h": 3906.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_indicator_3",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "60",
+            "type": "parameter",
+            "x": 4883.0,
+            "y": 63151.0,
+            "w": 15625.0,
+            "h": 10417.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.insight_3_indicator",
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": []
+    },
+    {
+      "id": "dash.super_descriptive",
+      "name": "Super: Descriptive",
+      "size": {
+        "width": 1000.0,
+        "height": 800.0,
+        "sizing_mode": "automatic"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "1",
+            "type": "text",
+            "x": 0.0,
+            "y": 93490.0,
+            "w": 100000.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "2",
+            "type": "text",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "3",
+            "type": "text",
+            "x": 1270.0,
+            "y": 1042.0,
+            "w": 43750.0,
+            "h": 4036.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Super Sample Superstore Dashboard",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "4",
+            "type": "text",
+            "x": 879.0,
+            "y": 94401.0,
+            "w": 75684.0,
+            "h": 4427.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "This workbook was created by Ryan Sleeper using the Sample - Superstore.xlsx data source.",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "6",
+            "type": "text",
+            "x": 0.0,
+            "y": 45573.0,
+            "w": 100000.0,
+            "h": 130.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "7",
+            "type": "text",
+            "x": 33301.0,
+            "y": 45573.0,
+            "w": 98.0,
+            "h": 47917.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "8",
+            "type": "text",
+            "x": 66602.0,
+            "y": 45573.0,
+            "w": 98.0,
+            "h": 47917.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "11",
+            "type": "worksheet",
+            "x": 0.0,
+            "y": 22786.0,
+            "w": 20020.0,
+            "h": 19531.0,
+            "direction": null,
+            "worksheet_id": "ws.all_us_map",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "12",
+            "type": "worksheet",
+            "x": 40039.0,
+            "y": 22786.0,
+            "w": 20020.0,
+            "h": 19531.0,
+            "direction": null,
+            "worksheet_id": "ws.central_map",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "13",
+            "type": "worksheet",
+            "x": 60059.0,
+            "y": 22786.0,
+            "w": 20020.0,
+            "h": 19531.0,
+            "direction": null,
+            "worksheet_id": "ws.east_map",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "5",
+            "type": "text",
+            "x": 0.0,
+            "y": 19531.0,
+            "w": 100000.0,
+            "h": 130.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "14",
+            "type": "parameter",
+            "x": 41504.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.region_parameter",
+            "text_html": "SELECT REGION",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "15",
+            "type": "worksheet",
+            "x": 80078.0,
+            "y": 22786.0,
+            "w": 20020.0,
+            "h": 19531.0,
+            "direction": null,
+            "worksheet_id": "ws.south_map",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "16",
+            "type": "worksheet",
+            "x": 20020.0,
+            "y": 22786.0,
+            "w": 20020.0,
+            "h": 19531.0,
+            "direction": null,
+            "worksheet_id": "ws.west_map",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "17",
+            "type": "image",
+            "x": 93750.0,
+            "y": 94401.0,
+            "w": 5762.0,
+            "h": 4557.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "18",
+            "type": "parameter",
+            "x": 2441.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.minimum_date",
+            "text_html": "START DATE",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "19",
+            "type": "parameter",
+            "x": 21973.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.maximum_date",
+            "text_html": "END DATE",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "20",
+            "type": "parameter",
+            "x": 80566.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.date_granularity",
+            "text_html": "DATE GRANULARITY",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "21",
+            "type": "parameter",
+            "x": 61035.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.date_comparison",
+            "text_html": "DATE COMPARISON",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "22",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 58333.0,
+            "w": 28418.0,
+            "h": 19271.0,
+            "direction": null,
+            "worksheet_id": "ws.sales_trend",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "23",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 48047.0,
+            "w": 28418.0,
+            "h": 4948.0,
+            "direction": null,
+            "worksheet_id": "ws.sales_callout",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "24",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 52995.0,
+            "w": 28418.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.sales_bullet",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "25",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 80729.0,
+            "w": 28418.0,
+            "h": 10286.0,
+            "direction": null,
+            "worksheet_id": "ws.sales_region_comp",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "26",
+            "type": "worksheet",
+            "x": 56250.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.descriptive_button_active",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "27",
+            "type": "worksheet",
+            "x": 70801.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.prescriptive_button_inactive",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "28",
+            "type": "worksheet",
+            "x": 85352.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.annotations_button_inactive",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "29",
+            "type": "worksheet",
+            "x": 69043.0,
+            "y": 48047.0,
+            "w": 28418.0,
+            "h": 4948.0,
+            "direction": null,
+            "worksheet_id": "ws.days_to_ship_difference",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "30",
+            "type": "worksheet",
+            "x": 69043.0,
+            "y": 52995.0,
+            "w": 28418.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.days_to_ship_bullet",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "31",
+            "type": "worksheet",
+            "x": 69043.0,
+            "y": 58333.0,
+            "w": 28418.0,
+            "h": 19271.0,
+            "direction": null,
+            "worksheet_id": "ws.days_to_ship_trend",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "32",
+            "type": "worksheet",
+            "x": 69043.0,
+            "y": 80729.0,
+            "w": 28418.0,
+            "h": 10286.0,
+            "direction": null,
+            "worksheet_id": "ws.days_to_ship_region_comp",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "33",
+            "type": "worksheet",
+            "x": 35742.0,
+            "y": 48047.0,
+            "w": 28418.0,
+            "h": 4948.0,
+            "direction": null,
+            "worksheet_id": "ws.profit_ratio_callout",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "34",
+            "type": "worksheet",
+            "x": 35742.0,
+            "y": 52995.0,
+            "w": 28418.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.profit_ratio_bullet",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "35",
+            "type": "worksheet",
+            "x": 35742.0,
+            "y": 58333.0,
+            "w": 28418.0,
+            "h": 19271.0,
+            "direction": null,
+            "worksheet_id": "ws.profit_ratio_trend",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "36",
+            "type": "worksheet",
+            "x": 35742.0,
+            "y": 80729.0,
+            "w": 28418.0,
+            "h": 10286.0,
+            "direction": null,
+            "worksheet_id": "ws.profit_ratio_region_comp",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": []
+    },
+    {
+      "id": "dash.super_prescriptive",
+      "name": "Super: Prescriptive",
+      "size": {
+        "width": 1000.0,
+        "height": 800.0,
+        "sizing_mode": "automatic"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "29",
+            "type": "worksheet",
+            "x": 0.0,
+            "y": 26042.0,
+            "w": 50000.0,
+            "h": 52083.0,
+            "direction": null,
+            "worksheet_id": "ws.prescriptive_map",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "1",
+            "type": "text",
+            "x": 0.0,
+            "y": 93490.0,
+            "w": 100000.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "2",
+            "type": "text",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "3",
+            "type": "text",
+            "x": 1270.0,
+            "y": 1042.0,
+            "w": 43750.0,
+            "h": 4036.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Super Sample Superstore Dashboard",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "4",
+            "type": "text",
+            "x": 879.0,
+            "y": 94401.0,
+            "w": 75684.0,
+            "h": 4427.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "This workbook was created by Ryan Sleeper using the Sample - Superstore.xlsx data source.",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "8",
+            "type": "text",
+            "x": 50000.0,
+            "y": 24219.0,
+            "w": 98.0,
+            "h": 53906.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "5",
+            "type": "text",
+            "x": 0.0,
+            "y": 19531.0,
+            "w": 100000.0,
+            "h": 130.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "14",
+            "type": "parameter",
+            "x": 41504.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.region_parameter",
+            "text_html": "SELECT REGION",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "17",
+            "type": "image",
+            "x": 93750.0,
+            "y": 94401.0,
+            "w": 5762.0,
+            "h": 4557.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "18",
+            "type": "parameter",
+            "x": 2441.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.minimum_date",
+            "text_html": "START DATE",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "19",
+            "type": "parameter",
+            "x": 21973.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.maximum_date",
+            "text_html": "END DATE",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "21",
+            "type": "parameter",
+            "x": 61035.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.date_comparison",
+            "text_html": "DATE COMPARISON",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "28",
+            "type": "worksheet",
+            "x": 85352.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.annotations_button_inactive",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "30",
+            "type": "worksheet",
+            "x": 51953.0,
+            "y": 34505.0,
+            "w": 45898.0,
+            "h": 38151.0,
+            "direction": null,
+            "worksheet_id": "ws.prescriptive_scatter_plot",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "33",
+            "type": "parameter",
+            "x": 84082.0,
+            "y": 26823.0,
+            "w": 13379.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.scatter_plot_detail",
+            "text_html": "BREAKDOWN",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "34",
+            "type": "parameter",
+            "x": 52441.0,
+            "y": 26823.0,
+            "w": 13379.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.y_axis",
+            "text_html": "Y-AXIS",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "35",
+            "type": "parameter",
+            "x": 68262.0,
+            "y": 26823.0,
+            "w": 13379.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.x_axis",
+            "text_html": "X-AXIS",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "36",
+            "type": "worksheet",
+            "x": 70801.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.prescriptive_button_active",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "37",
+            "type": "worksheet",
+            "x": 56250.0,
+            "y": 0.0,
+            "w": 14648.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": "ws.descriptive_button_inactive",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "38",
+            "type": "worksheet",
+            "x": 58008.0,
+            "y": 73958.0,
+            "w": 39160.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.x_axis_label",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "39",
+            "type": "text",
+            "x": 0.0,
+            "y": 78125.0,
+            "w": 100000.0,
+            "h": 130.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "40",
+            "type": "text",
+            "x": 0.0,
+            "y": 24219.0,
+            "w": 100000.0,
+            "h": 130.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "41",
+            "type": "text",
+            "x": 0.0,
+            "y": 20703.0,
+            "w": 100000.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "IMPROVED PERFORMANCEÆ     DECREASED PERFORMANCEÆ    Æ NO COMP AVAILABLEÆ     |     Circle size represents current period value",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "42",
+            "type": "text",
+            "x": 0.0,
+            "y": 26042.0,
+            "w": 50000.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "CLICK STATE TO FILTER SCATTER PLOT",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "44",
+            "type": "parameter",
+            "x": 80566.0,
+            "y": 9766.0,
+            "w": 17090.0,
+            "h": 6510.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": "param.map_kpi",
+            "text_html": "SELECT KPI",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "45",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 79427.0,
+            "w": 2930.0,
+            "h": 3906.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_1_indicator",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "46",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 83854.0,
+            "w": 2930.0,
+            "h": 3906.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_indicator_2",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "47",
+            "type": "worksheet",
+            "x": 2441.0,
+            "y": 88281.0,
+            "w": 2930.0,
+            "h": 3906.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_indicator_3",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "48",
+            "type": "worksheet",
+            "x": 5859.0,
+            "y": 79948.0,
+            "w": 89160.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_1",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "50",
+            "type": "worksheet",
+            "x": 5859.0,
+            "y": 84505.0,
+            "w": 89160.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_2",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "51",
+            "type": "worksheet",
+            "x": 5859.0,
+            "y": 88932.0,
+            "w": 89160.0,
+            "h": 2604.0,
+            "direction": null,
+            "worksheet_id": "ws.insight_3",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": []
+    }
+  ],
+  "theme": {
+    "palette_hexes": [],
+    "font_family": "Calibri",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.sample_superstore",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.toc_annotations",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.all_us_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.all_us_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.central_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.central_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.days_to_ship_trend",
+      "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: rows, resolved fields: 2)",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.east_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.east_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.prescriptive_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.prescriptive_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.profit_ratio_trend",
+      "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: rows, resolved fields: 2)",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.sales_trend",
+      "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: rows, resolved fields: 2)",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.south_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.south_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.west_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.west_map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "semantic_build.extract_materialization",
+      "issue": "Both ds.sample_superstore and ds.toc_annotations are extract-based (.hyper) data sources with no live upstream connection. Per explicit task instruction (option (a) of the data-materialization workflow step), both .hyper extracts were already materialized to CSV (ds.sample_superstore.csv: 9,994 rows / 17 columns; ds.toc_annotations.csv: 4 rows / 1 column) via scripts/extract_hyper_data.py, and both were built as Import-mode Power Query tables sourced directly from these CSVs via a shared 'DataFolder' M parameter. No live/gateway-backed refresh path exists; refreshing this model on another machine requires the same CSV files at the same relative path and updating the DataFolder parameter - same limitation class as the EEA Urban Adaptation migration's semantic_build.datafolder_parameter entry.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.columns_missing_from_spec",
+      "issue": "8 columns are present in the real CSV/hyper extract but entirely absent from migration-spec.json's parsed fields[] enumeration: Category, Order Date, Order ID, Returned, Segment, Ship Date, Ship Mode, Sub-Category (all on ds.sample_superstore). Several of these are load-bearing for core functionality - Order Date/Ship Date underpin the entire CP/PP date-window mechanism ('Order Date 2017', 'Days to Ship'), Order ID feeds the COUNTD-based Returns measures, Returned is the boolean return flag, and Category/Segment/Ship Mode/Sub-Category are core dimensions used directly on multiple worksheets and as 'Scatter Plot Detail' Field Parameter options. All 8 were materialized as base TMDL columns directly from the CSV header (not fabricated - genuine source data), matching the EEA migration's precedent (semantic_build.code_unit_columns_missing_from_spec / url_column_missing_from_spec) but at notably larger scale here (8 columns vs 1-2 in EEA). Flagged as a recurring parser bug across both migrations to date - the parser's field enumeration should not be treated as an exhaustive column catalogue without cross-checking the underlying CSV/hyper header.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.vestigial_calculated_fields",
+      "issue": "Recomputed field-usage transitively (direct worksheet shelf/filter/reference-line references, plus a text-blob scan of customized_tooltip_text/title_text/dashboard zone text for internal_name-based embedded references, plus referenced_fields closure) against all 63 calculated fields across both data sources. 5 calculated fields have zero usage anywhere in the 32 worksheets or 3 dashboards: 'Returns' (COUNTD(IF [Returned]=\"Yes\" THEN [Order ID] END), superseded everywhere by the date/region-windowed 'CP Returns'/'PP Returns'), 'Number of Records' on both data sources (Tableau's auto-generated per-data-source row-count pseudo-field, present whether used or not), 'Blank' (formula: a literal empty string, likely an abandoned layout-spacer field), and 'Profit (bin)' (formula: a bare passthrough of [Profit] with no actual binning logic - likely a leftover from an abandoned histogram experiment). Disposition: 'Returns' and both 'Number of Records' fields were kept as hidden, general-purpose utility measures (standard business metrics / row-count utilities, harmless and potentially useful for future report development, mirroring the EEA migration's precedent of keeping similar zero-usage-but-standard measures). 'Blank' and 'Profit (bin)' were deliberately NOT created - genuine dead weight with no plausible future utility, consistent with the Definition of Done's no-orphaned-artifacts requirement.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.stale_internal_names_trap",
+      "issue": "Every one of the 15 Tableau parameters in this workbook has a stale, actively misleading internal name inherited from Ctrl-drag-duplication (e.g. caption 'Maximum Date' has internal name '[Start Date (copy)]'; caption 'X-Axis' has internal name '[Y-Axis (copy)]'; caption 'Insight 2' has internal name '[Insight 1 (copy)]'). Tableau never updates a duplicated field's internal name when its caption is later renamed, so pattern-matching on internal-name text (e.g. assuming '[Y-Axis (copy)]' relates to Y-Axis rather than being the true source of X-Axis) would silently mis-map fields. All 15 parameters were resolved exclusively via the parser's already-resolved field_id/referenced_fields graph, per explicit task instruction, never by reading internal_name text. Flagged as a durable gotcha for any future migration involving heavily-duplicated Tableau parameters/calculated fields - this is likely to recur.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.field_parameters_for_dynamic_switching",
+      "issue": "Implemented all 5 of the workbook's parameter-driven dynamic measure/dimension switchers as Power BI Field Parameters rather than the manual disconnected-table + SWITCH-measure pattern: 'Y-Axis', 'X-Axis', 'Map KPI' (measure-flavored, 7 entries each, bound to CP Sales/CP Profit/CP Quantity/CP Discount Pct/CP Returns/CP Days To Ship/CP Profit Ratio Pct via NAMEOF), and 'Scatter Plot Detail' (dimension-flavored, 6 entries, bound to raw Sample Superstore columns), 'Date Granularity' (dimension-flavored, 4 entries, bound to Date table period-start columns). This composes cleanly with the downstream bullet/KPI-card composite visuals pbi-report-builder needs (Callout + Bullet + Trend + Region-comparison per KPI) since Field Parameters bind directly to a visual's field well like any other column/measure - no fallback to manual SWITCH was needed for any of the 5. Each Field Parameter table's DAX row-constructor source produces columns literally named Value1/Value2/Value3 (not the friendly display names) - see the separate field_parameter_sourcecolumn_gotcha entry.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.region_parameter_as_slicer",
+      "issue": "'Region Parameter' (internal '[Parameter 3]', list domain US/Central/East/South/West, default East) was implemented as a plain disconnected single-column table + native-slicer-friendly 'Region' column with a 'Region Parameter Value' SELECTEDVALUE measure - NOT a Field Parameter, and NOT bound via a relationship. Verified every worksheet-level use is either a direct SELECTEDVALUE read (baked into the CP/PP measures' region-restriction FILTER) or a Region-vs-Region-Parameter comparison measure ('Region Filter', 'Region = Region Parameter') - never a join key - so this is architecturally closest to the parameter-equality idiom already documented in this agent's Gotchas (an exclude/restrict pattern, not a genuine relationship dimension), even though 'US' as a value means 'show all regions' rather than a null-exclusion. A plain slicer + SELECTEDVALUE is the idiomatic Power BI equivalent; no Field Parameter machinery was needed for this one, unlike Y-Axis/X-Axis/Map KPI/Scatter Plot Detail/Date Granularity.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.region_restriction_baked_into_measures",
+      "issue": "In the source workbook, region restriction is applied as an external worksheet-level filter ('Region Filter' calculated field dragged onto the Filters shelf of each relevant worksheet), separate from the CP/PP measure formulas themselves. In this semantic model, the region restriction is instead baked directly into the default 'CP Sales'/'CP Profit'/.../'PP Sales'/... measures (via FILTER(ALL(Region), Region = [Region Parameter Value] || [Region Parameter Value] = \"US\")), because several of the Power BI visual types these measures feed (Callout cards, Bullet bars, Trend sparklines, the Scatter Plot, the Map) carry no Region field on any shelf, so there is no report-level mechanism to apply an equivalent worksheet filter the way Tableau does. A '(All Regions)' measure family (CP Sales (All Regions), CP Profit Ratio (All Regions), CP Days To Ship (All Regions)) was added alongside for the 3 Region Comp dot-plots and the 3 Region Average reference-line measures, which need the unrestricted per-region breakdown instead. 'Region Filter' and 'Region = Region Parameter' measures were also kept standalone for report-level filter parity wherever a Region field IS available on a shelf. Net effect is behaviorally equivalent to Tableau but architecturally different (filter baked into the measure vs. applied externally) - flagged in case future maintenance expects the Tableau-style external-filter shape.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.insights_no_live_text_entry",
+      "issue": "CAPABILITY GAP (new class): the source workbook's Annotations dashboard has 3 live, end-user-editable text-entry boxes ('Insight 1/2/3' free-text parameters) plus matching Positive/Neutral/Negative radio-button indicators ('Insight 1/2/3 Indicator' list parameters), which update a live PREVIEW section and feed the Prescriptive dashboard's numbered callouts in real time (confirmed via live screenshot). Power BI has no native mechanism for live end-user text entry bound to a measure/visual - What-if parameters are numeric-slider-only, and true writeback requires Power Apps integration, out of scope here. Implemented as a static 3-row 'Insights' lookup table (Insight Number/Insight Text/Indicator) seeded verbatim from each parameter's current_value in migration-spec.json, so the report shows the same 3 insights Tableau currently shows, but end users can no longer edit them live in Power BI. This is a durable, structural capability gap (not a translation shortfall) that should be called out explicitly in the capabilities & limitations scorecard as its own class, distinct from ordinary measure-translation limitations.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.min_max_date_no_live_parameter",
+      "issue": "CAPABILITY GAP (same new class as semantic_build.insights_no_live_text_entry): 'Minimum Date' (internal '[Parameter 4]', default 2016-09-01) and 'Maximum Date' (internal '[Start Date (copy)]', default 2017-03-31) are live, end-user-adjustable date parameters in Tableau that drive the entire CP/PP comparison window. Power BI What-if parameters are numeric only, with no native live date-entry equivalent. Implemented as disconnected calendar-list tables ('Minimum Date', 'Maximum Date', 2014-01-01 to 2018-12-31) each with a SELECTEDVALUE measure defaulting to Tableau's current default (2016-09-01 / 2017-03-31) - the CP/PP mechanism itself remains fully dynamic and will recompute correctly if a user changes the slicer selection on either table, so only the 'live text-box entry' interaction style is lost, not the underlying date-window logic. An alternative considered and rejected for now: a date-range slicer bound directly to the real Order Date column - rejected because Order Date's real range (2013-2016) doesn't match the parameter UI's expected 2017-relative framing without extra translation the report layer would have to carry. Flagged for pbi-report-builder to bind visible slicers to both disconnected tables so the CP/PP window remains genuinely adjustable, not just defaulted.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.cp_pp_translated_to_calculate_datesbetween",
+      "issue": "The source workbook's period-over-period comparison is hand-rolled from boolean-flag + date-arithmetic calculated fields (no Tableau LOD expressions or table calcs anywhere - confirmed via grep): 'Order Date 2017' (+365-day static shift so 2013-2016 sample data displays as 2014-2017), 'Days in Range' (DATEDIFF+1 between Minimum/Maximum Date), a 'Date Comparison' measure (Prior Period -> Days in Range offset, Prior Year -> fixed 365-day offset), and boolean 'Date Filter CP'/'Date Filter PP' fields consumed by SUM(IF(...)) inside each CP*/PP* measure. This was deliberately NOT ported literally. Instead: a genuine 'Date' dimension table (2010-01-01 to 2019-12-31) was added and related to 'Sample Superstore'[Order Date 2017] (many-to-one, active), and every CP*/PP* measure uses CALCULATE(<aggregation>, DATESBETWEEN('Date'[Date], <start>, <end>)) with <start>/<end> derived from the 'Minimum Date Value'/'Maximum Date Value'/'Date Comparison Offset' measures. A second family ('PP * (Trend)') uses VAR _bucketStart = MIN('Date'[Date]) / _bucketEnd = MAX('Date'[Date]) + ALL('Date') to shift each individual axis bucket (Week/Month/Quarter/Year, per the 'Date Granularity' Field Parameter) back by the offset, reproducing Tableau's 'Date Equalizer with Granularity' axis-overlay technique for the 3 Trend sparkline charts. All of this was numerically verified against the raw CSV (see semantic_build.groundtruth_validation).",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.field_parameter_sourcecolumn_gotcha",
+      "issue": "Discovered while hand-authoring the 5 Field Parameter tables: a DAX row-constructor table {(\"Label\", NAMEOF(...), Order), ...} with 3 columns always produces columns literally named Value1/Value2/Value3 (confirmed via dax.guide's table-constructor reference and via reflection against Microsoft.AnalysisServices.Tabular.dll, which confirms CalculatedTableColumn exposes separate Name/SourceColumn properties) - never the custom names assigned via TMDL 'column <Name>'. All 5 Field Parameter tables (Y-Axis, X-Axis, Map KPI, Scatter Plot Detail, Date Granularity) were initially written with sourceColumn values matching the friendly display Name instead of Value1/Value2/Value3 - this passes TmdlSerializer structural validation cleanly (which only checks TMDL syntax, not whether a declared sourceColumn matches what the DAX actually produces) but would fail only at live refresh/commit time with a column-not-found error - the exact residual-risk class this agent's own gotchas warn about for renamed M-sourced columns, now confirmed to have a direct analogue for DAX-calculated-table columns. Fixed in all 5 files. This fix rests on documented DAX behavior + TOM class structure, not on a live engine round-trip (none available in this environment) - flagged as a residual verification gap if a live Desktop/Fabric validation pass is ever done downstream.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.discount_profit_ratio_scaling_inconsistency",
+      "issue": "The source workbook itself is inconsistent about Discount/Profit Ratio scaling: the Y-Axis/X-Axis/Map KPI dynamic-measure CASE statements scale their Discount and Profit Ratio branches by *100 (e.g. [CP Discount]*100) so they plot on a comparable 0-100-ish axis alongside Sales/Profit/Quantity, but the standalone 'Discount Difference'/'Profit Ratio Difference' fields used for the 3 Bullet-chart KPI colour-coding do NOT apply this same *100 scaling to Discount (Profit Ratio Difference IS *100-scaled: (CP Profit Ratio - PP Profit Ratio) * 100, but Discount Difference is the raw fraction difference: CP Discount - PP Discount). Translated faithfully as two separate, differently-scaled measure families ('CP Discount'/'PP Discount'/'Discount Difference' stay raw 0-1 fractions with a native 0.0% formatString; 'CP Discount Pct'/'CP Profit Ratio Pct' are separate *100-scaled measures used only inside the Field Parameter switchers) rather than forcing one consistent scale - this preserves the source workbook's own (likely accidental) inconsistency rather than silently normalizing it away, consistent with this agent's policy of flagging apparent source-workbook quirks rather than 'fixing' them unasked.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.reference_line_region_average_confirmed",
+      "issue": "Verified hypothesis (per task instruction, checked against the live Tableau screenshot before committing to a DAX shape): the 'average' per-pane reference line on the 3 Bullet-chart worksheets (Sales Bullet, Profit Ratio Bullet, Days to Ship Bullet) is the average of the same CP measure computed independently across all 4 regions (Central/East/South/West), NOT a single global aggregate ignoring region. Implemented as 'Sales Region Average'/'Profit Ratio Region Average'/'Days to Ship Region Average' = AVERAGEX(ALL(Region), [CP <Measure> (All Regions)]). Numerically confirmed via a Python replication against the raw CSV for the default window (Sep 2016-Mar 2017): Sales Region Average $108,163.41, Profit Ratio Region Average 16.51%, Days to Ship Region Average 3.97 - all plausible benchmark values sitting between the 4 regions' own figures (Central/East/South/West individually range $55k-$147k Sales), consistent with a cross-region benchmark line rather than a degenerate or out-of-range value.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.groundtruth_validation",
+      "issue": "No Power BI Desktop, Fabric workspace, or MCP server was available in this environment (same constraint as the EEA Urban Adaptation migration), so a live DAX EVALUATE round-trip was not possible. Substituted: (1) structural validation via Microsoft.AnalysisServices.Tabular.TmdlSerializer.DeserializeDatabaseFromFolder (same parser Power BI Desktop uses) - passed cleanly, 13 tables, 20 columns/55 measures on Sample Superstore, 1 relationship; (2) a custom regex cross-reference confirming zero unresolved 'Table'[Column] / bare [Measure] references across every measure and calculated-column DAX expression, and zero measure/column name collisions model-wide; (3) a from-scratch Python re-implementation of the CP/PP DAX semantics (date-shift, DATESBETWEEN-equivalent windowing, region restriction) run directly against ds.sample_superstore.csv for the concrete state Region=East / Minimum Date=2016-09-01 / Maximum Date=2017-03-31 / Date Comparison=Prior Period, which reproduced the live Tableau screenshot's values exactly: Sales $104,007.01 (screenshot: $104,007), Profit Ratio 9.21% (screenshot: 9.2%), Avg Days to Ship 4.02 (screenshot: 4.0). The actual DAX text of 'CP Sales', 'PP Sales (Trend)', 'Days in Range', 'Date Comparison Offset', and the 3 Region Average measures was then read back and cross-checked token-by-token against this verified logic - all matched. This offline-validation substitution is a lower confidence bar than a live EVALUATE round-trip (it confirms the DAX design and text are internally consistent and numerically sound against an independent reimplementation, but not that the TMDL compiles/refreshes inside a real AS engine) - recommend a live Desktop/Fabric open as the first validation step before any customer-facing demo, same recommendation as the EEA migration's semantic_build.tmdl_structure_unvalidated entry.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.date_table_marking_best_effort",
+      "issue": "The 'Date' dimension table was marked as a date table using Table.DataCategory = \"Time\" (confirmed via reflection against Microsoft.AnalysisServices.Tabular.dll and matching this skill's modeling-guidelines.md text 'Set the dataCategory property to Time for calendar tables') plus Column.IsKey on the 'Date' column. No Model.MarkAsDateTable-equivalent method was found in the locally available TOM DLL version, so this is the best available hand-authored equivalent achievable without a live engine/MCP connection to invoke that API directly. No measure in this model currently uses shorthand time-intelligence functions (TOTALYTD, SAMEPERIODLASTYEAR, etc. - the CP/PP logic uses explicit DATESBETWEEN instead), so this is a completeness step for future extensibility rather than a correctness gap in the current measure set.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.no_report_folder_yet",
+      "issue": "Per explicit task scope, no .Report folder or .pbip artifacts entry was created by this pass - only the SuperstoreSalesPerformance.SemanticModel folder was authored. Building the paired Power BI report (pages, visuals, the 12-worksheet KPI composite layout, Field Parameter-bound visual bindings) is pbi-report-builder's responsibility, same scope boundary as the EEA migration's semantic_build.pbip_artifacts_empty_pending_report entry. The semantic model can be validated independently (e.g. via Tabular Editor pointed at the .SemanticModel folder) before the report exists.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.compatibility_level_bumped",
+      "issue": "database.tmdl was initially scaffolded with compatibilityLevel 1606 (copied from the EEA Urban Adaptation migration's precedent), below this skill's own documented guidance of 1702+ for newly created models. Bumped to 1702 and re-validated via TmdlSerializer.DeserializeDatabaseFromFolder - parses cleanly, all 13 tables/60 measures/1 relationship intact. Functionally, Field Parameters (calculated tables using NAMEOF) do not have a documented hard compatibility-level floor above 1606, so this was very likely not a functional blocker either way, but 1702 is the correct baseline per this skill's guidance and costs nothing to apply. The EEA Urban Adaptation model likely carries the same latent 1606 value and was not touched here (out of scope for this task) - worth a consolidation pass across both migrations later.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.insight_indicator_numeric_code_not_reproduced",
+      "issue": "In the source workbook, the 'Insight N Indicator' calculated-field wrapper (ds.toc_annotations; distinct from the raw 'Insight N Indicator' parameter which just holds the Positive/Neutral/Negative text) applies CASE [Parameters].[...] WHEN \"Positive\" THEN \"1\" WHEN \"Neutral\" THEN \"2\" WHEN \"Negative\" THEN \"3\" END before binding to the Color and Label encodings of the 3 'Insight Indicator N' Circle-mark worksheets - i.e. Tableau's own color legend / mark label is keyed off a derived \"1\"/\"2\"/\"3\" numeric-string code, not the raw Positive/Neutral/Negative text. This numeric-code indirection was deliberately NOT reproduced in the 'Insights' table's 'Indicator' column, which instead exposes the raw Positive/Neutral/Negative text directly - a Power BI conditional-formatting rule can key its color mapping on that text value with no need for an intermediate numeric code (unlike Tableau's older value-keyed color-legend mechanism, which this CASE was very likely working around). Flagged so the report-builder does not go looking for a '1'/'2'/'3' column that was intentionally not created, and so this counts as a recorded, deliberate fate (not an oversight) for these 3 calculated-field wrappers.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "semantic_build.click_to_highlight_helpers_superseded",
+      "issue": "4 calculated fields implement Tableau's manual 'click to cross-highlight' dashboard-action pattern: 'CLICK TO HIGHLIGHT' / 'CLICK TO HIGHLIGHT (US)' (IF [Region = Region Parameter] / IF [Region Parameter]=\"US\" THEN a constant label string ELSE NULL - bound to a Detail/Tooltip shelf so a dashboard click-action can key off whether the string is present) and 'Filtered State' / 'Filtered State (US)' (same IF-gating pattern, returning the State column value instead of a constant string). None of the 4 were materialized as TMDL columns or measures. Disposition: superseded, not vestigial - Power BI has native cross-visual highlighting/cross-filtering on click with no calculated-field workaround needed, so these 4 fields have no Power BI equivalent to build at the semantic-model layer; any equivalent interactivity (e.g. a 'set as filter'/drillthrough action between the region maps and a state-level detail view) is a pbi-report-builder concern for visual interactions, not a data-modeling one. Distinct from the separately-flagged vestigial-field list (semantic_build.vestigial_calculated_fields) since these 4 DO have a real purpose in the source workbook - it is just a purpose Power BI's native capabilities render unnecessary to reproduce as data.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "report_build.dimension_field_parameter_swap",
+      "issue": "The Date Granularity and Scatter Plot Detail field-parameter tables lack the internal ParameterMetadata marker, so native measure/dimension column-swap driven by their slicers is not reliable for the dimension-flavored parameters. Concrete fallback columns were bound instead: the Descriptive trend axis uses 'Date'[Month Start] (Month default) and the Prescriptive scatter detail uses 'Sample Superstore'[Sub-Category]. Their slicers (DATE GRANULARITY, BREAKDOWN) are rendered for UI fidelity but do not drive the swap. The measure-flavored parameters (Y-Axis, X-Axis, Map KPI) DO switch correctly via wrapper measures 'Sample Superstore'[Y-Axis]/[X-Axis]/[Map KPI].",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.bullet_rendered_as_gauge",
+      "issue": "Tableau horizontal bullet graphs (value bar + region-average reference line) are rendered as Power BI radial gauge visuals. Decisive reason: only the gauge exposes a measure-bound TargetValue role for the dynamic region-average reference; barChart/columnChart y1AxisReferenceLine.value is a static numeric and cannot bind a measure. Deltas: radial vs horizontal shape, and the arc color is static per default state (Sales teal, Profit Ratio red, Days to Ship red) because gauge is not in the conditional-formatting supported-visual list.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.filledmap_deprecation_accepted",
+      "issue": "All 6 measure-driven choropleth maps use the deprecated filledMap visual because azureMap (the recommended replacement) has no measure-driven fill-color role - only Category/Size/Series. The authoring validator emits PBIR_VISUAL_TYPE_DEPRECATED (warning, accepted). filledMap also requires the Bing Maps visual setting enabled in Power BI Desktop/service to render tiles.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.descriptive_map_static_highlight",
+      "issue": "The 5 Descriptive region maps use static default-state fill (East highlighted teal, the other four gray) plus a per-map categorical geography-crop filter (West/Central/East/South). They match the default-state screenshot exactly but do not dynamically re-highlight when the SELECT REGION slicer changes. The Prescriptive map is genuinely dynamic (continuous diverging choropleth on Map KPI Difference, cropped to the selected region via the Region Filter measure).",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.region_comparison_dotplot_simplified",
+      "issue": "The 3 Descriptive 'Region Comparison' dot plots are rendered as scatter charts (Category=Region, X=CP <KPI> (All Regions), Y=Region). Simplified vs the Tableau original: uniform accent color (the selected-region highlight is not dynamically colored, to avoid unreliable boolean-measure gradient coercion), and the reference line is omitted (its value is static-only; the adjacent gauge already conveys the region average dynamically).",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.insights_rendered_static",
+      "issue": "The Insights annotations were a live text-entry form in Tableau (ENTER INSIGHT 1/2/3 text boxes + Positive/Neutral/Negative radios on the Annotations dashboard, previewed on the Prescriptive dashboard). Live text entry is a Power BI capability gap, so the Insights table is static-seeded and rendered as read-only text cards: an Annotations page (banner + 3 numbered/indicator-colored cards) and the Prescriptive insight strip. Text and indicator values default to the workbook's captured values and are not editable at view time.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.callout_direction_arrows_static",
+      "issue": "The up/down direction arrows on the 3 Descriptive callouts are static textboxes matching the default-state direction (Sales up, Profit Ratio down, Days to Ship up). They do not flip dynamically with the data. The numeric callout value itself is a live cardVisual bound to the CP measure; only the arrow glyph is static.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.footer_logo_omitted",
+      "issue": "The Tableau footer logo image had no extractable asset in the .twbx package, so the footer logo is omitted (an unresolved RegisteredResources image reference would fail validation). The footer text band is preserved.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.desktop_render_unverified",
+      "issue": "No live Power BI Desktop was available in the build environment (Desktop Bridge status=not_connected). The report passed full structural validation (powerbi-report-author validate: 0 errors), a positions/overlap space-audit (0 unintended overlaps across all 3 pages), a slicer-default audit (13/13 slicers defaulted to the reference state), and a field-reference cross-check (30/30 Entity.Property refs resolve against the semantic model). Pixel/numeric rendering - Bing map tiles, gauge radial sizing/scale, scatter/filledMap diverging gradients - is not visually confirmed and should be screenshot-verified when a Desktop is available.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.offline_schema_validation_skipped",
+      "issue": "The visualContainer 2.11.0 JSON-schema URL could not be fetched in the offline build environment (PBIR_SCHEMA_UNREACHABLE warning), so deep JSON-schema validation was skipped. The authoring CLI's own structural, cross-reference, role-binding and theme rules all ran and passed with 0 errors.",
+      "severity": "low",
+      "stage": "report_build"
+    }
+  ]
+}

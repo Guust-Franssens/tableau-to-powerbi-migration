@@ -68,6 +68,18 @@ far more reliable than asking an LLM to re-derive this structure from raw XML on
   no live DB) — real rows must be pulled from the embedded `.hyper` file via `tableauhyperapi` (see
   `scripts/extract_hyper_data.py`). Real-world workbooks may have `mode: live` connections instead;
   the schema supports both without changing shape.
+- **`dashboards[].zones.type == "layout-floating"`.** Tableau dashboards built entirely from
+  "Floating" (freeform, absolute-position) containers serialize `<zones>` as N flat sibling `<zone>`
+  elements with no wrapping root container at all — unlike a "Tiled" dashboard's single nested root
+  zone (`layout-basic`/`layout-flow`). The parser detects this (>1 top-level `<zone>`) and synthesizes
+  a `layout-floating` root whose `children` are each top-level zone, so no sibling is silently dropped.
+  Seen on all 3 dashboards of the Superstore sample workbook (one had 23 flat sibling zones). Treat
+  each child's `x`/`y`/`w`/`h` as independently absolute, not nested-relative.
+- **Parameter-control zones (`type: "parameter"`, aliased from Tableau's raw `paramctrl`) resolve
+  their `field_id` from the zone's `param` XML attribute** (e.g. `[Parameters].[Insight 1 (copy)]`),
+  looked up against the already-parsed `parameters[]` list — the same stale-internal-name caveat as
+  calculated fields applies (see the parameter-equality idiom note above): resolve through `field_id`,
+  never the raw name text. A zone's raw `bitmap` type is likewise aliased to `image`.
 
 ## Validation
 

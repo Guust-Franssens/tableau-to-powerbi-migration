@@ -1,0 +1,8 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.4.0/schema.json",
+  "name": "aee2e6966e874901c9f2",
+  "displayName": "Airlines",
+  "displayOption": "FitToPage",
+  "height": 950,
+  "width": 1400
+}

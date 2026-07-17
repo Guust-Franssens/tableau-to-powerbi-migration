@@ -1,0 +1,142 @@
+/// Genuine Date dimension table (calculated in Power Query, 2010-01-01 to 2019-12-31 - a decade-wide buffer well beyond the real 'Order Date 2017' domain of 2014-01-03 to 2017-12-30, so CP/PP CALCULATE(DATESBETWEEN(...)) windows never truncate even for a Prior Period comparison spanning several years). Not a literal Tableau field - Tableau's workbook had no calendar table at all; the CP/PP mechanism there was pure boolean-flag + date-arithmetic calculated fields (Date Filter CP/PP) evaluated row-by-row with no dimension table. This table is the idiomatic DAX replacement (relationship + CALCULATE/DATESBETWEEN) called for by the migration - see limitations_encountered. 'Order Date 2017' (not the real Order Date) is the fact-table column related to this table's Date key, since the Minimum Date/Maximum Date parameters are calibrated to the +365-day-shifted timeline.
+table Date
+	lineageTag: fb223ac2-1311-4012-bc3e-817ca21864c3
+	dataCategory: Time
+
+	/// Calendar date (relationship key, 'many' side is 'Sample Superstore'[Order Date 2017]). DataCategory=Time is set at the table level (see above) to mark this as a genuine date table - the closest hand-authored-TMDL equivalent of Power BI Desktop's "Mark as Date Table" action available without live Desktop/MCP tooling in this environment (see limitations_encountered); no DAX measure in this model depends on official date-table status since CP/PP measures use explicit CALCULATE/DATESBETWEEN rather than shorthand time-intelligence functions (TOTALYTD/SAMEPERIODLASTYEAR/etc.), so this is a best-practice completeness step, not a correctness dependency.
+	column Date
+		dataType: dateTime
+		isKey
+		formatString: Short Date
+		lineageTag: c736bdac-ff4e-4764-80d8-1dd56b651572
+		summarizeBy: none
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	/// Calendar year, e.g. 2017.
+	column Year
+		dataType: int64
+		formatString: #,##0
+		lineageTag: f25a4cdf-7d1d-4748-ad73-25653e17dd64
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Quarter number 1-4, hidden sort helper for 'Quarter'.
+	column 'Quarter Number'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		lineageTag: 88acc811-356c-4859-aa0b-d24d0f100eb5
+		summarizeBy: none
+		sourceColumn: Quarter Number
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Quarter display label, e.g. "Q1". Sorted chronologically by 'Quarter Number', not alphabetically.
+	column Quarter
+		dataType: string
+		lineageTag: 2980d3f9-d36c-4007-9cd3-80237a0c2f36
+		summarizeBy: none
+		sourceColumn: Quarter
+		sortByColumn: 'Quarter Number'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Month number 1-12, hidden sort helper for 'Month'.
+	column 'Month Number'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		lineageTag: 208a6cc8-a479-482f-bed0-df27ca049fa4
+		summarizeBy: none
+		sourceColumn: Month Number
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Month display label, e.g. "January". Sorted chronologically by 'Month Number', not alphabetically.
+	column Month
+		dataType: string
+		lineageTag: 82cdc4e7-7253-4a9c-a756-adc0ff96274d
+		summarizeBy: none
+		sourceColumn: Month
+		sortByColumn: 'Month Number'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// First day (Sunday) of the calendar week containing Date. One of the 4 granularity levels bound into the 'Date Granularity' Field Parameter (Week option) - used as the continuous-axis field on the Sales/Profit Ratio/Days to Ship Trend charts when Date Granularity = Week, mirroring Tableau's DATETRUNC('week', [Order Date 2017]) continuous-date-axis technique.
+	column 'Week Start'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: f7651319-dca8-4313-a8a9-b474e1be14ee
+		summarizeBy: none
+		sourceColumn: Week Start
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	/// First day of the calendar month containing Date. Date Granularity Field Parameter option (Month, the Tableau default) - mirrors DATETRUNC('month', [Order Date 2017]).
+	column 'Month Start'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 1ac77868-dcb3-462e-872e-a9e212faacf0
+		summarizeBy: none
+		sourceColumn: Month Start
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	/// First day of the calendar quarter containing Date. Date Granularity Field Parameter option (Quarter) - mirrors DATETRUNC('quarter', [Order Date 2017]).
+	column 'Quarter Start'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: e10f1243-d5b1-4116-ba64-752ac841f0d8
+		summarizeBy: none
+		sourceColumn: Quarter Start
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	/// First day of the calendar year containing Date. Date Granularity Field Parameter option (Year) - mirrors DATETRUNC('year', [Order Date 2017]).
+	column 'Year Start'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 30bdb49f-7e8b-4df1-8b8a-9286b12da878
+		summarizeBy: none
+		sourceColumn: Year Start
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	partition Date = m
+		mode: import
+		source =
+				let
+					StartDate = #date(2010, 1, 1),
+					EndDate = #date(2019, 12, 31),
+					NumberOfDays = Duration.Days(EndDate - StartDate) + 1,
+					DateList = List.Dates(StartDate, NumberOfDays, #duration(1, 0, 0, 0)),
+					#"Converted to Table" = Table.FromList(DateList, Splitter.SplitByNothing(), {"Date"}),
+					#"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Date", type date}}, "en-US"),
+					#"Added Year" = Table.AddColumn(#"Changed Type", "Year", each Date.Year([Date]), Int64.Type),
+					#"Added Quarter Number" = Table.AddColumn(#"Added Year", "Quarter Number", each Date.QuarterOfYear([Date]), Int64.Type),
+					#"Added Quarter" = Table.AddColumn(#"Added Quarter Number", "Quarter", each "Q" & Text.From([Quarter Number]), type text),
+					#"Added Month Number" = Table.AddColumn(#"Added Quarter", "Month Number", each Date.Month([Date]), Int64.Type),
+					#"Added Month" = Table.AddColumn(#"Added Month Number", "Month", each Date.MonthName([Date]), type text),
+					#"Added Week Start" = Table.AddColumn(#"Added Month", "Week Start", each Date.StartOfWeek([Date], Day.Sunday), type date),
+					#"Added Month Start" = Table.AddColumn(#"Added Week Start", "Month Start", each Date.StartOfMonth([Date]), type date),
+					#"Added Quarter Start" = Table.AddColumn(#"Added Month Start", "Quarter Start", each Date.StartOfQuarter([Date]), type date),
+					#"Added Year Start" = Table.AddColumn(#"Added Quarter Start", "Year Start", each Date.StartOfYear([Date]), type date)
+				in
+					#"Added Year Start"
+
+	annotation PBI_ResultType = Table
+

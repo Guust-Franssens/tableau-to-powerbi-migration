@@ -1,0 +1,150 @@
+/// IPO/company master facts (930 rows, one row per company x year). Source: Tableau extract 'Top 100 IPOs' ('Facts (Named Range)+ (Company Master.xlsx)'). Independent fact table (no Tableau joins/blends).
+table 'Top 100 IPOs'
+	lineageTag: 39a5cb5c-6538-52af-94fd-34a2c2627a7a
+
+	/// Tableau [Number of Records] (=1 per row) -> DAX row count.
+	measure 'Number of Records' = COUNTROWS('Top 100 IPOs')
+		formatString: #,##0
+		lineageTag: 1a20178d-1ec0-5d93-92b1-dc046972052e
+
+	/// Tableau measure [Calculation2]: sum([Revenue_Inf_Adjusted]) <= [Parameters].[Parameter 1]*100000 (boolean gate).
+	measure Calculation2 = IF(SUM('Top 100 IPOs'[Revenue (Inflation Adjusted)]) <= [Dollar Amount Value] * 100000, TRUE, FALSE)
+		displayFolder: Tableau Helpers
+		lineageTag: 30dbe257-cd40-5358-8e6a-9a26b59a0698
+
+	/// Tableau measure [Calculation1]: IF last()=0 AND [Parameter 1]*100000>=SUM([Revenue_Inf_Adjusted]) 'keep' ELSE 'hide'. The last()=0 table-calc gate (evaluate only on the partition's last row) is a Tableau filter-helper idiom superseded by native PBI filtering and is dropped; the threshold logic is preserved. See limitations.
+	measure Calculation1 = IF([Dollar Amount Value] * 100000 >= SUM('Top 100 IPOs'[Revenue (Inflation Adjusted)]), "keep", "hide")
+		displayFolder: Tableau Helpers
+		lineageTag: d405abcb-3d7b-58d6-92f0-2d7b9d3c0bcf
+
+	/// TABLE CALC [Calculation3]: IF total(SUM([Revenue_Inf_Adjusted]))>=[Parameter 1]*100000 THEN max([Company Name (Full)]) ELSE 'No'. TOTAL() -> ALL() grand total. Partition INFERRED (field is orphaned). Ground truth: grand total=31,790.76 < 10,000,000 -> 'No' at default param=100.
+	measure Calculation3 = IF(CALCULATE(SUM('Top 100 IPOs'[Revenue (Inflation Adjusted)]), ALL('Top 100 IPOs')) >= [Dollar Amount Value] * 100000, MAX('Top 100 IPOs'[Company Name (Full)]), "No")
+		displayFolder: Tableau Helpers
+		lineageTag: 93c01b08-b8f4-5c41-aae4-def7f62d179b
+
+	column 'Company Name (Full)'
+		dataType: string
+		lineageTag: a0cfb438-ab56-54b6-9d79-315fc332ab07
+		summarizeBy: none
+		sourceColumn: Company Name (Full)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Company Name'
+		dataType: string
+		lineageTag: 044c5ade-ade3-57dd-a0e5-caf3f8b651a2
+		summarizeBy: none
+		sourceColumn: Company Name
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Net Income'
+		dataType: double
+		isHidden
+		lineageTag: 2e181ef9-a0f0-5ab3-bdc7-d7388ae95a61
+		summarizeBy: sum
+		sourceColumn: Net Income
+
+		annotation SummarizationSetBy = Automatic
+
+	column Revenue
+		dataType: double
+		isHidden
+		lineageTag: 1e6c8d53-99e3-5e99-8f45-b3e4c3a8e6df
+		summarizeBy: sum
+		sourceColumn: Revenue
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Revenue (Inflation Adjusted)'
+		dataType: double
+		lineageTag: 852f8fe3-9b26-5589-968e-ba9f82a12f01
+		summarizeBy: sum
+		sourceColumn: Revenue_Inf_Adjusted
+
+		annotation SummarizationSetBy = Automatic
+
+	column Segment
+		dataType: string
+		lineageTag: e355bd2c-ff10-5df4-a5ca-92129b8ede02
+		summarizeBy: none
+		sourceColumn: Segment
+
+		annotation SummarizationSetBy = Automatic
+
+	column Ticker
+		dataType: string
+		lineageTag: 5f311c43-3877-5300-a4da-3a8ce4d9ab62
+		summarizeBy: none
+		sourceColumn: Ticker
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year Founded'
+		dataType: int64
+		lineageTag: e030782d-a645-5205-9122-5a1fb9b5eac9
+		summarizeBy: none
+		sourceColumn: Year Founded
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year Number'
+		dataType: int64
+		lineageTag: 103e66c1-c37c-5a89-a4d5-e8a26b495af9
+		summarizeBy: none
+		sourceColumn: Year Number
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Years to $50m'
+		dataType: int64
+		lineageTag: 4ffa9f84-350f-56ab-bb2b-fec6b3fc94e8
+		summarizeBy: none
+		sourceColumn: Years to $50m
+
+		annotation SummarizationSetBy = Automatic
+
+	column Z_Complete_Sales
+		dataType: string
+		lineageTag: c7a09a04-84c4-5d18-abfb-0f71ad293516
+		summarizeBy: none
+		sourceColumn: Z_Complete_Sales
+
+		annotation SummarizationSetBy = Automatic
+
+	column Z_Typical
+		dataType: string
+		lineageTag: dd469067-50ac-534c-8abf-1f79aaa5e2f2
+		summarizeBy: none
+		sourceColumn: Z_Typical
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [Growth Group]: IF [Years to $50m]<=6 'Rocket Ship' ELSEIF <=12 'Hot Company' ELSE 'Slow Burner'. Used as color/row shelf in Top IPOs 1/2.
+	column 'Growth Group' = SWITCH(TRUE(), 'Top 100 IPOs'[Years to $50m] <= 6, "Rocket Ship", 'Top 100 IPOs'[Years to $50m] <= 12, "Hot Company", "Slow Burner")
+		dataType: string
+		lineageTag: d1720ce0-25a2-59af-a9ca-d9e6689e8984
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [Years to Hit CoHort]: banded [Years to $50m]. Faithful SWITCH(TRUE()) translation.
+	column 'Years to Hit CoHort' = SWITCH(TRUE(), 'Top 100 IPOs'[Years to $50m] < 5, "<5 Years", 'Top 100 IPOs'[Years to $50m] < 10, "<10 Years", 'Top 100 IPOs'[Years to $50m] < 20, ">10 Years", ">20 Years")
+		dataType: string
+		lineageTag: ef2694ff-8211-5922-8d60-cce69efe23ed
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Top 100 IPOs' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.top_100_ipos.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Company Name (Full)", type text}, {"Company Name", type text}, {"Net Income", type number}, {"Revenue", type number}, {"Revenue_Inf_Adjusted", type number}, {"Segment", type text}, {"Ticker", type text}, {"Year Founded", Int64.Type}, {"Year Number", Int64.Type}, {"Years to $50m", Int64.Type}, {"Z_Complete_Sales", type text}, {"Z_Typical", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

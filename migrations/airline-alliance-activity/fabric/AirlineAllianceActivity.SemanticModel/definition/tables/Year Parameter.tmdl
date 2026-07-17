@@ -1,0 +1,44 @@
+/// Disconnected single-select slicer table backing the Tableau 'Year Parameter' parameter (default 2023). Native-slicer + SELECTEDVALUE equivalent of a Tableau live parameter (parameter-equality idiom).
+table 'Year Parameter'
+
+	/// Reads the current 'Year Parameter' slicer selection, defaulting to the Tableau default 2023.
+	measure 'Year Parameter Value' = SELECTEDVALUE('Year Parameter'[Year], 2023)
+		displayFolder: Parameters
+
+	column 'Year'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Year
+		sortByColumn: 'Year Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper preserving the Tableau parameter's list order.
+	column 'Year Order'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Year Order
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Year Parameter' = m
+		mode: import
+		source =
+			let
+				Source = #table(
+					{"Year", "Year Order"},
+					{
+					{2022, 0},
+					{2023, 1},
+					{2024, 2},
+					{2025, 3}
+					}
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source, {{"Year", Int64.Type}, {"Year Order", Int64.Type}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

@@ -12,6 +12,12 @@ dependencies = [
 extract = [
     "tableauhyperapi>=0.0.19315",
 ]
+screenshots = [
+    "playwright>=1.44",
+]
+showcase = [
+    "pillow>=10.3",
+]
 dev = [
     "pytest>=8.2",
     "ruff>=0.6",

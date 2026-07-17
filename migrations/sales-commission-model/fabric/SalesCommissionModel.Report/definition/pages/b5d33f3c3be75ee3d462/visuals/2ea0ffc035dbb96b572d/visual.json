@@ -1,0 +1,59 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "2ea0ffc035dbb96b572d",
+  "position": { "x": 430, "y": 74, "z": 2010, "height": 72, "width": 414, "tabOrder": 400 },
+  "visual": {
+    "visualType": "slicer",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Commission Rate" } }, "Property": "Commission Rate" } },
+              "queryRef": "Commission Rate.Commission Rate",
+              "nativeQueryRef": "Commission Rate"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "data": [{ "properties": { "mode": { "expr": { "Literal": { "Value": "'Single'" } } } } }],
+      "slider": [{ "properties": { "show": { "expr": { "Literal": { "Value": "true" } } } } }],
+      "header": [{
+        "properties": {
+          "show": { "expr": { "Literal": { "Value": "true" } } },
+          "text": { "expr": { "Literal": { "Value": "'Commission Rate:'" } } }
+        }
+      }],
+      "general": [{
+        "properties": {
+          "filter": {
+            "filter": {
+              "Version": 2,
+              "From": [{ "Name": "c", "Entity": "Commission Rate", "Type": 0 }],
+              "Where": [{
+                "Condition": {
+                  "In": {
+                    "Expressions": [{ "Column": { "Expression": { "SourceRef": { "Source": "c" } }, "Property": "Commission Rate" } }],
+                    "Values": [[{ "Literal": { "Value": "22.8D" } }]]
+                  }
+                }
+              }]
+            }
+          }
+        }
+      }]
+    },
+    "visualContainerObjects": {
+      "padding": [{
+        "properties": {
+          "top": { "expr": { "Literal": { "Value": "8D" } } },
+          "bottom": { "expr": { "Literal": { "Value": "8D" } } },
+          "left": { "expr": { "Literal": { "Value": "8D" } } },
+          "right": { "expr": { "Literal": { "Value": "8D" } } }
+        }
+      }]
+    }
+  }
+}

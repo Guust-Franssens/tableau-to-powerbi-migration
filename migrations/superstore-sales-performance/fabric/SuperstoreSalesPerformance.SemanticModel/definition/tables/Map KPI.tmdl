@@ -1,0 +1,35 @@
+/// Field Parameter backing the Tableau 'Map KPI' dynamic-measure-switcher parameter (internal name '[Y-Axis (copy 2)]' - a second stale Ctrl-drag-duplicate of the Y-Axis parameter, see limitations_encountered - same list domain as Y-Axis, default "Sales"). Mirrors 'Y-Axis' table's structure/rationale exactly; see that table's doc comment for the full design note, including the sourceColumn=Value1/Value2/Value3 explanation. The actual measure switching happens in ['Map KPI Measure'] on 'Sample Superstore' (Prescriptive Map tooltip + Prescriptive Scatter Plot Size encoding).
+table 'Map KPI'
+	lineageTag: ef49f75a-7070-439c-8aef-2b3553e613b1
+
+	column 'Map KPI'
+		lineageTag: 0c90da80-308e-47a5-b37e-e28d8eece43f
+		summarizeBy: none
+		sourceColumn: [Value1]
+		sortByColumn: 'Map KPI Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Map KPI Fields'
+		isHidden
+		lineageTag: aecd9b6e-6ab7-460d-8a90-38987689fc23
+		summarizeBy: none
+		sourceColumn: [Value2]
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Map KPI Order'
+		isHidden
+		formatString: #,##0
+		lineageTag: 5b701eaf-0e66-4bbc-bd30-51dcba9c360c
+		summarizeBy: none
+		sourceColumn: [Value3]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Map KPI' = calculated
+		mode: import
+		source = {("Sales", NAMEOF('Sample Superstore'[CP Sales]), 0), ("Profit", NAMEOF('Sample Superstore'[CP Profit]), 1), ("Quantity", NAMEOF('Sample Superstore'[CP Quantity]), 2), ("Discount", NAMEOF('Sample Superstore'[CP Discount Pct]), 3), ("Returns", NAMEOF('Sample Superstore'[CP Returns]), 4), ("Days to Ship", NAMEOF('Sample Superstore'[CP Days To Ship]), 5), ("Profit Ratio", NAMEOF('Sample Superstore'[CP Profit Ratio Pct]), 6)}
+
+	annotation PBI_ResultType = Table
+

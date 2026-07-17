@@ -1,0 +1,23 @@
+/// What-If parameter (Tableau 'Churn Rate', real range, default 0.04). Drives Sales est / Units est (Superstore).
+table 'Churn Rate'
+
+	/// What-If selected value (default 0.04 preserved from Tableau).
+	measure 'Churn Rate Value' = SELECTEDVALUE('Churn Rate'[Churn Rate], 0.04)
+		formatString: 0.0%
+		displayFolder: Parameters
+
+	/// What-If parameter axis (GENERATESERIES). Bind slicer to this column.
+	column 'Churn Rate'
+		dataType: double
+		formatString: 0%
+		summarizeBy: none
+		sourceColumn: [Value]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Churn Rate' = calculated
+		mode: import
+		source = GENERATESERIES(0, 1, 0.01)
+
+	annotation PBI_ResultType = Table
+

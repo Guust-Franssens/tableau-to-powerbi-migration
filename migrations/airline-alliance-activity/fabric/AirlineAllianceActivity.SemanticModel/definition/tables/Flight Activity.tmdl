@@ -1,0 +1,1017 @@
+/// Flight-leg grain fact table (246,236 rows; one row per scheduled flight leg per date). Source: Tableau data source 'airline_alliance_performance_2022_2025' (the '_1' extract; the near-duplicate non-suffixed source is vestigial - 0 worksheet bindings - see limitations_encountered). Hosts all period-comparison KPI measures.
+table 'Flight Activity'
+
+	/// Tableau 'CY All Flights' measure. All Flights over CY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY All Flights' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Avg. CSAT' measure. Avg. CSAT over CY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Avg. CSAT' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Customer Satisfaction Score]),'Flight Activity'[Year]=_m_year_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.00
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY CTK' measure. CTK over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY CTK' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Cargo Carried Kg]*'Flight Activity'[Distance Km])/1000,'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Cargo Load Factor' measure. Cargo Load Factor over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Cargo Load Factor' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Cargo Load Factor]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Costs' measure. Costs over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Costs' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Total Costs Usd]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Count On-Time Perf' measure. Count On-Time Perf over CY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Count On-Time Perf' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[On Time Performance]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Freight Tonnes' measure. Freight Tonnes over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Freight Tonnes' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Cargo Carried Kg])/1000,'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Load Factor' measure. Load Factor over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Load Factor' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Load Factor]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY No of Comp Flights' measure. No of Comp Flights over CY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY No of Comp Flights' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Op Profit' measure. Op Profit over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Op Profit' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Operating Profit Usd]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Passenger Count' measure. Passenger Count over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Passenger Count' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Passengers Carried]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY RPK' measure. RPK over CY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY RPK' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY RPK (A)' measure. RPK (A) over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY RPK (A)' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'CY Total Revenue' measure. Total Revenue over CY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CY Total Revenue' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Total Revenue Usd]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Current Year (CY)
+
+	/// Tableau 'PY Avg. CSAT' measure. Avg. CSAT over PY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Avg. CSAT' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Customer Satisfaction Score]),'Flight Activity'[Year]=_m_year_parameter_value-1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.00
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY CTK' measure. CTK over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY CTK' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Cargo Carried Kg]*'Flight Activity'[Distance Km])/1000,'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY Cargo Load Factor' measure. Cargo Load Factor over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Cargo Load Factor' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Cargo Load Factor]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY Count On-Time Perf' measure. Count On-Time Perf over PY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Count On-Time Perf' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[On Time Performance]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY Freight Tonnes' measure. Freight Tonnes over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Freight Tonnes' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Cargo Carried Kg])/1000,'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY Load Factor' measure. Load Factor over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Load Factor' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Load Factor]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY No of Comp Flights' measure. No of Comp Flights over PY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY No of Comp Flights' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY Op Profit' measure. Op Profit over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Op Profit' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Operating Profit Usd]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY Passenger Count' measure. Passenger Count over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Passenger Count' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Passengers Carried]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY RPK' measure. RPK over PY period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY RPK' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY RPK (A)' measure. RPK (A) over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY RPK (A)' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'PY Total Revenue' measure. Total Revenue over PY period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PY Total Revenue' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Total Revenue Usd]),'Flight Activity'[Year]=_m_year_parameter_value-1,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Prior Year (PY)
+
+	/// Tableau 'CM All Flights' measure. All Flights over CM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM All Flights' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Avg. CSAT' measure. Avg. CSAT over CM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Avg. CSAT' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Customer Satisfaction Score]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.00
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM CTK' measure. CTK over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM CTK' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Cargo Carried Kg]*'Flight Activity'[Distance Km])/1000,'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Cargo Load Factor' measure. Cargo Load Factor over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Cargo Load Factor' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Cargo Load Factor]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Costs' measure. Costs over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Costs' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Total Costs Usd]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Count On-Time Perf' measure. Count On-Time Perf over CM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Count On-Time Perf' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[On Time Performance]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Freight Tonnes' measure. Freight Tonnes over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Freight Tonnes' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Cargo Carried Kg])/1000,'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Load Factor' measure. Load Factor over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Load Factor' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Load Factor]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM No of Comp Flights' measure. No of Comp Flights over CM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM No of Comp Flights' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM No of Mishandled Baggage' measure. No of Mishandled Baggage over CM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM No of Mishandled Baggage' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Mishandled Baggage]>=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Op Profit' measure. Op Profit over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Op Profit' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Operating Profit Usd]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Passenger Count' measure. Passenger Count over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Passenger Count' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Passengers Carried]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM RPK' measure. RPK over CM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM RPK' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM RPK (A)' measure. RPK (A) over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM RPK (A)' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'CM Total Revenue' measure. Total Revenue over CM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'CM Total Revenue' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Total Revenue Usd]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Current Month (CM)
+
+	/// Tableau 'PM All Flights' measure. All Flights over PM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM All Flights' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Avg. CSAT' measure. Avg. CSAT over PM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Avg. CSAT' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Customer Satisfaction Score]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.00
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM CTK' measure. CTK over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM CTK' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Cargo Carried Kg]*'Flight Activity'[Distance Km])/1000,'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Cargo Load Factor' measure. Cargo Load Factor over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Cargo Load Factor' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Cargo Load Factor]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Costs' measure. Costs over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Costs' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Total Costs Usd]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Count On-Time Perf' measure. Count On-Time Perf over PM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Count On-Time Perf' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[On Time Performance]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Freight Tonnes' measure. Freight Tonnes over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Freight Tonnes' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Cargo Carried Kg])/1000,'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Load Factor' measure. Load Factor over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Load Factor' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(AVERAGE('Flight Activity'[Load Factor]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: 0.0%
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM No of Comp Flights' measure. No of Comp Flights over PM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM No of Comp Flights' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM No of Mishandled Baggage' measure. No of Mishandled Baggage over PM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM No of Mishandled Baggage' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Mishandled Baggage]>=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM No of Passengers' measure. No of Passengers over PM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM No of Passengers' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Passengers Carried]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Op Profit' measure. Op Profit over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Op Profit' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Operating Profit Usd]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Passenger Count' measure. Passenger Count over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Passenger Count' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Passengers Carried]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM RPK' measure. RPK over PM period, all airlines (region-wide), region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM RPK' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM RPK (A)' measure. RPK (A) over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM RPK (A)' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUMX('Flight Activity','Flight Activity'[Passengers Carried]*'Flight Activity'[Distance Km]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'PM Total Revenue' measure. Total Revenue over PM period, airline = [Airline Parameter Value], region-restricted via the Origin Region parameter (Global = show all).
+	measure 'PM Total Revenue' = VAR _m_pm_year_value = [PM Year Value] VAR _m_pm_month_value = [PM Month Value] VAR _m_airline_parameter_value = [Airline Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(SUM('Flight Activity'[Total Revenue Usd]),'Flight Activity'[Year]=_m_pm_year_value,'Flight Activity'[Month]=_m_pm_month_value,'Flight Activity'[Completed Flights]=1,'Flight Activity'[Airline Name]=_m_airline_parameter_value,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
+		formatString: \$#,##0
+		displayFolder: Prior Month (PM)
+
+	/// Tableau 'CY On-Time Perf%': CY on-time flights / CY all flights.
+	measure 'CY On-Time Perf%' = DIVIDE([CY Count On-Time Perf],[CY All Flights])
+		formatString: 0.0%
+		displayFolder: Ratios
+
+	/// Tableau 'CM On-Time Perf%': CM on-time flights / CM all flights.
+	measure 'CM On-Time Perf%' = DIVIDE([CM Count On-Time Perf],[CM All Flights])
+		formatString: 0.0%
+		displayFolder: Ratios
+
+	/// Tableau 'PM On-Time Perf %': PM on-time flights / PM all flights.
+	measure 'PM On-Time Perf %' = DIVIDE([PM Count On-Time Perf],[PM All Flights])
+		formatString: 0.0%
+		displayFolder: Ratios
+
+	/// Tableau 'CM % of Mishandled Baggage': CM mishandled-baggage flights / CM completed flights.
+	measure 'CM % of Mishandled Baggage' = DIVIDE([CM No of Mishandled Baggage],[CM No of Comp Flights])
+		formatString: 0.0%
+		displayFolder: Ratios
+
+	/// Tableau 'PM % of Mishandled Baggage'. NOTE: denominator is CM (not PM) No of Comp Flights - faithful reproduction of a source-workbook quirk (see limitations_encountered).
+	measure 'PM % of Mishandled Baggage' = DIVIDE([PM No of Mishandled Baggage],[CM No of Comp Flights])
+		formatString: 0.0%
+		displayFolder: Ratios
+
+	/// Tableau 'Passenger Count Circle Col': YoY direction (Up/Down/No) of CY Passenger Count vs PY Passenger Count.
+	measure 'Passenger Count Circle Col' = IF([CY Passenger Count]>[PY Passenger Count],"Up",IF([CY Passenger Count]<[PY Passenger Count],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Total Revenue Circle Col': YoY direction (Up/Down/No) of CY Total Revenue vs PY Total Revenue.
+	measure 'Total Revenue Circle Col' = IF([CY Total Revenue]>[PY Total Revenue],"Up",IF([CY Total Revenue]<[PY Total Revenue],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Op Profit Circle Col': YoY direction (Up/Down/No) of CY Op Profit vs PY Op Profit.
+	measure 'Op Profit Circle Col' = IF([CY Op Profit]>[PY Op Profit],"Up",IF([CY Op Profit]<[PY Op Profit],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Costs Circle Col': YoY direction (Up/Down/No) of CY Op Profit vs PY Op Profit. NOTE: source formula compares CY/PY Op Profit (not Costs) - faithful reproduction of a source quirk.
+	measure 'Costs Circle Col' = IF([CY Op Profit]>[PY Op Profit],"Up",IF([CY Op Profit]<[PY Op Profit],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Load Factor Circle Col': YoY direction (Up/Down/No) of CY Load Factor vs PY Load Factor.
+	measure 'Load Factor Circle Col' = IF([CY Load Factor]>[PY Load Factor],"Up",IF([CY Load Factor]<[PY Load Factor],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Cargo Load Factor Circle Col': YoY direction (Up/Down/No) of CY Cargo Load Factor vs PY Cargo Load Factor.
+	measure 'Cargo Load Factor Circle Col' = IF([CY Cargo Load Factor]>[PY Cargo Load Factor],"Up",IF([CY Cargo Load Factor]<[PY Cargo Load Factor],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'CTK Circle Col': YoY direction (Up/Down/No) of CY CTK vs PY CTK.
+	measure 'CTK Circle Col' = IF([CY CTK]>[PY CTK],"Up",IF([CY CTK]<[PY CTK],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Freight Tonnes Circle Col': YoY direction (Up/Down/No) of CY Freight Tonnes vs PY Freight Tonnes.
+	measure 'Freight Tonnes Circle Col' = IF([CY Freight Tonnes]>[PY Freight Tonnes],"Up",IF([CY Freight Tonnes]<[PY Freight Tonnes],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'RPK Perf Circle Col': YoY direction (Up/Down/No) of CY RPK vs PY RPK.
+	measure 'RPK Perf Circle Col' = IF([CY RPK]>[PY RPK],"Up",IF([CY RPK]<[PY RPK],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'RPK Perf Circle Col (A)': YoY direction (Up/Down/No) of CY RPK (A) vs PY RPK (A).
+	measure 'RPK Perf Circle Col (A)' = IF([CY RPK (A)]>[PY RPK (A)],"Up",IF([CY RPK (A)]<[PY RPK (A)],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Comp Flights Circle Col': YoY direction (Up/Down/No) of CY No of Comp Flights vs PY No of Comp Flights.
+	measure 'Comp Flights Circle Col' = IF([CY No of Comp Flights]>[PY No of Comp Flights],"Up",IF([CY No of Comp Flights]<[PY No of Comp Flights],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'On-Time Perf Circle Col': YoY direction (Up/Down/No) of CY Count On-Time Perf vs PY Count On-Time Perf. Compares raw CY/PY on-time flight COUNT (not the %).
+	measure 'On-Time Perf Circle Col' = IF([CY Count On-Time Perf]>[PY Count On-Time Perf],"Up",IF([CY Count On-Time Perf]<[PY Count On-Time Perf],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'CSAT Perf Circle Col': YoY direction (Up/Down/No) of CY Avg. CSAT vs PY Avg. CSAT.
+	measure 'CSAT Perf Circle Col' = IF([CY Avg. CSAT]>[PY Avg. CSAT],"Up",IF([CY Avg. CSAT]<[PY Avg. CSAT],"Down","No"))
+		displayFolder: Trend Indicators (YoY)
+
+	/// Tableau 'Pos MoM Passenger Count': month-over-month growth (CM Passenger Count/PM Passenger Count - 1); BLANK when not growing.
+	measure 'Pos MoM Passenger Count' = IF([CM Passenger Count]>[PM Passenger Count],DIVIDE([CM Passenger Count],[PM Passenger Count])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Total Revenue': month-over-month growth (CM Total Revenue/PM Total Revenue - 1); BLANK when not growing.
+	measure 'Pos MoM Total Revenue' = IF([CM Total Revenue]>[PM Total Revenue],DIVIDE([CM Total Revenue],[PM Total Revenue])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Op Profit': month-over-month growth (CM Op Profit/PM Op Profit - 1); BLANK when not growing.
+	measure 'Pos MoM Op Profit' = IF([CM Op Profit]>[PM Op Profit],DIVIDE([CM Op Profit],[PM Op Profit])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Costs': month-over-month growth (CM Costs/PM Costs - 1); BLANK when not growing.
+	measure 'Pos MoM Costs' = IF([CM Costs]>[PM Costs],DIVIDE([CM Costs],[PM Costs])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Load Factor': month-over-month growth (CM Load Factor/PM Load Factor - 1); BLANK when not growing.
+	measure 'Pos MoM Load Factor' = IF([CM Load Factor]>[PM Load Factor],DIVIDE([CM Load Factor],[PM Load Factor])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Cargo Load Factor': month-over-month growth (CM Cargo Load Factor/PM Cargo Load Factor - 1); BLANK when not growing.
+	measure 'Pos MoM Cargo Load Factor' = IF([CM Cargo Load Factor]>[PM Cargo Load Factor],DIVIDE([CM Cargo Load Factor],[PM Cargo Load Factor])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM CTK': month-over-month growth (CM CTK/PM CTK - 1); BLANK when not growing.
+	measure 'Pos MoM CTK' = IF([CM CTK]>[PM CTK],DIVIDE([CM CTK],[PM CTK])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Freight Tonnes': month-over-month growth (CM Freight Tonnes/PM Freight Tonnes - 1); BLANK when not growing.
+	measure 'Pos MoM Freight Tonnes' = IF([CM Freight Tonnes]>[PM Freight Tonnes],DIVIDE([CM Freight Tonnes],[PM Freight Tonnes])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM RPK': month-over-month growth (CM RPK/PM RPK - 1); BLANK when not growing.
+	measure 'Pos MoM RPK' = IF([CM RPK]>[PM RPK],DIVIDE([CM RPK],[PM RPK])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM RPK (A)': month-over-month growth (CM RPK (A)/PM RPK (A) - 1); BLANK when not growing.
+	measure 'Pos MoM RPK (A)' = IF([CM RPK (A)]>[PM RPK (A)],DIVIDE([CM RPK (A)],[PM RPK (A)])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Comp Flights': month-over-month growth (CM No of Comp Flights/PM No of Comp Flights - 1); BLANK when not growing.
+	measure 'Pos MoM Comp Flights' = IF([CM No of Comp Flights]>[PM No of Comp Flights],DIVIDE([CM No of Comp Flights],[PM No of Comp Flights])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM On-Time Perf': month-over-month growth (CM Count On-Time Perf/PM Count On-Time Perf - 1); BLANK when not growing.
+	measure 'Pos MoM On-Time Perf' = IF([CM Count On-Time Perf]>[PM Count On-Time Perf],DIVIDE([CM Count On-Time Perf],[PM Count On-Time Perf])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Tableau 'Pos MoM Avg. CSAT': month-over-month growth (CM Avg. CSAT/PM Avg. CSAT - 1); BLANK when not growing.
+	measure 'Pos MoM Avg. CSAT' = IF([CM Avg. CSAT]>[PM Avg. CSAT],DIVIDE([CM Avg. CSAT],[PM Avg. CSAT])-1)
+		formatString: 0.0%
+		displayFolder: MoM Growth (Positive)
+
+	/// Prior-month month number derived from the Month parameter (wraps 1->12).
+	measure 'PM Month Value' = IF([Month Parameter Value]=1,12,[Month Parameter Value]-1)
+		formatString: #,##0
+		displayFolder: Parameters
+		isHidden
+
+	/// Prior-month year derived from the Year/Month parameters (rolls back at January).
+	measure 'PM Year Value' = IF([Month Parameter Value]=1,[Year Parameter Value]-1,[Year Parameter Value])
+		formatString: #,##0
+		displayFolder: Parameters
+		isHidden
+
+	/// Tableau 'Date From Params': MAKEDATE(Year Parameter, Month Parameter, 1) - first day of the selected month.
+	measure 'Date From Params Value' = DATE([Year Parameter Value],[Month Parameter Value],1)
+		formatString: Short Date
+		displayFolder: Parameters
+		isHidden
+
+	/// Tableau 'Selected Region' = current Origin Region parameter value.
+	measure 'Selected Region' = [Region Parameter Value]
+		displayFolder: Parameters
+
+	/// Tableau 'Selected Airline' = current Airline Name parameter value.
+	measure 'Selected Airline' = [Airline Parameter Value]
+		displayFolder: Parameters
+
+	/// Tableau 'Selected Aircraft Type' = current Aircraft Type parameter value.
+	measure 'Selected Aircraft Type' = [Aircraft Parameter Value]
+		displayFolder: Parameters
+
+	/// Tableau 'Colour': highlights the month matching the Month parameter (assumes visual grouped by Date[Month Number]).
+	measure 'Colour' = IF([Month Parameter Value]=SELECTEDVALUE('Date'[Month Number]),"Month","Others")
+		displayFolder: Report Helpers
+
+	/// Tableau 'Year Colour': highlights the year matching the Year parameter (assumes visual grouped by Date[Year]).
+	measure 'Year Colour' = IF([Year Parameter Value]=SELECTEDVALUE('Date'[Year]),"Year","Others")
+		displayFolder: Report Helpers
+
+	/// Tableau 'Bar Colours': highlights the selected month bar (assumes visual grouped by Date[Month Start]).
+	measure 'Bar Colours' = IF(SELECTEDVALUE('Date'[Month Start])=[Date From Params Value],"Selected Month","Others")
+		displayFolder: Report Helpers
+
+	/// Tableau 'Airline Bar Colours': highlights the selected month for the selected airline (assumes month+airline in context).
+	measure 'Airline Bar Colours' = IF(SELECTEDVALUE('Date'[Month Start])=[Date From Params Value]&&SELECTEDVALUE('Flight Activity'[Airline Name])=[Airline Parameter Value],"Selected Month","Others")
+		displayFolder: Report Helpers
+
+	/// Tableau 'Today' = TODAY().
+	measure 'Today' = TODAY()
+		formatString: Short Date
+		displayFolder: Report Helpers
+
+	/// Tableau 'Header size' constant (180).
+	measure 'Header size' = 180
+		formatString: #,##0
+		displayFolder: Report Helpers
+
+	/// Convenience replacement for Tableau dimension 'CM Main Destinations' (a parameter-equality projection). Put Destination City on the visual + this measure to rank top CM destinations; region filter applies to Destination Region.
+	measure 'CM Comp Flights to Destination' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Destination Region]),_m_region_parameter_value="Global"||'Flight Activity'[Destination Region]=_m_region_parameter_value))
+		formatString: #,##0
+		displayFolder: Current Month (CM)
+
+	column 'Date'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: date
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: year
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Month'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: month
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Quarter'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: quarter
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Day Of Week'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: day_of_week
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Airline Code'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: airline_code
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Airline Name'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: airline_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Hub Airport'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: hub_airport
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Hub City'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: hub_city
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Hub Country'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: hub_country
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Flight Id'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: flight_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Aircraft Type'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: aircraft_type
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Route Category'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: route_category
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Origin Airport'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: origin_airport
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Origin City'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: origin_city
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Origin Country'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: origin_country
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Origin Region'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: origin_region
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Origin Latitude'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: origin_latitude
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Origin Longitude'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: origin_longitude
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Destination Airport'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: destination_airport
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Destination City'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: destination_city
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Destination Country'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: destination_country
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Destination Region'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: destination_region
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Destination Latitude'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: destination_latitude
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Destination Longitude'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: destination_longitude
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Route'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: route
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Is Hub Flight'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: is_hub_flight
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Is International'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: is_international
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Is Intercontinental'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: is_intercontinental
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Scheduled Flights'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: scheduled_flights
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Completed Flights'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: completed_flights
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cancelled Flights'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: cancelled_flights
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Distance Km'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: distance_km
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Flight Duration Hours'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: flight_duration_hours
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Aircraft Capacity'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: aircraft_capacity
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Passengers Carried'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: passengers_carried
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Load Factor'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: load_factor
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Average Fare Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: average_fare_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Passenger Revenue Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: passenger_revenue_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cargo Capacity Kg'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: cargo_capacity_kg
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cargo Carried Kg'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: cargo_carried_kg
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cargo Load Factor'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: cargo_load_factor
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cargo Revenue Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: cargo_revenue_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Total Revenue Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: total_revenue_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fuel Cost Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: fuel_cost_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Crew Cost Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: crew_cost_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Maintenance Cost Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: maintenance_cost_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Airport Fees Usd'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: airport_fees_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Other Costs Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: other_costs_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Total Costs Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: total_costs_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Operating Profit Usd'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: operating_profit_usd
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Profit Margin Pct'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: profit_margin_pct
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'On Time Performance'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: on_time_performance
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Delay Minutes'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: delay_minutes
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fuel Consumed Kg'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: fuel_consumed_kg
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fuel Efficiency Kg Per 100Km'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: fuel_efficiency_kg_per_100km
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Customer Satisfaction Score'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: customer_satisfaction_score
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Total Baggage'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: total_baggage
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Mishandled Baggage'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: mishandled_baggage
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Baggage Handling Rate'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: baggage_handling_rate
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Co2 Emissions Kg'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: co2_emissions_kg
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Co2 Per Passenger Kg'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: co2_per_passenger_kg
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fuel Price Per Unit'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: fuel_price_per_unit
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Covid Impact Factor'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: covid_impact_factor
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Seasonal Factor Passenger'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: seasonal_factor_passenger
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Seasonal Factor Cargo'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: seasonal_factor_cargo
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Revenue Per Passenger'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: revenue_per_passenger
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cost Per Passenger'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: cost_per_passenger
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Revenue Per Km'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: revenue_per_km
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Cost Per Km'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: cost_per_km
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Aircraft Name' calculated column: IF LEFT(Aircraft Type,1)='A' THEN 'Airbus' ELSE 'Boeing'.
+	column 'Aircraft Name' = IF(LEFT('Flight Activity'[Aircraft Type],1)="A","Airbus","Boeing")
+		dataType: string
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Flight Activity' = m
+		mode: import
+		source =
+			let
+				Source = Csv.Document(File.Contents(DataFolder & "ds.airline_alliance_performance_2022_2025_1.csv"),[Delimiter=",", Columns=70, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"date", type date}, {"year", Int64.Type}, {"month", Int64.Type}, {"quarter", type text}, {"day_of_week", type text}, {"airline_code", type text}, {"airline_name", type text}, {"hub_airport", type text}, {"hub_city", type text}, {"hub_country", type text}, {"flight_id", type text}, {"aircraft_type", type text}, {"route_category", type text}, {"origin_airport", type text}, {"origin_city", type text}, {"origin_country", type text}, {"origin_region", type text}, {"origin_latitude", type number}, {"origin_longitude", type number}, {"destination_airport", type text}, {"destination_city", type text}, {"destination_country", type text}, {"destination_region", type text}, {"destination_latitude", type number}, {"destination_longitude", type number}, {"route", type text}, {"is_hub_flight", Int64.Type}, {"is_international", Int64.Type}, {"is_intercontinental", Int64.Type}, {"scheduled_flights", Int64.Type}, {"completed_flights", Int64.Type}, {"cancelled_flights", Int64.Type}, {"distance_km", Int64.Type}, {"flight_duration_hours", type number}, {"aircraft_capacity", Int64.Type}, {"passengers_carried", Int64.Type}, {"load_factor", type number}, {"average_fare_usd", type number}, {"passenger_revenue_usd", type number}, {"cargo_capacity_kg", Int64.Type}, {"cargo_carried_kg", type number}, {"cargo_load_factor", type number}, {"cargo_revenue_usd", type number}, {"total_revenue_usd", type number}, {"fuel_cost_usd", type number}, {"crew_cost_usd", type number}, {"maintenance_cost_usd", type number}, {"airport_fees_usd", Int64.Type}, {"other_costs_usd", type number}, {"total_costs_usd", type number}, {"operating_profit_usd", type number}, {"profit_margin_pct", type number}, {"on_time_performance", Int64.Type}, {"delay_minutes", Int64.Type}, {"fuel_consumed_kg", type number}, {"fuel_efficiency_kg_per_100km", type number}, {"customer_satisfaction_score", type number}, {"total_baggage", Int64.Type}, {"mishandled_baggage", Int64.Type}, {"baggage_handling_rate", type number}, {"co2_emissions_kg", type number}, {"co2_per_passenger_kg", type number}, {"fuel_price_per_unit", type number}, {"covid_impact_factor", type number}, {"seasonal_factor_passenger", type number}, {"seasonal_factor_cargo", type number}, {"revenue_per_passenger", type number}, {"cost_per_passenger", type number}, {"revenue_per_km", type number}, {"cost_per_km", type number}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

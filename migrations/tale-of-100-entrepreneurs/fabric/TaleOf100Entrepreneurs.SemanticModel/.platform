@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "TaleOf100Entrepreneurs"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "e90b1308-1294-5de1-9f3d-add7c53aef1b"
+  }
+}

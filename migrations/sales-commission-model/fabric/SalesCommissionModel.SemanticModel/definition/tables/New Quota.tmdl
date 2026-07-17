@@ -1,0 +1,23 @@
+/// What-If parameter (Tableau 'New Quota', int range, default 500000). Drives % of quota achieved / Achieved Quota / OTE.
+table 'New Quota'
+
+	/// What-If selected value (default 500000 preserved from Tableau).
+	measure 'New Quota Value' = SELECTEDVALUE('New Quota'[New Quota], 500000)
+		formatString: "$"#,##0
+		displayFolder: Parameters
+
+	/// What-If parameter axis (GENERATESERIES). Bind slicer to this column.
+	column 'New Quota'
+		dataType: int64
+		formatString: "$"#,##0
+		summarizeBy: none
+		sourceColumn: [Value]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'New Quota' = calculated
+		mode: import
+		source = GENERATESERIES(0, 2000000, 25000)
+
+	annotation PBI_ResultType = Table
+

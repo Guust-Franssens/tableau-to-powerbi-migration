@@ -1,0 +1,29 @@
+/// Disconnected slicer table for the Tableau 'Date Detail' parameter (string, list domain year/quarter/month/week/day, default 'month'). Feeds the Stocks [Bars]/[Calendar] granularity helpers. Value measure defaults to 'month'.
+table 'Date Detail'
+	lineageTag: c3074ca4-40dc-5975-9f1a-25d6d0570ffe
+
+	/// Reads the current slicer selection on 'Date Detail'[Date Detail], defaulting to Tableau's current value when nothing is selected.
+	measure 'Date Detail Value' = SELECTEDVALUE('Date Detail'[Date Detail], "month")
+		displayFolder: Parameter
+		lineageTag: bd50b2f4-09e8-5f25-9afa-6fe53df4b7da
+
+	column 'Date Detail'
+		dataType: string
+		lineageTag: ab24626e-2869-56b4-b1ac-1b9d8a6e9e7b
+		summarizeBy: none
+		sourceColumn: Date Detail
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Date Detail' = m
+		mode: import
+		source =
+				let
+				    Source = {"year", "quarter", "month", "week", "day"},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Date Detail"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Date Detail", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

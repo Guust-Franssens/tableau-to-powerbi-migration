@@ -1,0 +1,37 @@
+/// Disconnected calendar-list table backing the Tableau 'Maximum Date' parameter (internal name '[Start Date (copy)]' - a stale Ctrl-drag-duplicate name, see limitations_encountered - "any" date domain, default 2017-03-31). Same capability-gap approximation as 'Minimum Date' (bounded date-list slicer standing in for Tableau's genuinely free-form date-entry parameter); see that table's doc comment for the full rationale.
+table 'Maximum Date'
+	lineageTag: 05fc008b-1ca2-4ffd-8cfd-76d437516029
+
+	/// Reads the current slicer selection on 'Maximum Date'[Maximum Date], defaulting to Tableau's default 2017-03-31 when nothing is selected.
+	measure 'Maximum Date Value' = SELECTEDVALUE('Maximum Date'[Maximum Date], DATE(2017, 3, 31))
+		formatString: Short Date
+		displayFolder: Date Window
+		lineageTag: 7bb00afd-84c8-429f-905e-fe02a28c65ff
+
+	/// Selectable date value.
+	column 'Maximum Date'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 406cc1c5-fa76-4d53-809c-9019e6cb4a1c
+		summarizeBy: none
+		sourceColumn: Maximum Date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	partition 'Maximum Date' = m
+		mode: import
+		source =
+				let
+					StartDate = #date(2014, 1, 1),
+					EndDate = #date(2018, 12, 31),
+					NumberOfDays = Duration.Days(EndDate - StartDate) + 1,
+					DateList = List.Dates(StartDate, NumberOfDays, #duration(1, 0, 0, 0)),
+					#"Converted to Table" = Table.FromList(DateList, Splitter.SplitByNothing(), {"Maximum Date"}),
+					#"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Maximum Date", type date}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

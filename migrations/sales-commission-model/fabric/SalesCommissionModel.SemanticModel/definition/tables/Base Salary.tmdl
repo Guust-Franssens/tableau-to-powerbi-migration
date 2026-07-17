@@ -1,0 +1,23 @@
+/// What-If parameter (Tableau 'Base Salary', int range, default 45000). Drives Total Compensation / OTE.
+table 'Base Salary'
+
+	/// What-If selected value (default 45000 preserved from Tableau).
+	measure 'Base Salary Value' = SELECTEDVALUE('Base Salary'[Base Salary], 45000)
+		formatString: "$"#,##0
+		displayFolder: Parameters
+
+	/// What-If parameter axis (GENERATESERIES). Bind slicer to this column.
+	column 'Base Salary'
+		dataType: int64
+		formatString: "$"#,##0
+		summarizeBy: none
+		sourceColumn: [Value]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Base Salary' = calculated
+		mode: import
+		source = GENERATESERIES(0, 200000, 5000)
+
+	annotation PBI_ResultType = Table
+

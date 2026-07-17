@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "TaleOf100Entrepreneurs"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "9b2c7e14-3a55-4f80-ab21-5f0c8d7a1e42"
+  }
+}

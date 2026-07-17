@@ -1,0 +1,43 @@
+/// Static seed table for the Tableau 'Insight 1'/'Insight 2'/'Insight 3' + 'Insight 1/2/3 Indicator' parameters (internal names '[Parameter 9]'+'[Parameter 10]', '[Insight 1 (copy)]'+'[Insight 1 Indicator (copy)]', '[Insight 2 (copy)]'+'[Insight 2 Indicator (copy)]' - all stale Ctrl-drag-duplicate names, see limitations_encountered). In Tableau these are a live, end-user-editable "form" on the Annotations dashboard (free-text input boxes + Positive/Neutral/Negative radio buttons feeding the Prescriptive dashboard's numbered callouts in real time, confirmed via live screenshot). Power BI has NO native equivalent for live end-user text entry bound to a measure/visual (no writeback without Power Apps integration) - this is a genuine capability gap, not a translation choice, and is recorded as such in limitations_encountered. Implemented here as a static 3-row lookup table seeded from each parameter's current_value in migration-spec.json, so the report shows the same 3 insights Tableau currently shows; consolidating what were 6 separate Tableau parameters (3 text + 3 indicator) into one small table is a deliberate simplification since none of them are interactive here anymore - there is no live parameter left to keep separate. 'Indicator' (Positive/Neutral/Negative) is intended to drive report-layer conditional formatting (green/gray/red) on the Prescriptive dashboard's callouts - a pbi-report-builder concern; this table only supplies the faithful source values. NOTE: in the source workbook, the 'Insight N Indicator' calculated-field wrapper (as distinct from the raw parameter) applies CASE [Parameters].[...] WHEN "Positive" THEN "1" WHEN "Neutral" THEN "2" WHEN "Negative" THEN "3" END before binding to the Color/Label encodings of the 3 'Insight Indicator N' Circle-mark worksheets - i.e. Tableau drives its color legend off a derived "1"/"2"/"3" numeric-string code, not the raw text. That numeric-code indirection was deliberately NOT reproduced here: the raw Positive/Neutral/Negative text is more directly useful for Power BI conditional formatting (which can key a color rule on the text value itself, no numeric-code indirection needed) - see limitations_encountered.
+table Insights
+	lineageTag: 233cfe32-130d-472d-8223-2e714ea913b1
+
+	/// 1, 2, or 3 - matches the Annotations dashboard's numbered PREVIEW order and the Prescriptive dashboard's numbered callouts.
+	column 'Insight Number'
+		dataType: int64
+		formatString: #,##0
+		lineageTag: bd72bc82-0ce2-4cf9-ab4f-6fef9c91b353
+		summarizeBy: none
+		sourceColumn: Insight Number
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Free-text insight sentence, seeded verbatim from the Tableau parameter's current_value - including the source workbook's own typo "profitablility" in Insight 1, preserved faithfully rather than silently corrected.
+	column 'Insight Text'
+		dataType: string
+		lineageTag: ba7824cb-8e94-4af8-b214-27bf72c5b3b1
+		summarizeBy: none
+		sourceColumn: Insight Text
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Positive / Neutral / Negative, seeded verbatim from the matching '<Insight N> Indicator' parameter's current_value.
+	column Indicator
+		dataType: string
+		lineageTag: 3171d8cc-165f-4ab6-ab6c-088ea353389a
+		summarizeBy: none
+		sourceColumn: Indicator
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Insights = m
+		mode: import
+		source =
+				let
+					Source = #table({"Insight Number", "Insight Text", "Indicator"}, {{1, "Sales are up on average nationwide across all three of our product categories. How can we improve profitablility of Furniture?", "Positive"}, {2, "Let's keep an eye on days to ship as it was up slightly in three of four regions. Standard Class shipping appears to be the culprit.", "Neutral"}, {3, "Profit ratio was down in the East driven by a -134% profit ratio in Machines; this needs to be addressed immediately.", "Negative"}}),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Insight Number", Int64.Type}, {"Insight Text", type text}, {"Indicator", type text}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

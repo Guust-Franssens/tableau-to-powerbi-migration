@@ -1,0 +1,158 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "f5a5408c81595de17148",
+  "position": { "x": 740, "y": 66, "z": 4000, "height": 842, "width": 534, "tabOrder": 4000 },
+  "visual": {
+    "visualType": "azureMap",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Site ID" } },
+              "queryRef": "Cell Links.Site ID",
+              "nativeQueryRef": "Site ID",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": { "Aggregation": { "Expression": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Lat" } }, "Function": 1 } },
+              "queryRef": "Avg(Cell Links.Lat)",
+              "nativeQueryRef": "Average of Lat"
+            }
+          ]
+        },
+        "X": {
+          "projections": [
+            {
+              "field": { "Aggregation": { "Expression": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Long" } }, "Function": 1 } },
+              "queryRef": "Avg(Cell Links.Long)",
+              "nativeQueryRef": "Average of Long"
+            }
+          ]
+        },
+        "Series": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } },
+              "queryRef": "Cell Links.Link Status",
+              "nativeQueryRef": "Link Status"
+            }
+          ]
+        },
+        "Size": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Total Capacity" } },
+              "queryRef": "Cell Links.Total Capacity",
+              "nativeQueryRef": "Total Capacity"
+            }
+          ]
+        },
+        "PathID": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link ID" } },
+              "queryRef": "Cell Links.Link ID",
+              "nativeQueryRef": "Link ID"
+            }
+          ]
+        },
+        "PointOrder": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "path order" } },
+              "queryRef": "Cell Links.path order",
+              "nativeQueryRef": "path order"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "mapControls": [
+        {
+          "properties": {
+            "defaultStyle": { "expr": { "Literal": { "Value": "'grayscale_light'" } } },
+            "autoZoom": { "expr": { "Literal": { "Value": "true" } } },
+            "showLabels": { "expr": { "Literal": { "Value": "true" } } },
+            "worldWrap": { "expr": { "Literal": { "Value": "false" } } }
+          }
+        }
+      ],
+      "pathLayer": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "strokeWidth": { "expr": { "Literal": { "Value": "3L" } } },
+            "strokeTransparency": { "expr": { "Literal": { "Value": "10D" } } }
+          }
+        }
+      ],
+      "bubbleLayer": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "sizeByValue": { "expr": { "Literal": { "Value": "true" } } },
+            "minBubbleRadius": { "expr": { "Literal": { "Value": "2L" } } },
+            "bubbleRadius": { "expr": { "Literal": { "Value": "5L" } } },
+            "maxRadius": { "expr": { "Literal": { "Value": "12L" } } }
+          }
+        }
+      ],
+      "dataPoint": [
+        { "properties": { "showAllDataPoints": { "expr": { "Literal": { "Value": "true" } } } } },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#4E79A7'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Planned'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#B5A72C'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Build'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#4E9A51'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Operational'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#A9D18E'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Operational Backup'" } } } } }] }
+        },
+        {
+          "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#D6272A'" } } } } } },
+          "selector": { "data": [{ "scopeId": { "Comparison": { "ComparisonKind": 0, "Left": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link Status" } }, "Right": { "Literal": { "Value": "'Cancelled'" } } } } }] }
+        }
+      ],
+      "legend": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "position": { "expr": { "Literal": { "Value": "'Bottom'" } } },
+            "showTitle": { "expr": { "Literal": { "Value": "true" } } },
+            "titleText": { "expr": { "Literal": { "Value": "'Link Status'" } } }
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "text": { "expr": { "Literal": { "Value": "'Link Map'" } } },
+            "fontColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#C8791E'" } } } } },
+            "fontSize": { "expr": { "Literal": { "Value": "12D" } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } },
+            "alignment": { "expr": { "Literal": { "Value": "'center'" } } }
+          }
+        }
+      ],
+      "subTitle": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ]
+    }
+  }
+}

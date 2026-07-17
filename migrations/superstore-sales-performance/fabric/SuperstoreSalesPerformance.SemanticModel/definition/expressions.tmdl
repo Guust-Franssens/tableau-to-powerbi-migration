@@ -1,0 +1,5 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\superstore-sales-performance\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: a6317b21-4c9a-44ca-b0d0-9b3e51f26ed3
+
+	annotation PBI_ResultType = Text
+

@@ -1,0 +1,23 @@
+/// What-If parameter (Tableau 'Commission Rate', real range, default 22.8 = percent points). Drives Commission (Variable) / OTE.
+table 'Commission Rate'
+
+	/// What-If selected value (default 22.8 preserved from Tableau).
+	measure 'Commission Rate Value' = SELECTEDVALUE('Commission Rate'[Commission Rate], 22.8)
+		formatString: 0.0"%"
+		displayFolder: Parameters
+
+	/// What-If parameter axis (GENERATESERIES). Bind slicer to this column.
+	column 'Commission Rate'
+		dataType: double
+		formatString: 0.0"%"
+		summarizeBy: none
+		sourceColumn: [Value]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Commission Rate' = calculated
+		mode: import
+		source = GENERATESERIES(0, 100, 0.1)
+
+	annotation PBI_ResultType = Table
+

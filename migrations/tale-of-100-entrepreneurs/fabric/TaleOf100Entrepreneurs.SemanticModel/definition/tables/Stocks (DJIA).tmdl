@@ -1,0 +1,227 @@
+/// Daily OHLC + Adj Close for 31 Dow Jones stocks (292,280 rows; exactly one row per Symbol x Date; Adj Close has no nulls). Source: Tableau extract 'stocks in dow jones industrial average.csv'. Independent fact table. Home of 8 of the 9 Tableau table calculations (per-Symbol time-series 'growth of $X' idioms); their PARTITION BY Symbol / ORDER BY Date grain is INFERRED because no worksheet binds them.
+table 'Stocks (DJIA)'
+	lineageTag: 6f7cc683-071a-5295-9f85-bf0497c03af8
+
+	/// Tableau measure [Original Investment Amt] = [Investment Amount]/CountD([Number of Records]). CountD([NoR]) is degenerate (=1), so this = the Investment Amount parameter (500 default).
+	measure 'Original Investment Amt' = DIVIDE([Investment Amount Value], DISTINCTCOUNT('Stocks (DJIA)'[Number of Records]))
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Investment
+		lineageTag: 7b13e4ea-391f-528f-a973-39c056438ad0
+
+	/// TABLE CALC [Original Share Amount] = ([Investment Amount]/CountD([NoR]))/LOOKUP(avg([Adj Close]),First()) = shares bought at the first price. UTX -> 1515.151515.
+	measure 'Original Share Amount' = DIVIDE([Original Investment Amt], AVERAGE('Stocks (DJIA)'[Adj Close First]))
+		formatString: #,##0.000000
+		displayFolder: Investment
+		lineageTag: 34b64e28-1abf-544a-8b10-4651c95c140d
+
+	/// TABLE CALC [Avg. Adj Close] (internal '[Difference in Avg. Adj Close]') = ZN(AVG([Adj Close]))*([Investment Amount]/LOOKUP(ZN(AVG([Adj Close])),FIRST())) = value over time of the initial investment. UTX last date -> 106,833.33; first date -> 500.
+	measure 'Avg Adj Close Value' = AVERAGE('Stocks (DJIA)'[Adj Close]) * DIVIDE([Investment Amount Value], AVERAGE('Stocks (DJIA)'[Adj Close First]))
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Investment
+		lineageTag: 8c02760a-835c-58a4-ad87-69094cf92c8b
+
+	/// TABLE CALC [Very Last Value] = [Orig Inv Amt]*LOOKUP(...,LAST())/LOOKUP(...,FIRST()) = final value of the investment (per-symbol constant). UTX -> 106,833.33; AA -> 7,934.78.
+	measure 'Very Last Value' = [Original Investment Amt] * DIVIDE(AVERAGE('Stocks (DJIA)'[Adj Close Last]), AVERAGE('Stocks (DJIA)'[Adj Close First]))
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Investment
+		lineageTag: 9330bc2c-57e6-5ae8-a2aa-5e3774ca34b1
+
+	/// Tableau measure [Gains/(Loss)] = [Avg. Adj Close] - [Original Investment Amt]. UTX last date -> 106,333.33.
+	measure 'Gains Loss' = [Avg Adj Close Value] - [Original Investment Amt]
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Investment
+		lineageTag: 25a3435c-5022-5fd7-9be0-2b1c5ea0091a
+
+	/// Tableau measure [%] = [Gains/(Loss)]/[Original Investment Amt]. UTX last date -> 21266.67% (i.e. 212.6667x).
+	measure Pct = DIVIDE([Gains Loss], [Original Investment Amt])
+		formatString: 0.00%
+		displayFolder: Investment
+		lineageTag: d2ec7bbb-71a8-5803-b5bc-85aafe30ddeb
+
+	/// TABLE CALC [Last Value] = IF Min([Date])=Lookup(Min([Date]),LAST()) THEN [Avg. Adj Close] END = show the growth value only on the symbol's last date. UTX -> 106,833.33 on 2010-08-17, blank elsewhere.
+	measure 'Last Value' = IF(MAX('Stocks (DJIA)'[Date]) = CALCULATE(MAX('Stocks (DJIA)'[Date]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol])), [Avg Adj Close Value])
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Investment
+		lineageTag: ba73d5b7-ab30-5854-9b41-acb7c33720e2
+
+	/// TABLE CALC [First/Last Value] = IF MAX([Date])=Lookup(MAX,LAST) OR MAX([Date])=Lookup(MAX,FIRST) THEN [Avg. Adj Close] END = show the value on the first AND last date. UTX -> 500 on first date, 106,833.33 on last.
+	measure 'First Last Value' = IF(MAX('Stocks (DJIA)'[Date]) = CALCULATE(MAX('Stocks (DJIA)'[Date]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol])) || MAX('Stocks (DJIA)'[Date]) = CALCULATE(MIN('Stocks (DJIA)'[Date]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol])), [Avg Adj Close Value])
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Investment
+		lineageTag: 3bb61b28-1d3b-568b-ab58-280e9d5a45f8
+
+	/// TABLE CALC [LOOKUP(ZN(AVG([Adj Close])), FIRST())] = LOOKUP(MIN([Date]), Last()) = the last date of the symbol's partition. UTX -> 2010-08-17.
+	measure 'Lookup Min Date Last' = CALCULATE(MAX('Stocks (DJIA)'[Date]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol]))
+		formatString: General Date
+		displayFolder: Dates
+		lineageTag: e3ac9a36-b82a-5e11-a19a-ee70a39d9fb1
+
+	/// TABLE CALC [LOOKUP(...FIRST()) (copy)] = WINDOW_MIN(MIN([Date]),Last(),Last()) = min date over the single last mark = the last date. UTX -> 2010-08-17.
+	measure 'Window Min Last' = CALCULATE(MAX('Stocks (DJIA)'[Date]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol]))
+		formatString: General Date
+		displayFolder: Dates
+		lineageTag: 88ba3a01-e693-5f9b-b3d8-eb712d03c2ff
+
+	/// Tableau calc [Bars] = param [Date Detail] -> 365/91/30/7/1. Param-driven scalar.
+	measure Bars = SWITCH([Date Detail Value], "year", 365, "quarter", 91, "month", 30, "week", 7, "day", 1)
+		formatString: #,##0
+		displayFolder: Granularity
+		lineageTag: 4f02f034-17e7-5593-93b0-d2248ec75ba1
+
+	/// Tableau calc [Calendar] = param [Date Detail]-driven DATETRUNC of [Date]. Implemented as a measure; a dynamic date-granularity *axis* is better done as a Date Granularity Field Parameter in the report - see limitations.
+	measure Calendar = SWITCH([Date Detail Value], "year", DATE(YEAR(MAX('Stocks (DJIA)'[Date])), 1, 1), "quarter", DATE(YEAR(MAX('Stocks (DJIA)'[Date])), (QUARTER(MAX('Stocks (DJIA)'[Date])) - 1) * 3 + 1, 1), "month", DATE(YEAR(MAX('Stocks (DJIA)'[Date])), MONTH(MAX('Stocks (DJIA)'[Date])), 1), "week", MAX('Stocks (DJIA)'[Date]) - (WEEKDAY(MAX('Stocks (DJIA)'[Date]), 1) - 1), "day", MAX('Stocks (DJIA)'[Date]))
+		formatString: General Date
+		displayFolder: Granularity
+		lineageTag: 250f4b47-1b9b-54dd-8565-2823b1fdd0f7
+
+	column 'Adj Close'
+		dataType: double
+		lineageTag: 800ad7ee-b8be-5dc5-b64b-7553ebaad060
+		summarizeBy: sum
+		sourceColumn: Adj Close
+
+		annotation SummarizationSetBy = Automatic
+
+	column Close
+		dataType: double
+		isHidden
+		lineageTag: f65af754-51e7-5b1e-8a52-472886f55b8d
+		summarizeBy: sum
+		sourceColumn: Close
+
+		annotation SummarizationSetBy = Automatic
+
+	column Company
+		dataType: string
+		lineageTag: 9b092777-104a-5919-a99c-29775e276d62
+		summarizeBy: none
+		sourceColumn: Company
+
+		annotation SummarizationSetBy = Automatic
+
+	column Date
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 957340dd-b79d-5e11-b193-941d9ca7157f
+		summarizeBy: none
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+	column High
+		dataType: double
+		isHidden
+		lineageTag: bbc7b5e8-fa4b-58dc-ac11-aa082cf0d139
+		summarizeBy: sum
+		sourceColumn: High
+
+		annotation SummarizationSetBy = Automatic
+
+	column Low
+		dataType: double
+		isHidden
+		lineageTag: 89abc86c-b657-5723-ac24-7e9412f1bc65
+		summarizeBy: sum
+		sourceColumn: Low
+
+		annotation SummarizationSetBy = Automatic
+
+	column Open
+		dataType: double
+		isHidden
+		lineageTag: 3c1155b1-8aed-50a0-b65e-0a146ed36202
+		summarizeBy: sum
+		sourceColumn: Open
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Primary Group'
+		dataType: string
+		lineageTag: 0b77a199-43fa-53cc-92bd-93ea1854fe74
+		summarizeBy: none
+		sourceColumn: Primary Group
+
+		annotation SummarizationSetBy = Automatic
+
+	column Symbol
+		dataType: string
+		lineageTag: 8fe6e072-41f5-5666-97b4-e1d572259f11
+		summarizeBy: none
+		sourceColumn: Symbol
+
+		annotation SummarizationSetBy = Automatic
+
+	column Volume
+		dataType: int64
+		isHidden
+		lineageTag: 1fb26438-64ac-57a8-ac4a-6d31de503ff4
+		summarizeBy: sum
+		sourceColumn: Volume
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Number of Records] (=1). Kept as a hidden column so [Original Investment Amt] can faithfully do DISTINCTCOUNT of it (=1).
+	column 'Number of Records' = 1
+		dataType: int64
+		isHidden
+		lineageTag: a48f851e-0e7d-5dd5-b951-4e757efca58d
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Helper: LOOKUP(ZN(AVG([Adj Close])), FIRST()) = the Adj Close at each symbol's earliest date (per-symbol constant). UTX -> 0.33.
+	column 'Adj Close First' = CALCULATE(AVERAGE('Stocks (DJIA)'[Adj Close]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol]), 'Stocks (DJIA)'[Date] = CALCULATE(MIN('Stocks (DJIA)'[Date]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol])))
+		dataType: double
+		isHidden
+		lineageTag: 1c080c5e-014f-5efe-84b5-265d93f2b375
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Helper: LOOKUP(ZN(AVG([Adj Close])), LAST()) = the Adj Close at each symbol's latest date (per-symbol constant). UTX -> 70.51.
+	column 'Adj Close Last' = CALCULATE(AVERAGE('Stocks (DJIA)'[Adj Close]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol]), 'Stocks (DJIA)'[Date] = CALCULATE(MAX('Stocks (DJIA)'[Date]), ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol])))
+		dataType: double
+		isHidden
+		lineageTag: ac641421-9e5b-5ad6-aa17-c86cf22e76bb
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// TABLE CALC [Index] = INDEX(): 1-based position ordered by Date within Symbol. UTX first date -> 1, last -> 10254.
+	column Index = CALCULATE(COUNTROWS('Stocks (DJIA)'), FILTER(ALLEXCEPT('Stocks (DJIA)', 'Stocks (DJIA)'[Symbol]), 'Stocks (DJIA)'[Date] <= EARLIER('Stocks (DJIA)'[Date])))
+		dataType: int64
+		lineageTag: a28e1a54-fe33-5ead-a679-81c02c3f5ea6
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [Controllable Dates] = DATETRUNC('year',[Date]).
+	column 'Controllable Dates' = DATE(YEAR('Stocks (DJIA)'[Date]), 1, 1)
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 3b9e9eee-2e17-5031-8c89-c9323e0ccd28
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [Week] = DATE(DATETRUNC('week',[Date])) (Sunday-start week).
+	column Week = 'Stocks (DJIA)'[Date] - (WEEKDAY('Stocks (DJIA)'[Date], 1) - 1)
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 85cbcd1b-0388-5818-84b2-d8ffe6ff5352
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Stocks (DJIA)' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.stocks_in_dow_jones_industrial_average_csv_stocks_in_dow_jones_industrial_average_csv.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Adj Close", type number}, {"Close", type number}, {"Company", type text}, {"Date", type datetime}, {"High", type number}, {"Low", type number}, {"Open", type number}, {"Primary Group", type text}, {"Symbol", type text}, {"Volume", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

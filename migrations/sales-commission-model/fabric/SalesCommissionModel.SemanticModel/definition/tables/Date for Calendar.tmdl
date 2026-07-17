@@ -1,0 +1,27 @@
+/// Disconnected slicer: orphan list parameter (1/2), not consumed.
+table 'Date for Calendar'
+
+	/// Selected value (default 1). ORPHAN: not consumed; kept for fidelity.
+	measure 'Date for Calendar Value' = SELECTEDVALUE('Date for Calendar'[Date for Calendar], 1)
+		formatString: #,##0
+		displayFolder: Parameters
+
+	/// Tableau 'Date for Calendar' list param (1 or 2). Not consumed by any migrated calc.
+	column 'Date for Calendar'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Date for Calendar
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Date for Calendar' = m
+		mode: import
+		source =
+				let
+					Source = #table(type table [#"Date for Calendar" = Int64.Type], {{1}, {2}})
+				in
+					Source
+
+	annotation PBI_ResultType = Table
+

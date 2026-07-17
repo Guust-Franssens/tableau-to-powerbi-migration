@@ -1,0 +1,47 @@
+/// Disconnected single-select slicer table backing the Tableau 'Region Parameter' parameter (default "North America"). 'Global' is the show-all sentinel (Origin Region filter is bypassed). Native-slicer + SELECTEDVALUE equivalent of a Tableau live parameter (parameter-equality idiom).
+table 'Region Parameter'
+
+	/// Reads the current 'Region Parameter' slicer selection, defaulting to the Tableau default "North America".
+	measure 'Region Parameter Value' = SELECTEDVALUE('Region Parameter'[Region], "North America")
+		displayFolder: Parameters
+
+	column 'Region'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Region
+		sortByColumn: 'Region Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper preserving the Tableau parameter's list order.
+	column 'Region Order'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Region Order
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Region Parameter' = m
+		mode: import
+		source =
+			let
+				Source = #table(
+					{"Region", "Region Order"},
+					{
+					{"Global", 0},
+					{"Africa", 1},
+					{"Asia", 2},
+					{"Europe", 3},
+					{"Middle East", 4},
+					{"North America", 5},
+					{"Oceania", 6},
+					{"South America", 7}
+					}
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source, {{"Region", type text}, {"Region Order", Int64.Type}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

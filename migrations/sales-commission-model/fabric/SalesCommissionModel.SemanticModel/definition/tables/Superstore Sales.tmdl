@@ -1,0 +1,244 @@
+/// Sample Superstore extract (16798 rows, 24 English cols kept). Feeds growth/estimate calcs; not shown on the migrated worksheet.
+table 'Superstore Sales'
+
+	/// Tableau 'Sales est' = Sales*(1-Churn)*(1+New Business Growth).
+	measure 'Sales est' = SUM('Superstore Sales'[Sales]) * (1 - [Churn Rate Value]) * (1 + [New Business Growth Value])
+		formatString: "$"#,##0
+		displayFolder: Estimates
+
+	/// Tableau 'Units est' per-row ROUND(qty*(1-Churn)*(1+Growth)) then summed.
+	measure 'Units est' = SUMX('Superstore Sales', ROUND('Superstore Sales'[Order quantity] * (1 - [Churn Rate Value]) * (1 + [New Business Growth Value]), 0))
+		formatString: #,##0
+		displayFolder: Estimates
+
+	/// Tableau 'Gross profit ratio' = SUM(Profit)/SUM(Sales).
+	measure 'Gross profit ratio' = DIVIDE(SUM('Superstore Sales'[Profit]), SUM('Superstore Sales'[Sales]))
+		formatString: 0.0%
+		displayFolder: Ratios
+
+	/// Tableau 'Annual sales growth' = SUM(2013 sales)/SUM(2012 sales)-1 (resolved by internal names, NOT the stale caption text in the formula).
+	measure 'Annual sales growth' = DIVIDE(SUM('Superstore Sales'[2013 sales]) - SUM('Superstore Sales'[2012 sales]), SUM('Superstore Sales'[2012 sales]))
+		formatString: 0.0%
+		displayFolder: Ratios
+
+	/// Tableau 'Number of Records' for superstore (renamed for model-wide uniqueness).
+	measure 'Superstore Row Count' = COUNTROWS('Superstore Sales')
+		formatString: #,##0
+		displayFolder: General
+		isHidden
+
+	column City
+		dataType: string
+		summarizeBy: none
+		sourceColumn: City
+		dataCategory: City
+
+		annotation SummarizationSetBy = Automatic
+
+	column Continent
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Continent
+		dataCategory: Continent
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Country / Region' (internal [Country]).
+	column 'Country / Region'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Country
+		dataCategory: Country
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Customer ID'
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Customer ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Customer Name'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Customer Name
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Customer Segment'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Customer Segment
+
+		annotation SummarizationSetBy = Automatic
+
+	column Discount
+		dataType: double
+		formatString: 0.0%
+		summarizeBy: none
+		sourceColumn: Discount
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Order Date'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: Order Date
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Order ID'
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Order ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Order number'
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Order number
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Postal Code'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Postal Code
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Product Base Margin'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Product Base Margin
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Department' (internal [Product Category]).
+	column Department
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Product Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Container' (internal [Product Container]).
+	column Container
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Product Container
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Item' (internal [Product Name]).
+	column Item
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Product Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Category' (internal [Product Sub-Category]).
+	column Category
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Product Sub-Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden; aggregated via Gross profit ratio.
+	column Profit
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Profit
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Order quantity' (internal [Quantity ordered new]); hidden, used by Units est.
+	column 'Order quantity'
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Quantity ordered new
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Row ID'
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Row ID
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden; aggregated via Sales est / ratios.
+	column Sales
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Sales
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Ship Date'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: Ship Date
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Shipping Cost'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: Shipping Cost
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'State or Province'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: State or Province
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Unit Price'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Unit Price
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau '2012 sales' (internal [2013 sales (copy)]) row-level year filter.
+	column '2012 sales' = IF(YEAR('Superstore Sales'[Order Date]) = 2012, 'Superstore Sales'[Sales])
+		dataType: double
+		summarizeBy: none
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau '2013 sales' (internal [Calculation_8821129170240873]) row-level year filter.
+	column '2013 sales' = IF(YEAR('Superstore Sales'[Order Date]) = 2013, 'Superstore Sales'[Sales])
+		dataType: double
+		summarizeBy: none
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Superstore Sales' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "ds.sample_superstore_sales_english.csv"),[Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Selected Columns" = Table.SelectColumns(#"Promoted Headers", {"City", "Continent", "Country", "Customer ID", "Customer Name", "Customer Segment", "Discount", "Order Date", "Order ID", "Order number", "Postal Code", "Product Base Margin", "Product Category", "Product Container", "Product Name", "Product Sub-Category", "Profit", "Quantity ordered new", "Row ID", "Sales", "Ship Date", "Shipping Cost", "State or Province", "Unit Price"}),
+					#"Changed Type" = Table.TransformColumnTypes(#"Selected Columns", {{"City", type text}, {"Continent", type text}, {"Country", type text}, {"Customer ID", Int64.Type}, {"Customer Name", type text}, {"Customer Segment", type text}, {"Discount", type number}, {"Order Date", type date}, {"Order ID", Int64.Type}, {"Order number", Int64.Type}, {"Postal Code", type text}, {"Product Base Margin", type number}, {"Product Category", type text}, {"Product Container", type text}, {"Product Name", type text}, {"Product Sub-Category", type text}, {"Profit", type number}, {"Quantity ordered new", Int64.Type}, {"Row ID", Int64.Type}, {"Sales", type number}, {"Ship Date", type date}, {"Shipping Cost", type number}, {"State or Province", type text}, {"Unit Price", type number}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+
