@@ -10,6 +10,11 @@ real, publicly available 16-worksheet Tableau dashboard, with every bug found al
 documented honestly. See [`docs/capabilities-and-limitations.md`](docs/capabilities-and-limitations.md)
 for the full, evidence-based writeup of what worked automatically and what needed human validation.
 
+![Architecture: a deterministic parser extracts a schema-validated migration-spec.json contract, then LLM agents translate it to a Fabric Power BI semantic model + report](docs/architecture.png)
+
+**[See the migration showcase](docs/showcase/README.md)** — original Tableau dashboards side-by-side
+with the Power BI reports the pipeline generated from them.
+
 ## Why a separate parser instead of an LLM doing everything
 
 Tableau's `.twb` XML (datasources, shelves, zones) is exact and structural — a deterministic parser
