@@ -21,14 +21,14 @@
                 "Column": {
                   "Expression": {
                     "SourceRef": {
-                      "Entity": "Date"
+                      "Entity": "Date Granularity"
                     }
                   },
-                  "Property": "Month Start"
+                  "Property": "Date Granularity"
                 }
               },
-              "queryRef": "Date.Month Start",
-              "nativeQueryRef": "Month Start",
+              "queryRef": "Date Granularity.Date Granularity",
+              "nativeQueryRef": "Date Granularity",
               "active": true
             }
           ]

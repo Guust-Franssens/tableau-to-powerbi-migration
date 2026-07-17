@@ -20,14 +20,14 @@
                 "Column": {
                   "Expression": {
                     "SourceRef": {
-                      "Entity": "Sample Superstore"
+                      "Entity": "Scatter Plot Detail"
                     }
                   },
-                  "Property": "Sub-Category"
+                  "Property": "Scatter Plot Detail"
                 }
               },
-              "queryRef": "Sample Superstore.Sub-Category",
-              "nativeQueryRef": "Sub-Category",
+              "queryRef": "Scatter Plot Detail.Scatter Plot Detail",
+              "nativeQueryRef": "Scatter Plot Detail",
               "active": true
             }
           ]
