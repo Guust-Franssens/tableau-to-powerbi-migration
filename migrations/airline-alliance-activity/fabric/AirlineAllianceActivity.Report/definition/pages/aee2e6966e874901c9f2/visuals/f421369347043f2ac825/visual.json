@@ -1,0 +1,56 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "f421369347043f2ac825",
+  "position": {
+    "x": 666.3333333333333,
+    "y": 180,
+    "z": 5000,
+    "height": 52,
+    "width": 331.3333333333333,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Avg. Distance Covered\n",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI Semibold",
+                      "fontSize": "9pt",
+                      "color": "#5A5A6E",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "—  ",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI Semibold",
+                      "fontSize": "14pt",
+                      "color": "#9A9AA8",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "(not in model)",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "7pt",
+                      "color": "#B0B0BE"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

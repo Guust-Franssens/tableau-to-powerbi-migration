@@ -1,0 +1,23 @@
+/// What-If parameter (Tableau 'Top Customers', internal [Parameter 2], int range, default 15). ORPHAN: not consumed by any migrated calc/worksheet; forward-looking.
+table 'Top Customers'
+
+	/// What-If selected value (default 15 preserved from Tableau).
+	measure 'Top Customers Value' = SELECTEDVALUE('Top Customers'[Top Customers], 15)
+		formatString: #,##0
+		displayFolder: Parameters
+
+	/// What-If parameter axis (GENERATESERIES). Bind slicer to this column.
+	column 'Top Customers'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: [Value]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Top Customers' = calculated
+		mode: import
+		source = GENERATESERIES(1, 50, 1)
+
+	annotation PBI_ResultType = Table
+

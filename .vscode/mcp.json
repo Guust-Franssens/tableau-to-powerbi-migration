@@ -1,0 +1,19 @@
+{
+  "$comment": [
+    "MCP servers this migration toolkit uses. Committed so a clone is self-configuring:",
+    "VS Code's Copilot reads this file directly. GitHub Copilot CLI users add the same",
+    "servers with `/mcp` (or copy these into ~/.copilot/mcp-config.json under an 'mcpServers' key).",
+    "See AGENTS.md > 'Required Copilot setup' for the full setup, including the Fabric skill plugins."
+  ],
+  "servers": {
+    "powerbi-modeling-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@microsoft/powerbi-modeling-mcp@latest", "--start", "--skipconfirmation"]
+    },
+    "powerbi-remote": {
+      "type": "http",
+      "url": "https://api.fabric.microsoft.com/v1/mcp/powerbi"
+    }
+  }
+}

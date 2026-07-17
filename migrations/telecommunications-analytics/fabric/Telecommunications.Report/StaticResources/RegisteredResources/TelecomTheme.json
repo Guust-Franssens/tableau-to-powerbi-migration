@@ -1,0 +1,31 @@
+{
+  "name": "TelecomTheme.json",
+  "dataColors": [
+    "#4E79A7",
+    "#B5A72C",
+    "#4E9A51",
+    "#A9D18E",
+    "#D6272A",
+    "#59A14F",
+    "#9C755F",
+    "#BAB0AC"
+  ],
+  "foreground": "#3B3B3B",
+  "foregroundNeutralSecondary": "#5A5A5A",
+  "background": "#FFFFFF",
+  "backgroundLight": "#F5F5F5",
+  "tableAccent": "#4E79A7",
+  "maximum": "#4E79A7",
+  "center": "#B5A72C",
+  "minimum": "#F1F1F1",
+  "textClasses": {
+    "title": {
+      "fontFace": "Segoe UI Semibold",
+      "color": "#C8791E"
+    },
+    "label": {
+      "fontFace": "Segoe UI",
+      "color": "#3B3B3B"
+    }
+  }
+}

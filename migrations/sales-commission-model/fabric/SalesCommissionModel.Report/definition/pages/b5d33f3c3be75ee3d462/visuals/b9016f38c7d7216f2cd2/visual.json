@@ -1,0 +1,134 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "b9016f38c7d7216f2cd2",
+  "position": { "x": 600, "y": 180, "z": 3010, "height": 502, "width": 524, "tabOrder": 700 },
+  "visual": {
+    "visualType": "barChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Sales Person" } },
+              "queryRef": "Sales Planning.Sales Person",
+              "nativeQueryRef": "Sales Person",
+              "active": true
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Base Salary" } }, "Property": "Base Salary Value" } },
+              "queryRef": "Base Salary.Base Salary Value",
+              "nativeQueryRef": "Base Salary Value"
+            },
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Commission (Variable)" } },
+              "queryRef": "Sales Planning.Commission (Variable)",
+              "nativeQueryRef": "Commission (Variable)"
+            }
+          ]
+        },
+        "Tooltips": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Total Compensation" } },
+              "queryRef": "Sales Planning.Total Compensation",
+              "nativeQueryRef": "Total Compensation"
+            },
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Sort by field" } },
+              "queryRef": "Sales Planning.Sort by field",
+              "nativeQueryRef": "Sort by field"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sales Planning" } }, "Property": "Sort by field" } },
+            "direction": "Ascending"
+          }
+        ],
+        "isDefaultSort": true
+      }
+    },
+    "objects": {
+      "categoryAxis": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "false" } } }
+          }
+        }
+      ],
+      "valueAxis": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "start": { "expr": { "Literal": { "Value": "0D" } } },
+            "labelDisplayUnits": { "expr": { "Literal": { "Value": "1000D" } } },
+            "titleText": { "expr": { "Literal": { "Value": "'Compensation ($)'" } } },
+            "showAxisTitle": { "expr": { "Literal": { "Value": "true" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } },
+            "labelColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#606060'" } } } } }
+          }
+        }
+      ],
+      "legend": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "dataPoint": [
+        {
+          "properties": {
+            "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#4F4F4F'" } } } } }
+          },
+          "selector": { "metadata": "Base Salary.Base Salary Value" }
+        },
+        {
+          "properties": {
+            "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#4577A8'" } } } } }
+          },
+          "selector": { "metadata": "Sales Planning.Commission (Variable)" }
+        }
+      ],
+      "labels": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "y1AxisReferenceLine": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "value": { "expr": { "Literal": { "Value": "159000D" } } },
+            "style": { "expr": { "Literal": { "Value": "'dashed'" } } },
+            "lineColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#8A8A8A'" } } } } },
+            "displayName": { "expr": { "Literal": { "Value": "'OTE $159,000'" } } },
+            "dataLabelShow": { "expr": { "Literal": { "Value": "true" } } },
+            "dataLabelText": { "expr": { "Literal": { "Value": "'Name'" } } },
+            "dataLabelColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#8A8A8A'" } } } } },
+            "dataLabelHorizontalPosition": { "expr": { "Literal": { "Value": "'right'" } } },
+            "shadeShow": { "expr": { "Literal": { "Value": "false" } } }
+          },
+          "selector": { "id": "oteLine" }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "title": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "padding": [
+        {
+          "properties": {
+            "top": { "expr": { "Literal": { "Value": "0D" } } },
+            "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+            "left": { "expr": { "Literal": { "Value": "0D" } } },
+            "right": { "expr": { "Literal": { "Value": "0D" } } }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

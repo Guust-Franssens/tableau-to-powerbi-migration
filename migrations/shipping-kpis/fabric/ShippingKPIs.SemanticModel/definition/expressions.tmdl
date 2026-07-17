@@ -1,0 +1,5 @@
+expression SourceFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\shipping-kpis\data" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: a0f5f245-e3eb-4949-8a50-ad5b2ff73f4b
+
+	annotation PBI_ResultType = Text
+

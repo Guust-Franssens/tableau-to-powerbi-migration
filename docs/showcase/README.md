@@ -20,13 +20,17 @@ Logistics profitability & delay KPIs. GOOD/OK/BAD conditional coloring on scatte
 
 Radio-tower network dashboard. Notable: a true two-point azureMap route/line map (PathID + PointOrder) - a fidelity win over Tableau's dual-axis workaround.
 
-- **Radio Towers Dashboard** — Power BI screenshot pending Desktop capture.
+**Radio Towers Dashboard**
+
+![Telecommunications Analytics - Radio Towers Dashboard](assets/telecommunications-analytics-1.png)
 
 ### Sales Commission Model
 
 Interactive what-if commission calculator. Three What-If parameters (New Quota / Commission Rate / Base Salary) drive a dual-panel Sales-vs-Compensation bar chart with 4-bucket quota-attainment conditional coloring.
 
-- **Commission Model** — Power BI screenshot pending Desktop capture.
+**Commission Model**
+
+![Sales Commission Model - Commission Model](assets/sales-commission-model-1.png)
 
 ### Tale of 100 Entrepreneurs
 
@@ -38,22 +42,24 @@ Company revenue-growth analysis. Exercised the pipeline's first real Tableau tab
 
 ### Superstore Sales Performance
 
-Three-dashboard analytics suite. Field Parameters for parameter-driven measure/dimension switching, current/prior-period comparison, and diverging-gradient choropleths.
+Three-dashboard analytics suite. Field Parameters for parameter-driven measure/dimension switching, current/prior-period comparison, diverging-gradient Azure Maps choropleths (data-bound reference layer), and region-comparison dot-plots.
 
-- **Descriptive** — Power BI screenshot pending Desktop capture.
+**Prescriptive**
 
-- **Prescriptive** — Power BI screenshot pending Desktop capture.
+![Superstore Sales Performance - Prescriptive](assets/superstore-sales-performance-1.png)
 
-- **Annotations** — Power BI screenshot pending Desktop capture.
+**Descriptive**
+
+![Superstore Sales Performance - Descriptive](assets/superstore-sales-performance-2.png)
 
 ### Airline Alliance Activity
 
-Largest workbook (91 worksheets, 4 pages, 108 measures). Includes the spatial MAKEPOINT/MAKELINE origin-destination route map (a documented capability gap handled via a native map fallback).
+Largest workbook (91 worksheets, 4 pages, 108 measures). A CY/PY navigation app with an azureMap origin-destination map (the MAKELINE great-circle arc has no native PBI equivalent, so destination bubbles are used). Surfaced a systematic DAX bug: 58 comparison measures used the illegal compact filter `'Table'[Col]=[Measure]`, fixed by hoisting to VARs.
 
-- **Alliance Page** — Power BI screenshot pending Desktop capture.
+**Alliance Overview**
 
-- **Airlines Page** — Power BI screenshot pending Desktop capture.
+![Airline Alliance Activity - Alliance Overview](assets/airline-alliance-activity-1.png)
 
-- **Fleet Page** — Power BI screenshot pending Desktop capture.
+**Flights Map**
 
-- **Flight Page** — Power BI screenshot pending Desktop capture.
+![Airline Alliance Activity - Flights Map](assets/airline-alliance-activity-2.png)

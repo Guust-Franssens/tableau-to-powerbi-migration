@@ -1,0 +1,246 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "4e9767cb0d8a2e378a15",
+  "position": {
+    "x": 894,
+    "y": 662,
+    "z": 5000,
+    "height": 247,
+    "width": 451,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Flight Activity"
+                    }
+                  },
+                  "Property": "Date"
+                }
+              },
+              "queryRef": "Flight Activity.Date",
+              "nativeQueryRef": "Date",
+              "active": true
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Flight Activity"
+                    }
+                  },
+                  "Property": "Flight Id"
+                }
+              },
+              "queryRef": "Flight Activity.Flight Id",
+              "nativeQueryRef": "Flight Id",
+              "active": true
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Flight Activity"
+                    }
+                  },
+                  "Property": "Route"
+                }
+              },
+              "queryRef": "Flight Activity.Route",
+              "nativeQueryRef": "Route",
+              "active": true
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Flight Activity"
+                    }
+                  },
+                  "Property": "Average Fare Usd"
+                }
+              },
+              "queryRef": "Flight Activity.Average Fare Usd",
+              "nativeQueryRef": "Average Fare Usd",
+              "active": true
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Flight Activity"
+                    }
+                  },
+                  "Property": "Passengers Carried"
+                }
+              },
+              "queryRef": "Flight Activity.Passengers Carried",
+              "nativeQueryRef": "Passengers Carried",
+              "active": true
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Flight Activity"
+                    }
+                  },
+                  "Property": "Flight Duration Hours"
+                }
+              },
+              "queryRef": "Flight Activity.Flight Duration Hours",
+              "nativeQueryRef": "Flight Duration Hours",
+              "active": true
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Column": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "Flight Activity"
+                  }
+                },
+                "Property": "Date"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    },
+    "objects": {
+      "values": [
+        {
+          "properties": {
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "8D"
+                }
+              }
+            }
+          },
+          "selector": {
+            "id": "default"
+          }
+        }
+      ],
+      "columnHeaders": [
+        {
+          "properties": {
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "8D"
+                }
+              }
+            },
+            "bold": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          },
+          "selector": {
+            "id": "default"
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  },
+  "filterConfig": {
+    "filters": [
+      {
+        "name": "Filterbbbd6977f7426a9c9c1e",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "Flight Activity"
+              }
+            },
+            "Property": "Aircraft Type"
+          }
+        },
+        "type": "Categorical",
+        "filter": {
+          "Version": 2,
+          "From": [
+            {
+              "Name": "s",
+              "Entity": "Flight Activity",
+              "Type": 0
+            }
+          ],
+          "Where": [
+            {
+              "Condition": {
+                "In": {
+                  "Expressions": [
+                    {
+                      "Column": {
+                        "Expression": {
+                          "SourceRef": {
+                            "Source": "s"
+                          }
+                        },
+                        "Property": "Aircraft Type"
+                      }
+                    }
+                  ],
+                  "Values": [
+                    [
+                      {
+                        "Literal": {
+                          "Value": "'A330'"
+                        }
+                      }
+                    ]
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "howCreated": "User"
+      }
+    ]
+  }
+}

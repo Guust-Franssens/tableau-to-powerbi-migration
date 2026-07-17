@@ -147,6 +147,14 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   correct *before* the first Desktop open. Found in all 5 Field Parameter tables of the Superstore
   build (only surfaced in Desktop, never in validation). See
   `docs/tableau-dax-translation-guide.md` §3 for the full pattern.
+- **Never emit the compact filter `'Table'[Col] = [Measure]` (measure on the RHS).** When a measure
+  filters a `CALCULATE` by a parameter-selection or prior-period **measure**
+  (`'Flight Activity'[Year] = [Year Parameter Value]`, `'…'[Month] = [PM Month Value]`), the compact
+  boolean-filter form is illegal DAX and fails **only at query/render time** with `A function
+  'PLACEHOLDER' has been used in a True/False expression that is used as a table filter expression`
+  (invisible to `validate` and TMDL structural checks; the report shows "Something's wrong with one or
+  more fields" in Desktop). Hoist the measure into a `VAR` and compare the column to the VAR. Found in
+  58 CM/CY/PM measures of the Airline build. See `docs/tableau-dax-translation-guide.md` §4.
 - **Validate before reporting success.** After writing TMDL files, load
   `Microsoft.AnalysisServices.Tabular.dll` (ships with Tabular Editor, bundled in this skill's
   `scripts/_tools/TabularEditor/`) and call

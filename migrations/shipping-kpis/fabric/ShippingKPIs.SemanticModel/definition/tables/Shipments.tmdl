@@ -1,0 +1,169 @@
+/// One row per shipment record loaded from the ShippingDataFinal extract. Grain: shipment record (a small number of Shipment IDs span multiple rows). Source Tableau table: 'Sheet1$'.
+table Shipments
+	lineageTag: 68dd9919-c90b-4a5e-8eb1-ffb713ec7569
+
+	/// Bill-to revenue per billable mile = total Bill Amount / total Billable Miles. Tableau calc field 'Billable Rate Per Mile'.
+	measure 'Billable Rate Per Mile' = DIVIDE ( SUM ( 'Shipments'[Bill Amount] ), SUM ( 'Shipments'[Billable Miles] ) )
+		formatString: $#,##0.00
+		displayFolder: Per-Mile Rates
+		lineageTag: 88d7f342-1217-4c65-bd56-0e0ead7f03d3
+
+	/// Profit per billable mile = total Profit / total Billable Miles. Tableau calc field 'Profit Per Mile'.
+	measure 'Profit Per Mile' = DIVIDE ( SUM ( 'Shipments'[Profit] ), SUM ( 'Shipments'[Billable Miles] ) )
+		formatString: $#,##0.00
+		displayFolder: Per-Mile Rates
+		lineageTag: 1befb43d-b479-4ce6-b412-ca1654674f1b
+
+	/// Delay rating from average shipment delay: GOOD if avg < 1 hr, OK if avg < 10 hrs, else BAD. Blank when no delay values. Tableau calc field 'Delay KPI'. Text measure (no numeric formatString).
+	measure 'Delay KPI' = VAR _avg = AVERAGE ( 'Shipments'[Shipment Delay (Hrs)] ) RETURN IF ( ISBLANK ( _avg ), BLANK(), SWITCH ( TRUE(), _avg < 1, "GOOD", _avg < 10, "OK", "BAD" ) )
+		displayFolder: KPIs
+		lineageTag: 9023648a-350f-45bb-8ebd-169cea5d579b
+
+	/// Profitability rating from average per-shipment profit ratio: GOOD if avg > 0.2, OK if avg > 0.1, else BAD. Blank when no ratio values. Tableau calc field 'Profitability KPI'. Text measure (no numeric formatString).
+	measure 'Profitability KPI' = VAR _avg = AVERAGE ( 'Shipments'[Profit Ratio per shipment] ) RETURN IF ( ISBLANK ( _avg ), BLANK(), SWITCH ( TRUE(), _avg > 0.2, "GOOD", _avg > 0.1, "OK", "BAD" ) )
+		displayFolder: KPIs
+		lineageTag: 2d65d0d7-aacf-4ca4-ba63-cfc76074952d
+
+	/// Row count of Shipments. Idiomatic translation of Tableau's 'Number of Records' (= 1) field.
+	measure 'Number of Records' = COUNTROWS ( 'Shipments' )
+		formatString: #,##0
+		displayFolder: Counts
+		lineageTag: 81c5b9c4-f8b9-4a90-b3ff-36c5e0552c1f
+
+	column 'Actual Ship Date'
+		dataType: dateTime
+		lineageTag: 902bf158-be2b-4a13-93b6-c1de071d8906
+		summarizeBy: none
+		sourceColumn: Actual Ship Date
+
+	column 'Bill Amount'
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: ce65506e-153d-4f14-ae7f-b44fd7fe98fc
+		summarizeBy: sum
+		sourceColumn: Bill Amount
+
+	column 'Billable Miles'
+		dataType: int64
+		formatString: #,##0
+		lineageTag: d65b4666-0bc2-4a50-b1c9-58fb6ef39d1c
+		summarizeBy: sum
+		sourceColumn: Billable Miles
+
+	column Customer
+		dataType: string
+		lineageTag: 39c198fd-e604-4c82-a7c8-1595918fb232
+		summarizeBy: none
+		sourceColumn: Customer
+
+	column 'Destination State'
+		dataType: string
+		lineageTag: a4356c3f-196e-4e60-97cb-bfcb16651b9a
+		dataCategory: StateOrProvince
+		summarizeBy: none
+		sourceColumn: Destination State
+
+	column 'Expected Ship Date'
+		dataType: dateTime
+		lineageTag: 2dfeb9c8-53be-44a8-adc4-5b0e6aa4372b
+		summarizeBy: none
+		sourceColumn: Expected Ship Date
+
+	column 'Origin State'
+		dataType: string
+		lineageTag: 114490ad-daaf-4261-a84a-37d1e7fc0482
+		dataCategory: StateOrProvince
+		summarizeBy: none
+		sourceColumn: Origin State
+
+	column 'Pay Amount'
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: 3c823eda-6521-4247-9cc6-cfce83e5b528
+		summarizeBy: sum
+		sourceColumn: Pay Amount
+
+	column Profit
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: b41494e9-20c5-4ba1-9979-6826af9a3d68
+		summarizeBy: sum
+		sourceColumn: Profit
+
+	column 'Shipment ID'
+		dataType: int64
+		formatString: 0
+		lineageTag: e0909390-890f-444a-831f-43d3c44fa789
+		summarizeBy: none
+		sourceColumn: Shipment ID
+
+	column Shipper
+		dataType: string
+		lineageTag: b7f411db-2b6a-4b1b-87e7-eae88d6914cf
+		summarizeBy: none
+		sourceColumn: Shipper
+
+	column Status
+		dataType: string
+		lineageTag: b1a2ba0f-5a66-47cd-8952-74988ceb9222
+		summarizeBy: none
+		sourceColumn: Status
+
+	column 'Total Miles'
+		dataType: int64
+		formatString: #,##0
+		lineageTag: 90721f70-8c87-460d-8e0c-b84bb4515137
+		summarizeBy: sum
+		sourceColumn: Total Miles
+
+	/// Row-level delay in hours = (Expected Ship Date - Actual Ship Date) * 24. Faithful equivalent of Tableau datediff('second',[Actual Ship Date],[Expected Ship Date])/3600 (identical for whole-second timestamps). Sign follows source (positive when Expected later than Actual) - see migration notes re possible source argument-order quirk. Blank if either date missing.
+	column 'Shipment Delay (Hrs)' = IF ( ISBLANK ( 'Shipments'[Actual Ship Date] ) || ISBLANK ( 'Shipments'[Expected Ship Date] ), BLANK(), ( 'Shipments'[Expected Ship Date] - 'Shipments'[Actual Ship Date] ) * 24 )
+		dataType: decimal
+		formatString: #,##0.00
+		lineageTag: 6fb7ee05-7a39-470d-9739-d26449996eb9
+		summarizeBy: sum
+
+	/// Shipment delay in hours with negatives clamped to 0. Faithful translation of Tableau 'Shipment Delay (Hrs) (copy)'. Blank if either date missing.
+	column 'Shipment Delay (Hrs, delays only)' = IF ( ISBLANK ( 'Shipments'[Actual Ship Date] ) || ISBLANK ( 'Shipments'[Expected Ship Date] ), BLANK(), VAR _d = ( 'Shipments'[Expected Ship Date] - 'Shipments'[Actual Ship Date] ) * 24 RETURN IF ( _d < 0, 0, _d ) )
+		dataType: decimal
+		formatString: #,##0.00
+		lineageTag: 0dcef9fe-649b-42cd-b60c-81a812f4f19e
+		summarizeBy: sum
+
+	/// Row-level discount = Bill Amount - Pay Amount. Blank when either amount missing (matches Tableau null propagation). Tableau calc field 'Discount'.
+	column Discount = IF ( ISBLANK ( 'Shipments'[Bill Amount] ) || ISBLANK ( 'Shipments'[Pay Amount] ), BLANK(), 'Shipments'[Bill Amount] - 'Shipments'[Pay Amount] )
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: cae7d9ea-e9a6-4c83-b062-c898876040aa
+		summarizeBy: sum
+
+	/// Row-level discount fraction = (Bill Amount - Pay Amount) / Bill Amount. Blank when either amount missing. Tableau calc field '% Discount'.
+	column '% Discount' = IF ( ISBLANK ( 'Shipments'[Bill Amount] ) || ISBLANK ( 'Shipments'[Pay Amount] ), BLANK(), DIVIDE ( 'Shipments'[Bill Amount] - 'Shipments'[Pay Amount], 'Shipments'[Bill Amount] ) )
+		dataType: decimal
+		formatString: 0.00%
+		lineageTag: 7d6ab03d-6a51-449d-9e2c-a8aa395522b3
+		summarizeBy: sum
+
+	/// FIXED LOD per Shipment ID = SUM(Profit)/SUM(Pay Amount) across all rows sharing the Shipment ID. Faithful translation of Tableau {fixed [Shipment ID]: Sum([Profit])/Sum([Pay Amount])}.
+	column 'Profit Ratio per shipment' = DIVIDE ( CALCULATE ( SUM ( 'Shipments'[Profit] ), ALLEXCEPT ( 'Shipments', 'Shipments'[Shipment ID] ) ), CALCULATE ( SUM ( 'Shipments'[Pay Amount] ), ALLEXCEPT ( 'Shipments', 'Shipments'[Shipment ID] ) ) )
+		dataType: decimal
+		formatString: 0.00%
+		lineageTag: e00548ab-cd9e-4c24-9b01-e975ae41ae90
+		summarizeBy: sum
+
+	/// TRUE when not yet shipped: Actual Ship Date missing, or at least 1 day in the future and within the current year. Faithful translation of Tableau 'Future Months' Shipments'.
+	column 'Not Yet Shipped' = ISBLANK ( 'Shipments'[Actual Ship Date] ) || ( DATEDIFF ( TODAY(), 'Shipments'[Actual Ship Date], DAY ) >= 1 && YEAR ( 'Shipments'[Actual Ship Date] ) = YEAR ( TODAY() ) )
+		dataType: boolean
+		lineageTag: e7857aaf-2ddf-42f7-846c-c5a8a8b990d6
+		summarizeBy: none
+
+	partition Shipments = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(SourceFolder & "\ds.sheet1_shippingdatafinal_xls.csv"), [Delimiter=",", Columns=13, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Types" = Table.TransformColumnTypes(#"Promoted Headers", {{"Actual Ship Date", type datetime}, {"Bill Amount", Currency.Type}, {"Billable Miles", Int64.Type}, {"Customer", type text}, {"Destination State", type text}, {"Expected Ship Date", type datetime}, {"Origin State", type text}, {"Pay Amount", Currency.Type}, {"Profit", Currency.Type}, {"Shipment ID", Int64.Type}, {"Shipper", type text}, {"Status", type text}, {"Total Miles", Int64.Type}}, "en-US")
+				in
+					#"Changed Types"
+

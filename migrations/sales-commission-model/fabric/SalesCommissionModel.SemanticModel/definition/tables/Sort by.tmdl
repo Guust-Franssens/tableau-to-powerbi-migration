@@ -1,0 +1,36 @@
+/// Disconnected slicer: list parameter feeding the sort key (NOT a measure/dimension swap -> not a Field Parameter).
+table 'Sort by'
+
+	/// Selected 'Sort by' option (default 'Names'). Consumed by [Sort by field].
+	measure 'Sort By Selection' = SELECTEDVALUE('Sort by'[Sort by], "Names")
+		displayFolder: Parameters
+
+	/// Tableau 'Sort by' param (internal [Parameter 1]): % Quota Ascending / Descending / Names.
+	column 'Sort by'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Sort by
+		sortByColumn: 'Sort by Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sort key for the 'Sort by' column.
+	column 'Sort by Order'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Sort by Order
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Sort by' = m
+		mode: import
+		source =
+				let
+					Source = #table(type table [#"Sort by" = text, #"Sort by Order" = Int64.Type], {{"% Quota Ascending", 0}, {"% Quota Descending", 1}, {"Names", 2}})
+				in
+					Source
+
+	annotation PBI_ResultType = Table
+

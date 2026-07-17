@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "AirlineAllianceActivity"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "a1f4c9e2-7b6d-48a3-9c2e-5d8b1f3a6c04"
+  }
+}

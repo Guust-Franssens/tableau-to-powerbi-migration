@@ -1,0 +1,119 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "de9483678157864c84c1",
+  "position": {
+    "x": 0,
+    "y": 604,
+    "z": 3000,
+    "height": 42,
+    "width": 928,
+    "tabOrder": 3000
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "● GOOD    ",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "13px",
+                      "color": "#4E79A7",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "● OK    ",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "13px",
+                      "color": "#F28E2B",
+                      "fontWeight": "bold"
+                    }
+                  },
+                  {
+                    "value": "● BAD",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "13px",
+                      "color": "#E15759",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "left"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "padding": [
+        {
+          "properties": {
+            "top": {
+              "expr": {
+                "Literal": {
+                  "Value": "0D"
+                }
+              }
+            },
+            "bottom": {
+              "expr": {
+                "Literal": {
+                  "Value": "0D"
+                }
+              }
+            },
+            "left": {
+              "expr": {
+                "Literal": {
+                  "Value": "0D"
+                }
+              }
+            },
+            "right": {
+              "expr": {
+                "Literal": {
+                  "Value": "0D"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

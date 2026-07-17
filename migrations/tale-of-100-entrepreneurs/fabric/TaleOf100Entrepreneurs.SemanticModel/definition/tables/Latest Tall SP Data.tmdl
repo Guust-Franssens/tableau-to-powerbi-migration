@@ -1,0 +1,86 @@
+/// Tall S&P macro time-series (1,296 rows: Date x Metric x Value). Source: Tableau extract 'Latest Tall SP Data'. Independent fact table.
+table 'Latest Tall SP Data'
+	lineageTag: 97d2e155-19c8-53ac-9fb3-f5e51985e45d
+
+	/// Tableau [Number of Records] (=1 per row) -> DAX row count. Renamed from 'Number of Records' to avoid a model-wide measure-name collision (each Tableau data source auto-generates its own 'Number of Records').
+	measure 'SP Data Row Count' = COUNTROWS('Latest Tall SP Data')
+		formatString: #,##0
+		lineageTag: 8f8752ac-23bf-5c8f-a016-0e3c7a7f3866
+
+	column Date
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: a8a50651-f535-5e23-b9de-9cb5c07c1ce7
+		summarizeBy: none
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+	column Decade
+		dataType: int64
+		lineageTag: 6e2f0022-d380-5216-a8c4-752c5f64eb6a
+		summarizeBy: none
+		sourceColumn: Decade
+
+		annotation SummarizationSetBy = Automatic
+
+	column Metric
+		dataType: string
+		lineageTag: 5cdcacc9-84a1-511c-b3c8-15955fbb131e
+		summarizeBy: none
+		sourceColumn: Metric
+
+		annotation SummarizationSetBy = Automatic
+
+	column Value
+		dataType: double
+		lineageTag: 08fc1d8c-f17c-5235-9d2f-5d98afa6d541
+		summarizeBy: sum
+		sourceColumn: Value
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [Financial metric] = [Metric], with the field's Tableau display-aliases materialized as a SWITCH value remap.
+	column 'Financial metric' = SWITCH('Latest Tall SP Data'[Metric], "Inflation Rate Past 12 Months", "Inflation rate past 12 months", "Interest Rate", "Real interest rate", "Real Forward 10 Years Annualized Return", "Real forward 10 years annualized S&P Comp annualized return with dividend", "Real Forward 12 Months Return", "Real forward 12 months S&P Comp return with dividend", "Real Forward 3 Years Annualized Return", "Real forward 3 years annualized S&P Comp returns with dividend", "Real Last 12 Months Return", "Real past 12 months return", "Yield", "Real S&P Comp yield", 'Latest Tall SP Data'[Metric])
+		dataType: string
+		lineageTag: fff4ac7a-add3-5410-8107-3a72878d6e40
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [Financial metric 2] = [Metric] (no aliases -> passthrough copy).
+	column 'Financial metric 2' = 'Latest Tall SP Data'[Metric]
+		dataType: string
+		lineageTag: 3e7c3070-84af-563e-950c-eb46de16a527
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [Metric3] = [Metric], with its (short-label) Tableau display-aliases materialized as a SWITCH value remap.
+	column Metric3 = SWITCH('Latest Tall SP Data'[Metric], "Inflation Rate Past 12 Months", "Inflation Rate", "Interest Rate", "Real interest rate", "Real Forward 10 Years Annualized Return", "10 Years", "Real Forward 12 Months Return", "1 Year", "Real Forward 3 Years Annualized Return", "3 Years", "Real Last 12 Months Return", "Real S&P Comp returns with dividends", "Yield", "Real S&P Comp yield", 'Latest Tall SP Data'[Metric])
+		dataType: string
+		lineageTag: 96a56b31-7a7c-5511-9845-2dedd6b1e979
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau calc [YrStr] = STR(YEAR([Date])).
+	column YrStr = FORMAT(YEAR('Latest Tall SP Data'[Date]), "0")
+		dataType: string
+		lineageTag: dcb1aeff-3044-55b5-8570-b171a175019f
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Latest Tall SP Data' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.latest_tall_sp_data.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Date", type datetime}, {"Decade", Int64.Type}, {"Metric", type text}, {"Value", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

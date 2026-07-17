@@ -1,0 +1,79 @@
+/// Daily securities prices (17,314 rows). Source: Tableau extract 'Securities'. Independent fact table (no Tableau joins/blends).
+table Securities
+	lineageTag: d30a7aeb-8972-5818-a31f-05c4630d7a49
+
+	/// Tableau [Number of Records] (=1 per row) -> DAX row count. Renamed from 'Number of Records' to avoid a model-wide measure-name collision (each Tableau data source auto-generates its own 'Number of Records').
+	measure 'Securities Row Count' = COUNTROWS('Securities')
+		formatString: #,##0
+		lineageTag: 890e2ecc-6b55-548b-9f46-b8e747c5f3dc
+
+	column Close
+		dataType: double
+		lineageTag: 272dadee-1685-5306-b27c-669a646c0902
+		summarizeBy: sum
+		sourceColumn: Close
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Company Name (Full)'
+		dataType: string
+		lineageTag: a29716c8-ec07-5346-bd61-20678eede3aa
+		summarizeBy: none
+		sourceColumn: Company Name (Full)
+
+		annotation SummarizationSetBy = Automatic
+
+	column Date
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: c45e7c76-3d80-5623-8c26-ca455836ad8c
+		summarizeBy: none
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+	column Segment
+		dataType: string
+		lineageTag: 6bf799d5-ace0-5296-9854-3dfa9156dfa2
+		summarizeBy: none
+		sourceColumn: Segment
+
+		annotation SummarizationSetBy = Automatic
+
+	column Ticker
+		dataType: string
+		lineageTag: 5bc5819f-3936-5927-b792-5057dda29076
+		summarizeBy: none
+		sourceColumn: Ticker
+
+		annotation SummarizationSetBy = Automatic
+
+	column Volume
+		dataType: int64
+		lineageTag: 13ff2198-e0b3-5dba-998d-0fef43baf7e2
+		summarizeBy: sum
+		sourceColumn: Volume
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Z_Not Exchange'
+		dataType: string
+		isHidden
+		lineageTag: 3b35dddf-969c-5e40-93e2-9e5d3fd3d99e
+		summarizeBy: none
+		sourceColumn: Z_Not Exchange
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Securities = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.securities.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Close", type number}, {"Company Name (Full)", type text}, {"Date", type datetime}, {"Segment", type text}, {"Ticker", type text}, {"Volume", Int64.Type}, {"Z_Not Exchange", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

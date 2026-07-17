@@ -1,0 +1,3 @@
+relationship 'Flight Activity_Date_Date_Date'
+	fromColumn: 'Flight Activity'.Date
+	toColumn: Date.Date

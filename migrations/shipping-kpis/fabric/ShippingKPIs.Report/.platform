@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "ShippingKPIs"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "b7e2f4a1-3c56-4d89-9a12-0f1a2b3c4d5e"
+  }
+}

@@ -1,0 +1,406 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "aab9e1de16f38176f86d",
+  "position": {
+    "x": 8,
+    "y": 592,
+    "z": 9,
+    "width": 1262,
+    "height": 204,
+    "tabOrder": 9
+  },
+  "visual": {
+    "visualType": "pivotTable",
+    "query": {
+      "queryState": {
+        "Rows": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Top 100 IPOs"
+                    }
+                  },
+                  "Property": "Growth Group"
+                }
+              },
+              "queryRef": "Top 100 IPOs.Growth Group",
+              "nativeQueryRef": "Growth Group"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Top 100 IPOs"
+                    }
+                  },
+                  "Property": "Company Name (Full)"
+                }
+              },
+              "queryRef": "Top 100 IPOs.Company Name (Full)",
+              "nativeQueryRef": "Company"
+            }
+          ]
+        },
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Top 100 IPOs"
+                        }
+                      },
+                      "Property": "Year Founded"
+                    }
+                  },
+                  "Function": 3
+                }
+              },
+              "queryRef": "Min(Top 100 IPOs.Year Founded)",
+              "nativeQueryRef": "Min of Year Founded"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Top 100 IPOs"
+                        }
+                      },
+                      "Property": "Years to $50m"
+                    }
+                  },
+                  "Function": 3
+                }
+              },
+              "queryRef": "Min(Top 100 IPOs.Years to $50m)",
+              "nativeQueryRef": "Min of Years to $50m"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Top 100 IPOs"
+                        }
+                      },
+                      "Property": "Revenue"
+                    }
+                  },
+                  "Function": 3
+                }
+              },
+              "queryRef": "Min(Top 100 IPOs.Revenue)",
+              "nativeQueryRef": "Min of Revenue"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Top 100 IPOs"
+                        }
+                      },
+                      "Property": "Net Income"
+                    }
+                  },
+                  "Function": 3
+                }
+              },
+              "queryRef": "Min(Top 100 IPOs.Net Income)",
+              "nativeQueryRef": "Min of Net Income"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Aggregation": {
+                "Expression": {
+                  "Column": {
+                    "Expression": {
+                      "SourceRef": {
+                        "Entity": "Top 100 IPOs"
+                      }
+                    },
+                    "Property": "Years to $50m"
+                  }
+                },
+                "Function": 3
+              }
+            },
+            "direction": "Ascending"
+          }
+        ],
+        "isDefaultSort": true
+      }
+    },
+    "expansionStates": [
+      {
+        "roles": [
+          "Rows"
+        ],
+        "levels": [
+          {
+            "queryRefs": [
+              "Top 100 IPOs.Growth Group"
+            ],
+            "isCollapsed": false,
+            "isPinned": true,
+            "identityKeys": [
+              {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Top 100 IPOs"
+                    }
+                  },
+                  "Property": "Growth Group"
+                }
+              }
+            ]
+          },
+          {
+            "queryRefs": [
+              "Top 100 IPOs.Company Name (Full)"
+            ],
+            "isCollapsed": false,
+            "identityKeys": [
+              {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Top 100 IPOs"
+                    }
+                  },
+                  "Property": "Company Name (Full)"
+                }
+              }
+            ]
+          }
+        ],
+        "root": {
+          "children": [
+            {
+              "identityValues": [
+                {
+                  "Literal": {
+                    "Value": "'Rocket Ship'"
+                  }
+                }
+              ],
+              "isToggled": true
+            },
+            {
+              "identityValues": [
+                {
+                  "Literal": {
+                    "Value": "'Hot Company'"
+                  }
+                }
+              ],
+              "isToggled": true
+            },
+            {
+              "identityValues": [
+                {
+                  "Literal": {
+                    "Value": "'Slow Burner'"
+                  }
+                }
+              ],
+              "isToggled": true
+            }
+          ]
+        }
+      }
+    ],
+    "objects": {
+      "rowHeaders": [
+        {
+          "properties": {
+            "stepped": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#333333'"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "columnHeaders": [
+        {
+          "properties": {
+            "columnAdjustment": {
+              "expr": {
+                "Literal": {
+                  "Value": "'growToFit'"
+                }
+              }
+            },
+            "autoSizeColumnWidth": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#4F6E8D'"
+                    }
+                  }
+                }
+              }
+            },
+            "alignment": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Right'"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "subTotals": [
+        {
+          "properties": {
+            "rowSubtotals": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "columnSubtotals": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "values": [
+        {
+          "properties": {
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#333333'"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Company Details'"
+                }
+              }
+            },
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#4F6E8D'"
+                    }
+                  }
+                }
+              }
+            },
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "14D"
+                }
+              }
+            },
+            "alignment": {
+              "expr": {
+                "Literal": {
+                  "Value": "'left'"
+                }
+              }
+            },
+            "background": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#F8F5F1'"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

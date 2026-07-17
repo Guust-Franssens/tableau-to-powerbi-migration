@@ -1,0 +1,263 @@
+/// Link-endpoint grain fact table (808 rows). Source: Tableau data source 'cell-links' (Excel extract-based .hyper, materialized via scripts/extract_hyper_data.py to data/ds.cell_links.csv per migration-spec limitations_encountered). Grain: one row per microwave link endpoint - the Tableau custom SQL UNIONs each link's 'source' side (path order 1) and 'target' side (path order 2), 404 links x 2 = 808 rows.
+table 'Cell Links'
+
+	/// Total link capacity in Mb/s (Tableau aggregated shelf reference sum:Capacity (Mb/s); drives the Overview bar length, the Cell Map mark size, and one series of the Link Data measure-values pivot).
+	measure 'Total Capacity' = SUM('Cell Links'[Capacity (Mb/s)])
+		formatString: #,##0
+		displayFolder: Key Measures
+
+	/// Average link capacity in Mb/s (Tableau aggregated shelf reference avg:Capacity (Mb/s); shown in the Overview tooltip).
+	measure 'Avg Capacity' = AVERAGE('Cell Links'[Capacity (Mb/s)])
+		formatString: #,##0.0
+		displayFolder: Key Measures
+
+	/// Share of total capacity for the current visual selection (Tableau table calc pcto:sum:Capacity (Mb/s) 'Percent of Total'; drives the Overview stacked bar). ALLSELECTED denominator = grand total across the visual, honoring page/report filters. Table-calc translation - validate addressing against Tableau if a live compare is available.
+	measure '% of Total Capacity' = DIVIDE([Total Capacity], CALCULATE([Total Capacity], ALLSELECTED('Cell Links')))
+		formatString: 0.0%
+		displayFolder: Key Measures
+
+	/// Average link availability percentage (Tableau aggregated shelf reference avg:Availability (%); one series of the Link Data measure-values pivot). Availability is stored on a 0-100 scale (e.g. 99.9), not a 0-1 fraction, so no percent multiplier is applied.
+	measure 'Avg Availability' = AVERAGE('Cell Links'[Availability (%)])
+		formatString: #,##0.0
+		displayFolder: Key Measures
+
+	/// Average frequency band in GHz (Tableau aggregated shelf reference avg:Freq Band (GHz); one series of the Link Data measure-values pivot).
+	measure 'Avg Freq Band' = AVERAGE('Cell Links'[Freq Band (GHz)])
+		formatString: #,##0.0
+		displayFolder: Key Measures
+
+	/// Total link distance in miles (Tableau aggregated shelf reference sum:Distance (miles); one series of the Link Data measure-values pivot).
+	measure 'Total Distance' = SUM('Cell Links'[Distance (miles)])
+		formatString: #,##0.0
+		displayFolder: Key Measures
+
+	/// Row count (Tableau 'Number of Records' calculated field, formula: 1). Not bound to any worksheet shelf in this workbook - kept as a standard general-purpose hidden measure.
+	measure 'Number of Records' = COUNTROWS('Cell Links')
+		formatString: #,##0
+		displayFolder: General
+		isHidden
+
+	/// Raw link availability percentage on a 0-100 scale (Tableau measure 'Availability (%)'). Hidden - use the 'Avg Availability' measure instead.
+	column 'Availability (%)'
+		dataType: decimal
+		formatString: #,##0.0
+		summarizeBy: none
+		sourceColumn: Availability (%)
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Backhaul survey method (mostly blank in the extract - 52 of 808 rows populated). Tooltip field on the Link Data worksheet.
+	column 'BH Survey Method'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: BH Survey Method
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Candidate ID for the link endpoint. Tooltip field on the Link Data worksheet.
+	column 'Cand ID'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Cand ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Raw link capacity in Mb/s (Tableau measure 'Capacity (Mb/s)'). Hidden - use the 'Total Capacity' / 'Avg Capacity' measures instead.
+	column 'Capacity (Mb/s)'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Capacity (Mb/s)
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Raw link distance in miles (Tableau measure 'Distance (miles)'). Hidden - use the 'Total Distance' measure instead.
+	column 'Distance (miles)'
+		dataType: decimal
+		formatString: #,##0.000
+		summarizeBy: none
+		sourceColumn: Distance (miles)
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Forecast decision flag (YES/NO). Tooltip field on the Link Data worksheet.
+	column 'Forecast Decision'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Forecast Decision
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Raw frequency band in GHz (Tableau measure 'Freq Band (GHz)'). Hidden - use the 'Avg Freq Band' measure instead.
+	column 'Freq Band (GHz)'
+		dataType: decimal
+		formatString: #,##0.0
+		summarizeBy: none
+		sourceColumn: Freq Band (GHz)
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Endpoint latitude (Tableau 'Lat'). Used with 'Long' as the Cell Map line-mark position; dataCategory Latitude enables native map binding. Kept as a full-precision coordinate (double) rather than fixed decimal to preserve source geo precision.
+	column Lat
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Lat
+		dataCategory: Latitude
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Link identifier (Tableau dimension 'Link ID'). One Link ID spans two rows (source + target endpoints) that the Cell Map connects with a line. Detail field on the Cell Map / Link Data worksheets.
+	column 'Link ID'
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: Link ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Link lifecycle status (Build / Cancelled / Operational / Operational Backup / Planned ...). Color encoding on all three worksheets.
+	column 'Link Status'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Link Status
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Link contract type (Contracted / Native).
+	column 'Link Type'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Link Type
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Endpoint longitude (Tableau 'Long'). Used with 'Lat' as the Cell Map line-mark position; dataCategory Longitude enables native map binding. Kept as a full-precision coordinate (double) rather than fixed decimal to preserve source geo precision.
+	column Long
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Long
+		dataCategory: Longitude
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Antenna polarization (Alternating / Flat / Multi / Top). Tooltip field on the Link Data worksheet.
+	column Polarization
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Polarization
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Radio model. Tooltip field on the Link Data worksheet.
+	column 'Radio Model'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Radio Model
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Service-level-agreement flag (YES/NO).
+	column SLA
+		dataType: string
+		summarizeBy: none
+		sourceColumn: SLA
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Site identifier. Typed as string because the extract mixes numeric site ids (e.g. 117) with alphanumeric ones (e.g. WA-SNO457). Row header on the Link Data worksheet.
+	column 'Site ID'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Site ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Site operational status (Operational / Offline / Planned). Tooltip field on the Link Data worksheet.
+	column 'Site Status'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Site Status
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Site backhaul type (Frame / Radio / T1). Tooltip field on the Link Data worksheet.
+	column 'Site Type BH'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Site Type BH
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Survey date (mostly blank in the extract - 54 of 808 rows populated). Source strings are ISO 'yyyy-MM-dd HH:mm:ss' with a zero time component - verify parse on live refresh.
+	column 'Survey Date'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: Survey Date
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Survey outcome (Not Surveyed / Surveyed - OK / Surveyed - Fault). Tooltip field on the Link Data worksheet.
+	column 'Survey Status'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Survey Status
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Transmit path type (Auto / High Pass / Low Pass). Tooltip field on the Link Data worksheet.
+	column 'TX Type'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: TX Type
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Equipment vendor (AlphaTel / Monucell / Norm 3 LLP / UOW Cell). Tooltip field on the Link Data worksheet.
+	column Vendor
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Vendor
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Link endpoint role ('source' or 'target'), from the Tableau custom SQL UNION 'link position' literal. Pairs with 'path order' to order the two ends of each link's Cell Map line.
+	column 'link position'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: link position
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Path order (1 = source endpoint, 2 = target endpoint), from the Tableau custom SQL UNION 'path order' literal. Orders the two points of each Link ID line on the Cell Map.
+	column 'path order'
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: path order
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau group 'Regional Group (group)' - a partial manual grouping over the intermediate 'Regional Group' field (str(ROUND([Lat],1))+str(ROUND([Long],1))). 7 named region clusters are matched from the rounded lat/long pair via exact integer comparison on lat*10 / long*10 (DAX ROUND is half-away-from-zero = an exact match to Tableau ROUND); the ~70% of rows (568 of 808) the workbook author left ungrouped fall through to their raw 'lat-long' coordinate label, faithful to Tableau's ungrouped-shows-as-itself behavior. The intermediate 'Regional Group' concat field is consolidated into this single definition (see limitations_encountered). Row header on the Overview and Link Data worksheets.
+	column 'Regional Group (group)' = VAR _la = ROUND('Cell Links'[Lat] * 10, 0) VAR _lo = ROUND('Cell Links'[Long] * 10, 0) RETURN SWITCH(TRUE(), _la = 474 && _lo = -1221, "South", _la = 475 && _lo = -1221, "South West", _la = 476 && _lo = -1219, "Central East", _la = 476 && _lo = -1223, "Central West", _la = 477 && _lo = -1220, "North", _la = 477 && _lo = -1224, "North East", _la = 478 && _lo = -1222, "North West", FORMAT(_la / 10, "0.0") & FORMAT(_lo / 10, "0.0"))
+		dataType: string
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Cell Links' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "ds.cell_links.csv"),[Delimiter=",", Columns=24, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"Availability (%)", type number}, {"BH Survey Method", type text}, {"Cand ID", type text}, {"Capacity (Mb/s)", Int64.Type}, {"Distance (miles)", type number}, {"Forecast Decision", type text}, {"Freq Band (GHz)", type number}, {"Lat", type number}, {"Link ID", Int64.Type}, {"Link Status", type text}, {"Link Type", type text}, {"Long", type number}, {"Polarization", type text}, {"Radio Model", type text}, {"SLA", type text}, {"Site ID", type text}, {"Site Status", type text}, {"Site Type BH", type text}, {"Survey Date", type datetime}, {"Survey Status", type text}, {"TX Type", type text}, {"Vendor", type text}, {"link position", type text}, {"path order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

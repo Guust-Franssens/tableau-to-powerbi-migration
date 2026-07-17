@@ -1,0 +1,43 @@
+/// Disconnected single-select slicer table backing the Tableau 'Airline Code Parameter' parameter (default "GS"). Report-level slicer; not consumed by any KPI formula (parity only). Native-slicer + SELECTEDVALUE equivalent of a Tableau live parameter (parameter-equality idiom).
+table 'Airline Code Parameter'
+
+	/// Reads the current 'Airline Code Parameter' slicer selection, defaulting to the Tableau default "GS".
+	measure 'Airline Code Parameter Value' = SELECTEDVALUE('Airline Code Parameter'[Airline Code], "GS")
+		displayFolder: Parameters
+
+	column 'Airline Code'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Airline Code
+		sortByColumn: 'Airline Code Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper preserving the Tableau parameter's list order.
+	column 'Airline Code Order'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Airline Code Order
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Airline Code Parameter' = m
+		mode: import
+		source =
+			let
+				Source = #table(
+					{"Airline Code", "Airline Code Order"},
+					{
+					{"AE", 0},
+					{"GS", 1},
+					{"PW", 2},
+					{"SC", 3}
+					}
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source, {{"Airline Code", type text}, {"Airline Code Order", Int64.Type}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

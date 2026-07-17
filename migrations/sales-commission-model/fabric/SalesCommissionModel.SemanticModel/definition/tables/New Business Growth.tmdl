@@ -1,0 +1,23 @@
+/// What-If parameter (Tableau 'New Business Growth', internal [Sales Growth], real range, default 0.1952). Drives Sales est / Units est.
+table 'New Business Growth'
+
+	/// What-If selected value (default 0.1952 preserved from Tableau).
+	measure 'New Business Growth Value' = SELECTEDVALUE('New Business Growth'[New Business Growth], 0.1952)
+		formatString: 0.0%
+		displayFolder: Parameters
+
+	/// What-If parameter axis (GENERATESERIES). Bind slicer to this column.
+	column 'New Business Growth'
+		dataType: double
+		formatString: 0%
+		summarizeBy: none
+		sourceColumn: [Value]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'New Business Growth' = calculated
+		mode: import
+		source = GENERATESERIES(0, 1, 0.01)
+
+	annotation PBI_ResultType = Table
+

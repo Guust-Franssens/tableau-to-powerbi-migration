@@ -1,0 +1,23 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Sales Planning", "Superstore Sales", "WalMart Stores", "Base Salary", "Commission Rate", "New Quota", "Churn Rate", "New Business Growth", "Top Customers", "Sort by", "Date for Calendar", "DataFolder"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table 'Sales Planning'
+ref table 'Superstore Sales'
+ref table 'WalMart Stores'
+ref table 'Base Salary'
+ref table 'Commission Rate'
+ref table 'New Quota'
+ref table 'Churn Rate'
+ref table 'New Business Growth'
+ref table 'Top Customers'
+ref table 'Sort by'
+ref table 'Date for Calendar'

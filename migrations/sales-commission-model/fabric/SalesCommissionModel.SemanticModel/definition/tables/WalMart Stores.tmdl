@@ -1,0 +1,104 @@
+/// Walmart US store history (3220 rows). Secondary; conversion-timeline calcs.
+table 'WalMart Stores'
+
+	/// Tableau 'Number of Records' for walmart (renamed for model-wide uniqueness).
+	measure 'WalMart Row Count' = COUNTROWS('WalMart Stores')
+		formatString: #,##0
+		displayFolder: General
+		isHidden
+
+	/// Nullable (1240 nulls) - store not (yet) a Super Center.
+	column 'Date Super Center'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: Date Super Center
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'First Opened'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: First Opened
+
+		annotation SummarizationSetBy = Automatic
+
+	column Number
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Number
+
+		annotation SummarizationSetBy = Automatic
+
+	column State
+		dataType: string
+		summarizeBy: none
+		sourceColumn: State
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Store Type'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Store Type
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Street Address'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Street Address
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Street City'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Street City
+		dataCategory: City
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Super Center?'
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Super Center?
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Zip Code'
+		dataType: int64
+		summarizeBy: none
+		sourceColumn: Zip Code
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Years until conversion' between First Opened and Date Super Center.
+	column 'Years until conversion' = IF(ISBLANK('WalMart Stores'[Date Super Center]), BLANK(), DATEDIFF('WalMart Stores'[First Opened], 'WalMart Stores'[Date Super Center], YEAR))
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Converted?' conversion label.
+	column 'Converted?' = IF(ISBLANK('WalMart Stores'[Date Super Center]), " ", IF('WalMart Stores'[First Opened] = 'WalMart Stores'[Date Super Center], "Opened as SuperCenter", "Converted " & DATEDIFF('WalMart Stores'[First Opened], 'WalMart Stores'[Date Super Center], YEAR) & " years later"))
+		dataType: string
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'WalMart Stores' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "ds.walmart_stores_us_history.csv"),[Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Selected Columns" = Table.SelectColumns(#"Promoted Headers", {"Date Super Center", "First Opened", "Number", "State", "Store Type", "Street Address", "Street City", "Super Center?", "Zip Code"}),
+					#"Changed Type" = Table.TransformColumnTypes(#"Selected Columns", {{"Date Super Center", type date}, {"First Opened", type date}, {"Number", Int64.Type}, {"State", type text}, {"Store Type", type text}, {"Street Address", type text}, {"Street City", type text}, {"Super Center?", Int64.Type}, {"Zip Code", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

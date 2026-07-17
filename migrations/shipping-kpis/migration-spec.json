@@ -1,0 +1,1444 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "Shipping Industry Example_10.0.twbx",
+    "tableau_version": "10.0",
+    "source_build": "2023.1.0 (20231.23.0320.2007)",
+    "repository_location_id": "ShippingIndustryExample_10_0",
+    "parsed_at": "2026-07-16T17:45:46.666509+00:00"
+  },
+  "parameters": [],
+  "data_sources": [
+    {
+      "id": "ds.sheet1_shippingdatafinal_xls",
+      "caption": "Sheet1 (ShippingDataFinal.xls)",
+      "internal_name": "Sheet1 (ShippingDataFinal.xls)",
+      "connection": {
+        "class": "excel",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/Sheet1 _ShippingDataFinal_xls_.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1",
+          "name": "Sheet1$",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__measure_names",
+          "internal_name": "[:Measure Names]",
+          "caption": ":Measure Names",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "[Sheet1 (ShippingDataFinal.xls)].[avg:Calculation_4760317224722252:qk]": "Profit Ratio",
+            "[Sheet1 (ShippingDataFinal.xls)].[avg:Shipment Delay (Hrs):qk]": "Avg. Delay (Hrs)",
+            "[Sheet1 (ShippingDataFinal.xls)].[ctd:Shipment ID:qk]": "Ship ments",
+            "[Sheet1 (ShippingDataFinal.xls)].[max:Shipment Delay (Hrs):qk]": "Max. Delay (Hrs)",
+            "[Sheet1 (ShippingDataFinal.xls)].[min:Shipment Delay (Hrs):qk]": "Min. Delay (Hrs)",
+            "[Sheet1 (ShippingDataFinal.xls)].[pcto:sum:Profit:qk]": "% of Total Profit",
+            "[Sheet1 (ShippingDataFinal.xls)].[sum:Bill Amount:qk]": "Bill Amount",
+            "[Sheet1 (ShippingDataFinal.xls)].[sum:Shipment Delay (Hrs):qk]": "Delay (Hrs)",
+            "[Sheet1 (ShippingDataFinal.xls)].[sum:Total Miles:qk]": "Total Miles"
+          }
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__actual_ship_date",
+          "internal_name": "[Actual Ship Date]",
+          "caption": "Actual Ship Date",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "datetime",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__bill_amount",
+          "internal_name": "[Bill Amount]",
+          "caption": "Bill Amount",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__billable_rate_per_mile",
+          "internal_name": "[Billable Rate Per Mile]",
+          "caption": "Billable Rate Per Mile",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM([Bill Amount])/SUM([Billable Miles])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__bill_amount"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__profit_ratio_per_shipment",
+          "internal_name": "[Calculation_4760317224722252]",
+          "caption": "Profit Ratio per shipment",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{fixed [Shipment ID]:Sum([Profit])/Sum([Pay Amount])}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__pay_amount",
+            "fld.ds_sheet1_shippingdatafinal_xls__profit",
+            "fld.ds_sheet1_shippingdatafinal_xls__shipment_id"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__discount",
+          "internal_name": "[Calculation_5080317224344880]",
+          "caption": "Discount",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Bill Amount]-[Pay Amount]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__bill_amount",
+            "fld.ds_sheet1_shippingdatafinal_xls__pay_amount"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__delay_kpi",
+          "internal_name": "[Calculation_7550222114105813]",
+          "caption": "Delay KPI",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "If Avg([Shipment Delay (Hrs)])<1 then \"GOOD\" elseif\r\nAvg([Shipment Delay (Hrs)])<10 then \"OK\" else\r\n\"BAD\" end",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__customer",
+          "internal_name": "[Customer]",
+          "caption": "Customer",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Alpha Channel Enterprises": "Alpha Channel",
+            "Anova Computing": "Anova",
+            "Blue Heron Foods": "Blue Heron",
+            "Calexico Inc.": "Calexico",
+            "Eliza Software Inc": "Eliza Software",
+            "General Food Processors": "General Food",
+            "Spirit Soda Inc.": "Spirit Soda",
+            "Viktoria's Specialties": "Viktoria's",
+            "Wayerhouse LLC": "Wayerhouse"
+          }
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__profitability_kpi",
+          "internal_name": "[Delay KPI (copy)]",
+          "caption": "Profitability KPI",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "If Avg([Calculation_4760317224722252])>0.2 then \"GOOD\" elseif\r\nAvg([Calculation_4760317224722252])>0.1 then \"OK\" else\r\n\"BAD\" end",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__profit_ratio_per_shipment"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__destination_state_group",
+          "internal_name": "[Destination State (group)]",
+          "caption": "Destination State group",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "AL": "se",
+            "AR": "sc",
+            "AZ": "sw",
+            "BC": "nw",
+            "CO": "nc",
+            "CT": "ne"
+          }
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__destination_state",
+          "internal_name": "[Destination State]",
+          "caption": "Destination State",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__discount_1",
+          "internal_name": "[Discount (copy)]",
+          "caption": "% Discount",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "([Bill Amount]-[Pay Amount])/[Bill Amount]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__bill_amount",
+            "fld.ds_sheet1_shippingdatafinal_xls__pay_amount"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__not_yet_shipped",
+          "internal_name": "[Future Months' Shipments]",
+          "caption": "Not Yet Shipped",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(datediff('day',Today(),[Actual Ship Date]) >= 1\r\nAND\r\ndatediff('year',Today(),[Actual Ship Date]) = 0)\r\nOR ISNULL([Actual Ship Date])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__actual_ship_date"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__origin_state",
+          "internal_name": "[Origin State]",
+          "caption": "Origin State",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__pay_amount",
+          "internal_name": "[Pay Amount]",
+          "caption": "Pay Amount",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__profit_per_mile",
+          "internal_name": "[Profit Per Mile]",
+          "caption": "Profit Per Mile",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM([Profit])/SUM([Billable Miles])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__profit"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__profit",
+          "internal_name": "[Profit]",
+          "caption": "Profit",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs_delays_only",
+          "internal_name": "[Shipment Delay (Hrs) (copy)]",
+          "caption": "Shipment Delay (Hrs, delays only)",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF datediff('second',[Actual Ship Date],[Expected Ship Date])/3600\r\n< 0 THEN 0 ELSE\r\ndatediff('second',[Actual Ship Date],[Expected Ship Date])/3600\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__actual_ship_date"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs",
+          "internal_name": "[Shipment Delay (Hrs)]",
+          "caption": "Shipment Delay (Hrs)",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "datediff('second',[Actual Ship Date],[Expected Ship Date])/3600",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sheet1_shippingdatafinal_xls__actual_ship_date"
+          ]
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_id",
+          "internal_name": "[Shipment ID]",
+          "caption": "Shipment ID",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__shipper",
+          "internal_name": "[Shipper]",
+          "caption": "Shipper",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Airtight Shipping Inc.": "Airtight Shipping",
+            "Delagato's Express Freight LLC": "Delagato's Express",
+            "Federal Amulgated Shipping": "Federal Amulgated"
+          }
+        },
+        {
+          "id": "fld.ds_sheet1_shippingdatafinal_xls__total_miles",
+          "internal_name": "[Total Miles]",
+          "caption": "Total Miles",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.delay_by_customer",
+      "name": "Delay by Customer",
+      "title_text": "Avg. Delay by Company (Hrs)\nClick to Filter",
+      "data_source_ids": [
+        "Sheet1 (ShippingDataFinal.xls)"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__customer",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__delay_kpi"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Customer)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__destination_state",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__origin_state",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.delay_by_shipper",
+      "name": "Delay by shipper",
+      "title_text": "Avg. Delay by Shipper (Hrs)\nClick to Filter",
+      "data_source_ids": [
+        "Sheet1 (ShippingDataFinal.xls)"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipper",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__delay_kpi"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Customer)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__destination_state",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__origin_state",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.profitability",
+      "name": "Profitability",
+      "title_text": "Profitability Per Shippment",
+      "data_source_ids": [
+        "Sheet1 (ShippingDataFinal.xls)"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__profit_ratio_per_shipment",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__profit",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__profitability_kpi"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Customer)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.profitability_details",
+      "name": "Profitability Details",
+      "title_text": "Profitability Details",
+      "data_source_ids": [
+        "Sheet1 (ShippingDataFinal.xls)"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__customer",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_id",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__pay_amount",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED::Measure Names",
+            "aggregation": null,
+            "derivation": "",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__profitability_kpi"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[Multiple Values]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[:Measure Names]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Bill Amount:qk]\"",
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Profit:qk]\"",
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Calculation_5080317224344880:qk]\"",
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Discount (copy):qk]\"",
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Calculation_4760317224722252:qk]\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Customer)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_id",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": {
+        "axis": "columns",
+        "pivoted_field_ids": [
+          "fld.ds_sheet1_shippingdatafinal_xls__bill_amount",
+          "fld.ds_sheet1_shippingdatafinal_xls__profit",
+          "fld.ds_sheet1_shippingdatafinal_xls__discount",
+          "fld.ds_sheet1_shippingdatafinal_xls__discount_1",
+          "fld.ds_sheet1_shippingdatafinal_xls__profit_ratio_per_shipment"
+        ],
+        "note": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column."
+      },
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.profitability_by_company",
+      "name": "Profitability by Company",
+      "title_text": "Profitability by CompanyÆ\nClick to Filter",
+      "data_source_ids": [
+        "Sheet1 (ShippingDataFinal.xls)"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__customer",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED::Measure Names",
+            "aggregation": null,
+            "derivation": "",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__profitability_kpi"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[Multiple Values]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[:Measure Names]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"[Sheet1 (ShippingDataFinal.xls)].[pcto:sum:Profit:qk]\"",
+            "\"[Sheet1 (ShippingDataFinal.xls)].[avg:Calculation_4760317224722252:qk]\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": {
+        "axis": "columns",
+        "pivoted_field_ids": [
+          "fld.ds_sheet1_shippingdatafinal_xls__profit",
+          "fld.ds_sheet1_shippingdatafinal_xls__profit_ratio_per_shipment"
+        ],
+        "note": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column."
+      },
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.sheet_5",
+      "name": "Sheet 5",
+      "title_text": "Delay Details",
+      "data_source_ids": [
+        "Sheet1 (ShippingDataFinal.xls)"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__customer",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipper",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_id",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__origin_state",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__destination_state",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED::Measure Names",
+            "aggregation": null,
+            "derivation": "",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__delay_kpi"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[Multiple Values]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[:Measure Names]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Pay Amount:qk]\"",
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Profit:qk]\"",
+            "\"[Sheet1 (ShippingDataFinal.xls)].[sum:Shipment Delay (Hrs):qk]\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": {
+        "axis": "columns",
+        "pivoted_field_ids": [
+          "fld.ds_sheet1_shippingdatafinal_xls__pay_amount",
+          "fld.ds_sheet1_shippingdatafinal_xls__profit",
+          "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs"
+        ],
+        "note": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column."
+      },
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.shipment_delays_versus_billable_amount",
+      "name": "Shipment Delays versus Billable Amount",
+      "title_text": "Delay Overview",
+      "data_source_ids": [
+        "Sheet1 (ShippingDataFinal.xls)"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__pay_amount",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__delay_kpi"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Customer)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__destination_state",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_sheet1_shippingdatafinal_xls__origin_state",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[Sheet1 (ShippingDataFinal.xls)].[none:Shipper:nk]> - No. <[Sheet1 (ShippingDataFinal.xls)].[none:Shipment ID:ok]>\nFrom <[Sheet1 (ShippingDataFinal.xls)].[none:Origin State:nk]> to  <[Sheet1 (ShippingDataFinal.xls)].[none:Destination State:nk]>\nShipment Delay (Hrs): <[Sheet1 (ShippingDataFinal.xls)].[avg:Shipment Delay (Hrs):qk]>\nBill Amount: <[Sheet1 (ShippingDataFinal.xls)].[sum:Bill Amount:qk]>\nCustomers: <[Sheet1 (ShippingDataFinal.xls)].[none:Customer:nk]>\n"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.profitability_kpi",
+      "name": "Profitability KPI",
+      "size": {
+        "width": 1000.0,
+        "height": 800.0,
+        "sizing_mode": "automatic"
+      },
+      "zones": {
+        "id": "2",
+        "type": "layout-basic",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "9",
+            "type": "layout-flow",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": "vertical",
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "8",
+                "type": "title",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 8047.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "5",
+                "type": "layout-flow",
+                "x": 0.0,
+                "y": 8047.0,
+                "w": 100000.0,
+                "h": 91953.0,
+                "direction": "horizontal",
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "3",
+                    "type": "layout-basic",
+                    "x": 0.0,
+                    "y": 8047.0,
+                    "w": 77755.0,
+                    "h": 91953.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "7",
+                        "type": "worksheet",
+                        "x": 0.0,
+                        "y": 63082.0,
+                        "w": 77755.0,
+                        "h": 36918.0,
+                        "direction": null,
+                        "worksheet_id": "ws.profitability_details",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "11",
+                        "type": "worksheet",
+                        "x": 0.0,
+                        "y": 8047.0,
+                        "w": 77755.0,
+                        "h": 50706.0,
+                        "direction": null,
+                        "worksheet_id": "ws.profitability",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "13",
+                        "type": "layout-basic",
+                        "x": 0.0,
+                        "y": 58753.0,
+                        "w": 77755.0,
+                        "h": 4329.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "4",
+                    "type": "layout-flow",
+                    "x": 77755.0,
+                    "y": 8047.0,
+                    "w": 22245.0,
+                    "h": 91953.0,
+                    "direction": "vertical",
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "15",
+                        "type": "filter",
+                        "x": 77755.0,
+                        "y": 8047.0,
+                        "w": 22245.0,
+                        "h": 5748.0,
+                        "direction": null,
+                        "worksheet_id": "ws.profitability_details",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "14",
+                        "type": "worksheet",
+                        "x": 77755.0,
+                        "y": 13795.0,
+                        "w": 22245.0,
+                        "h": 85737.0,
+                        "direction": null,
+                        "worksheet_id": "ws.profitability_by_company",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "actions": []
+    },
+    {
+      "id": "dash.shipping_kpi",
+      "name": "Shipping KPI",
+      "size": {
+        "width": 1000.0,
+        "height": 800.0,
+        "sizing_mode": "automatic"
+      },
+      "zones": {
+        "id": "2",
+        "type": "layout-basic",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "13",
+            "type": "layout-flow",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 75000.0,
+            "h": 100000.0,
+            "direction": "vertical",
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "12",
+                "type": "title",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 75000.0,
+                "h": 9311.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "24",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 9311.0,
+                "w": 75000.0,
+                "h": 3679.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "5",
+                "type": "layout-flow",
+                "x": 0.0,
+                "y": 12990.0,
+                "w": 75000.0,
+                "h": 87010.0,
+                "direction": "horizontal",
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "3",
+                    "type": "layout-basic",
+                    "x": 0.0,
+                    "y": 12990.0,
+                    "w": 75000.0,
+                    "h": 87010.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "1",
+                        "type": "worksheet",
+                        "x": 0.0,
+                        "y": 12990.0,
+                        "w": 75000.0,
+                        "h": 53895.0,
+                        "direction": null,
+                        "worksheet_id": "ws.shipment_delays_versus_billable_amount",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "44",
+                        "type": "worksheet",
+                        "x": 0.0,
+                        "y": 66885.0,
+                        "w": 75000.0,
+                        "h": 33115.0,
+                        "direction": null,
+                        "worksheet_id": "ws.sheet_5",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "45",
+            "type": "layout-flow",
+            "x": 75000.0,
+            "y": 0.0,
+            "w": 25000.0,
+            "h": 100000.0,
+            "direction": "vertical",
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "52",
+                "type": "worksheet",
+                "x": 75000.0,
+                "y": 0.0,
+                "w": 25000.0,
+                "h": 74552.0,
+                "direction": null,
+                "worksheet_id": "ws.delay_by_customer",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "51",
+                "type": "worksheet",
+                "x": 75000.0,
+                "y": 74552.0,
+                "w": 25000.0,
+                "h": 24972.0,
+                "direction": null,
+                "worksheet_id": "ws.delay_by_shipper",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      "actions": []
+    }
+  ],
+  "theme": {
+    "palette_hexes": [],
+    "font_family": "Tableau Book",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.sheet1_shippingdatafinal_xls",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sheet1_shippingdatafinal_xls__profit_ratio_per_shipment",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.profitability_details",
+      "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: columns, resolved fields: 5)",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.profitability_by_company",
+      "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: columns, resolved fields: 2)",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.sheet_5",
+      "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: columns, resolved fields: 3)",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.sheet1_shippingdatafinal_xls",
+      "issue": "Materialization decision: extract-based (.hyper) source has no live connection, so the semantic model imports from the pre-materialized CSV (data/ds.sheet1_shippingdatafinal_xls.csv, 5510 rows) via an M 'SourceFolder' parameter holding the absolute data-folder path. To repoint at a real upstream system, change only the SourceFolder parameter (or replace the partition M query). Clearly-labeled sample-vs-production status: this is the true extracted data, not a stub.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "extract_physical_columns_not_in_spec",
+      "issue": "The parser's fields[] omitted 3 physical columns present in the materialized extract (Billable Miles, Expected Ship Date, Status) - always cross-check the CSV header against fields[] for extract-only sources. All 3 were modeled as real columns (Billable Miles is required by the Billable Rate/Profit Per Mile measures and the Shipment Delay calc needs Expected Ship Date).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_sheet1_shippingdatafinal_xls__profit_ratio_per_shipment",
+      "issue": "FIXED LOD resolved as a DAX calculated column using DIVIDE(CALCULATE(SUM(Profit),ALLEXCEPT('Shipments','Shipments'[Shipment ID])),CALCULATE(SUM('Shipments'[Pay Amount]),ALLEXCEPT(...))). Shipment ID is NOT unique (5508 distinct / 5510 rows; ID 999220 has 3 rows summing Profit=150, Pay=840 -> ratio 0.178571), confirming the LOD genuinely aggregates; a calc column (not AVERAGEX over distinct IDs) preserves Tableau's per-row replication weighting. Overall AVG ratio replicated in Python = 0.190199. Resolves the parse-stage high-severity LOD flag.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_sheet1_shippingdatafinal_xls__shipment_delay_hrs",
+      "issue": "POSSIBLE SOURCE-WORKBOOK BUG (translated faithfully, not 'fixed'): Tableau formula is datediff('second',[Actual Ship Date],[Expected Ship Date])/3600 = Expected - Actual, so LATE shipments yield NEGATIVE delay and the Delay KPI rates very-early shipments as BAD. Modeled as ('Shipments'[Expected Ship Date] - 'Shipments'[Actual Ship Date]) * 24 (identical for whole-second timestamps; avoids DATEDIFF sign ambiguity) with null-guards to match Tableau null propagation. Flag argument order back to the customer.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": ":Measure Names",
+      "issue": "Excluded from the model: Tableau 'Measure Names' pseudo-dimension is not real data. The 3 Measure Values virtual pivots (profitability_details, profitability_by_company, sheet_5) are handled at report-build time by binding each resolved pivoted_field_id directly onto the target visual (see the corresponding parse-stage limitations).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Destination State (group)",
+      "issue": "Excluded from the model: Tableau ad-hoc group with only a partial 6-state mapping surfaced, NOT materialized in the extract, and referenced by no worksheet. If a grouped-geography rollup is later needed, add it as a calculated column or a mapping table at report time.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "reference_lines",
+      "issue": "No gauge/KPI reference-line measures were created: all 7 worksheets have reference_lines: [] (empty). The '<base> Min'/'Max'/'Target' suffix-naming convention was reserved but is unused for this workbook.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "money_column_typing",
+      "issue": "Money columns (Bill Amount, Pay Amount, Profit) modeled as Decimal (Currency.Type / fixed decimal), not Double, per modeling guidelines. Verified immaterial: replicating Profit Ratio per shipment with 4-decimal fixed-decimal emulation in Python gave the identical overall AVG (0.190199) as full double precision, so fixed-decimal typing introduces no drift at this data's scale.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "base_numeric_columns_visible",
+      "issue": "Deliberate BPA deviation ('Hide fact table columns' flags Bill Amount, Billable Miles, Profit, Profit Ratio per shipment): base numeric columns kept VISIBLE with summarizeBy=sum so the report builder can implicitly aggregate them exactly as Tableau exposed them as draggable measures, avoiding orphan explicit measures and column/measure name collisions. Revisit if a stricter hidden-columns + explicit-measures posture is desired.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "no_date_table",
+      "issue": "BPA 'Model should have a date table' not addressed by design: this is a faithful 1:1 migration of a single flat extract that had no date dimension in Tableau. A dedicated date table + time-intelligence is a recommended later report-modeling enhancement, not required for migration fidelity.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "zero_pay_shipment_ids",
+      "issue": "Data-quality finding (validates the DIVIDE guard): 67 of 5508 distinct Shipment IDs have SUM(Pay Amount)=0, so the FIXED-LOD 'Profit Ratio per shipment' calc column returns BLANK (via DAX DIVIDE) for those rows and AVERAGE excludes them - the faithful overall = 0.190199. A naive '/' would have produced infinity/errors, so the DIVIDE(...) choice is load-bearing. Report builder should expect blank profit-ratio cells for these shipments; consider flagging the zero-pay shipments back to the customer as a possible source-data issue.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "profitability_by_company.pct_of_total_profit",
+      "issue": "Tableau's 'Profitability by Company' left column is a %-of-Total table calculation (each company's profit as a share of grand-total profit). This is a table-scoped running calc with no equivalent in the frozen semantic model (no %-of-grand-total measure) and no documented PBIR 'show value as % of grand total' quick-calc. Bound faithfully as SUM(Profit) with an honest 'Profit' ($) header instead. Row ranking, sort order, and KPI (GOOD/OK/BAD) row coloring are identical to the reference; only the left column's unit differs ($ vs % of total).",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "number_format_precision",
+      "issue": "Column display formats come from the frozen model formatStrings (0.00% for ratio/discount, $#,##0.00 for amounts, #,##0.00 for delay hrs), so values render with 2 decimals and $ signs. The Tableau reference shows lower-precision, internally-inconsistent formats (integer % e.g. '12%', 1-decimal delay e.g. '-0.5', and no-$ on some amount columns). Verified the underlying value scale is correct (ratio is a true 0-1 fraction -> 0.00% renders the right value, just with more decimals). Purely cosmetic precision difference; not corrected to avoid overriding the authoritative model format strings.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard_filter_actions",
+      "issue": "Tableau dashboard filter actions ([Action (Customer)] / 'Click to Filter' on the company and detail tables) are translated to Power BI's default visual cross-highlight/cross-filter interactions between visuals on the same page, rather than explicit action objects. Click-to-filter behavior is preserved functionally; there is no 1:1 named-action artifact in PBIR.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "customized_tooltips",
+      "issue": "Worksheet customized tooltip text is reproduced via the visuals' default field tooltips (the projected measures/dimensions appear on hover). Tableau's rich/dynamic tooltip layout and any inline formatting are not fully carried over. Consider a dedicated PBI tooltip page if exact tooltip fidelity is later required.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "delay_scatter_xaxis_range",
+      "issue": "The page-2 'Delay Overview' scatter (Shipment Delay Hrs vs Pay Amount) has a fixed X-axis range so the dense main cluster stays legible despite a ~2906-hr extreme outlier. Tableau auto-ranges but visually the outlier is similarly off to the side; the fixed range is a faithful, more-legible rendering rather than a data change. All points remain bound; none are filtered out.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "measure_names_values_pivot_binding",
+      "issue": "The 'Profitability Details' and 'Sheet 5 / Delay Details' worksheets use Tableau's Measure Names / Measure Values virtual pivot (with [Multiple Values] and Measure Names shelf refs that the parser surfaces as UNRESOLVED). These have no PBI equivalent and are translated by binding each underlying field directly to the table (one field-well entry per resolved measure, per pivoted_field_ids) rather than recreating the literal pivot column. No fields were silently dropped.",
+      "severity": "low",
+      "stage": "report_build"
+    }
+  ]
+}

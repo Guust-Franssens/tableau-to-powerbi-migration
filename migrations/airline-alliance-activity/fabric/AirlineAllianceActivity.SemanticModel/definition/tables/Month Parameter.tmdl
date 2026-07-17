@@ -1,0 +1,41 @@
+/// Disconnected single-select slicer table backing the Tableau 'Month Parameter' parameter (default 7). Month number 1-12. Native-slicer + SELECTEDVALUE equivalent of a Tableau live parameter (parameter-equality idiom).
+table 'Month Parameter'
+
+	/// Reads the current 'Month Parameter' slicer selection, defaulting to the Tableau default 7.
+	measure 'Month Parameter Value' = SELECTEDVALUE('Month Parameter'[Month], 7)
+		displayFolder: Parameters
+
+	column 'Month'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Month
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Month Parameter' = m
+		mode: import
+		source =
+			let
+				Source = #table(
+					{"Month"},
+					{
+					{1},
+					{2},
+					{3},
+					{4},
+					{5},
+					{6},
+					{7},
+					{8},
+					{9},
+					{10},
+					{11},
+					{12}
+					}
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source, {{"Month", Int64.Type}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

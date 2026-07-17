@@ -1,0 +1,793 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "8fee58a51fc67e0f24a2",
+  "position": {
+    "x": 0,
+    "y": 648,
+    "z": 4000,
+    "height": 372,
+    "width": 928,
+    "tabOrder": 4000
+  },
+  "visual": {
+    "visualType": "tableEx",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Shipments"
+                    }
+                  },
+                  "Property": "Customer"
+                }
+              },
+              "queryRef": "Shipments.Customer",
+              "nativeQueryRef": "Customer"
+            },
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Shipments"
+                    }
+                  },
+                  "Property": "Shipment ID"
+                }
+              },
+              "queryRef": "Shipments.Shipment ID",
+              "nativeQueryRef": "Shipment ID"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Shipments"
+                        }
+                      },
+                      "Property": "Pay Amount"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Shipments.Pay Amount)",
+              "nativeQueryRef": "Pay Amount"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Shipments"
+                        }
+                      },
+                      "Property": "Bill Amount"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Shipments.Bill Amount)",
+              "nativeQueryRef": "Bill Amount"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Shipments"
+                        }
+                      },
+                      "Property": "Profit"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Shipments.Profit)",
+              "nativeQueryRef": "Profit"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Shipments"
+                        }
+                      },
+                      "Property": "Discount"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Shipments.Discount)",
+              "nativeQueryRef": "Discount"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Shipments"
+                        }
+                      },
+                      "Property": "% Discount"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Shipments.% Discount)",
+              "nativeQueryRef": "% Discount",
+              "displayName": "% Discount"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Shipments"
+                        }
+                      },
+                      "Property": "Profit Ratio per shipment"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Shipments.Profit Ratio per shipment)",
+              "nativeQueryRef": "Profit Ratio per shipment",
+              "displayName": "Profit Ratio per shipment"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Column": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "Shipments"
+                  }
+                },
+                "Property": "Customer"
+              }
+            },
+            "direction": "Ascending"
+          },
+          {
+            "field": {
+              "Column": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "Shipments"
+                  }
+                },
+                "Property": "Shipment ID"
+              }
+            },
+            "direction": "Ascending"
+          }
+        ]
+      }
+    },
+    "objects": {
+      "values": [
+        {
+          "properties": {
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Conditional": {
+                      "Cases": [
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.1D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#E15759'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.2D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#F28E2B'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "1000000000000D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#4E79A7'"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": {
+            "data": [
+              {
+                "dataViewWildcard": {
+                  "matchingOption": 1
+                }
+              }
+            ],
+            "metadata": "Sum(Shipments.Bill Amount)"
+          }
+        },
+        {
+          "properties": {
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Conditional": {
+                      "Cases": [
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.1D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#E15759'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.2D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#F28E2B'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "1000000000000D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#4E79A7'"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": {
+            "data": [
+              {
+                "dataViewWildcard": {
+                  "matchingOption": 1
+                }
+              }
+            ],
+            "metadata": "Sum(Shipments.Profit)"
+          }
+        },
+        {
+          "properties": {
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Conditional": {
+                      "Cases": [
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.1D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#E15759'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.2D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#F28E2B'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "1000000000000D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#4E79A7'"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": {
+            "data": [
+              {
+                "dataViewWildcard": {
+                  "matchingOption": 1
+                }
+              }
+            ],
+            "metadata": "Sum(Shipments.Discount)"
+          }
+        },
+        {
+          "properties": {
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Conditional": {
+                      "Cases": [
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.1D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#E15759'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.2D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#F28E2B'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "1000000000000D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#4E79A7'"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": {
+            "data": [
+              {
+                "dataViewWildcard": {
+                  "matchingOption": 1
+                }
+              }
+            ],
+            "metadata": "Avg(Shipments.% Discount)"
+          }
+        },
+        {
+          "properties": {
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Conditional": {
+                      "Cases": [
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.1D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#E15759'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "0.2D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#F28E2B'"
+                            }
+                          }
+                        },
+                        {
+                          "Condition": {
+                            "Comparison": {
+                              "ComparisonKind": 3,
+                              "Left": {
+                                "SelectRef": {
+                                  "ExpressionName": "Avg(Shipments.Profit Ratio per shipment)"
+                                }
+                              },
+                              "Right": {
+                                "Literal": {
+                                  "Value": "1000000000000D"
+                                }
+                              }
+                            }
+                          },
+                          "Value": {
+                            "Literal": {
+                              "Value": "'#4E79A7'"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": {
+            "data": [
+              {
+                "dataViewWildcard": {
+                  "matchingOption": 1
+                }
+              }
+            ],
+            "metadata": "Avg(Shipments.Profit Ratio per shipment)"
+          }
+        }
+      ],
+      "columnHeaders": [
+        {
+          "properties": {
+            "autoSizeColumnWidth": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "columnAdjustment": {
+              "expr": {
+                "Literal": {
+                  "Value": "'growToFit'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "color": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#FFFFFF'"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "text": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Profitability Details'"
+                }
+              }
+            },
+            "fontColor": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#252423'"
+                    }
+                  }
+                }
+              }
+            },
+            "alignment": {
+              "expr": {
+                "Literal": {
+                  "Value": "'left'"
+                }
+              }
+            },
+            "fontSize": {
+              "expr": {
+                "Literal": {
+                  "Value": "12D"
+                }
+              }
+            },
+            "bold": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            },
+            "fontFamily": {
+              "expr": {
+                "Literal": {
+                  "Value": "'Segoe UI'"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "stylePreset": [
+        {
+          "properties": {
+            "name": {
+              "expr": {
+                "Literal": {
+                  "Value": "'None'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

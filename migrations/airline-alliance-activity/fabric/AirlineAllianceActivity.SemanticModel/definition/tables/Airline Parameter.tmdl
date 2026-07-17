@@ -1,0 +1,43 @@
+/// Disconnected single-select slicer table backing the Tableau 'Airline Parameter' parameter (default "SkyConnect Airways"). Native-slicer + SELECTEDVALUE equivalent of a Tableau live parameter (parameter-equality idiom).
+table 'Airline Parameter'
+
+	/// Reads the current 'Airline Parameter' slicer selection, defaulting to the Tableau default "SkyConnect Airways".
+	measure 'Airline Parameter Value' = SELECTEDVALUE('Airline Parameter'[Airline], "SkyConnect Airways")
+		displayFolder: Parameters
+
+	column 'Airline'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Airline
+		sortByColumn: 'Airline Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper preserving the Tableau parameter's list order.
+	column 'Airline Order'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Airline Order
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Airline Parameter' = m
+		mode: import
+		source =
+			let
+				Source = #table(
+					{"Airline", "Airline Order"},
+					{
+					{"Atlantic Express", 0},
+					{"Global Star", 1},
+					{"Pacific Wings", 2},
+					{"SkyConnect Airways", 3}
+					}
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source, {{"Airline", type text}, {"Airline Order", Int64.Type}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

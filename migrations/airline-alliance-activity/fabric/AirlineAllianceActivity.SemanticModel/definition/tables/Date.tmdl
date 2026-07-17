@@ -1,0 +1,137 @@
+/// Genuine Date dimension (Power Query calendar, 2021-01-01 to 2026-12-31 - a buffer around the real 2022-01-01..2025-01-31 fact-date domain so Prior Year (Year-1) windows never truncate). Related to 'Flight Activity'[Date]. Hosts the Tableau month/year layout-helper columns (Year Label, Month List, Label, Row Pos, Col Pos) which were row-level date calcs in the source workbook.
+table Date
+	dataCategory: Time
+
+	/// Calendar date (relationship key; 'many' side is 'Flight Activity'[Date]).
+	column Date
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		isKey
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Calendar year, e.g. 2024.
+	column Year
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Month number 1-12, hidden sort helper for 'Month'.
+	column 'Month Number'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Month Number
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Month display label, e.g. "January". Sorted chronologically by 'Month Number'.
+	column Month
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Month
+		sortByColumn: 'Month Number'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Quarter number 1-4, hidden sort helper for 'Quarter'.
+	column 'Quarter Number'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Quarter Number
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Quarter display label, e.g. "Q1". Sorted chronologically by 'Quarter Number'.
+	column Quarter
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Quarter
+		sortByColumn: 'Quarter Number'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// First day of the calendar month containing Date (Tableau DATETRUNC('month',...)). Bound by the 'Bar Colours'/'Airline Bar Colours' measures.
+	column 'Month Start'
+		dataType: dateTime
+		formatString: Short Date
+		summarizeBy: none
+		sourceColumn: Month Start
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Year Label' calc: "'" + last 2 digits of the year, e.g. "'24" (the source IF is a no-op; both branches identical).
+	column 'Year Label'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Year Label
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Month List' calc: first letter of the month name, e.g. "J".
+	column 'Month List'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Month List
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Label' calc: first letter of the month name (duplicate of 'Month List'; source IF is a no-op).
+	column Label
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Label
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Row Pos' calc: month-grid row (1 for Jan-Apr, 2 for May-Aug, 3 for Sep-Dec).
+	column 'Row Pos'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Row Pos
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Col Pos' calc: month-grid column (1 for months 1/5/9, 2 for 2/6/10, 3 for 3/7/11, else 4).
+	column 'Col Pos'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Col Pos
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Date = m
+		mode: import
+		source =
+				let
+					StartDate = #date(2021, 1, 1),
+					EndDate = #date(2026, 12, 31),
+					NumberOfDays = Duration.Days(EndDate - StartDate) + 1,
+					DateList = List.Dates(StartDate, NumberOfDays, #duration(1, 0, 0, 0)),
+					#"Converted to Table" = Table.FromList(DateList, Splitter.SplitByNothing(), {"Date"}),
+					#"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Date", type date}}, "en-US"),
+					#"Added Year" = Table.AddColumn(#"Changed Type", "Year", each Date.Year([Date]), Int64.Type),
+					#"Added Month Number" = Table.AddColumn(#"Added Year", "Month Number", each Date.Month([Date]), Int64.Type),
+					#"Added Month" = Table.AddColumn(#"Added Month Number", "Month", each Date.MonthName([Date]), type text),
+					#"Added Quarter Number" = Table.AddColumn(#"Added Month", "Quarter Number", each Date.QuarterOfYear([Date]), Int64.Type),
+					#"Added Quarter" = Table.AddColumn(#"Added Quarter Number", "Quarter", each "Q" & Text.From([Quarter Number]), type text),
+					#"Added Month Start" = Table.AddColumn(#"Added Quarter", "Month Start", each Date.StartOfMonth([Date]), type date),
+					#"Added Year Label" = Table.AddColumn(#"Added Month Start", "Year Label", each "'" & Text.End(Text.From([Year]), 2), type text),
+					#"Added Month List" = Table.AddColumn(#"Added Year Label", "Month List", each Text.Start([Month], 1), type text),
+					#"Added Label" = Table.AddColumn(#"Added Month List", "Label", each Text.Start([Month], 1), type text),
+					#"Added Row Pos" = Table.AddColumn(#"Added Label", "Row Pos", each if [Month Number] <= 4 then 1 else if [Month Number] <= 8 then 2 else 3, Int64.Type),
+					#"Added Col Pos" = Table.AddColumn(#"Added Row Pos", "Col Pos", each Number.Mod([Month Number] - 1, 4) + 1, Int64.Type)
+				in
+					#"Added Col Pos"
+
+	annotation PBI_ResultType = Table

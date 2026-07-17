@@ -1,0 +1,48 @@
+{
+  "name": "SalesCommissionTheme.json",
+  "dataColors": [
+    "#4577A8",
+    "#E08A2B",
+    "#5FA052",
+    "#7FBEB0",
+    "#4F4F4F",
+    "#8C6BAE",
+    "#C0504D",
+    "#9BBB59"
+  ],
+  "foreground": "#4F4F4F",
+  "foregroundNeutralSecondary": "#6B6B6B",
+  "foregroundNeutralTertiary": "#B3B3B3",
+  "background": "#FFFFFF",
+  "backgroundLight": "#F5F5F5",
+  "backgroundNeutral": "#EAEAEA",
+  "tableAccent": "#4577A8",
+  "maximum": "#4577A8",
+  "center": "#E08A2B",
+  "minimum": "#5FA052",
+  "good": "#5FA052",
+  "neutral": "#E08A2B",
+  "bad": "#C0504D",
+  "textClasses": {
+    "title": {
+      "fontFace": "Segoe UI Semibold",
+      "fontSize": 16,
+      "color": "#3A3A3A"
+    },
+    "callout": {
+      "fontFace": "Segoe UI Semibold",
+      "fontSize": 20,
+      "color": "#3A3A3A"
+    },
+    "header": {
+      "fontFace": "Segoe UI Semibold",
+      "fontSize": 12,
+      "color": "#3A3A3A"
+    },
+    "label": {
+      "fontFace": "Segoe UI",
+      "fontSize": 10,
+      "color": "#4F4F4F"
+    }
+  }
+}

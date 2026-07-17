@@ -1,0 +1,34 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/3.0.0/schema.json",
+  "themeCollection": {
+    "customTheme": {
+      "name": "TelecomTheme.json",
+      "reportVersionAtImport": {
+        "visual": "1.8.100",
+        "report": "2.0.100",
+        "page": "1.3.100"
+      },
+      "type": "RegisteredResources"
+    }
+  },
+  "resourcePackages": [
+    {
+      "name": "RegisteredResources",
+      "type": "RegisteredResources",
+      "items": [
+        {
+          "name": "TelecomTheme.json",
+          "path": "TelecomTheme.json",
+          "type": "CustomTheme"
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "useStylableVisualContainerHeader": true,
+    "defaultFilterActionIsDataFilter": true,
+    "defaultDrillFilterOtherVisuals": true,
+    "allowChangeFilterTypes": true,
+    "useEnhancedTooltips": true
+  }
+}

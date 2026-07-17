@@ -1,0 +1,59 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "a1311206dcbd156c3b29",
+  "position": { "x": 8, "y": 74, "z": 2000, "height": 48, "width": 414, "tabOrder": 300 },
+  "visual": {
+    "visualType": "slicer",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "New Quota" } }, "Property": "New Quota" } },
+              "queryRef": "New Quota.New Quota",
+              "nativeQueryRef": "New Quota"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "data": [{ "properties": { "mode": { "expr": { "Literal": { "Value": "'Single'" } } } } }],
+      "slider": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }],
+      "header": [{
+        "properties": {
+          "show": { "expr": { "Literal": { "Value": "true" } } },
+          "text": { "expr": { "Literal": { "Value": "'New Quota:'" } } }
+        }
+      }],
+      "general": [{
+        "properties": {
+          "filter": {
+            "filter": {
+              "Version": 2,
+              "From": [{ "Name": "n", "Entity": "New Quota", "Type": 0 }],
+              "Where": [{
+                "Condition": {
+                  "In": {
+                    "Expressions": [{ "Column": { "Expression": { "SourceRef": { "Source": "n" } }, "Property": "New Quota" } }],
+                    "Values": [[{ "Literal": { "Value": "500000L" } }]]
+                  }
+                }
+              }]
+            }
+          }
+        }
+      }]
+    },
+    "visualContainerObjects": {
+      "padding": [{
+        "properties": {
+          "top": { "expr": { "Literal": { "Value": "8D" } } },
+          "bottom": { "expr": { "Literal": { "Value": "8D" } } },
+          "left": { "expr": { "Literal": { "Value": "8D" } } },
+          "right": { "expr": { "Literal": { "Value": "8D" } } }
+        }
+      }]
+    }
+  }
+}

@@ -27,7 +27,8 @@
         {
           "name": "Radio Towers Dashboard",
           "tableau": "migrations/telecommunications-analytics/reference/tableau-dashboard.png",
-          "powerbi": null
+          "powerbi": "migrations/telecommunications-analytics/reference/powerbi-dashboard.png",
+          "powerbi_crop": { "top": 0.08, "right": 0.13 }
         }
       ]
     },
@@ -39,7 +40,8 @@
         {
           "name": "Commission Model",
           "tableau": "migrations/sales-commission-model/reference/tableau-commission-model.png",
-          "powerbi": null
+          "powerbi": "migrations/sales-commission-model/reference/powerbi-commission-model.png",
+          "powerbi_crop": { "top": 0.08, "right": 0.13 }
         }
       ]
     },
@@ -59,22 +61,39 @@
     {
       "slug": "superstore-sales-performance",
       "title": "Superstore Sales Performance",
-      "caption": "Three-dashboard analytics suite. Field Parameters for parameter-driven measure/dimension switching, current/prior-period comparison, and diverging-gradient choropleths.",
+      "caption": "Three-dashboard analytics suite. Field Parameters for parameter-driven measure/dimension switching, current/prior-period comparison, diverging-gradient Azure Maps choropleths (data-bound reference layer), and region-comparison dot-plots.",
       "pages": [
-        { "name": "Descriptive", "tableau": "migrations/superstore-sales-performance/reference/tableau-descriptive.png", "powerbi": null },
-        { "name": "Prescriptive", "tableau": "migrations/superstore-sales-performance/reference/tableau-prescriptive.png", "powerbi": null },
-        { "name": "Annotations", "tableau": "migrations/superstore-sales-performance/reference/tableau-annotations.png", "powerbi": null }
+        {
+          "name": "Prescriptive",
+          "tableau": "migrations/superstore-sales-performance/reference/tableau-prescriptive.png",
+          "powerbi": "migrations/superstore-sales-performance/reference/powerbi-prescriptive.png",
+          "powerbi_crop": { "right": 0.035 }
+        },
+        {
+          "name": "Descriptive",
+          "tableau": "migrations/superstore-sales-performance/reference/tableau-descriptive.png",
+          "powerbi": "migrations/superstore-sales-performance/reference/powerbi-descriptive.png",
+          "powerbi_crop": { "right": 0.04 }
+        }
       ]
     },
     {
       "slug": "airline-alliance-activity",
       "title": "Airline Alliance Activity",
-      "caption": "Largest workbook (91 worksheets, 4 pages, 108 measures). Includes the spatial MAKEPOINT/MAKELINE origin-destination route map (a documented capability gap handled via a native map fallback).",
+      "caption": "Largest workbook (91 worksheets, 4 pages, 108 measures). A CY/PY navigation app with an azureMap origin-destination map (the MAKELINE great-circle arc has no native PBI equivalent, so destination bubbles are used). Surfaced a systematic DAX bug: 58 comparison measures used the illegal compact filter `'Table'[Col]=[Measure]`, fixed by hoisting to VARs.",
       "pages": [
-        { "name": "Alliance Page", "tableau": "migrations/airline-alliance-activity/reference/tableau-alliance-page.png", "powerbi": null },
-        { "name": "Airlines Page", "tableau": "migrations/airline-alliance-activity/reference/tableau-airlines-page.png", "powerbi": null },
-        { "name": "Fleet Page", "tableau": "migrations/airline-alliance-activity/reference/tableau-fleet-page.png", "powerbi": null },
-        { "name": "Flight Page", "tableau": "migrations/airline-alliance-activity/reference/tableau-flight-page.png", "powerbi": null }
+        {
+          "name": "Alliance Overview",
+          "tableau": "migrations/airline-alliance-activity/reference/tableau-alliance-page.png",
+          "powerbi": "migrations/airline-alliance-activity/reference/powerbi-alliance-page.png",
+          "powerbi_crop": { "right": 0.03 }
+        },
+        {
+          "name": "Flights Map",
+          "tableau": "migrations/airline-alliance-activity/reference/tableau-flight-page.png",
+          "powerbi": "migrations/airline-alliance-activity/reference/powerbi-flight-page.png",
+          "powerbi_crop": { "right": 0.03 }
+        }
       ]
     }
   ]

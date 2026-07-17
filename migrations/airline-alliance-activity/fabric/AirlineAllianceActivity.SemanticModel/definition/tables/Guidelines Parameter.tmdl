@@ -1,0 +1,41 @@
+/// Disconnected single-select slicer table backing the Tableau 'Guidelines Parameter' parameter (default "Hide Guidelines"). Report-level show/hide toggle for gridline guides. Native-slicer + SELECTEDVALUE equivalent of a Tableau live parameter (parameter-equality idiom).
+table 'Guidelines Parameter'
+
+	/// Reads the current 'Guidelines Parameter' slicer selection, defaulting to the Tableau default "Hide Guidelines".
+	measure 'Guidelines Value' = SELECTEDVALUE('Guidelines Parameter'[Guideline], "Hide Guidelines")
+		displayFolder: Parameters
+
+	column 'Guideline'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Guideline
+		sortByColumn: 'Guideline Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper preserving the Tableau parameter's list order.
+	column 'Guideline Order'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Guideline Order
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Guidelines Parameter' = m
+		mode: import
+		source =
+			let
+				Source = #table(
+					{"Guideline", "Guideline Order"},
+					{
+					{"Show Guidelines", 0},
+					{"Hide Guidelines", 1}
+					}
+				),
+				#"Changed Type" = Table.TransformColumnTypes(Source, {{"Guideline", type text}, {"Guideline Order", Int64.Type}}, "en-US")
+			in
+				#"Changed Type"
+
+	annotation PBI_ResultType = Table

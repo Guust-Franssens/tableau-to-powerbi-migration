@@ -1,0 +1,31 @@
+/// Disconnected slicer table for the Tableau 'Investment Amount' parameter (real, range domain, default 500). Feeds the Stocks 'growth of $X' measures. Tableau range params have no fixed list; approximated as a discrete choice list. The value measure defaults to Tableau's current 500 when nothing is selected.
+table 'Investment Amount'
+	lineageTag: 4cf45894-7786-5a0e-8ed4-946038d2d7d3
+
+	/// Reads the current slicer selection on 'Investment Amount'[Investment Amount], defaulting to Tableau's current value when nothing is selected.
+	measure 'Investment Amount Value' = SELECTEDVALUE('Investment Amount'[Investment Amount], 500)
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		displayFolder: Parameter
+		lineageTag: fd9dbad3-dea9-56e4-8ec9-4c3e68c7168b
+
+	column 'Investment Amount'
+		dataType: double
+		formatString: \$#,##0.00;-\$#,##0.00;\$#,##0.00
+		lineageTag: 23134632-7e7f-50ef-a3b8-e14cc74613ae
+		summarizeBy: none
+		sourceColumn: Investment Amount
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Investment Amount' = m
+		mode: import
+		source =
+				let
+				    Source = {0, 100, 250, 500, 1000, 2500, 5000, 10000},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Investment Amount"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Investment Amount", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

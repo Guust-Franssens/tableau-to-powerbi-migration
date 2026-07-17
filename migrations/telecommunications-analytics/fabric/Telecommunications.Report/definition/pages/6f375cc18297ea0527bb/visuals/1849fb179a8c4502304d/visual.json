@@ -1,0 +1,110 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "1849fb179a8c4502304d",
+  "position": { "x": 6, "y": 513, "z": 3000, "height": 395, "width": 726, "tabOrder": 3000 },
+  "visual": {
+    "visualType": "pivotTable",
+    "query": {
+      "queryState": {
+        "Rows": {
+          "projections": [
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Link ID" } },
+              "queryRef": "Cell Links.Link ID",
+              "nativeQueryRef": "Link ID"
+            },
+            {
+              "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Site ID" } },
+              "queryRef": "Cell Links.Site ID",
+              "nativeQueryRef": "Site ID"
+            }
+          ]
+        },
+        "Values": {
+          "projections": [
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Total Capacity" } },
+              "queryRef": "Cell Links.Total Capacity",
+              "nativeQueryRef": "Total Capacity"
+            },
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Avg Freq Band" } },
+              "queryRef": "Cell Links.Avg Freq Band",
+              "nativeQueryRef": "Avg Freq Band"
+            },
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Total Distance" } },
+              "queryRef": "Cell Links.Total Distance",
+              "nativeQueryRef": "Total Distance"
+            },
+            {
+              "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Cell Links" } }, "Property": "Avg Availability" } },
+              "queryRef": "Cell Links.Avg Availability",
+              "nativeQueryRef": "Avg Availability"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "columnHeaders": [
+        {
+          "properties": {
+            "columnAdjustment": { "expr": { "Literal": { "Value": "'growToFit'" } } },
+            "autoSizeColumnWidth": { "expr": { "Literal": { "Value": "true" } } },
+            "fontColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#333333'" } } } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } },
+            "alignment": { "expr": { "Literal": { "Value": "'Center'" } } }
+          }
+        }
+      ],
+      "rowHeaders": [
+        {
+          "properties": {
+            "stepped": { "expr": { "Literal": { "Value": "false" } } },
+            "showExpandCollapseButtons": { "expr": { "Literal": { "Value": "false" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } }
+          }
+        }
+      ],
+      "values": [
+        {
+          "properties": {
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } },
+            "backColorPrimary": { "solid": { "color": { "expr": { "Literal": { "Value": "'#FFFFFF'" } } } } },
+            "backColorSecondary": { "solid": { "color": { "expr": { "Literal": { "Value": "'#F4F6F4'" } } } } }
+          }
+        }
+      ],
+      "subTotals": [
+        {
+          "properties": {
+            "rowSubtotals": { "expr": { "Literal": { "Value": "false" } } },
+            "columnSubtotals": { "expr": { "Literal": { "Value": "false" } } }
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "stylePreset": [
+        { "properties": { "name": { "expr": { "Literal": { "Value": "'None'" } } } } }
+      ],
+      "title": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "text": { "expr": { "Literal": { "Value": "'Link Data (Select link to highlight)'" } } },
+            "fontColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#C8791E'" } } } } },
+            "fontSize": { "expr": { "Literal": { "Value": "12D" } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } },
+            "alignment": { "expr": { "Literal": { "Value": "'left'" } } }
+          }
+        }
+      ],
+      "subTitle": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ]
+    }
+  }
+}

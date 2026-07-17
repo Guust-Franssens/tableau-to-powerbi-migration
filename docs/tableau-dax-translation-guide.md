@@ -160,6 +160,27 @@ behaviorally equivalent to Tableau but architecturally different (filter baked i
 applied externally) — flag it in `limitations_encountered` so future maintenance isn't surprised the
 measure doesn't respond to a page-level Region filter the way a Tableau worksheet would.
 
+**Gotcha — never emit the compact filter `'Table'[Col] = [Measure]` (measure on the RHS) [high
+severity, found and fixed in 58 Airline measures].** When you restrict a `CALCULATE` by a
+parameter-selection or prior-period measure (`'Flight Activity'[Year] = [Year Parameter Value]`,
+`'Flight Activity'[Month] = [PM Month Value]`), the compact boolean-filter form with a **measure** on
+the right-hand side is illegal DAX. Every such measure fails **at query/render time** with `A function
+'PLACEHOLDER' has been used in a True/False expression that is used as a table filter expression` — and
+it is invisible to `powerbi-report-author validate` and TMDL structural validation (the whole report
+renders "Something's wrong with one or more fields" only in Desktop). Hoist each measure into a `VAR`
+and compare the column to the VAR (a constant scalar):
+
+```dax
+CM Costs =
+VAR _year  = [Year Parameter Value]
+VAR _month = [Month Parameter Value]
+RETURN CALCULATE(SUM('Flight Activity'[Total Costs Usd]),
+    'Flight Activity'[Year] = _year, 'Flight Activity'[Month] = _month, 'Flight Activity'[Completed Flights] = 1)
+```
+
+A **literal** RHS (`'…'[Completed Flights] = 1`) and an **explicit** `FILTER(ALL('…'[Col]), '…'[Col] =
+[Measure])` both already work — only the compact `column = [measure]` form is rejected.
+
 ## 5. LOD expressions [seen, Shipping — a FIXED per-shipment ratio]
 
 | Tableau LOD | DAX equivalent |

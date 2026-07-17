@@ -1,0 +1,43 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "ad837599b0264aa5552d",
+  "position": { "x": 8, "y": 6, "z": 1000, "height": 36, "width": 700, "tabOrder": 0 },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Sales Commission Model",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI Semibold",
+                      "fontSize": "20pt",
+                      "color": "#41626B"
+                    }
+                  }
+                ],
+                "horizontalTextAlignment": "left"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }],
+      "border": [{ "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }],
+      "padding": [{
+        "properties": {
+          "top": { "expr": { "Literal": { "Value": "0D" } } },
+          "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+          "left": { "expr": { "Literal": { "Value": "0D" } } },
+          "right": { "expr": { "Literal": { "Value": "0D" } } }
+        }
+      }]
+    }
+  }
+}

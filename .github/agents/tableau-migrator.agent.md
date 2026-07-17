@@ -41,6 +41,19 @@ it must show up in `limitations_encountered`, not be silently dropped.
 
 ## Workflow
 
+0. **Preflight the environment (do this EVERY invocation, before anything else).** Run:
+   ```
+   powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
+   ```
+   It is a PowerShell (not Python) bootstrap on purpose — it must work even on a machine where Python
+   isn't installed yet, because checking FOR Python is one of its jobs. It verifies the whole
+   toolchain: Python + the parser's deps, the `powerbi-authoring@fabric-collection` skill plugin, the
+   MCP servers (`powerbi-modeling-mcp`, `powerbi-remote`), Power BI Desktop + its Bridge CLI
+   (`powerbi-desktop`), `npx`, and the TOM refresh DLL. If it exits non-zero, **stop and surface the
+   missing items to the user with the printed install hints** (e.g. `/plugin` to add
+   `microsoft/skills-for-fabric` + enable `powerbi-authoring`, `/mcp` to register the servers, or
+   installing Python / Power BI Desktop) — do not attempt a migration against a half-configured
+   machine. See `AGENTS.md` for the full setup. Only proceed once preflight reports "Ready to migrate."
 1. **Confirm inputs.** You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
    `migrations/<name>/` (create `source/`, and the spec will live at
    `migrations/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug

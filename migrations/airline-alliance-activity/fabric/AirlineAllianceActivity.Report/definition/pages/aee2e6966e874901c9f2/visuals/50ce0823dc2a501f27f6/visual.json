@@ -1,0 +1,46 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "50ce0823dc2a501f27f6",
+  "position": {
+    "x": 1140,
+    "y": 34,
+    "z": 1500,
+    "height": 48,
+    "width": 240,
+    "tabOrder": 0
+  },
+  "visual": {
+    "visualType": "textbox",
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Hello, Guest!\n",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI Semibold",
+                      "fontSize": "10pt",
+                      "color": "#FFFFFF"
+                    }
+                  },
+                  {
+                    "value": "Last Login: 16 Jul 2026",
+                    "textStyle": {
+                      "fontFamily": "Segoe UI",
+                      "fontSize": "8pt",
+                      "color": "#8CE0A6"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}
