@@ -10,11 +10,11 @@ Logistics profitability & delay KPIs. GOOD/OK/BAD conditional coloring on scatte
 
 **Profitability KPI**
 
-![Shipping KPIs - Profitability KPI](assets/shipping-kpis-1.png)
+![Shipping KPIs - Profitability KPI](assets/shipping-kpis-1-stacked.png)
 
 **Shipping KPI**
 
-![Shipping KPIs - Shipping KPI](assets/shipping-kpis-2.png)
+![Shipping KPIs - Shipping KPI](assets/shipping-kpis-2-stacked.png)
 
 ### Telecommunications Analytics
 
@@ -34,7 +34,7 @@ Company revenue-growth analysis. Exercised the pipeline's first real Tableau tab
 
 **Tale of 100 Entrepreneurs**
 
-![Tale of 100 Entrepreneurs - Tale of 100 Entrepreneurs](assets/tale-of-100-entrepreneurs-1.png)
+![Tale of 100 Entrepreneurs - Tale of 100 Entrepreneurs](assets/tale-of-100-entrepreneurs-1-stacked.png)
 
 ### Superstore Sales Performance
 
