@@ -484,8 +484,8 @@ table 'Flight Activity'
 		formatString: #,##0
 		displayFolder: Report Helpers
 
-	/// Convenience replacement for Tableau dimension 'CM Main Destinations' (a parameter-equality projection). Put Destination City on the visual + this measure to rank top CM destinations; region filter applies to Destination Region.
-	measure 'CM Comp Flights to Destination' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Destination Region]),_m_region_parameter_value="Global"||'Flight Activity'[Destination Region]=_m_region_parameter_value))
+	/// Convenience replacement for Tableau dimension 'CM Main Destinations' (a parameter-equality projection). Put Destination City on the visual + this measure to rank top CM destinations; region filter applies to Origin Region (top destinations for flights DEPARTING the selected region, matching the Origin Region semantics used across the rest of the dashboard - validator found Destination Region here was ~2x off vs Tableau).
+	measure 'CM Comp Flights to Destination' = VAR _m_year_parameter_value = [Year Parameter Value] VAR _m_month_parameter_value = [Month Parameter Value] VAR _m_region_parameter_value = [Region Parameter Value] RETURN CALCULATE(DISTINCTCOUNT('Flight Activity'[Flight Id]),'Flight Activity'[Year]=_m_year_parameter_value,'Flight Activity'[Month]=_m_month_parameter_value,'Flight Activity'[Completed Flights]=1,FILTER(ALL('Flight Activity'[Origin Region]),_m_region_parameter_value="Global"||'Flight Activity'[Origin Region]=_m_region_parameter_value))
 		formatString: #,##0
 		displayFolder: Current Month (CM)
 
