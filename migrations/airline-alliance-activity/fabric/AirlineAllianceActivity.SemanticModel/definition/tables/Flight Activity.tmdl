@@ -363,68 +363,68 @@ table 'Flight Activity'
 	measure 'CSAT Perf Circle Col' = IF([CY Avg. CSAT]>[PY Avg. CSAT],"Up",IF([CY Avg. CSAT]<[PY Avg. CSAT],"Down","No"))
 		displayFolder: Trend Indicators (YoY)
 
-	/// Tableau 'Pos MoM Passenger Count': month-over-month growth (CM Passenger Count/PM Passenger Count - 1); BLANK when not growing.
-	measure 'Pos MoM Passenger Count' = IF([CM Passenger Count]>[PM Passenger Count],DIVIDE([CM Passenger Count],[PM Passenger Count])-1)
+	/// Tableau 'Pos MoM Passenger Count': month-over-month growth (CM Passenger Count/PM Passenger Count - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Passenger Count' = IF([PM Passenger Count]<>0,DIVIDE([CM Passenger Count],[PM Passenger Count])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Total Revenue': month-over-month growth (CM Total Revenue/PM Total Revenue - 1); BLANK when not growing.
-	measure 'Pos MoM Total Revenue' = IF([CM Total Revenue]>[PM Total Revenue],DIVIDE([CM Total Revenue],[PM Total Revenue])-1)
+	/// Tableau 'Pos MoM Total Revenue': month-over-month growth (CM Total Revenue/PM Total Revenue - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Total Revenue' = IF([PM Total Revenue]<>0,DIVIDE([CM Total Revenue],[PM Total Revenue])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Op Profit': month-over-month growth (CM Op Profit/PM Op Profit - 1); BLANK when not growing.
-	measure 'Pos MoM Op Profit' = IF([CM Op Profit]>[PM Op Profit],DIVIDE([CM Op Profit],[PM Op Profit])-1)
+	/// Tableau 'Pos MoM Op Profit': month-over-month growth (CM Op Profit/PM Op Profit - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Op Profit' = IF([PM Op Profit]<>0,DIVIDE([CM Op Profit],[PM Op Profit])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Costs': month-over-month growth (CM Costs/PM Costs - 1); BLANK when not growing.
-	measure 'Pos MoM Costs' = IF([CM Costs]>[PM Costs],DIVIDE([CM Costs],[PM Costs])-1)
+	/// Tableau 'Pos MoM Costs': month-over-month growth (CM Costs/PM Costs - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Costs' = IF([PM Costs]<>0,DIVIDE([CM Costs],[PM Costs])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Load Factor': month-over-month growth (CM Load Factor/PM Load Factor - 1); BLANK when not growing.
-	measure 'Pos MoM Load Factor' = IF([CM Load Factor]>[PM Load Factor],DIVIDE([CM Load Factor],[PM Load Factor])-1)
+	/// Tableau 'Pos MoM Load Factor': month-over-month growth (CM Load Factor/PM Load Factor - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Load Factor' = IF([PM Load Factor]<>0,DIVIDE([CM Load Factor],[PM Load Factor])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Cargo Load Factor': month-over-month growth (CM Cargo Load Factor/PM Cargo Load Factor - 1); BLANK when not growing.
-	measure 'Pos MoM Cargo Load Factor' = IF([CM Cargo Load Factor]>[PM Cargo Load Factor],DIVIDE([CM Cargo Load Factor],[PM Cargo Load Factor])-1)
+	/// Tableau 'Pos MoM Cargo Load Factor': month-over-month growth (CM Cargo Load Factor/PM Cargo Load Factor - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Cargo Load Factor' = IF([PM Cargo Load Factor]<>0,DIVIDE([CM Cargo Load Factor],[PM Cargo Load Factor])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM CTK': month-over-month growth (CM CTK/PM CTK - 1); BLANK when not growing.
-	measure 'Pos MoM CTK' = IF([CM CTK]>[PM CTK],DIVIDE([CM CTK],[PM CTK])-1)
+	/// Tableau 'Pos MoM CTK': month-over-month growth (CM CTK/PM CTK - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM CTK' = IF([PM CTK]<>0,DIVIDE([CM CTK],[PM CTK])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Freight Tonnes': month-over-month growth (CM Freight Tonnes/PM Freight Tonnes - 1); BLANK when not growing.
-	measure 'Pos MoM Freight Tonnes' = IF([CM Freight Tonnes]>[PM Freight Tonnes],DIVIDE([CM Freight Tonnes],[PM Freight Tonnes])-1)
+	/// Tableau 'Pos MoM Freight Tonnes': month-over-month growth (CM Freight Tonnes/PM Freight Tonnes - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Freight Tonnes' = IF([PM Freight Tonnes]<>0,DIVIDE([CM Freight Tonnes],[PM Freight Tonnes])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM RPK': month-over-month growth (CM RPK/PM RPK - 1); BLANK when not growing.
-	measure 'Pos MoM RPK' = IF([CM RPK]>[PM RPK],DIVIDE([CM RPK],[PM RPK])-1)
+	/// Tableau 'Pos MoM RPK': month-over-month growth (CM RPK/PM RPK - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM RPK' = IF([PM RPK]<>0,DIVIDE([CM RPK],[PM RPK])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM RPK (A)': month-over-month growth (CM RPK (A)/PM RPK (A) - 1); BLANK when not growing.
-	measure 'Pos MoM RPK (A)' = IF([CM RPK (A)]>[PM RPK (A)],DIVIDE([CM RPK (A)],[PM RPK (A)])-1)
+	/// Tableau 'Pos MoM RPK (A)': month-over-month growth (CM RPK (A)/PM RPK (A) - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM RPK (A)' = IF([PM RPK (A)]<>0,DIVIDE([CM RPK (A)],[PM RPK (A)])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Comp Flights': month-over-month growth (CM No of Comp Flights/PM No of Comp Flights - 1); BLANK when not growing.
-	measure 'Pos MoM Comp Flights' = IF([CM No of Comp Flights]>[PM No of Comp Flights],DIVIDE([CM No of Comp Flights],[PM No of Comp Flights])-1)
+	/// Tableau 'Pos MoM Comp Flights': month-over-month growth (CM No of Comp Flights/PM No of Comp Flights - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Comp Flights' = IF([PM No of Comp Flights]<>0,DIVIDE([CM No of Comp Flights],[PM No of Comp Flights])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM On-Time Perf': month-over-month growth (CM Count On-Time Perf/PM Count On-Time Perf - 1); BLANK when not growing.
-	measure 'Pos MoM On-Time Perf' = IF([CM Count On-Time Perf]>[PM Count On-Time Perf],DIVIDE([CM Count On-Time Perf],[PM Count On-Time Perf])-1)
+	/// Tableau 'Pos MoM On-Time Perf': month-over-month growth (CM Count On-Time Perf/PM Count On-Time Perf - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM On-Time Perf' = IF([PM Count On-Time Perf]<>0,DIVIDE([CM Count On-Time Perf],[PM Count On-Time Perf])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
-	/// Tableau 'Pos MoM Avg. CSAT': month-over-month growth (CM Avg. CSAT/PM Avg. CSAT - 1); BLANK when not growing.
-	measure 'Pos MoM Avg. CSAT' = IF([CM Avg. CSAT]>[PM Avg. CSAT],DIVIDE([CM Avg. CSAT],[PM Avg. CSAT])-1)
+	/// Tableau 'Pos MoM Avg. CSAT': month-over-month growth (CM Avg. CSAT/PM Avg. CSAT - 1); signed value in both directions (BLANK only when there is no prior-month baseline).
+	measure 'Pos MoM Avg. CSAT' = IF([PM Avg. CSAT]<>0,DIVIDE([CM Avg. CSAT],[PM Avg. CSAT])-1)
 		formatString: 0.0%
 		displayFolder: MoM Growth (Positive)
 
