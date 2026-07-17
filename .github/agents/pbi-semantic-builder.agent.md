@@ -131,14 +131,21 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   the measure (e.g. `'X Value'`) instead.
 - **The `.pbip` file's `$schema` must end in a literal numeric version** (e.g.
   `.../pbipProperties/1.0.0/schema.json`) — never the placeholder text `1.x.x`.
-- **Field Parameter tables: `sourceColumn` must be `Value1`/`Value2`/`Value3`, never the friendly
+- **Field Parameter / dimension-parameter calc tables: `sourceColumn` must be the BRACKETED
+  calc-column reference `[Value1]`/`[Value2]`/`[Value3]` — never bare `Value1`, never the friendly
   display name.** A DAX table-constructor row like `{("Label", NAMEOF(...), Order), ...}` with 3
-  columns always produces columns physically named `Value1`/`Value2`/`Value3` internally, regardless
-  of what friendly name you give the column via TMDL `column '<Name>'`. Writing
-  `sourceColumn: <FriendlyName>` instead of `sourceColumn: Value1` (etc.) is the exact same trap as
-  the M-sourced/renamed-column case above, just for DAX-calculated tables — it passes
-  `TmdlSerializer` structural validation cleanly (syntax-only check) but fails at live refresh/commit
-  with a column-not-found error. Found in all 5 Field Parameter tables of the Superstore build; see
+  columns always produces physical columns named `Value1`/`Value2`/`Value3`, and in a *calculated*
+  table a column binds to them as a **bracketed column reference**. The correct form is
+  `column 'Map KPI'` … `sourceColumn: [Value1]` (friendly Name on top, bracketed source below).
+  Writing `sourceColumn: Value1` **without brackets** (or `sourceColumn: <FriendlyName>`) passes
+  `TmdlSerializer` structural validation cleanly AND `powerbi-report-author validate` (0 errors) but
+  does NOT bind: Power BI Desktop silently **infers** `Value1`/`Value2`/`Value3` (`isNameInferred`)
+  columns instead, the friendly `'Map KPI'` column never materializes, and every `'Map KPI'[Map KPI]`
+  reference in a measure or slicer fails ("Column 'Map KPI' in table 'Map KPI' cannot be found or may
+  not be used in this expression"). Worse: on open/refresh Desktop **rewrites the `.tmdl` on disk to
+  the inferred `Value1`/`Value2`/`Value3` form**, discarding your friendly columns — so this must be
+  correct *before* the first Desktop open. Found in all 5 Field Parameter tables of the Superstore
+  build (only surfaced in Desktop, never in validation). See
   `docs/tableau-dax-translation-guide.md` §3 for the full pattern.
 - **Validate before reporting success.** After writing TMDL files, load
   `Microsoft.AnalysisServices.Tabular.dll` (ships with Tabular Editor, bundled in this skill's

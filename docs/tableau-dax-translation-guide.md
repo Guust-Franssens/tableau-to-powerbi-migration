@@ -111,16 +111,20 @@ disconnected-table-plus-`SWITCH`-measure pattern whenever a parameter genuinely 
   both plain slicers, alongside 5 genuine Field Parameters (`Y-Axis`, `X-Axis`, `Map KPI`,
   `Scatter Plot Detail`, `Date Granularity`) in the same workbook.
 
-**Gotcha — `sourceColumn` must be `Value1`/`Value2`/`Value3`, never the display name [high severity,
-found and fixed].** A DAX table-constructor row like `{("Label", NAMEOF(...), Order), ...}` with 3
-columns always produces columns **physically named `Value1`/`Value2`/`Value3`** internally — never
-the friendly names given via TMDL `column '<Name>'`. Writing `sourceColumn: <FriendlyName>` instead of
-`sourceColumn: Value1` (etc.) passes `TmdlSerializer` structural validation cleanly (it only checks
-TMDL syntax, not whether a declared `sourceColumn` matches what the DAX constructor actually produces)
-but fails only at live refresh/commit time with a column-not-found error. This is the same
-name-vs-`sourceColumn` trap already documented for M-sourced/renamed columns (see the "TMDL authoring"
-Gotcha in `pbi-semantic-builder.agent.md`), now confirmed to have a direct analogue for
-DAX-calculated-table columns specifically.
+**Gotcha — `sourceColumn` must be the BRACKETED `[Value1]`/`[Value2]`/`[Value3]`, never bare `Value1`
+and never the display name [high severity, found and fixed in all 5 Superstore FP tables].** A DAX
+table-constructor row like `{("Label", NAMEOF(...), Order), ...}` with 3 columns always produces
+physical columns named `Value1`/`Value2`/`Value3`; in a *calculated* table each friendly column binds
+to them as a **bracketed column reference**. The correct TMDL is `column 'Map KPI'` … `sourceColumn:
+[Value1]`. Writing bare `sourceColumn: Value1` (no brackets) — or `sourceColumn: <FriendlyName>` —
+passes both `TmdlSerializer` structural validation and `powerbi-report-author validate` (0 errors) but
+does **not** bind. Power BI Desktop silently infers `Value1`/`Value2`/`Value3` (`isNameInferred`)
+columns, the friendly `'Map KPI'` column never materializes, and every `'Map KPI'[Map KPI]` reference
+fails ("Column 'Map KPI' … cannot be found or may not be used in this expression"); on open Desktop
+also **rewrites the `.tmdl` to the inferred form**, silently deleting your friendly columns. Fix it
+before the first Desktop open — it is invisible to every offline validator and only surfaces when the
+model is loaded in Desktop. (The bare-name form is a natural but wrong reading of "sourceColumn must be
+Value1, not the friendly name" — the missing piece is the brackets.)
 
 ## 4. Comparison-period (CP/PP) pattern → `CALCULATE` + `DATESBETWEEN` [seen, Superstore]
 
@@ -238,9 +242,10 @@ help migrate dashboards to Power BI, and what are their limitations?"*
   the true upstream system if one exists behind the extract).
 - **Visual fidelity** — chart-type and layout mapping is automated, but final polish (colors, spacing,
   exact fonts) benefits from a design pass, not a pixel-diff guarantee.
-- **Field Parameter table constructors** (§3) — the `Value1`/`Value2`/`Value3` `sourceColumn` gotcha
-  passes structural TMDL validation but fails at live refresh, so a live Desktop/Fabric round-trip is
-  the only way to fully close this verification gap.
+- **Field Parameter table constructors** (§3) — the **bracketed** `sourceColumn: [Value1]` gotcha
+  passes every offline validator (structural TMDL check AND `powerbi-report-author validate`) but a
+  bare `Value1` silently fails to bind in Desktop (columns inferred to `Value1`/`Value2`/`Value3`), so
+  a live Desktop/Fabric round-trip is the only way to fully close this verification gap.
 - **Any formula this guide doesn't yet cover** — flagged in `limitations_encountered` for manual
   follow-up rather than silently guessed.
 

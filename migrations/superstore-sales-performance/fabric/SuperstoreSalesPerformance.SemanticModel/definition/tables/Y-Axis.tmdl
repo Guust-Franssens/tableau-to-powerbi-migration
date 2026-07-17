@@ -1,0 +1,35 @@
+/// Field Parameter backing the Tableau 'Y-Axis' dynamic-measure-switcher parameter (internal name '[Parameter 7]', list domain: Sales/Profit/Quantity/Discount/Returns/Days to Ship/Profit Ratio, default "Sales"). Implements the "user picks which measure to plot" idiom via Power BI's native Field Parameter mechanism (calculated table + NAMEOF column references) rather than a manual disconnected-table + SWITCH-measure pattern, per the recommended idiomatic translation - this composes cleanly with the Prescriptive Scatter Plot's continuous-axis binding. The actual measure switching happens in ['Y-Axis Measure'] on 'Sample Superstore', which reads this table's selection via SELECTEDVALUE and falls back to "Sales" (Tableau's default) when nothing is selected yet. Bound to the x100-scaled 'CP Discount Pct'/'CP Profit Ratio Pct' variants for Discount/Profit Ratio (not the native-percentage 'CP Discount'/'CP Profit Ratio') - see those measures' doc comments for why. NOTE: this hand-authored calculated table has the functionally-required 3-column NAMEOF shape (Microsoft Learn "Edit a field parameter" DAX pattern) but was not created via Power BI Desktop's "New parameter > Fields" UI (unavailable in this environment), so it may lack the internal marker Desktop uses to show the friendly field-picker editing UI - see limitations_encountered; the parameter still functions correctly as a slicer + SELECTEDVALUE source regardless. IMPORTANT: sourceColumn values below are Value1/Value2/Value3, NOT the friendly column Names - a DAX table-constructor `{(...), ...}` with 3 elements per row always produces columns literally named Value1/Value2/Value3 (confirmed via dax.guide), so that is what each column's sourceColumn must bind to; the Name is the display rename applied on top, exactly the same Name-vs-sourceColumn split as a renamed M-sourced column, just for a calculated table instead.
+table Y-Axis
+	lineageTag: ec29ed81-ab16-482f-9310-6a949598257e
+
+	column Y-Axis
+		lineageTag: f5f4c096-0c9e-41a4-9a05-bf5c0cce95e3
+		summarizeBy: none
+		sourceColumn: [Value1]
+		sortByColumn: 'Y-Axis Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Y-Axis Fields'
+		isHidden
+		lineageTag: c5446f05-3321-4dcf-951b-9764132e2875
+		summarizeBy: none
+		sourceColumn: [Value2]
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Y-Axis Order'
+		isHidden
+		formatString: #,##0
+		lineageTag: a91e872a-7d23-43c9-a5f7-2a50a99045c7
+		summarizeBy: none
+		sourceColumn: [Value3]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Y-Axis = calculated
+		mode: import
+		source = {("Sales", NAMEOF('Sample Superstore'[CP Sales]), 0), ("Profit", NAMEOF('Sample Superstore'[CP Profit]), 1), ("Quantity", NAMEOF('Sample Superstore'[CP Quantity]), 2), ("Discount", NAMEOF('Sample Superstore'[CP Discount Pct]), 3), ("Returns", NAMEOF('Sample Superstore'[CP Returns]), 4), ("Days to Ship", NAMEOF('Sample Superstore'[CP Days To Ship]), 5), ("Profit Ratio", NAMEOF('Sample Superstore'[CP Profit Ratio Pct]), 6)}
+
+	annotation PBI_ResultType = Table
+

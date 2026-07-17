@@ -1,0 +1,35 @@
+/// Field Parameter backing the Tableau 'Date Granularity' parameter (internal name '[Parameter 5]', list domain: Week/Month/Quarter/Year, default "Month"). Dimension-flavored Field Parameter (like 'Scatter Plot Detail') driving which period-start column from 'Date' is used as the continuous-axis field on the Sales/Profit Ratio/Days to Ship Trend charts - replacing the Tableau 'Date Equalizer with Granularity' CASE-based calculated field (DATETRUNC by the selected granularity) entirely. No wrapper measure needed; report authors bind this table's 'Date Granularity' column directly to the Trend charts' axis field well. sourceColumn values are Value1/Value2/Value3 (the DAX table-constructor's default column names per dax.guide), not the friendly Names - see 'Y-Axis' table's doc comment for the full explanation.
+table 'Date Granularity'
+	lineageTag: 8167b30c-7987-425a-b89e-8fdf00ca6023
+
+	column 'Date Granularity'
+		lineageTag: 3cb3151f-f19a-4478-93e3-31536d4503c6
+		summarizeBy: none
+		sourceColumn: [Value1]
+		sortByColumn: 'Date Granularity Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Date Granularity Fields'
+		isHidden
+		lineageTag: 73daf89a-958d-4fc9-8302-56971bbf364b
+		summarizeBy: none
+		sourceColumn: [Value2]
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Date Granularity Order'
+		isHidden
+		formatString: #,##0
+		lineageTag: a5d31625-9cd4-4411-842c-43485fd2ac0d
+		summarizeBy: none
+		sourceColumn: [Value3]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Date Granularity' = calculated
+		mode: import
+		source = {("Week", NAMEOF('Date'[Week Start]), 0), ("Month", NAMEOF('Date'[Month Start]), 1), ("Quarter", NAMEOF('Date'[Quarter Start]), 2), ("Year", NAMEOF('Date'[Year Start]), 3)}
+
+	annotation PBI_ResultType = Table
+

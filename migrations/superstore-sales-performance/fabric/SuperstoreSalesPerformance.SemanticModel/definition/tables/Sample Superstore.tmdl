@@ -1,0 +1,585 @@
+/// Order-line grain fact table (9,994 rows). Source: Tableau data source 'Sample - Superstore' (extract-based .hyper, materialized via scripts/extract_hyper_data.py to ds.sample_superstore.csv per migration-spec limitations_encountered). Grain: one row per Order ID + Product Name line item.
+table 'Sample Superstore'
+	lineageTag: 4a794407-9d88-47b6-9223-fbc31c81915a
+
+	/// Row count for the Sample Superstore table (Tableau 'Number of Records' calculated field, formula: 1).
+	measure 'Number of Records' = COUNTROWS('Sample Superstore')
+		formatString: #,##0
+		isHidden
+		displayFolder: General
+		lineageTag: 976cb9b2-3f79-43c3-83e4-859f3c517e21
+
+	/// Distinct count of returned orders (Tableau 'Returns', formula: COUNTD(IF [Returned]="Yes" THEN [Order ID] END)). Kept as a general-purpose hidden measure despite zero direct worksheet usage in this workbook - standard business metric.
+	measure Returns = CALCULATE(DISTINCTCOUNT('Sample Superstore'[Order ID]), 'Sample Superstore'[Returned] = "Yes")
+		formatString: #,##0
+		isHidden
+		displayFolder: General
+		lineageTag: fa09b697-d6c4-4487-8153-b2e8bc5fba40
+
+	/// Overall profit ratio, no date/region filtering (Tableau 'Profit Ratio', formula: SUM(Profit)/SUM(Sales)). Kept as a general-purpose hidden measure despite zero direct worksheet usage - standard business metric distinct from the date/region-windowed 'CP Profit Ratio'.
+	measure 'Profit Ratio' = DIVIDE(SUM('Sample Superstore'[Profit]), SUM('Sample Superstore'[Sales]))
+		formatString: 0.0%
+		isHidden
+		displayFolder: General
+		lineageTag: c65170d2-2715-4888-ade9-194f2f14f6dc
+
+	/// Tableau 'Region Filter' calculated field: TRUE when the current row's Region matches the selected Region Parameter, or when Region Parameter = "US" (meaning "show all regions"). Mirrors the boolean logic baked directly into the CP/PP measures below; exposed standalone for report-level filter parity with the source worksheets that apply it as a worksheet filter (Callout/Bullet/Trend/Prescriptive Map/Prescriptive Scatter Plot). References '[Region Parameter Value]', which is defined on the 'Region Parameter' table (measure names are model-wide unique in Tabular, so the bare reference resolves regardless of which table hosts it).
+	measure 'Region Filter' = VAR _selected = [Region Parameter Value] RETURN _selected = "US" || _selected = SELECTEDVALUE('Sample Superstore'[Region])
+		displayFolder: Region Parameter Support
+		lineageTag: ddccb434-f6e4-4050-9ef0-70db37d37a84
+
+	/// Tableau 'Region = Region Parameter' calculated field: TRUE when the current row context's Region equals the selected Region Parameter. Used as the Color encoding on the 3 Region Comp dot-plots (highlights which of the 4 region dots is the currently selected one) and on the 4 single-region Map worksheets.
+	measure 'Region = Region Parameter' = SELECTEDVALUE('Sample Superstore'[Region]) = [Region Parameter Value]
+		displayFolder: Region Parameter Support
+		lineageTag: 6ee38914-77a9-4197-9c35-0c4a5ac5ceff
+
+	/// Tableau 'US Map Color' calculated field: constant "US" when Region Parameter = "US", else "NULL" (string). Drives the Color encoding on the 'All US Map' worksheet, which Tableau's dashboard shows/hides based on the Region Parameter selection (report-layer visibility concern for pbi-report-builder).
+	measure 'US Map Color' = IF([Region Parameter Value] = "US", "US", "NULL")
+		displayFolder: Region Parameter Support
+		lineageTag: 1575e5af-0542-49a3-a112-51571cfc1c32
+
+	/// Days spanned by the selected date window, inclusive (Tableau 'Days in Range', formula: DATEDIFF('day',[Minimum Date],[Maximum Date])+1). Default state (2016-09-01 to 2017-03-31) = 212 days.
+	measure 'Days in Range' = DATEDIFF([Minimum Date Value], [Maximum Date Value], DAY) + 1
+		formatString: #,##0
+		isHidden
+		displayFolder: Date Window
+		lineageTag: a3da7706-2be8-4579-8392-a8e15c3ca49a
+
+	/// Day-offset to shift the comparison window back by (Tableau calculated field 'Date Comparison' - same caption as the 'Date Comparison' PARAMETER but a distinct field, renamed here to avoid ambiguity). Prior Period = same number of days as the current window; Prior Year = fixed 365 days.
+	measure 'Date Comparison Offset' = IF([Date Comparison Value] = "Prior Period", [Days in Range], 365)
+		formatString: #,##0
+		isHidden
+		displayFolder: Date Window
+		lineageTag: 19219952-33eb-44db-bcec-e226ac711fc3
+
+	/// Current-period Sales: sum of Sales within [Minimum Date, Maximum Date] (via the shifted 'Order Date 2017' / 'Date' relationship), restricted to the selected Region Parameter (or all regions if "US"). Tableau 'CP Sales' = SUM(IF [Date Filter CP] THEN [Sales] END); the Region restriction was an external worksheet filter in Tableau ('Region Filter') but is baked directly into this measure here because Power BI visuals with no Region field (Callout/Bullet/Trend/Scatter/Map) have no other way to apply a row-level restriction - see limitations_encountered.
+	measure 'CP Sales' = CALCULATE(SUM('Sample Superstore'[Sales]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\CP
+		lineageTag: 728f4ff7-f657-48d9-b407-663160f7be63
+
+	/// Current-period Profit, same date-window + region restriction as CP Sales. Tableau 'CP Profit'.
+	measure 'CP Profit' = CALCULATE(SUM('Sample Superstore'[Profit]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\CP
+		lineageTag: 3985c27b-1463-423c-88cf-193beeb971da
+
+	/// Current-period Quantity, same date-window + region restriction. Tableau 'CP Quantity'.
+	measure 'CP Quantity' = CALCULATE(SUM('Sample Superstore'[Quantity]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: #,##0
+		displayFolder: Core KPI Measures\CP
+		lineageTag: 1c71e923-60cc-4cf4-99a7-e139057280db
+
+	/// Current-period average Discount (raw 0-1 fraction), same date-window + region restriction. Tableau 'CP Discount'.
+	measure 'CP Discount' = CALCULATE(AVERAGE('Sample Superstore'[Discount]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\CP
+		lineageTag: a1fab29c-30d4-410a-b9ef-c082bdecc2d4
+
+	/// Current-period distinct count of returned orders, same date-window + region restriction. Tableau 'CP Returns'.
+	measure 'CP Returns' = CALCULATE(DISTINCTCOUNT('Sample Superstore'[Order ID]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]), 'Sample Superstore'[Returned] = "Yes", FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: #,##0
+		displayFolder: Core KPI Measures\CP
+		lineageTag: 0fec20f3-50b6-47e9-8937-3a6f85280118
+
+	/// Current-period average Days to Ship, same date-window + region restriction. Tableau 'CP Days To Ship'.
+	measure 'CP Days To Ship' = CALCULATE(AVERAGE('Sample Superstore'[Days to Ship]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: #,##0.0
+		displayFolder: Core KPI Measures\CP
+		lineageTag: 5c9f4f99-e7f3-4c56-8cb0-234ef41a4c65
+
+	/// Current-period Profit Ratio = CP Profit / CP Sales. Tableau 'CP Profit Ratio'.
+	measure 'CP Profit Ratio' = DIVIDE([CP Profit], [CP Sales])
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\CP
+		lineageTag: de24f331-0452-425f-841d-d4a71dd3e723
+
+	/// Prior-period Sales: sum of Sales within [Minimum Date - offset, Maximum Date - offset], same region restriction as CP Sales. Tableau 'PP Sales' = SUM(IF [Date Filter PP] THEN [Sales] END).
+	measure 'PP Sales' = CALCULATE(SUM('Sample Superstore'[Sales]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\PP
+		lineageTag: 9486772d-d6da-4210-b0b8-979734b06971
+
+	/// Prior-period Profit. Tableau 'PP Profit'.
+	measure 'PP Profit' = CALCULATE(SUM('Sample Superstore'[Profit]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\PP
+		lineageTag: b26fa732-d0c3-4704-9e5b-5e3b851776c9
+
+	/// Prior-period Quantity. Tableau 'PP Quantity'.
+	measure 'PP Quantity' = CALCULATE(SUM('Sample Superstore'[Quantity]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: #,##0
+		displayFolder: Core KPI Measures\PP
+		lineageTag: c7006c02-95d6-42c1-a171-7c5a3322ff1d
+
+	/// Prior-period average Discount. Tableau 'PP Discount'.
+	measure 'PP Discount' = CALCULATE(AVERAGE('Sample Superstore'[Discount]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\PP
+		lineageTag: 53248519-cd6e-4379-8d42-03d3701e1305
+
+	/// Prior-period distinct count of returned orders. Tableau 'PP Returns'.
+	measure 'PP Returns' = CALCULATE(DISTINCTCOUNT('Sample Superstore'[Order ID]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]), 'Sample Superstore'[Returned] = "Yes", FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: #,##0
+		displayFolder: Core KPI Measures\PP
+		lineageTag: 84042874-0bec-4444-985f-d3de7873447f
+
+	/// Prior-period average Days to Ship. Tableau 'PP Days To Ship'.
+	measure 'PP Days To Ship' = CALCULATE(AVERAGE('Sample Superstore'[Days to Ship]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: #,##0.0
+		displayFolder: Core KPI Measures\PP
+		lineageTag: fca857b7-871b-432f-b959-2b2eed830984
+
+	/// Prior-period Profit Ratio = PP Profit / PP Sales. Tableau 'PP Profit Ratio'.
+	measure 'PP Profit Ratio' = DIVIDE([PP Profit], [PP Sales])
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\PP
+		lineageTag: 63c16ad3-a44d-4c6f-8572-994e0091e884
+
+	/// CP Sales with no Region restriction (all 4 regions always included) - feeds the 3 Region Comp dot-plots and the Region Average reference-line measures, which need the ambient per-region breakdown rather than the selected-region total. Not a literal Tableau field (Tableau's CP Sales was already region-agnostic by default; the "(All Regions)" variant exists here because the default CP Sales above deviates from Tableau by baking region-restriction in - see CP Sales doc comment).
+	measure 'CP Sales (All Regions)' = CALCULATE(SUM('Sample Superstore'[Sales]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]))
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: 65cc1b76-4aed-4010-99f4-9ada9a949592
+
+	/// CP Profit with no Region restriction. Helper - only used as an ingredient for CP Profit Ratio (All Regions); not one of the 3 headline "All Regions" KPIs itself.
+	measure 'CP Profit (All Regions)' = CALCULATE(SUM('Sample Superstore'[Profit]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]))
+		formatString: "$"#,##0
+		isHidden
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: 959c9210-0f24-418d-9865-5f07fd683d34
+
+	/// CP Days To Ship with no Region restriction. Feeds the Days to Ship Region Comp dot-plot and Days to Ship Region Average reference line.
+	measure 'CP Days To Ship (All Regions)' = CALCULATE(AVERAGE('Sample Superstore'[Days to Ship]), DATESBETWEEN('Date'[Date], [Minimum Date Value], [Maximum Date Value]))
+		formatString: #,##0.0
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: c3219e7d-6108-410a-bc09-fe6eedc9aab0
+
+	/// CP Profit Ratio with no Region restriction = CP Profit (All Regions) / CP Sales (All Regions). Feeds the Profit Ratio Region Comp dot-plot and Profit Ratio Region Average reference line.
+	measure 'CP Profit Ratio (All Regions)' = DIVIDE([CP Profit (All Regions)], [CP Sales (All Regions)])
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: f3963c60-ec98-4943-919c-2c75f238c7ff
+
+	/// Constant 0 baseline for the Region Comp dot-plots' Y axis - a scatterChart requires a numeric Y measure, so all 4 region dots sit on a single horizontal line (Y=0) and spread only by X (the per-region value). Replaces the invalid Y=[Region] the builder originally used.
+	measure 'Dot Baseline' = 0
+		isHidden
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0001-4a01-9e01-000000000001
+
+	/// Prior-period Sales, no Region restriction - PP mirror of CP Sales (All Regions), shifted back by [Date Comparison Offset]. Feeds the Sales Region Comp dot-plot's improved/decreased colour.
+	measure 'PP Sales (All Regions)' = CALCULATE(SUM('Sample Superstore'[Sales]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]))
+		formatString: "$"#,##0
+		isHidden
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0002-4a02-9e02-000000000002
+
+	/// Prior-period Profit, no Region restriction. Helper for PP Profit Ratio (All Regions).
+	measure 'PP Profit (All Regions)' = CALCULATE(SUM('Sample Superstore'[Profit]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]))
+		isHidden
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0003-4a03-9e03-000000000003
+
+	/// Prior-period Days To Ship, no Region restriction. Feeds the Days to Ship Region Comp dot-plot's improved/decreased colour.
+	measure 'PP Days To Ship (All Regions)' = CALCULATE(AVERAGE('Sample Superstore'[Days to Ship]), DATESBETWEEN('Date'[Date], [Minimum Date Value] - [Date Comparison Offset], [Maximum Date Value] - [Date Comparison Offset]))
+		formatString: #,##0.0
+		isHidden
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0004-4a04-9e04-000000000004
+
+	/// Prior-period Profit Ratio, no Region restriction = PP Profit (All Regions) / PP Sales (All Regions).
+	measure 'PP Profit Ratio (All Regions)' = DIVIDE([PP Profit (All Regions)], [PP Sales (All Regions)])
+		formatString: 0.0%
+		isHidden
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0005-4a05-9e05-000000000005
+
+	/// Signed Sales performance vs prior period (all regions): CP - PP. Positive = improved (blue), negative = decreased (red). Drives the Sales Region Comp dot colour.
+	measure 'Sales Perf Diff (All Regions)' = [CP Sales (All Regions)] - [PP Sales (All Regions)]
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0006-4a06-9e06-000000000006
+
+	/// Signed Profit Ratio performance vs prior period (all regions): CP - PP. Positive = improved (blue). Drives the Profit Ratio Region Comp dot colour.
+	measure 'Profit Ratio Perf Diff (All Regions)' = [CP Profit Ratio (All Regions)] - [PP Profit Ratio (All Regions)]
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0007-4a07-9e07-000000000007
+
+	/// Signed Days-to-Ship performance vs prior period (all regions): PP - CP (polarity flipped because fewer days is better). Positive = improved/faster (blue), negative = slower (red). Drives the Days to Ship Region Comp dot colour.
+	measure 'Days To Ship Perf Diff (All Regions)' = [PP Days To Ship (All Regions)] - [CP Days To Ship (All Regions)]
+		formatString: #,##0.0
+		displayFolder: Core KPI Measures\All Regions
+		lineageTag: a1b2c3d4-0008-4a08-9e08-000000000008
+
+	/// Reference-line benchmark: average of CP Sales (All Regions) across the 4 regions (Central/East/South/West), i.e. "how does the selected region's Sales compare to the all-region average" - verified against the 'average'/'per-pane' reference line on the Sales Bullet/Sales Region Comp worksheets and the live Tableau screenshot ground truth.
+	measure 'Sales Region Average' = AVERAGEX(ALL('Sample Superstore'[Region]), [CP Sales (All Regions)])
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\Region Benchmark
+		lineageTag: 2e1f69b5-7b16-44a7-9241-389172f0acb7
+
+	/// Reference-line benchmark: average of CP Profit Ratio (All Regions) across the 4 regions. Mirrors 'Sales Region Average' for the Profit Ratio Bullet/Region Comp worksheets.
+	measure 'Profit Ratio Region Average' = AVERAGEX(ALL('Sample Superstore'[Region]), [CP Profit Ratio (All Regions)])
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\Region Benchmark
+		lineageTag: b018b1a9-b183-4702-915c-33f8b22433ad
+
+	/// Reference-line benchmark: average of CP Days To Ship (All Regions) across the 4 regions. Mirrors 'Sales Region Average' for the Days to Ship Bullet/Region Comp worksheets.
+	measure 'Days to Ship Region Average' = AVERAGEX(ALL('Sample Superstore'[Region]), [CP Days To Ship (All Regions)])
+		formatString: #,##0.0
+		displayFolder: Core KPI Measures\Region Benchmark
+		lineageTag: 8d29d288-e1da-4eba-a0d0-8398d33983d6
+
+	/// Tableau 'Sales Difference' = CP Sales - PP Sales. Drives the Sales Bullet color encoding (red/green).
+	measure 'Sales Difference' = [CP Sales] - [PP Sales]
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\Differences
+		lineageTag: 9e2606ce-92db-4160-94f6-f6942c0fdfdb
+
+	/// Tableau 'Profit Difference' = CP Profit - PP Profit.
+	measure 'Profit Difference' = [CP Profit] - [PP Profit]
+		formatString: "$"#,##0
+		displayFolder: Core KPI Measures\Differences
+		lineageTag: 04c89206-ae5c-40bd-a9e8-437e2e361ec5
+
+	/// Tableau 'Quantity Difference' = CP Quantity - PP Quantity.
+	measure 'Quantity Difference' = [CP Quantity] - [PP Quantity]
+		formatString: #,##0
+		displayFolder: Core KPI Measures\Differences
+		lineageTag: 009f62de-a79d-4238-a4c4-ce757dd52fb2
+
+	/// Tableau 'Discount Difference' = CP Discount - PP Discount (raw fraction, NOT x100 - translated faithfully even though the Y-Axis/X-Axis/Map KPI dynamic-measure CASE scales its own Discount branch by x100; this looks like a source-workbook scaling inconsistency between the two Discount-difference paths, flagged rather than silently normalized - see limitations_encountered).
+	measure 'Discount Difference' = [CP Discount] - [PP Discount]
+		formatString: 0.0%
+		displayFolder: Core KPI Measures\Differences
+		lineageTag: d46d515b-ad02-4ecf-b08b-7607587e0d3b
+
+	/// Tableau 'Returns Difference' = CP Returns - PP Returns.
+	measure 'Returns Difference' = [CP Returns] - [PP Returns]
+		formatString: #,##0
+		displayFolder: Core KPI Measures\Differences
+		lineageTag: a40a85cd-b0f4-4ec9-b3b2-c3ada2c73475
+
+	/// Tableau 'Days to Ship Difference' = CP Days To Ship - PP Days To Ship.
+	measure 'Days to Ship Difference' = [CP Days To Ship] - [PP Days To Ship]
+		formatString: #,##0.0
+		displayFolder: Core KPI Measures\Differences
+		lineageTag: 08113517-5047-4ced-8d16-e42e6e16c5db
+
+	/// Tableau 'Profit Ratio Difference' = (CP Profit Ratio - PP Profit Ratio) * 100, i.e. expressed in percentage POINTS (already x100-scaled - do not apply a percent formatString on top of this one, unlike 'Profit Ratio Region Average' which stays a raw 0-1 fraction).
+	measure 'Profit Ratio Difference' = ([CP Profit Ratio] - [PP Profit Ratio]) * 100
+		formatString: #,##0.0
+		displayFolder: Core KPI Measures\Differences
+		lineageTag: c8e5ff6d-1e5d-45d5-b031-52d69bfff3a0
+
+	/// x100-scaled CP Discount, used only as the "Discount" entry inside the Y-Axis / X-Axis / Map KPI Field Parameters and their Prefix+Value+Suffix tooltip-text-concatenation measures - verified via the Prescriptive Map / Prescriptive Scatter Plot customized_tooltip_text, which literally concatenates Prefix + raw value + Suffix as text (no native % formatting applied), so the raw value must already be on a 0-100 scale to read correctly and to share a plausible plotted axis scale with Sales/Profit/Quantity. Mirrors the Tableau Y-Axis CASE's own "Discount" branch (`[CP Discount]*100`).
+	measure 'CP Discount Pct' = [CP Discount] * 100
+		formatString: #,##0.0
+		displayFolder: Dynamic KPI Switching\Field Parameter Support
+		lineageTag: c5f00dca-654b-468a-bfb0-ce172949d07f
+
+	/// x100-scaled CP Profit Ratio, used only as the "Profit Ratio" entry inside the Y-Axis / X-Axis / Map KPI Field Parameters - see 'CP Discount Pct' doc comment for why the scaling is preserved here (faithful to the Tableau Y-Axis CASE's `[CP Profit Ratio]*100` branch).
+	measure 'CP Profit Ratio Pct' = [CP Profit Ratio] * 100
+		formatString: #,##0.0
+		displayFolder: Dynamic KPI Switching\Field Parameter Support
+		lineageTag: deaf123a-b296-4b01-97bb-684509eee3e4
+
+	/// Tableau 'Y-Axis' dynamic measure switcher, re-implemented via SELECTEDVALUE over the 'Y-Axis' Field Parameter instead of a literal CASE, since Field Parameters are the idiomatic Power BI mechanism for "user picks which measure to plot" and compose cleanly with the Prefix/Suffix/Label helper pattern below. Used as the Rows (continuous axis) encoding on Prescriptive Scatter Plot.
+	measure 'Y-Axis Measure' = SWITCH(SELECTEDVALUE('Y-Axis'[Y-Axis], "Sales"), "Sales", [CP Sales], "Profit", [CP Profit], "Quantity", [CP Quantity], "Discount", [CP Discount Pct], "Returns", [CP Returns], "Days to Ship", [CP Days To Ship], "Profit Ratio", [CP Profit Ratio Pct])
+		formatString: #,##0.0
+		displayFolder: Dynamic KPI Switching\Y-Axis
+		lineageTag: 52141d03-b545-47a5-aa71-b324aa73be93
+
+	/// Tableau 'Y-Axis Label' = UPPER(the Y-Axis parameter's current text), e.g. "SALES". Used as the axis title / tooltip header text on Prescriptive Scatter Plot.
+	measure 'Y-Axis Label' = UPPER(SELECTEDVALUE('Y-Axis'[Y-Axis], "Sales"))
+		displayFolder: Dynamic KPI Switching\Y-Axis
+		lineageTag: 21d85ed4-a331-426d-bc20-53550cfa9a50
+
+	/// Tableau 'Y-Axis Prefix': "$" for Sales/Profit, "" otherwise. Text-concatenated in front of the Y-Axis value in the Prescriptive Scatter Plot tooltip.
+	measure 'Y-Axis Prefix' = SWITCH(SELECTEDVALUE('Y-Axis'[Y-Axis], "Sales"), "Sales", "$", "Profit", "$", "Quantity", "", "Discount", "", "Returns", "", "Days to Ship", "", "Profit Ratio", "")
+		displayFolder: Dynamic KPI Switching\Y-Axis
+		lineageTag: 964eb1da-7c0c-42af-b9f9-b3b6fd494f14
+
+	/// Tableau 'Y-Axis Suffix': "%" for Discount/Profit Ratio, "" otherwise. Text-concatenated after the Y-Axis value in the Prescriptive Scatter Plot tooltip.
+	measure 'Y-Axis Suffix' = SWITCH(SELECTEDVALUE('Y-Axis'[Y-Axis], "Sales"), "Sales", "", "Profit", "", "Quantity", "", "Discount", "%", "Returns", "", "Days to Ship", "", "Profit Ratio", "%")
+		displayFolder: Dynamic KPI Switching\Y-Axis
+		lineageTag: 1a3e1267-43dd-477e-9d9b-1bcee1326577
+
+	/// Tableau 'X-Axis' dynamic measure switcher, re-implemented via SELECTEDVALUE over the 'X-Axis' Field Parameter (default Discount). Used as the Columns (continuous axis) encoding on Prescriptive Scatter Plot.
+	measure 'X-Axis Measure' = SWITCH(SELECTEDVALUE('X-Axis'[X-Axis], "Discount"), "Sales", [CP Sales], "Profit", [CP Profit], "Quantity", [CP Quantity], "Discount", [CP Discount Pct], "Returns", [CP Returns], "Days to Ship", [CP Days To Ship], "Profit Ratio", [CP Profit Ratio Pct])
+		formatString: #,##0.0
+		displayFolder: Dynamic KPI Switching\X-Axis
+		lineageTag: c1090fe8-bbcb-4298-a985-96c4b62a8868
+
+	/// Tableau 'X-Axis Label' = UPPER(the X-Axis parameter's current text), e.g. "DISCOUNT".
+	measure 'X-Axis Label' = UPPER(SELECTEDVALUE('X-Axis'[X-Axis], "Discount"))
+		displayFolder: Dynamic KPI Switching\X-Axis
+		lineageTag: 3c0d171c-7f4d-4694-bb89-5bfbc4566730
+
+	/// Tableau 'X-Axis Prefix': "$" for Sales/Profit, "" otherwise.
+	measure 'X-Axis Prefix' = SWITCH(SELECTEDVALUE('X-Axis'[X-Axis], "Discount"), "Sales", "$", "Profit", "$", "Quantity", "", "Discount", "", "Returns", "", "Days to Ship", "", "Profit Ratio", "")
+		displayFolder: Dynamic KPI Switching\X-Axis
+		lineageTag: a9552641-b36a-484b-b3fc-c8832bf28690
+
+	/// Tableau 'X-Axis Suffix': "%" for Discount/Profit Ratio, "" otherwise.
+	measure 'X-Axis Suffix' = SWITCH(SELECTEDVALUE('X-Axis'[X-Axis], "Discount"), "Sales", "", "Profit", "", "Quantity", "", "Discount", "%", "Returns", "", "Days to Ship", "", "Profit Ratio", "%")
+		displayFolder: Dynamic KPI Switching\X-Axis
+		lineageTag: 7a7fffd1-7d5e-4ef1-abfe-025bcca3ceb9
+
+	/// Tableau 'Map KPI' dynamic measure switcher, re-implemented via SELECTEDVALUE over the 'Map KPI' Field Parameter (default Sales). Used as the Size encoding on Prescriptive Scatter Plot and in the Prescriptive Map tooltip.
+	measure 'Map KPI Measure' = SWITCH(SELECTEDVALUE('Map KPI'[Map KPI], "Sales"), "Sales", [CP Sales], "Profit", [CP Profit], "Quantity", [CP Quantity], "Discount", [CP Discount Pct], "Returns", [CP Returns], "Days to Ship", [CP Days To Ship], "Profit Ratio", [CP Profit Ratio Pct])
+		formatString: #,##0.0
+		displayFolder: Dynamic KPI Switching\Map KPI
+		lineageTag: d1585acc-2567-42b9-a0e8-91b87f732561
+
+	/// Tableau 'Map KPI Prefix': "$" for Sales/Profit, "" otherwise.
+	measure 'Map KPI Prefix' = SWITCH(SELECTEDVALUE('Map KPI'[Map KPI], "Sales"), "Sales", "$", "Profit", "$", "Quantity", "", "Discount", "", "Returns", "", "Days to Ship", "", "Profit Ratio", "")
+		displayFolder: Dynamic KPI Switching\Map KPI
+		lineageTag: 8978b95a-ea7c-402a-9579-015f6e78a475
+
+	/// Tableau 'Map KPI Suffix': "%" for Discount/Profit Ratio, "" otherwise.
+	measure 'Map KPI Suffix' = SWITCH(SELECTEDVALUE('Map KPI'[Map KPI], "Sales"), "Sales", "", "Profit", "", "Quantity", "", "Discount", "%", "Returns", "", "Days to Ship", "", "Profit Ratio", "%")
+		displayFolder: Dynamic KPI Switching\Map KPI
+		lineageTag: 9c268c8a-6a83-4276-929a-91e490fd30c8
+
+	/// Tableau 'Map KPI Difference': picks the Difference measure matching the selected Map KPI, negating Discount/Returns/Days to Ship (where a DECREASE is the favorable direction) so the sign convention is consistent with "positive = good" for the Prescriptive Map's color encoding.
+	measure 'Map KPI Difference' = SWITCH(SELECTEDVALUE('Map KPI'[Map KPI], "Sales"), "Sales", [Sales Difference], "Profit", [Profit Difference], "Quantity", [Quantity Difference], "Discount", -[Discount Difference], "Returns", -[Returns Difference], "Days to Ship", -[Days to Ship Difference], "Profit Ratio", [Profit Ratio Difference])
+		formatString: #,##0.0
+		displayFolder: Dynamic KPI Switching\Map KPI
+		lineageTag: ca63daf9-c9a8-4854-8c04-5cbf290dbfdb
+
+	/// Tableau 'Map KPI Difference >= 0': boolean flag used as the Color encoding on Prescriptive Scatter Plot (green/red dot coloring by whether the selected Map KPI improved or worsened).
+	measure 'Map KPI Difference >= 0' = [Map KPI Difference] >= 0
+		displayFolder: Dynamic KPI Switching\Map KPI
+		lineageTag: 49a81547-4903-4e1a-8b5e-c7943a95d3db
+
+	/// Trend-aligned prior-period Sales: for the CURRENT axis bucket (whatever Week/Month/Quarter/Year-Start bucket the Trend chart's Date Granularity Field Parameter is grouping by), shows the Sales total from the equivalent bucket shifted back by the comparison offset - overlaying the PP line on the same calendar positions as the CP line, matching Tableau's 'Date Equalizer with Granularity' overlay technique (which shifts PP rows FORWARD by the offset so they land on the same axis positions as CP). ALL('Date') clears the ambient bucket filter before re-applying the shifted range explicitly; the default (non-aligned) 'PP Sales' measure is NOT usable here because its fixed [Minimum Date - offset, Maximum Date - offset] window doesn't move per axis bucket.
+	measure 'PP Sales (Trend)' = VAR _bucketStart = MIN('Date'[Date]) VAR _bucketEnd = MAX('Date'[Date]) VAR _offset = [Date Comparison Offset] RETURN CALCULATE(SUM('Sample Superstore'[Sales]), DATESBETWEEN('Date'[Date], _bucketStart - _offset, _bucketEnd - _offset), ALL('Date'), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: "$"#,##0
+		displayFolder: Date Window\Trend Aligned
+		lineageTag: e645fb9d-c012-44be-8c8a-a9f102c47c4e
+
+	/// Trend-aligned prior-period Profit - see 'PP Sales (Trend)' doc comment for the alignment mechanism. Feeds the Profit Ratio Trend chart alongside 'PP Sales (Trend)'.
+	measure 'PP Profit (Trend)' = VAR _bucketStart = MIN('Date'[Date]) VAR _bucketEnd = MAX('Date'[Date]) VAR _offset = [Date Comparison Offset] RETURN CALCULATE(SUM('Sample Superstore'[Profit]), DATESBETWEEN('Date'[Date], _bucketStart - _offset, _bucketEnd - _offset), ALL('Date'), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: "$"#,##0
+		isHidden
+		displayFolder: Date Window\Trend Aligned
+		lineageTag: 2083dc30-938f-40dd-89f4-7b6e9ce829ce
+
+	/// Trend-aligned prior-period Profit Ratio = PP Profit (Trend) / PP Sales (Trend).
+	measure 'PP Profit Ratio (Trend)' = DIVIDE([PP Profit (Trend)], [PP Sales (Trend)])
+		formatString: 0.0%
+		displayFolder: Date Window\Trend Aligned
+		lineageTag: d3c20231-80e2-4b3a-9731-31b1d90da33a
+
+	/// Trend-aligned prior-period Days to Ship - see 'PP Sales (Trend)' doc comment for the alignment mechanism. Feeds the Days to Ship Trend chart.
+	measure 'PP Days To Ship (Trend)' = VAR _bucketStart = MIN('Date'[Date]) VAR _bucketEnd = MAX('Date'[Date]) VAR _offset = [Date Comparison Offset] RETURN CALCULATE(AVERAGE('Sample Superstore'[Days to Ship]), DATESBETWEEN('Date'[Date], _bucketStart - _offset, _bucketEnd - _offset), ALL('Date'), FILTER(ALL('Sample Superstore'[Region]), 'Sample Superstore'[Region] = [Region Parameter Value] || [Region Parameter Value] = "US"))
+		formatString: #,##0.0
+		displayFolder: Date Window\Trend Aligned
+		lineageTag: 667b93ed-f8fc-426e-b011-ac5b416d49f1
+
+	/// Category (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header, see limitations_encountered).
+	column Category
+		dataType: string
+		lineageTag: 569a076c-f585-48e4-a36c-e8f94f19afee
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Country (declared in migration-spec.json fields[] and present in the real CSV).
+	column Country
+		dataType: string
+		lineageTag: 36a9bb77-b9f1-4c5e-a9fe-4273a701dec2
+		summarizeBy: none
+		sourceColumn: Country
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Customer Name (declared in migration-spec.json fields[] and present in the real CSV). Also a 'Scatter Plot Detail' Field Parameter option.
+	column 'Customer Name'
+		dataType: string
+		lineageTag: e40fce1d-12db-4619-9d2f-ff465805f5d8
+		summarizeBy: none
+		sourceColumn: Customer Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Raw line-item discount fraction (0-1). Hidden - use the CP Discount / PP Discount measures instead.
+	column Discount
+		dataType: double
+		isHidden
+		formatString: 0.0%
+		lineageTag: 342b2ec9-b835-4c34-88e2-a7983b3b912d
+		summarizeBy: sum
+		sourceColumn: Discount
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Order Date (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header). Real range 2013-01-03 to 2016-12-30. Not used directly in the date-window relationship - see 'Order Date 2017'.
+	column 'Order Date'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 5e3b97f9-a72d-4af2-a160-502969ea6996
+		summarizeBy: none
+		sourceColumn: Order Date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	/// Order ID (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header). Not a unique row key - one Order ID spans multiple line items - used for COUNTD-style Returns/CP Returns/PP Returns measures.
+	column 'Order ID'
+		dataType: string
+		lineageTag: dc8e56b1-8f5f-4671-9a0a-bf60116a66be
+		summarizeBy: none
+		sourceColumn: Order ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Product Name (declared in migration-spec.json fields[] and present in the real CSV). Also a 'Scatter Plot Detail' Field Parameter option.
+	column 'Product Name'
+		dataType: string
+		lineageTag: 1966b0e9-6f19-4ec1-8bf2-dc29bfff56d9
+		summarizeBy: none
+		sourceColumn: Product Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Raw line-item profit (can be negative). Hidden - use the CP Profit / PP Profit measures instead.
+	column Profit
+		dataType: double
+		isHidden
+		formatString: "$"#,##0.00
+		lineageTag: 463cb028-d7ec-4201-bb10-736fab358a65
+		summarizeBy: sum
+		sourceColumn: Profit
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Raw line-item quantity. Hidden - use the CP Quantity / PP Quantity measures instead.
+	column Quantity
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		lineageTag: 4de3dbda-f60b-47a1-a444-7598ec781f5e
+		summarizeBy: none
+		sourceColumn: Quantity
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Region (US sales region: Central/East/South/West). Declared in migration-spec.json fields[] and present in the real CSV. Used directly as the category axis for the 3 Region Comp dot-plots (ambient per-region grouping for the "(All Regions)" measures).
+	column Region
+		dataType: string
+		lineageTag: 15e30b88-a0d0-4b31-a0e2-46ba710e14ef
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Return flag (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header). Literal value is "Yes" for returned line items and an EMPTY STRING (not "No") for all others - matches the Tableau formula's implicit `IF [Returned]="Yes"` treatment of blank as not-returned.
+	column Returned
+		dataType: string
+		lineageTag: 3271fcb1-8acc-4636-b080-0e6edba05e81
+		summarizeBy: none
+		sourceColumn: Returned
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Raw line-item sales amount. Hidden - use the CP Sales / PP Sales measures instead.
+	column Sales
+		dataType: double
+		isHidden
+		formatString: "$"#,##0.00
+		lineageTag: 754d42df-0a3e-479f-806f-b2f985d5eb87
+		summarizeBy: sum
+		sourceColumn: Sales
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Segment (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header). Also a 'Scatter Plot Detail' Field Parameter option.
+	column Segment
+		dataType: string
+		lineageTag: 1daa02ca-3301-473b-a642-8f546733607c
+		summarizeBy: none
+		sourceColumn: Segment
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Ship Date (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header). Used to derive 'Days to Ship'.
+	column 'Ship Date'
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 34c5a844-84b2-43a6-9eae-2cc7963fb9cc
+		summarizeBy: none
+		sourceColumn: Ship Date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	/// Ship Mode (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header). Also a 'Scatter Plot Detail' Field Parameter option.
+	column 'Ship Mode'
+		dataType: string
+		lineageTag: af6a9730-8519-4d6b-997a-c76ad834d89c
+		summarizeBy: none
+		sourceColumn: Ship Mode
+
+		annotation SummarizationSetBy = Automatic
+
+	/// State (declared in migration-spec.json fields[] and present in the real CSV). Used for the 5 region Filled Map worksheets.
+	column State
+		dataType: string
+		lineageTag: e6ec33da-3d58-40a2-8578-af32a7f620fd
+		summarizeBy: none
+		sourceColumn: State
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sub-Category (parser gap - present in the real CSV/hyper extract but absent from migration-spec.json fields[]; materialized directly from the CSV header). Also a 'Scatter Plot Detail' Field Parameter option and its default selection.
+	column Sub-Category
+		dataType: string
+		lineageTag: 351bc088-ca7e-4e94-87b6-e5dea3e96564
+		summarizeBy: none
+		sourceColumn: Sub-Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Order Date 2017' calculated column = [Order Date] + 365, a static +365-day forward shift applied to every row so 2013-2016 sample data displays as if the "current" year were 2017-2018 in the parameter UI - a known Tableau-sample-data convention, not a bug. This shifted date (not the raw Order Date) is the key used in the relationship to the 'Date' table, since the Minimum/Maximum Date parameters are calibrated to this shifted timeline (default window 2016-09-01 to 2017-03-31 falls inside the shifted range).
+	column 'Order Date 2017' = 'Sample Superstore'[Order Date] + 365
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: b563d03b-01c0-4914-af1d-cd1e9e33eb35
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Days to Ship' calculated column = [Ship Date] - [Order Date], an integer day count. No parameter dependency, so implemented as a calculated column (the CP Days To Ship / PP Days To Ship measures average it with the date-window + region restriction).
+	column 'Days to Ship' = INT('Sample Superstore'[Ship Date] - 'Sample Superstore'[Order Date])
+		dataType: int64
+		formatString: #,##0
+		lineageTag: ed950a0c-c58b-4271-8f8f-1c988f1fb9c5
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau 'Region Abbreviation' calculated column = LEFT([Region],1), e.g. "C"/"E"/"S"/"W". No parameter dependency, so implemented as a calculated column. Used as the Label text on the 3 Region Comp dot-plots.
+	column 'Region Abbreviation' = LEFT('Sample Superstore'[Region], 1)
+		dataType: string
+		lineageTag: 691a01e7-1431-4990-9ad1-a9819ae5d81e
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Sample Superstore' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "ds.sample_superstore.csv"),[Delimiter=",", Columns=17, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"Category", type text}, {"Country", type text}, {"Customer Name", type text}, {"Discount", type number}, {"Order Date", type date}, {"Order ID", type text}, {"Product Name", type text}, {"Profit", type number}, {"Quantity", Int64.Type}, {"Region", type text}, {"Returned", type text}, {"Sales", type number}, {"Segment", type text}, {"Ship Date", type date}, {"Ship Mode", type text}, {"State", type text}, {"Sub-Category", type text}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,32 @@
+/// Dashboard table-of-contents / navigation lookup (4 rows, 1 column). Source: Tableau data source 'toc_annotations' (extract-based .hyper, materialized via scripts/extract_hyper_data.py to ds.toc_annotations.csv per migration-spec limitations_encountered). Used for dashboard-to-dashboard navigation (buttons/breadcrumb) in the source workbook - a report-layer (pbi-report-builder) concern, not a data-relationship concern, so this table is intentionally NOT related to 'Sample Superstore'. The 'PREDICTIVE' row is vestigial/unused - the workbook has only 3 real dashboards (Annotations, Descriptive, Prescriptive) - kept faithfully as-is since it is genuine source data, not fabricated.
+table 'TOC Annotations'
+	lineageTag: bfc8f308-825e-43e1-8e89-65374f3d4a1b
+
+	/// Row count for the TOC Annotations table (Tableau 'Number of Records' calculated field, formula: 1). Suffixed '(TOC Annotations)' because measure names are model-wide unique in Tabular and 'Sample Superstore' already has its own bare 'Number of Records' measure - mirrors the EEA migration's disambiguation convention (e.g. 'Number of Records (UA Cities)').
+	measure 'Number of Records (TOC Annotations)' = COUNTROWS('TOC Annotations')
+		formatString: #,##0
+		isHidden
+		displayFolder: General
+		lineageTag: 377dc1c5-6ad5-4f08-8719-4d2085ad23b9
+
+	/// Dashboard name: ANNOTATIONS / DESCRIPTIVE / PREDICTIVE (vestigial, unused) / PRESCRIPTIVE.
+	column Dashboard
+		dataType: string
+		lineageTag: 2f60fbfe-1b3d-41b7-b981-9512c1854771
+		summarizeBy: none
+		sourceColumn: Dashboard
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'TOC Annotations' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "ds.toc_annotations.csv"),[Delimiter=",", Columns=1, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"Dashboard", type text}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

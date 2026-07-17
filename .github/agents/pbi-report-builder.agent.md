@@ -47,8 +47,27 @@ Do not skip straight to authoring — these three skills are explicitly designed
 | `Circle` **without** `reference_lines` | Scatter chart | |
 | `Area` | Area chart | |
 | `Text` | Table, matrix, or card — infer from shelf shape: single measure + no rows/columns → card; multiple dimensions on rows → table/matrix | |
-| `Map` | Map, filled map, or Azure Map | Check for geographic `semantic_role` on the bound field |
+| `Map` | **Always `azureMap`** (`map`/`filledMap` are deprecated Bing). Region shaded by a measure → azureMap data-bound **reference-layer choropleth** (see Iteration-4 gotchas); points → bubble layer | Check for geographic `semantic_role` on the bound field |
 | `Automatic` | Infer from shelf shape (same heuristics as Tableau itself: discrete+discrete → bar-ish, continuous+continuous → scatter/line) | Flag low-confidence inferences for design review rather than guessing silently |
+
+### When unsure about a visual: research first, then put a human in the loop
+
+Some Tableau visuals map to Power BI features whose **PBIR authoring encoding is undocumented or
+uncertain** (Azure Maps reference-layer choropleths, custom visuals, novel conditional-formatting
+shapes). Do NOT guess-and-iterate blindly against Desktop — it is slow and `validate` will not catch a
+wrong encoding. Instead:
+1. **Research what's actually possible first.** Check the official docs (Microsoft Learn) and the
+   `powerbi-report-author` CLI (`catalog describe <type>`, `formatting describe-object <type> <obj>`,
+   `formatting search`) to confirm the visual supports the capability and to enumerate the real
+   role/object/property names.
+2. **If the capability exists but the exact PBIR JSON is uncertain, surface it to the human with
+   click-by-click Desktop instructions** (via `ask_user`): name the visual to add, the fields to drop
+   in each well, and the Format-pane toggles to set, then have them save. **Read the resulting
+   `visual.json` and reuse it as ground truth** — one human round-trip beats many blind render cycles.
+   (Exactly how the Superstore Azure Maps choropleth encoding below was captured; a research subagent
+   found zero public PBIR examples of it.)
+3. Only then generalize the captured encoding (e.g. into a small re-runnable transform script) and
+   apply it to the remaining visuals.
 
 ## Workflow
 
@@ -267,6 +286,52 @@ only a live Desktop screenshot catches them, so treat structural validation as n
   `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR`.
 - **What-if % slicer format: `0.0"%"` (quoted) when the stored value is pre-scaled (e.g. 22.8); `0.0%`
   (unquoted) only when it's a true 0–1 fraction** — mixing them mis-scales the display by 100×.
+
+### Iteration-4 hard-won gotchas (Superstore — Azure Maps + Field Parameters)
+
+**Azure Maps is the ONLY non-deprecated map** (`map`/`filledMap` are legacy Bing → a
+`PBIR_VISUAL_TYPE_DEPRECATED` warning **plus** a once-per-session Desktop "Bing maps are going away"
+nag modal that the bridge screenshot does NOT surface). All recipes below are Desktop-verified on the
+Superstore build.
+
+- **Measure-driven choropleth (shade regions/states by a measure) — the sanctioned azureMap pattern,
+  ground-truth PBIR encoding:**
+  - `query.queryState.Category` = the location **key column** (e.g. `State`) as a `Column` projection.
+    That alone data-binds the reference layer (Azure Maps matches the key to a property in the boundary
+    file). The colouring measure does **not** go in a data well.
+  - `objects.referenceLayer` is a **2-entry array**:
+    - `[0]` (no selector): `datasourceType` = `'url'`, `referenceLayerUrl` = a hosted boundary GeoJSON
+      URL — fully declarative, no file upload, nothing in `RegisteredResources`. US states:
+      `https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json`
+      (its `name` property = full state name). Add `unmappedObjectVisibility: false` to hide states
+      filtered out of the data.
+    - `[1]` (selector `{data:[{dataViewWildcard:{matchingOption:1}}]}`): `polygonFillColor` = a
+      `FillRule`/`linearGradient3` bound to the measure — the **exact same FillRule shape as
+      `dataPoint.fill`** (`{Input:{Measure:…}, FillRule:{linearGradient3:{min, mid{value:0D}, max,
+      nullColoringStrategy 'asZero'}}}`).
+  - Bring a boundary file for the geography *before* building; if none exists or the join key is
+    uncertain, that is a research-then-ask moment (see "When unsure about a visual" above).
+- **azureMap fixed-view small-multiples:** for a small (≤~400px) region-highlighter multiple, set
+  `mapControls`: `defaultStyle 'road'`, `autoZoom` **false** (otherwise it fits to Alaska/Hawaii/PR in
+  the boundary file and shrinks the lower-48 to a dot), plus a fixed `zoom` + `centerLatitude/Longitude`.
+  Zoom scales with viewport (512px vector tiles): continental US fills a **384px**-wide map at
+  **`zoom ≈ 2.0`** (a 700–940px map uses ≈2.9). `blank` style + `autoZoom` rendered empty/tiny — avoid.
+- **scatterChart X and Y must BOTH be MEASURES, never a grouping column.** Binding `Y` (or `X`) to a
+  dimension renders "Remove Values to display x- and y-axis pairs" (validation-clean, Desktop-only). A
+  Tableau "dimension-on-rows dot strip" → scatter with `Category` = the dimension (Details, one dot
+  each), `X` = value measure, `Y` = a **constant baseline measure** (`measure 'Dot Baseline' = 0`,
+  hidden), `Size` = value measure, colour via a `FillRule` gradient on a signed diff measure; hide the
+  constant `valueAxis` (`show:false` + `showAxisTitle:false`). (Superstore's 3 region-comparison
+  dot-strips.)
+- **A measure used as a visual-level filter at a FINER grain than it evaluates silently zeroes the
+  visual.** Superstore's scatter carried a `Region Filter` measure filter, but at Sub-Category grain
+  `SELECTEDVALUE('…'[Region])` is blank so the filter is false for every point → empty visual. When the
+  underlying measures already bake in the restriction (they did — DAX guide §4), just drop the
+  redundant visual filter.
+- **Slicers/maps showing "Column … cannot be found or may not be used"** almost always mean the
+  field-parameter table's columns didn't materialize — a semantic-model bug (`sourceColumn` needs
+  brackets `[Value1]`); see `pbi-semantic-builder.agent.md` Gotchas. Suspect this first for FP-bound
+  visuals.
 
 **Desktop verification mechanics (when a live check is possible):**
 - **The `powerbi-desktop` bridge has NO refresh command** (only `application.state.get` /

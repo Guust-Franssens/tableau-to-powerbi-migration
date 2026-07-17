@@ -1,0 +1,35 @@
+/// Field Parameter backing the Tableau 'X-Axis' dynamic-measure-switcher parameter (internal name '[Y-Axis (copy)]' - a stale Ctrl-drag-duplicate of the Y-Axis parameter, see limitations_encountered - same list domain as Y-Axis, default "Discount"). Mirrors 'Y-Axis' table's structure/rationale exactly; see that table's doc comment for the full design note, including the sourceColumn=Value1/Value2/Value3 explanation. The actual measure switching happens in ['X-Axis Measure'] on 'Sample Superstore'.
+table X-Axis
+	lineageTag: a90d8d63-091b-46c4-9fdb-c60aa69bfe5a
+
+	column X-Axis
+		lineageTag: 4bc69997-65e2-4a69-8efc-f1f632b495fc
+		summarizeBy: none
+		sourceColumn: [Value1]
+		sortByColumn: 'X-Axis Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'X-Axis Fields'
+		isHidden
+		lineageTag: 294fd489-c63f-49d4-9c53-879eaed5e296
+		summarizeBy: none
+		sourceColumn: [Value2]
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'X-Axis Order'
+		isHidden
+		formatString: #,##0
+		lineageTag: 126612d4-d8e6-4320-b997-d0215830d1f2
+		summarizeBy: none
+		sourceColumn: [Value3]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition X-Axis = calculated
+		mode: import
+		source = {("Sales", NAMEOF('Sample Superstore'[CP Sales]), 0), ("Profit", NAMEOF('Sample Superstore'[CP Profit]), 1), ("Quantity", NAMEOF('Sample Superstore'[CP Quantity]), 2), ("Discount", NAMEOF('Sample Superstore'[CP Discount Pct]), 3), ("Returns", NAMEOF('Sample Superstore'[CP Returns]), 4), ("Days to Ship", NAMEOF('Sample Superstore'[CP Days To Ship]), 5), ("Profit Ratio", NAMEOF('Sample Superstore'[CP Profit Ratio Pct]), 6)}
+
+	annotation PBI_ResultType = Table
+
