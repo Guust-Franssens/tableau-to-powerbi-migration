@@ -1,0 +1,14 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Health Data","Date Period","DataFolder"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table 'Health Data'
+ref table 'Date Period'

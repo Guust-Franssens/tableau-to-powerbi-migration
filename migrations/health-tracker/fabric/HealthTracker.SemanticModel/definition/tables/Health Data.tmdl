@@ -1,0 +1,445 @@
+/// Daily personal-health fact table (730 rows, one row per calendar date 2022-01-01..2023-12-31). Source: Tableau data source 'ds.health_data' (extract-based .hyper, materialized to data/ds.health_data.csv per migration-spec limitations_encountered). Grain: one row per Date. All 12 metric columns kept visible with summarizeBy matching the Tableau-implied aggregation (sum for volume/count metrics, average for rate/score metrics) - the workbook exposed them as draggable measures.
+table 'Health Data'
+	lineageTag: acd7dfc3-c446-498e-8884-08c022c72623
+
+	/// Max Date across the whole table, filter-independent (Tableau '{ MAX([Date]) }' implicit-FIXED LOD). Hidden helper referenced by every Latest/Prior measure. NOTE: parser did not flag the bare '{ MAX([Date]) }' as is_lod (only '{FIXED...}' detected) - see limitations_encountered.
+	measure 'Latest Date' = CALCULATE(MAX('Health Data'[Date]), ALL('Health Data'))
+		formatString: "Short Date"
+		displayFolder: _Support
+		isHidden
+		lineageTag: bbb6ae0d-2e9d-4434-bba9-dead1bf1047d
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [BMI] END) }' - value of BMI on the max date, ignoring filter context.
+	measure 'Latest BMI' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[BMI]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.00
+		displayFolder: Latest (LOD)
+		lineageTag: 2f23eda2-0faa-488d-bda0-d27aced8eaf6
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Calories Intake] END) }' - value of Calories Intake on the max date, ignoring filter context.
+	measure 'Latest Cal Int' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Calories Intake]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Latest (LOD)
+		lineageTag: 995c901b-5bee-479a-8550-65c76d64c57e
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Calories Burned] END) }' - value of Calories Burned on the max date, ignoring filter context.
+	measure 'Latest Cal Bur' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Calories Burned]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Latest (LOD)
+		lineageTag: 9c75ef98-2aa4-4a18-8962-d61f44ee829f
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Blood Pressure Systolic (mmHg)] END) }' - value of Blood Pressure Systolic (mmHg) on the max date, ignoring filter context.
+	measure 'Latest BP Sys' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Blood Pressure Systolic (mmHg)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Latest (LOD)
+		lineageTag: 32f63d4c-42bd-4464-9213-d26173071ae4
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Mood Score (1-10)] END) }' - value of Mood Score (1-10) on the max date, ignoring filter context.
+	measure 'Latest Mood Score' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Mood Score (1-10)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.00
+		displayFolder: Latest (LOD)
+		lineageTag: 2e34e819-80a2-49fc-83bd-14551870ff7b
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Blood Pressure Diastolic (mmHg)] END) }' - value of Blood Pressure Diastolic (mmHg) on the max date, ignoring filter context.
+	measure 'Latest BP Dias' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Blood Pressure Diastolic (mmHg)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Latest (LOD)
+		lineageTag: c262c1aa-c97d-4ab3-82ef-1c2587de50fd
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Heart Rate (bpm)] END) }' - value of Heart Rate (bpm) on the max date, ignoring filter context.
+	measure 'Latest HR bpm' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Heart Rate (bpm)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Latest (LOD)
+		lineageTag: e1adee62-de04-49a2-bb05-6d48d0c2d706
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Steps Count] END) }' - value of Steps Count on the max date, ignoring filter context.
+	measure 'Latest Steps Count' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Steps Count]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Latest (LOD)
+		lineageTag: b545c73f-a9b4-40d5-8478-299d708f8576
+
+	/// Tableau FIXED-LOD '{ FIXED : AVERAGE(IF [Date]=[Latest Date] THEN [Sleep Duration (hours)] END) }' - value of Sleep Duration (hours) on the max date, ignoring filter context.
+	measure 'Latest Sleep Dur' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Sleep Duration (hours)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.00
+		displayFolder: Latest (LOD)
+		lineageTag: ab8a0e66-848d-43d9-8adf-7124cc621c0a
+
+	/// Tableau FIXED-LOD '{ FIXED : SUM(IF [Date]=[Latest Date] THEN [Water Intake (liters)] END) }' - value of Water Intake (liters) on the max date, ignoring filter context.
+	measure 'Latest Water Intake' = VAR _d = [Latest Date] RETURN CALCULATE(SUM('Health Data'[Water Intake (liters)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.00
+		displayFolder: Latest (LOD)
+		lineageTag: c8f06874-a8ab-4871-a5c7-5c3b18cf10f9
+
+	/// Tableau FIXED-LOD prior-period value of Calories Burned, period chosen by the 'Date Period' parameter (Last Week=maxDate-7, Last Month=EDATE(-1), Last Year=EDATE(-12)). Prior Week/Month/Year date fields inlined into _p.
+	measure 'Prior Cal Bur' = VAR _sel = [Date Period Value] VAR _max = [Latest Date] VAR _p = SWITCH(_sel, "Last Week", _max - 7, "Last Month", EDATE(_max, -1), "Last Year", EDATE(_max, -12), _max - 7) RETURN CALCULATE(SUM('Health Data'[Calories Burned]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _p))
+		formatString: #,##0.0
+		displayFolder: Prior (LOD)
+		lineageTag: 921d4282-5548-4f50-b962-8585c7c32cde
+
+	/// Tableau FIXED-LOD prior-period value of Calories Intake, period chosen by the 'Date Period' parameter (Last Week=maxDate-7, Last Month=EDATE(-1), Last Year=EDATE(-12)). Prior Week/Month/Year date fields inlined into _p.
+	measure 'Prior Cal Int' = VAR _sel = [Date Period Value] VAR _max = [Latest Date] VAR _p = SWITCH(_sel, "Last Week", _max - 7, "Last Month", EDATE(_max, -1), "Last Year", EDATE(_max, -12), _max - 7) RETURN CALCULATE(SUM('Health Data'[Calories Intake]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _p))
+		formatString: #,##0.0
+		displayFolder: Prior (LOD)
+		lineageTag: b9b67fa5-1738-4e46-9f57-198d72d0d327
+
+	/// Tableau FIXED-LOD prior-period value of Steps Count, period chosen by the 'Date Period' parameter (Last Week=maxDate-7, Last Month=EDATE(-1), Last Year=EDATE(-12)). Prior Week/Month/Year date fields inlined into _p.
+	measure 'Prior Steps Count' = VAR _sel = [Date Period Value] VAR _max = [Latest Date] VAR _p = SWITCH(_sel, "Last Week", _max - 7, "Last Month", EDATE(_max, -1), "Last Year", EDATE(_max, -12), _max - 7) RETURN CALCULATE(SUM('Health Data'[Steps Count]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _p))
+		formatString: #,##0.0
+		displayFolder: Prior (LOD)
+		lineageTag: 3eedefb1-df44-4e42-ba89-7ea13eb8fc82
+
+	/// Tableau FIXED-LOD prior-period value of Mood Score (1-10), period chosen by the 'Date Period' parameter (Last Week=maxDate-7, Last Month=EDATE(-1), Last Year=EDATE(-12)). Prior Week/Month/Year date fields inlined into _p.
+	measure 'Prior Mood Score' = VAR _sel = [Date Period Value] VAR _max = [Latest Date] VAR _p = SWITCH(_sel, "Last Week", _max - 7, "Last Month", EDATE(_max, -1), "Last Year", EDATE(_max, -12), _max - 7) RETURN CALCULATE(AVERAGE('Health Data'[Mood Score (1-10)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _p))
+		formatString: #,##0.00
+		displayFolder: Prior (LOD)
+		lineageTag: b1d8523d-797e-40bb-9377-74d070b9aa50
+
+	/// Tableau FIXED-LOD prior-period value of Sleep Duration (hours), period chosen by the 'Date Period' parameter (Last Week=maxDate-7, Last Month=EDATE(-1), Last Year=EDATE(-12)). Prior Week/Month/Year date fields inlined into _p.
+	measure 'Prior Sleep Dur' = VAR _sel = [Date Period Value] VAR _max = [Latest Date] VAR _p = SWITCH(_sel, "Last Week", _max - 7, "Last Month", EDATE(_max, -1), "Last Year", EDATE(_max, -12), _max - 7) RETURN CALCULATE(AVERAGE('Health Data'[Sleep Duration (hours)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _p))
+		formatString: #,##0.00
+		displayFolder: Prior (LOD)
+		lineageTag: c83ea0fa-77cc-4782-a548-cabcdb6585ec
+
+	/// Tableau FIXED-LOD prior-period value of Water Intake (liters), period chosen by the 'Date Period' parameter (Last Week=maxDate-7, Last Month=EDATE(-1), Last Year=EDATE(-12)). Prior Week/Month/Year date fields inlined into _p.
+	measure 'Prior Water Intake' = VAR _sel = [Date Period Value] VAR _max = [Latest Date] VAR _p = SWITCH(_sel, "Last Week", _max - 7, "Last Month", EDATE(_max, -1), "Last Year", EDATE(_max, -12), _max - 7) RETURN CALCULATE(AVERAGE('Health Data'[Water Intake (liters)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _p))
+		formatString: #,##0.00
+		displayFolder: Prior (LOD)
+		lineageTag: ca603b85-cb41-43e1-a0cd-6fd0e26429af
+
+	/// Tableau 'IF [Latest Cal Int] > [Prior Cal Int] THEN [Latest Cal Int] - [Prior Cal Int] END' (positive-change branch; BLANK otherwise).
+	measure 'Cal Int Diff +' = VAR _l = [Latest Cal Int] VAR _p = [Prior Cal Int] RETURN IF(_l > _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 3cab4bb6-1aef-4b85-9b21-337f55e7d9bc
+
+	/// Tableau 'IF [Latest Cal Int] < [Prior Cal Int] THEN [Latest Cal Int] - [Prior Cal Int] END' (negative-change branch; BLANK otherwise).
+	measure 'Cal Int Diff -' = VAR _l = [Latest Cal Int] VAR _p = [Prior Cal Int] RETURN IF(_l < _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 4cea6590-7228-4350-8ba1-c89852f1ff70
+
+	/// Tableau 'IF [Latest Cal Int] = [Prior Cal Int] THEN [Latest Cal Int] - [Prior Cal Int] END' (no-change branch; evaluates to 0 when equal, BLANK otherwise).
+	measure 'Cal Int No Diff' = VAR _l = [Latest Cal Int] VAR _p = [Prior Cal Int] RETURN IF(_l = _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 00c30c12-8e03-4f97-89c7-c35de47a4c6d
+
+	/// Tableau 'IF [Latest Cal Bur] > [Prior Cal Bur] THEN [Latest Cal Bur] - [Prior Cal Bur] END' (positive-change branch; BLANK otherwise).
+	measure 'Cal Bur Diff +' = VAR _l = [Latest Cal Bur] VAR _p = [Prior Cal Bur] RETURN IF(_l > _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 97160522-6534-4c3b-a4b3-267e7bf12597
+
+	/// Tableau 'IF [Latest Cal Bur] < [Prior Cal Bur] THEN [Latest Cal Bur] - [Prior Cal Bur] END' (negative-change branch; BLANK otherwise).
+	measure 'Cal Bur Diff -' = VAR _l = [Latest Cal Bur] VAR _p = [Prior Cal Bur] RETURN IF(_l < _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 5db641df-d4e6-466e-a1be-b0a37212abf7
+
+	/// Tableau 'IF [Latest Cal Bur] = [Prior Cal Bur] THEN [Latest Cal Bur] - [Prior Cal Bur] END' (no-change branch; evaluates to 0 when equal, BLANK otherwise).
+	measure 'Cal Bur No Diff' = VAR _l = [Latest Cal Bur] VAR _p = [Prior Cal Bur] RETURN IF(_l = _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 708ae4cb-fae7-45cf-9354-6bb4c79ba2b6
+
+	/// Tableau 'IF [Latest Steps Count] > [Prior Steps Count] THEN [Latest Steps Count] - [Prior Steps Count] END' (positive-change branch; BLANK otherwise).
+	measure 'Steps Count Diff +' = VAR _l = [Latest Steps Count] VAR _p = [Prior Steps Count] RETURN IF(_l > _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: ba215aaf-2e5d-4b0a-b3db-ef00f7106c9d
+
+	/// Tableau 'IF [Latest Steps Count] < [Prior Steps Count] THEN [Latest Steps Count] - [Prior Steps Count] END' (negative-change branch; BLANK otherwise).
+	measure 'Steps Count Diff -' = VAR _l = [Latest Steps Count] VAR _p = [Prior Steps Count] RETURN IF(_l < _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 9bb55aad-0205-4b80-aa4a-e108d1352cd2
+
+	/// Tableau 'IF [Latest Steps Count] = [Prior Steps Count] THEN [Latest Steps Count] - [Prior Steps Count] END' (no-change branch; evaluates to 0 when equal, BLANK otherwise).
+	measure 'Steps Count No Diff' = VAR _l = [Latest Steps Count] VAR _p = [Prior Steps Count] RETURN IF(_l = _p, _l - _p)
+		formatString: #,##0.0
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 72a55a11-d286-4823-b709-c5d5f55eba94
+
+	/// Tableau 'IF [Latest Sleep Dur] > [Prior Sleep Dur] THEN [Latest Sleep Dur] - [Prior Sleep Dur] END' (positive-change branch; BLANK otherwise).
+	measure 'Sleep Duration Diff +' = VAR _l = [Latest Sleep Dur] VAR _p = [Prior Sleep Dur] RETURN IF(_l > _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: dabf59ef-62ed-4fc9-a5c7-918b64f3b9e4
+
+	/// Tableau 'IF [Latest Sleep Dur] < [Prior Sleep Dur] THEN [Latest Sleep Dur] - [Prior Sleep Dur] END' (negative-change branch; BLANK otherwise).
+	measure 'Sleep Duration Diff -' = VAR _l = [Latest Sleep Dur] VAR _p = [Prior Sleep Dur] RETURN IF(_l < _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 17b90f4f-60f8-4e18-85e7-9bc6748b775a
+
+	/// Tableau 'IF [Latest Sleep Dur] = [Prior Sleep Dur] THEN [Latest Sleep Dur] - [Prior Sleep Dur] END' (no-change branch; evaluates to 0 when equal, BLANK otherwise).
+	measure 'Sleep Duration No Diff' = VAR _l = [Latest Sleep Dur] VAR _p = [Prior Sleep Dur] RETURN IF(_l = _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: e0b62f5b-f998-42ec-a5ea-45746bb648ad
+
+	/// Tableau 'IF [Latest Mood Score] > [Prior Mood Score] THEN [Latest Mood Score] - [Prior Mood Score] END' (positive-change branch; BLANK otherwise).
+	measure 'Mood Score Diff +' = VAR _l = [Latest Mood Score] VAR _p = [Prior Mood Score] RETURN IF(_l > _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 274eb50a-0ff9-416c-bd20-68677087ff14
+
+	/// Tableau 'IF [Latest Mood Score] < [Prior Mood Score] THEN [Latest Mood Score] - [Prior Mood Score] END' (negative-change branch; BLANK otherwise).
+	measure 'Mood Score Diff -' = VAR _l = [Latest Mood Score] VAR _p = [Prior Mood Score] RETURN IF(_l < _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: b6fbcb01-36fd-4c56-a8f9-54381ff30cc2
+
+	/// Tableau 'IF [Latest Mood Score] = [Prior Mood Score] THEN [Latest Mood Score] - [Prior Mood Score] END' (no-change branch; evaluates to 0 when equal, BLANK otherwise).
+	measure 'Mood Score No Diff' = VAR _l = [Latest Mood Score] VAR _p = [Prior Mood Score] RETURN IF(_l = _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 40ff1df0-71e7-4fe3-af94-0cf51b5148fc
+
+	/// Tableau 'IF [Latest Water Intake] > [Prior Water Intake] THEN [Latest Water Intake] - [Prior Water Intake] END' (positive-change branch; BLANK otherwise).
+	measure 'Water Intake Diff +' = VAR _l = [Latest Water Intake] VAR _p = [Prior Water Intake] RETURN IF(_l > _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: d9874347-00cf-4116-9317-be166cbb4cd5
+
+	/// Tableau 'IF [Latest Water Intake] < [Prior Water Intake] THEN [Latest Water Intake] - [Prior Water Intake] END' (negative-change branch; BLANK otherwise).
+	measure 'Water Intake Diff -' = VAR _l = [Latest Water Intake] VAR _p = [Prior Water Intake] RETURN IF(_l < _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 015c2b4e-eb67-4d50-83e4-5f4255a63c56
+
+	/// Tableau 'IF [Latest Water Intake] = [Prior Water Intake] THEN [Latest Water Intake] - [Prior Water Intake] END' (no-change branch; evaluates to 0 when equal, BLANK otherwise).
+	measure 'Water Intake No Diff' = VAR _l = [Latest Water Intake] VAR _p = [Prior Water Intake] RETURN IF(_l = _p, _l - _p)
+		formatString: #,##0.00
+		displayFolder: Diff (Latest vs Prior)
+		lineageTag: 1d9ea7bb-8800-4e77-83e6-a31b7d2d1210
+
+	/// Tableau BMI category IF/ELSEIF on [Latest BMI]. WHO-style bands: <=18.4 Underweight, <=24.9 Normal weight, else Overweight.
+	measure 'BMI text' = VAR _v = [Latest BMI] RETURN SWITCH(TRUE(), _v <= 18.4, "Underweight", _v <= 24.9, "Normal weight", "Overweight")
+		displayFolder: Status Text
+		lineageTag: 6febe980-319d-4f4a-b6c0-e9b6321ff98c
+
+	/// Tableau heart-rate category on [Latest HR bpm]. Final 'Invalid Heart Rate' ELSE is unreachable for any real number - translated faithfully (source-workbook dead branch).
+	measure 'HR text' = VAR _v = [Latest HR bpm] RETURN SWITCH(TRUE(), _v < 60, "Low Heart Rate", _v <= 100, "Normal Heart Rate", _v > 100, "High Heart Rate", "Invalid Heart Rate")
+		displayFolder: Status Text
+		lineageTag: 870ad8e5-5656-4d55-8ee7-5db5a52cfb7b
+
+	/// Tableau AHA blood-pressure category on [Latest BP Sys]/[Latest BP Dias]. Chained compound IF/ELSEIF -> SWITCH(TRUE()).
+	measure 'BP text' = VAR _sys = [Latest BP Sys] VAR _dias = [Latest BP Dias] RETURN SWITCH(TRUE(), _sys <= 120 && _dias <= 80, "Normal Blood Pressure", _sys <= 129 && _dias < 80, "Elevated Blood Pressure", (_sys <= 139 && _sys >= 130) || (_dias <= 89 && _dias >= 80), "Stage 1 Hypertension", (_sys <= 180 && _sys >= 140) || (_dias <= 120 && _dias >= 90), "Stage 2 Hypertension", "Hypertensive Crisis - Consult a Doctor Immediately")
+		displayFolder: Status Text
+		lineageTag: ec9ba34d-eb9e-4432-b6e9-9f21d13fab70
+
+	/// Translation of the Tableau boolean 'Date Period' filter field (renamed to avoid collision with the 'Date Period' slicer table/column). 1 when the current context rows fall in the parameter-selected latest period, else 0. Use as a visual-level filter (=1). NOTE: a measure filter restricts categories not rows - see limitations_encountered for the report-layer row-restriction guidance.
+	measure 'In Selected Period' = VAR _sel = [Date Period Value] VAR _w = MAXX('Health Data', IF('Health Data'[Latest Week], 1, 0)) VAR _m = MAXX('Health Data', IF('Health Data'[Latest Month], 1, 0)) VAR _y = MAXX('Health Data', IF('Health Data'[Latest Year], 1, 0)) RETURN SWITCH(_sel, "Last Week", _w, "Last Month", _m, "Last Year", _y, _w)
+		formatString: 0
+		displayFolder: Period Support
+		lineageTag: ba49bfce-4a17-4dd2-8d46-8703957d7ca7
+
+	/// Translation of the Tableau boolean 'Date Color' color-encoding field (Last Week/Last Month -> Latest Day; Last Year -> Latest Month). 1 highlights the latest bar. Absorbs the Tableau 'Label' field (IF [Date Color] THEN 'Yes') - report shows the data label where Highlight Latest = 1.
+	measure 'Highlight Latest' = VAR _sel = [Date Period Value] VAR _d = MAXX('Health Data', IF('Health Data'[Latest Day], 1, 0)) VAR _m = MAXX('Health Data', IF('Health Data'[Latest Month], 1, 0)) RETURN SWITCH(_sel, "Last Week", _d, "Last Month", _d, "Last Year", _m, _d)
+		formatString: 0
+		displayFolder: Period Support
+		lineageTag: 449238d0-80c2-445a-b14d-3d40f38fc657
+
+	/// Calendar date, one row per day (Tableau dimension 'Date'). Drives all Latest/Prior LOD date logic.
+	column 'Date'
+		dataType: dateTime
+		formatString: "Short Date"
+		lineageTag: ba2bee9f-2c51-45f5-af69-a6dfd8b05a90
+		summarizeBy: none
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	/// Body weight in kg (Tableau measure 'Weight (kg)').
+	column 'Weight (kg)'
+		dataType: double
+		formatString: #,##0.00
+		lineageTag: 608eaa1a-ae96-4ac6-aec2-9facc0351dcb
+		summarizeBy: average
+		sourceColumn: Weight (kg)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Body height in cm (Tableau measure 'Height (cm)').
+	column 'Height (cm)'
+		dataType: double
+		formatString: #,##0.00
+		lineageTag: 3328042e-96c3-4658-9c8d-df599108495d
+		summarizeBy: average
+		sourceColumn: Height (cm)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Body-mass index (Tableau measure 'BMI').
+	column 'BMI'
+		dataType: double
+		formatString: #,##0.00
+		lineageTag: fb8149a3-3e65-4c7a-829b-473a8c9cdf4a
+		summarizeBy: average
+		sourceColumn: BMI
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Calories consumed (Tableau measure 'Calories Intake').
+	column 'Calories Intake'
+		dataType: double
+		formatString: #,##0.0
+		lineageTag: 091b7ca2-df02-4102-ac81-82ca30c1907e
+		summarizeBy: sum
+		sourceColumn: Calories Intake
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Calories burned (Tableau measure 'Calories Burned').
+	column 'Calories Burned'
+		dataType: double
+		formatString: #,##0.0
+		lineageTag: ad78295b-578b-4c4e-805d-2d8e6f34bc42
+		summarizeBy: sum
+		sourceColumn: Calories Burned
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sleep duration in hours (Tableau measure 'Sleep Duration (hours)').
+	column 'Sleep Duration (hours)'
+		dataType: double
+		formatString: #,##0.00
+		lineageTag: 498b2dc7-976e-4bce-8fd1-57995adf970a
+		summarizeBy: average
+		sourceColumn: Sleep Duration (hours)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Daily step count (Tableau measure 'Steps Count').
+	column 'Steps Count'
+		dataType: double
+		formatString: #,##0.0
+		lineageTag: e983abde-af69-40fe-aaa8-d99ee45fecda
+		summarizeBy: sum
+		sourceColumn: Steps Count
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Heart rate in bpm (Tableau measure 'Heart Rate (bpm)').
+	column 'Heart Rate (bpm)'
+		dataType: double
+		formatString: #,##0.0
+		lineageTag: b6c19281-6aff-48ae-b137-490794d55cea
+		summarizeBy: average
+		sourceColumn: Heart Rate (bpm)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Systolic blood pressure in mmHg (Tableau measure 'Blood Pressure Systolic (mmHg)').
+	column 'Blood Pressure Systolic (mmHg)'
+		dataType: double
+		formatString: #,##0.0
+		lineageTag: d1ea0d69-55a2-4e74-ad83-b3be1d21c724
+		summarizeBy: average
+		sourceColumn: Blood Pressure Systolic (mmHg)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Diastolic blood pressure in mmHg (Tableau measure 'Blood Pressure Diastolic (mmHg)').
+	column 'Blood Pressure Diastolic (mmHg)'
+		dataType: double
+		formatString: #,##0.0
+		lineageTag: fdbdffbd-8bb0-4093-a150-7b1afb997298
+		summarizeBy: average
+		sourceColumn: Blood Pressure Diastolic (mmHg)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Self-reported mood score 1-10 (Tableau measure 'Mood Score (1-10)').
+	column 'Mood Score (1-10)'
+		dataType: double
+		formatString: #,##0.00
+		lineageTag: 160ca5d3-71d8-43f5-8d99-e81600c4393d
+		summarizeBy: average
+		sourceColumn: Mood Score (1-10)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Water intake in liters (Tableau measure 'Water Intake (liters)').
+	column 'Water Intake (liters)'
+		dataType: double
+		formatString: #,##0.00
+		lineageTag: 73b959a7-a9fe-434c-a463-25931c6eb533
+		summarizeBy: sum
+		sourceColumn: Water Intake (liters)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau boolean 'Latest Day' = DATETRUNC('day',[Date]) = DATEADD('day',-1,DATETRUNC('day',{MAX([Date])}+1)). Reduces to [Date] = max date. Row-level, filter-independent.
+	column 'Latest Day' = 'Health Data'[Date] = MAXX(ALL('Health Data'), 'Health Data'[Date])
+		dataType: boolean
+		lineageTag: 7acec83c-6790-4bb8-ae8f-e1310f3e7e1b
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau boolean 'Latest Week' - last COMPLETE Sunday-start week before maxDate+1. maxDate 2023-12-31 is a Sunday so this is Dec 24-30 (excludes Dec 31), faithful to Tableau's DATETRUNC('week') last-complete-week logic.
+	column 'Latest Week' = VAR _max = MAXX(ALL('Health Data'), 'Health Data'[Date]) VAR _target = (_max + 1) - (WEEKDAY(_max + 1, 1) - 1) - 7 VAR _ws = 'Health Data'[Date] - (WEEKDAY('Health Data'[Date], 1) - 1) RETURN _ws = _target
+		dataType: boolean
+		lineageTag: 81f35b08-e466-4ce9-a734-0e631efec8c3
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau boolean 'Latest Month' - month before the month containing maxDate+1. For maxDate 2023-12-31 that is Dec 2023 (includes maxDate).
+	column 'Latest Month' = VAR _max = MAXX(ALL('Health Data'), 'Health Data'[Date]) VAR _target = EDATE(DATE(YEAR(_max + 1), MONTH(_max + 1), 1), -1) VAR _ms = DATE(YEAR('Health Data'[Date]), MONTH('Health Data'[Date]), 1) RETURN _ms = _target
+		dataType: boolean
+		lineageTag: d33b687d-c7de-45e7-be58-9c0b675e9a6b
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau boolean 'Latest Year' - year before the year containing maxDate+1. For maxDate 2023-12-31 that is 2023 (includes maxDate).
+	column 'Latest Year' = VAR _max = MAXX(ALL('Health Data'), 'Health Data'[Date]) VAR _target = DATE(YEAR(_max + 1) - 1, 1, 1) VAR _ys = DATE(YEAR('Health Data'[Date]), 1, 1) RETURN _ys = _target
+		dataType: boolean
+		lineageTag: 1f7f2fe0-5244-4fd7-a253-df28fe5ae786
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Day-of-month 1-31 (Tableau 'Date period selected' DATENAME('day',[Date]) for the Last Week / Last Month axis). Report binds this as the trend-bar axis for the day-grain periods.
+	column 'Day Of Month' = DAY('Health Data'[Date])
+		dataType: int64
+		formatString: 0
+		lineageTag: 28d323b5-8d0b-4612-93d4-436d53c52368
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort helper (1-12) for 'Month Name'.
+	column 'Month Number' = MONTH('Health Data'[Date])
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 20c71043-fa54-4ee7-93bb-4621768b8580
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Full month name (Tableau 'Date period selected' DATENAME('month',[Date]) for the Last Year axis). Consolidates the Tableau 'Date period selected name' field (UPPER(month name)) - the report uppercases at the visual level.
+	column 'Month Name' = FORMAT('Health Data'[Date], "MMMM")
+		dataType: string
+		lineageTag: 03419a8d-dce6-4e62-8ecb-15d60e1c9820
+		summarizeBy: none
+		sortByColumn: 'Month Number'
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Health Data' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "ds.health_data.csv"),[Delimiter=",", Columns=13, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"Date", type date}, {"Weight (kg)", type number}, {"Height (cm)", type number}, {"BMI", type number}, {"Calories Intake", type number}, {"Calories Burned", type number}, {"Sleep Duration (hours)", type number}, {"Steps Count", type number}, {"Heart Rate (bpm)", type number}, {"Blood Pressure Systolic (mmHg)", type number}, {"Blood Pressure Diastolic (mmHg)", type number}, {"Mood Score (1-10)", type number}, {"Water Intake (liters)", type number}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table

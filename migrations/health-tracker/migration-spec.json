@@ -1,0 +1,4825 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "HealthTracker_17222296039800.twbx",
+    "tableau_version": "18.1",
+    "source_build": "2024.3.0 (20243.24.1213.2326)",
+    "repository_location_id": "HealthTracker_17222296039800",
+    "parsed_at": "2026-07-17T16:14:17.739115+00:00"
+  },
+  "parameters": [
+    {
+      "id": "param.date_period",
+      "internal_name": "[Parameter 1]",
+      "caption": "Date Period",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Last Week",
+        "Last Month",
+        "Last Year"
+      ],
+      "current_value": "Last Week"
+    }
+  ],
+  "data_sources": [
+    {
+      "id": "ds.health_data",
+      "caption": "Health data",
+      "internal_name": "federated.1jyyste1t0ly4q11ora8k1irmgfv",
+      "connection": {
+        "class": "textscan",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1jyyste1t0ly4q11ora8k1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.health_data_csv",
+          "name": "Health data.csv",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_health_data__cal_int_diff",
+          "internal_name": "[BMI Diff (copy 4)_120752809752244238]",
+          "caption": "Cal Int Diff +",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy) (copy) (copy)_549157724182474763] > [Latest Cal Int (copy)_549157724212244504]\r\nTHEN [Latest BMI (copy) (copy) (copy) (copy)_549157724182474763] - [Latest Cal Int (copy)_549157724212244504]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_cal_int",
+            "fld.ds_health_data__prior_cal_int"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__steps_count_diff",
+          "internal_name": "[BMI Diff (copy) (copy) (copy 2)_120752809752219659]",
+          "caption": "Steps Count Diff +",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest HR bpm (copy) (copy)_549157724183281679] > [Latest Steps Count (copy)_549157724212244510]\r\nTHEN [Latest HR bpm (copy) (copy)_549157724183281679] - [Latest Steps Count (copy)_549157724212244510]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_steps_count",
+            "fld.ds_health_data__prior_steps_count"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__sleep_duration_diff",
+          "internal_name": "[BMI Diff (copy) (copy)_120752809752207369]",
+          "caption": "Sleep Duration Diff +",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest HR bpm (copy)_549157724183273486] > [Latest Sleep Dur (copy)_549157724212244511]\r\nTHEN [Latest HR bpm (copy)_549157724183273486] - [Latest Sleep Dur (copy)_549157724212244511]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_sleep_dur",
+            "fld.ds_health_data__prior_sleep_dur"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__mood_score_diff",
+          "internal_name": "[BMI Diff (copy)_120752809752199176]",
+          "caption": "Mood Score Diff +",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy)_549157724183068685] > [Latest Mood Score (copy)_549157724212244507]\r\nTHEN [Latest BMI (copy) (copy)_549157724183068685] - [Latest Mood Score (copy)_549157724212244507]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_mood_score",
+            "fld.ds_health_data__prior_mood_score"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__bp_text",
+          "internal_name": "[BMI text (copy)_120752809814319154]",
+          "caption": "BP text",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy)_549157724182454281] <= 120 AND [Latest BMI (copy)_549157724182437896] <= 80 THEN\r\n    'Normal Blood Pressure'\r\nELSEIF [Latest BMI (copy) (copy)_549157724182454281] <= 129 AND [Latest BMI (copy)_549157724182437896] < 80 THEN\r\n    'Elevated Blood Pressure'\r\nELSEIF ([Latest BMI (copy) (copy)_549157724182454281] <= 139 AND [Latest BMI (copy) (copy)_549157724182454281] >= 130) OR ([Latest BMI (copy)_549157724182437896] <= 89 AND [Latest BMI (copy)_549157724182437896] >= 80) THEN\r\n    'Stage 1 Hypertension'\r\nELSEIF ([Latest BMI (copy) (copy)_549157724182454281] <= 180 AND [Latest BMI (copy) (copy)_549157724182454281] >= 140) OR ([Latest BMI (copy)_549157724182437896] <= 120 AND [Latest BMI (copy)_549157724182437896] >= 90) THEN\r\n    'Stage 2 Hypertension'\r\nELSE\r\n    'Hypertensive Crisis - Consult a Doctor Immediately'\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_bp_dias",
+            "fld.ds_health_data__latest_bp_sys"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__bmi",
+          "internal_name": "[BMI]",
+          "caption": "BMI",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__blood_pressure_diastolic_mmhg",
+          "internal_name": "[Blood Pressure Diastolic (mmHg)]",
+          "caption": "Blood Pressure Diastolic (mmHg)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__blood_pressure_systolic_mmhg",
+          "internal_name": "[Blood Pressure Systolic (mmHg)]",
+          "caption": "Blood Pressure Systolic (mmHg)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__water_intake_diff",
+          "internal_name": "[Cal Bur Diff (copy)_120752809753935889]",
+          "caption": "Water Intake Diff +",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest Sleep Dur (copy)_549157724183420944] > [Latest Water Intake (copy)_549157724212244512]\r\nTHEN [Latest Sleep Dur (copy)_549157724183420944] - [Latest Water Intake (copy)_549157724212244512]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_water_intake",
+            "fld.ds_health_data__prior_water_intake"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__cal_bur_diff",
+          "internal_name": "[Cal Bur Diff + (copy)_120752809754152985]",
+          "caption": "Cal Bur Diff -",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy) (copy)_549157724182466570] < [Latest Cal Bur (copy)_549157724212244505]\r\nTHEN [Latest BMI (copy) (copy) (copy)_549157724182466570] - [Latest Cal Bur (copy)_549157724212244505]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_cal_bur",
+            "fld.ds_health_data__prior_cal_bur"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__cal_bur_no_diff",
+          "internal_name": "[Cal Bur Diff - (copy)_120752809754693658]",
+          "caption": "Cal Bur No Diff",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy) (copy)_549157724182466570] = [Latest Cal Bur (copy)_549157724212244505]\r\nTHEN [Latest BMI (copy) (copy) (copy)_549157724182466570] - [Latest Cal Bur (copy)_549157724212244505]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_cal_bur",
+            "fld.ds_health_data__prior_cal_bur"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__cal_int_diff_1",
+          "internal_name": "[Cal Int Diff + (copy)_120752809754152978]",
+          "caption": "Cal Int Diff -",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy) (copy) (copy)_549157724182474763] < [Latest Cal Int (copy)_549157724212244504]\r\nTHEN [Latest BMI (copy) (copy) (copy) (copy)_549157724182474763] - [Latest Cal Int (copy)_549157724212244504]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_cal_int",
+            "fld.ds_health_data__prior_cal_int"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__cal_int_no_diff",
+          "internal_name": "[Cal Int Diff - (copy)_120752809754693659]",
+          "caption": "Cal Int No Diff",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy) (copy) (copy)_549157724182474763] = [Latest Cal Int (copy)_549157724212244504]\r\nTHEN [Latest BMI (copy) (copy) (copy) (copy)_549157724182474763] - [Latest Cal Int (copy)_549157724212244504]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_cal_int",
+            "fld.ds_health_data__prior_cal_int"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__date_period_selected",
+          "internal_name": "[Calculation_120752809738952707]",
+          "caption": "Date period selected",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 1]\r\n        WHEN 'Last Week' THEN DATENAME('day', [Date])\r\n        WHEN 'Last Month' THEN DATENAME('day', [Date])\r\n        WHEN 'Last Year' THEN DATENAME('month', [Date])\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__cal_bur_diff_1",
+          "internal_name": "[Calculation_120752809750446087]",
+          "caption": "Cal Bur Diff +",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy) (copy)_549157724182466570] > [Latest Cal Bur (copy)_549157724212244505]\r\nTHEN [Latest BMI (copy) (copy) (copy)_549157724182466570] - [Latest Cal Bur (copy)_549157724212244505]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_cal_bur",
+            "fld.ds_health_data__prior_cal_bur"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__date_color",
+          "internal_name": "[Calculation_120752809787707426]",
+          "caption": "Date Color",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 1]\r\n    WHEN 'Last Week' THEN [Calculation_120752809788018723]\r\n    WHEN 'Last Month' THEN [Calculation_120752809788018723]\r\n    WHEN 'Last Year' THEN [LC Week (copy)_549157724169756674]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_day",
+            "fld.ds_health_data__latest_month"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_day",
+          "internal_name": "[Calculation_120752809788018723]",
+          "caption": "Latest Day",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATETRUNC('day', [Date]) = DATEADD('day', -1, DATETRUNC('day', { MAX([Date])} + 1))",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__label",
+          "internal_name": "[Calculation_120752809795854372]",
+          "caption": "Label",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Calculation_120752809787707426] = TRUE\r\nTHEN 'Yes'\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date_color"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__shape",
+          "internal_name": "[Calculation_120752809812664368]",
+          "caption": "Shape",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "'S'",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_health_data__bmi_text",
+          "internal_name": "[Calculation_120752809812877361]",
+          "caption": "BMI text",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Calculation_549157724182274055] <= 18.4\r\nTHEN 'Underweight'\r\nELSEIF [Calculation_549157724182274055] <= 24.9\r\nTHEN 'Normal weight'\r\nELSE 'Overweight'\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_bmi"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__hr_text",
+          "internal_name": "[Calculation_120752809816248371]",
+          "caption": "HR text",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy)_549157724183056396] < 60 THEN\r\n    'Low Heart Rate'\r\nELSEIF [Latest BMI (copy)_549157724183056396] >= 60 AND [Latest BMI (copy)_549157724183056396] <= 100 THEN\r\n    'Normal Heart Rate'\r\nELSEIF [Latest BMI (copy)_549157724183056396] > 100 THEN\r\n    'High Heart Rate'\r\nELSE\r\n    'Invalid Heart Rate'\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_hr_bpm"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_week",
+          "internal_name": "[Calculation_549157724167987201]",
+          "caption": "Latest Week",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATETRUNC('week', [Date]) = DATEADD('week', -1, DATETRUNC('week', { MAX([Date])} + 1))",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__date_period",
+          "internal_name": "[Calculation_549157724171034628]",
+          "caption": "Date Period",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE [Parameters].[Parameter 1]\r\n    WHEN 'Last Week' THEN [Calculation_549157724167987201]\r\n    WHEN 'Last Month' THEN [LC Week (copy)_549157724169756674]\r\n    WHEN 'Last Year' THEN [LC Month (copy)_549157724170584067]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_month",
+            "fld.ds_health_data__latest_week",
+            "fld.ds_health_data__latest_year"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_date",
+          "internal_name": "[Calculation_549157724174692357]",
+          "caption": "Latest Date",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{ MAX([Date])}",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_bmi",
+          "internal_name": "[Calculation_549157724182274055]",
+          "caption": "Latest BMI",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [BMI]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__bmi",
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__calories_burned",
+          "internal_name": "[Calories Burned]",
+          "caption": "Calories Burned",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__calories_intake",
+          "internal_name": "[Calories Intake]",
+          "caption": "Calories Intake",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__date_period_selected_name",
+          "internal_name": "[Date period selected (copy)_1048212858278899712]",
+          "caption": "Date period selected name",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "UPPER(CASE [Parameters].[Parameter 1]\r\n        WHEN 'Last Year' THEN DATENAME('month', [Date])\r\nEND)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__heart_rate_bpm",
+          "internal_name": "[Heart Rate (bpm)]",
+          "caption": "Heart Rate (bpm)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__latest_year",
+          "internal_name": "[LC Month (copy)_549157724170584067]",
+          "caption": "Latest Year",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATETRUNC('year', [Date]) = DATEADD('year', -1, DATETRUNC('year', { MAX([Date])} + 1))",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_month",
+          "internal_name": "[LC Week (copy)_549157724169756674]",
+          "caption": "Latest Month",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATETRUNC('month', [Date]) = DATEADD('month', -1, DATETRUNC('month', { MAX([Date])} + 1))",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_cal_int",
+          "internal_name": "[Latest BMI (copy) (copy) (copy) (copy)_549157724182474763]",
+          "caption": "Latest Cal Int",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Calories Intake]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__calories_intake",
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_cal_bur",
+          "internal_name": "[Latest BMI (copy) (copy) (copy)_549157724182466570]",
+          "caption": "Latest Cal Bur",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Calories Burned]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__calories_burned",
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_bp_sys",
+          "internal_name": "[Latest BMI (copy) (copy)_549157724182454281]",
+          "caption": "Latest BP Sys",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Blood Pressure Systolic (mmHg)]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__blood_pressure_systolic_mmhg",
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_mood_score",
+          "internal_name": "[Latest BMI (copy) (copy)_549157724183068685]",
+          "caption": "Latest Mood Score",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Mood Score (1-10)]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date",
+            "fld.ds_health_data__mood_score_1_10"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_bp_dias",
+          "internal_name": "[Latest BMI (copy)_549157724182437896]",
+          "caption": "Latest BP Dias",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Blood Pressure Diastolic (mmHg)]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__blood_pressure_diastolic_mmhg",
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_hr_bpm",
+          "internal_name": "[Latest BMI (copy)_549157724183056396]",
+          "caption": "Latest HR bpm",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Heart Rate (bpm)]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__heart_rate_bpm",
+            "fld.ds_health_data__latest_date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_cal_bur",
+          "internal_name": "[Latest Cal Bur (copy)_549157724212244505]",
+          "caption": "Prior Cal Bur",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : SUM(IF [Parameters].[Parameter 1] = 'Last Week' THEN\r\n    IF [Date] = [Latest Date (copy)_549157724211195924] \r\n    THEN [Calories Burned]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Month' THEN\r\n    IF [Date] = [Latest Date (copy) (copy)_549157724211208213] \r\n    THEN [Calories Burned]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Year' THEN\r\n    IF [Date] = [Latest Date (copy) (copy) (copy)_549157724211212310] \r\n    THEN [Calories Burned]\r\n    END\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__calories_burned",
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__prior_month",
+            "fld.ds_health_data__prior_week",
+            "fld.ds_health_data__prior_year"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_cal_int",
+          "internal_name": "[Latest Cal Int (copy)_549157724212244504]",
+          "caption": "Prior Cal Int",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : SUM(IF [Parameters].[Parameter 1] = 'Last Week' THEN\r\n    IF [Date] = [Latest Date (copy)_549157724211195924] \r\n    THEN [Calories Intake]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Month' THEN\r\n    IF [Date] = [Latest Date (copy) (copy)_549157724211208213] \r\n    THEN [Calories Intake]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Year' THEN\r\n    IF [Date] = [Latest Date (copy) (copy) (copy)_549157724211212310] \r\n    THEN [Calories Intake]\r\n    END\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__calories_intake",
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__prior_month",
+            "fld.ds_health_data__prior_week",
+            "fld.ds_health_data__prior_year"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_year",
+          "internal_name": "[Latest Date (copy) (copy) (copy)_549157724211212310]",
+          "caption": "Prior Year",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "datetime",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATEADD('year', -1, { MAX([Date]) })",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_month",
+          "internal_name": "[Latest Date (copy) (copy)_549157724211208213]",
+          "caption": "Prior Month",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "datetime",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATEADD('month', -1, { MAX([Date]) })",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_week",
+          "internal_name": "[Latest Date (copy)_549157724211195924]",
+          "caption": "Prior Week",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "datetime",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "DATEADD('week', -1, { MAX([Date]) })",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_steps_count",
+          "internal_name": "[Latest HR bpm (copy) (copy)_549157724183281679]",
+          "caption": "Latest Steps Count",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Steps Count]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date",
+            "fld.ds_health_data__steps_count"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_sleep_dur",
+          "internal_name": "[Latest HR bpm (copy)_549157724183273486]",
+          "caption": "Latest Sleep Dur",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Sleep Duration (hours)]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date",
+            "fld.ds_health_data__sleep_duration_hours"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_mood_score",
+          "internal_name": "[Latest Mood Score (copy)_549157724212244507]",
+          "caption": "Prior Mood Score",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Parameters].[Parameter 1] = 'Last Week' THEN\r\n    IF [Date] = [Latest Date (copy)_549157724211195924] \r\n    THEN [Mood Score (1-10)]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Month' THEN\r\n    IF [Date] = [Latest Date (copy) (copy)_549157724211208213] \r\n    THEN [Mood Score (1-10)]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Year' THEN\r\n    IF [Date] = [Latest Date (copy) (copy) (copy)_549157724211212310] \r\n    THEN [Mood Score (1-10)]\r\n    END\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__mood_score_1_10",
+            "fld.ds_health_data__prior_month",
+            "fld.ds_health_data__prior_week",
+            "fld.ds_health_data__prior_year"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__latest_water_intake",
+          "internal_name": "[Latest Sleep Dur (copy)_549157724183420944]",
+          "caption": "Latest Water Intake",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : SUM(IF [Date] = [Calculation_549157724174692357]\r\nTHEN [Water Intake (liters)]\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__latest_date",
+            "fld.ds_health_data__water_intake_liters"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_sleep_dur",
+          "internal_name": "[Latest Sleep Dur (copy)_549157724212244511]",
+          "caption": "Prior Sleep Dur",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Parameters].[Parameter 1] = 'Last Week' THEN\r\n    IF [Date] = [Latest Date (copy)_549157724211195924] \r\n    THEN [Sleep Duration (hours)]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Month' THEN\r\n    IF [Date] = [Latest Date (copy) (copy)_549157724211208213] \r\n    THEN [Sleep Duration (hours)]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Year' THEN\r\n    IF [Date] = [Latest Date (copy) (copy) (copy)_549157724211212310] \r\n    THEN [Sleep Duration (hours)]\r\n    END\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__prior_month",
+            "fld.ds_health_data__prior_week",
+            "fld.ds_health_data__prior_year",
+            "fld.ds_health_data__sleep_duration_hours"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_steps_count",
+          "internal_name": "[Latest Steps Count (copy)_549157724212244510]",
+          "caption": "Prior Steps Count",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : SUM(IF [Parameters].[Parameter 1] = 'Last Week' THEN\r\n    IF [Date] = [Latest Date (copy)_549157724211195924] \r\n    THEN [Steps Count]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Month' THEN\r\n    IF [Date] = [Latest Date (copy) (copy)_549157724211208213] \r\n    THEN [Steps Count]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Year' THEN\r\n    IF [Date] = [Latest Date (copy) (copy) (copy)_549157724211212310] \r\n    THEN [Steps Count]\r\n    END\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__prior_month",
+            "fld.ds_health_data__prior_week",
+            "fld.ds_health_data__prior_year",
+            "fld.ds_health_data__steps_count"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__prior_water_intake",
+          "internal_name": "[Latest Water Intake (copy)_549157724212244512]",
+          "caption": "Prior Water Intake",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{\r\nFIXED : AVG(IF [Parameters].[Parameter 1] = 'Last Week' THEN\r\n    IF [Date] = [Latest Date (copy)_549157724211195924] \r\n    THEN [Water Intake (liters)]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Month' THEN\r\n    IF [Date] = [Latest Date (copy) (copy)_549157724211208213] \r\n    THEN [Water Intake (liters)]\r\n    END\r\nELSEIF [Parameters].[Parameter 1] = 'Last Year' THEN\r\n    IF [Date] = [Latest Date (copy) (copy) (copy)_549157724211212310] \r\n    THEN [Water Intake (liters)]\r\n    END\r\nEND)\r\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__date",
+            "fld.ds_health_data__prior_month",
+            "fld.ds_health_data__prior_week",
+            "fld.ds_health_data__prior_year",
+            "fld.ds_health_data__water_intake_liters"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__mood_score_1_10",
+          "internal_name": "[Mood Score (1-10)]",
+          "caption": "Mood Score (1-10)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__mood_score_diff_1",
+          "internal_name": "[Mood Score Diff + (copy)_120752809754152983]",
+          "caption": "Mood Score Diff -",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy)_549157724183068685] < [Latest Mood Score (copy)_549157724212244507]\r\nTHEN [Latest BMI (copy) (copy)_549157724183068685] - [Latest Mood Score (copy)_549157724212244507]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_mood_score",
+            "fld.ds_health_data__prior_mood_score"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__mood_score_no_diff",
+          "internal_name": "[Mood Score Diff - (copy)_120752809754693661]",
+          "caption": "Mood Score No Diff",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest BMI (copy) (copy)_549157724183068685] = [Latest Mood Score (copy)_549157724212244507]\r\nTHEN [Latest BMI (copy) (copy)_549157724183068685] - [Latest Mood Score (copy)_549157724212244507]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_mood_score",
+            "fld.ds_health_data__prior_mood_score"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__sleep_duration_hours",
+          "internal_name": "[Sleep Duration (hours)]",
+          "caption": "Sleep Duration (hours)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__sleep_duration_diff_1",
+          "internal_name": "[Sleep Duration Diff + (copy)_120752809754152982]",
+          "caption": "Sleep Duration Diff -",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest HR bpm (copy)_549157724183273486] < [Latest Sleep Dur (copy)_549157724212244511]\r\nTHEN [Latest HR bpm (copy)_549157724183273486] - [Latest Sleep Dur (copy)_549157724212244511]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_sleep_dur",
+            "fld.ds_health_data__prior_sleep_dur"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__sleep_duration_no_diff",
+          "internal_name": "[Sleep Duration Diff - (copy)_120752809754693662]",
+          "caption": "Sleep Duration No Diff",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest HR bpm (copy)_549157724183273486] = [Latest Sleep Dur (copy)_549157724212244511]\r\nTHEN [Latest HR bpm (copy)_549157724183273486] - [Latest Sleep Dur (copy)_549157724212244511]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_sleep_dur",
+            "fld.ds_health_data__prior_sleep_dur"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__steps_count_diff_1",
+          "internal_name": "[Steps Count Diff + (copy)_120752809754152981]",
+          "caption": "Steps Count Diff -",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest HR bpm (copy) (copy)_549157724183281679] < [Latest Steps Count (copy)_549157724212244510]\r\nTHEN [Latest HR bpm (copy) (copy)_549157724183281679] - [Latest Steps Count (copy)_549157724212244510]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_steps_count",
+            "fld.ds_health_data__prior_steps_count"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__steps_count_no_diff",
+          "internal_name": "[Steps Count Diff - (copy)_120752809754693663]",
+          "caption": "Steps Count No Diff",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest HR bpm (copy) (copy)_549157724183281679] = [Latest Steps Count (copy)_549157724212244510]\r\nTHEN [Latest HR bpm (copy) (copy)_549157724183281679] - [Latest Steps Count (copy)_549157724212244510]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_steps_count",
+            "fld.ds_health_data__prior_steps_count"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__water_intake_liters",
+          "internal_name": "[Water Intake (liters)]",
+          "caption": "Water Intake (liters)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__water_intake_diff_1",
+          "internal_name": "[Water Intake Diff + (copy)_120752809754152984]",
+          "caption": "Water Intake Diff -",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest Sleep Dur (copy)_549157724183420944] < [Latest Water Intake (copy)_549157724212244512]\r\nTHEN [Latest Sleep Dur (copy)_549157724183420944] - [Latest Water Intake (copy)_549157724212244512]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_water_intake",
+            "fld.ds_health_data__prior_water_intake"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__water_intake_no_diff",
+          "internal_name": "[Water Intake Diff - (copy)_120752809754693664]",
+          "caption": "Water Intake No Diff",
+          "table_id": "tbl.health_data_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Latest Sleep Dur (copy)_549157724183420944] = [Latest Water Intake (copy)_549157724212244512]\r\nTHEN [Latest Sleep Dur (copy)_549157724183420944] - [Latest Water Intake (copy)_549157724212244512]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_health_data__latest_water_intake",
+            "fld.ds_health_data__prior_water_intake"
+          ]
+        },
+        {
+          "id": "fld.ds_health_data__health_data_csv",
+          "internal_name": "[__tableau_internal_object_id__].[Health data.csv_A56D567835D249D4B0A7687B5243CFFB]",
+          "caption": "Health data.csv",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_health_data__date",
+          "internal_name": "[Date]",
+          "caption": "Date",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_health_data__weight_kg",
+          "internal_name": "[Weight (kg)]",
+          "caption": "Weight (kg)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_health_data__height_cm",
+          "internal_name": "[Height (cm)]",
+          "caption": "Height (cm)",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_health_data__steps_count",
+          "internal_name": "[Steps Count]",
+          "caption": "Steps Count",
+          "table_id": "tbl.health_data_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.bmi_bar",
+      "name": "BMI Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__bmi",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__bmi"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nBMI:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:BMI:qk]>"
+    },
+    {
+      "id": "ws.bmi_kpi",
+      "name": "BMI KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_bmi"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nBMI text:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812877361:nk]>Æ\nAvg. Latest BMI:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Calculation_549157724182274055:qk]>"
+    },
+    {
+      "id": "ws.bp_bar",
+      "name": "BP Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__blood_pressure_systolic_mmhg",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__blood_pressure_systolic_mmhg"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "UNRESOLVED:[usr:Calculation_1048212858279370753:nk]"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[usr:Calculation_1048212858279370753:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nSystolic BP (mmHg):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Blood Pressure Systolic (mmHg):qk]>Æ\nDiastolic BP (mmHg):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Blood Pressure Diastolic (mmHg):qk]>"
+    },
+    {
+      "id": "ws.bp_kpi",
+      "name": "BP KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_bp_sys"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "BP text:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:BMI text (copy)_120752809814319154:nk]>Æ\nShape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nAvg. Latest BP Sys:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest BMI (copy) (copy)_549157724182454281:qk]>Æ\nAvg. Latest BP Dias:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest BMI (copy)_549157724182437896:qk]>"
+    },
+    {
+      "id": "ws.cal_bur_bar",
+      "name": "Cal Bur Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__calories_burned",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__calories_burned"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nCalories Burned:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Calories Burned:qk]>Æ cal"
+    },
+    {
+      "id": "ws.cal_bur_kpi",
+      "name": "Cal Bur KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_cal_bur"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nAvg. Latest Cal Bur:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest BMI (copy) (copy) (copy)_549157724182466570:qk]>Æ\nCal Bur Diff -:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Cal Bur Diff + (copy)_120752809754152985:qk]>Æ\nCal Bur No Diff:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Cal Bur Diff - (copy)_120752809754693658:qk]>Æ\nCal Bur Diff +:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Calculation_120752809750446087:qk]>Æ\nDate Period:\t<[Parameters].[Parameter 1]>"
+    },
+    {
+      "id": "ws.cal_int_bar",
+      "name": "Cal Int Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__calories_intake",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__calories_intake"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nCalories Intake:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Calories Intake:qk]> cal"
+    },
+    {
+      "id": "ws.cal_int_kpi",
+      "name": "Cal Int KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_cal_int"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nAvg. Latest Cal Int:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest BMI (copy) (copy) (copy) (copy)_549157724182474763:qk]>Æ\nCal Int Diff +:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:BMI Diff (copy 4)_120752809752244238:qk]>Æ\nCal Int Diff -:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Cal Int Diff + (copy)_120752809754152978:qk]>Æ\nCal Int No Diff:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Cal Int Diff - (copy)_120752809754693659:qk]>Æ\nDate Period:\t<[Parameters].[Parameter 1]>"
+    },
+    {
+      "id": "ws.h_w",
+      "name": "H/W",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__height_cm"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__latest_day",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nLatest Date:\tÆ\nHeight (cm):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Height (cm):qk]>Æ\nWeight (kg):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Weight (kg):qk]>"
+    },
+    {
+      "id": "ws.hr_bar",
+      "name": "HR Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__heart_rate_bpm",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__heart_rate_bpm"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          },
+          {
+            "field_id": "fld.ds_health_data__date"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nHeart Rate (bpm):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Heart Rate (bpm):qk]>"
+    },
+    {
+      "id": "ws.hr_kpi",
+      "name": "HR KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_hr_bpm"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nHR text:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809816248371:nk]>Æ\nAvg. Latest HR bpm:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest BMI (copy)_549157724183056396:qk]>"
+    },
+    {
+      "id": "ws.mood_bar",
+      "name": "Mood Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__mood_score_1_10",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__mood_score_1_10"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nMood Score (1-10):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Mood Score (1-10):qk]>"
+    },
+    {
+      "id": "ws.mood_kpi",
+      "name": "Mood KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_mood_score"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nAvg. Latest Mood Score:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest BMI (copy) (copy)_549157724183068685:qk]>Æ\nMood Score Diff +:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:BMI Diff (copy)_120752809752199176:qk]>Æ\nMood Score Diff -:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Mood Score Diff + (copy)_120752809754152983:qk]>Æ\nMood Score No Diff:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Mood Score Diff - (copy)_120752809754693661:qk]>Æ\nDate Period:\t<[Parameters].[Parameter 1]>"
+    },
+    {
+      "id": "ws.sleep_dur_bar",
+      "name": "Sleep Dur Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__sleep_duration_hours",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__sleep_duration_hours"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nSleep Duration:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Sleep Duration (hours):qk]> hrs"
+    },
+    {
+      "id": "ws.sleep_kpi",
+      "name": "Sleep KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_sleep_dur"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nAvg. Latest Sleep Dur:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest HR bpm (copy)_549157724183273486:qk]>Æ\nSleep Duration Diff +:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:BMI Diff (copy) (copy)_120752809752207369:qk]>Æ\nSleep Duration Diff -:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Sleep Duration Diff + (copy)_120752809754152982:qk]>Æ\nSleep Duration No Diff:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Sleep Duration Diff - (copy)_120752809754693662:qk]>Æ\nDate Period:\t<[Parameters].[Parameter 1]>"
+    },
+    {
+      "id": "ws.step_kpi",
+      "name": "Step KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_steps_count"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nAvg. Latest Steps Count:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest HR bpm (copy) (copy)_549157724183281679:qk]>Æ\nSteps Count Diff +:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:BMI Diff (copy) (copy) (copy 2)_120752809752219659:qk]>Æ\nSteps Count Diff -:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Steps Count Diff + (copy)_120752809754152981:qk]>Æ\nSteps Count No Diff:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Steps Count Diff - (copy)_120752809754693663:qk]>Æ\nDate Period:\t<[Parameters].[Parameter 1]>"
+    },
+    {
+      "id": "ws.steps_bar",
+      "name": "Steps Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__steps_count",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__steps_count"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nSteps Count:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Steps Count:qk]>Æ steps"
+    },
+    {
+      "id": "ws.table",
+      "name": "Table",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__date",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809862144054:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_120752809864192061:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_health_data__mood_score_1_10",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nDate:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Date:ok]>Æ\nBlood Pressure Diastolic (mmHg):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Blood Pressure Diastolic (mmHg):qk]>Æ\nBlood Pressure Systolic (mmHg):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Blood Pressure Systolic (mmHg):qk]>Æ\nBMI:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:BMI:qk]>Æ\nCalories Burned:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Calories Burned:qk]>Æ\nCalories Intake:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Calories Intake:qk]>Æ\nHeight (cm):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Height (cm):qk]>Æ\nWeight (kg):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Weight (kg):qk]>Æ\nAVG(0):\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[usr:Calculation_120752809862144054:qk]>"
+    },
+    {
+      "id": "ws.water_int_bar",
+      "name": "Water Int Bar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_health_data__water_intake_liters",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_health_data__date_period_selected",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_health_data__date_color"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__water_intake_liters"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_health_data__label"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_health_data__date"
+          },
+          {
+            "field_id": "fld.ds_health_data__date_period_selected_name"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_health_data__date_period",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date period selected (copy)_1048212858278899712:nk]><[federated.1jyyste1t0ly4q11ora8k1irmgfv].[attr:Date:ok]>Æ\n\nWater Intake: <[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Water Intake (liters):qk]>Æ L"
+    },
+    {
+      "id": "ws.water_intake_kpi",
+      "name": "Water Intake KPI",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1jyyste1t0ly4q11ora8k1irmgfv"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_health_data__shape"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_health_data__latest_water_intake"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Shape:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[none:Calculation_120752809812664368:nk]>Æ\nAvg. Latest Water Intake:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[avg:Latest Sleep Dur (copy)_549157724183420944:qk]>Æ\nWater Intake Diff +:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Cal Bur Diff (copy)_120752809753935889:qk]>Æ\nWater Intake Diff -:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Water Intake Diff + (copy)_120752809754152984:qk]>Æ\nWater Intake No Diff:\t<[federated.1jyyste1t0ly4q11ora8k1irmgfv].[sum:Water Intake Diff - (copy)_120752809754693664:qk]>Æ\nDate Period:\t<[Parameters].[Parameter 1]>"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.health_tracker_metrics",
+      "name": "Health Tracker Metrics",
+      "size": {
+        "width": 1400.0,
+        "height": 800.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "3",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#f5f5f5",
+            "children": [
+              {
+                "id": "160",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 13750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "5",
+                    "type": "layout-basic",
+                    "x": 0.0,
+                    "y": 0.0,
+                    "w": 49000.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#060d27",
+                    "children": [
+                      {
+                        "id": "89",
+                        "type": "layout-basic",
+                        "x": 0.0,
+                        "y": 0.0,
+                        "w": 34142.0,
+                        "h": 13750.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "HEALTH TRACKER",
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "159",
+                        "type": "layout-basic",
+                        "x": 34142.0,
+                        "y": 0.0,
+                        "w": 14858.0,
+                        "h": 13750.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "162",
+                    "type": "layout-basic",
+                    "x": 49000.0,
+                    "y": 0.0,
+                    "w": 51000.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "161",
+                        "type": "layout-basic",
+                        "x": 49000.0,
+                        "y": 0.0,
+                        "w": 6231.0,
+                        "h": 13750.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#060d27",
+                        "children": [
+                          {
+                            "id": "149",
+                            "type": "layout-basic",
+                            "x": 49000.0,
+                            "y": 0.0,
+                            "w": 6231.0,
+                            "h": 13750.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": "Download:",
+                            "background_color": null,
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "id": "163",
+                        "type": "layout-basic",
+                        "x": 55231.0,
+                        "y": 0.0,
+                        "w": 44769.0,
+                        "h": 13750.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#060d27",
+                        "children": [
+                          {
+                            "id": "118",
+                            "type": "layout-basic",
+                            "x": 55231.0,
+                            "y": 0.0,
+                            "w": 7286.0,
+                            "h": 13750.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": [
+                              {
+                                "id": "116",
+                                "type": "layout-basic",
+                                "x": 55231.0,
+                                "y": 0.0,
+                                "w": 3286.0,
+                                "h": 13750.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": []
+                              },
+                              {
+                                "id": "121",
+                                "type": "layout-basic",
+                                "x": 58517.0,
+                                "y": 0.0,
+                                "w": 714.0,
+                                "h": 13750.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": []
+                              },
+                              {
+                                "id": "117",
+                                "type": "layout-basic",
+                                "x": 59231.0,
+                                "y": 0.0,
+                                "w": 3286.0,
+                                "h": 13750.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": []
+                              }
+                            ]
+                          },
+                          {
+                            "id": "134",
+                            "type": "layout-basic",
+                            "x": 62517.0,
+                            "y": 0.0,
+                            "w": 14929.0,
+                            "h": 13750.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "139",
+                            "type": "layout-basic",
+                            "x": 77446.0,
+                            "y": 0.0,
+                            "w": 3572.0,
+                            "h": 13750.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "135",
+                            "type": "layout-basic",
+                            "x": 81018.0,
+                            "y": 0.0,
+                            "w": 714.0,
+                            "h": 13750.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "132",
+                            "type": "layout-basic",
+                            "x": 81732.0,
+                            "y": 0.0,
+                            "w": 3571.0,
+                            "h": 13750.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "120",
+                            "type": "layout-basic",
+                            "x": 85303.0,
+                            "y": 0.0,
+                            "w": 14643.0,
+                            "h": 13750.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": "<Full Name>Æ\nLogged inÆ ●",
+                            "background_color": null,
+                            "children": []
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "96",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 13750.0,
+                "w": 100000.0,
+                "h": 10000.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#060d27",
+                "children": [
+                  {
+                    "id": "153",
+                    "type": "layout-basic",
+                    "x": 0.0,
+                    "y": 13750.0,
+                    "w": 100000.0,
+                    "h": 6250.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "90",
+                        "type": "layout-basic",
+                        "x": 0.0,
+                        "y": 13750.0,
+                        "w": 37571.0,
+                        "h": 6250.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "144",
+                            "type": "layout-basic",
+                            "x": 0.0,
+                            "y": 13750.0,
+                            "w": 2285.0,
+                            "h": 6250.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "147",
+                            "type": "layout-basic",
+                            "x": 2285.0,
+                            "y": 13750.0,
+                            "w": 8571.0,
+                            "h": 6250.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": [
+                              {
+                                "id": "143",
+                                "type": "layout-basic",
+                                "x": 2285.0,
+                                "y": 13750.0,
+                                "w": 8571.0,
+                                "h": 5875.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": "Track Metrics",
+                                "background_color": null,
+                                "children": []
+                              },
+                              {
+                                "id": "148",
+                                "type": "layout-basic",
+                                "x": 2285.0,
+                                "y": 19625.0,
+                                "w": 8571.0,
+                                "h": 375.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": "#ffffff",
+                                "children": []
+                              }
+                            ]
+                          },
+                          {
+                            "id": "145",
+                            "type": "layout-basic",
+                            "x": 10856.0,
+                            "y": 13750.0,
+                            "w": 8571.0,
+                            "h": 6250.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": [
+                              {
+                                "id": "146",
+                                "type": "layout-basic",
+                                "x": 10856.0,
+                                "y": 13750.0,
+                                "w": 8571.0,
+                                "h": 6250.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": []
+                              }
+                            ]
+                          },
+                          {
+                            "id": "150",
+                            "type": "layout-basic",
+                            "x": 19427.0,
+                            "y": 13750.0,
+                            "w": 18144.0,
+                            "h": 6250.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "id": "155",
+                        "type": "layout-basic",
+                        "x": 37571.0,
+                        "y": 13750.0,
+                        "w": 57358.0,
+                        "h": 6250.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "154",
+                            "type": "layout-basic",
+                            "x": 37571.0,
+                            "y": 13750.0,
+                            "w": 27881.0,
+                            "h": 6250.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": [
+                              {
+                                "id": "142",
+                                "type": "worksheet",
+                                "x": 37571.0,
+                                "y": 13750.0,
+                                "w": 27881.0,
+                                "h": 6250.0,
+                                "direction": null,
+                                "worksheet_id": "ws.h_w",
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": []
+                              }
+                            ]
+                          },
+                          {
+                            "id": "157",
+                            "type": "layout-basic",
+                            "x": 65452.0,
+                            "y": 13750.0,
+                            "w": 29477.0,
+                            "h": 6250.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": [
+                              {
+                                "id": "156",
+                                "type": "layout-basic",
+                                "x": 65452.0,
+                                "y": 13750.0,
+                                "w": 4392.0,
+                                "h": 6250.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": [
+                                  {
+                                    "id": "91",
+                                    "type": "layout-basic",
+                                    "x": 65452.0,
+                                    "y": 13750.0,
+                                    "w": 4392.0,
+                                    "h": 6250.0,
+                                    "direction": null,
+                                    "worksheet_id": null,
+                                    "field_id": null,
+                                    "text_html": null,
+                                    "background_color": null,
+                                    "children": []
+                                  }
+                                ]
+                              },
+                              {
+                                "id": "165",
+                                "type": "layout-basic",
+                                "x": 69844.0,
+                                "y": 13750.0,
+                                "w": 25085.0,
+                                "h": 6250.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": [
+                                  {
+                                    "id": "158",
+                                    "type": "layout-basic",
+                                    "x": 69844.0,
+                                    "y": 13750.0,
+                                    "w": 14816.0,
+                                    "h": 6250.0,
+                                    "direction": null,
+                                    "worksheet_id": null,
+                                    "field_id": null,
+                                    "text_html": null,
+                                    "background_color": null,
+                                    "children": [
+                                      {
+                                        "id": "92",
+                                        "type": "layout-basic",
+                                        "x": 69844.0,
+                                        "y": 13750.0,
+                                        "w": 14816.0,
+                                        "h": 6250.0,
+                                        "direction": null,
+                                        "worksheet_id": null,
+                                        "field_id": null,
+                                        "text_html": "Select Date Period to change view",
+                                        "background_color": null,
+                                        "children": []
+                                      }
+                                    ]
+                                  },
+                                  {
+                                    "id": "166",
+                                    "type": "layout-basic",
+                                    "x": 84660.0,
+                                    "y": 13750.0,
+                                    "w": 10269.0,
+                                    "h": 6250.0,
+                                    "direction": null,
+                                    "worksheet_id": null,
+                                    "field_id": null,
+                                    "text_html": null,
+                                    "background_color": null,
+                                    "children": [
+                                      {
+                                        "id": "35",
+                                        "type": "layout-basic",
+                                        "x": 84660.0,
+                                        "y": 13750.0,
+                                        "w": 10269.0,
+                                        "h": 6250.0,
+                                        "direction": null,
+                                        "worksheet_id": null,
+                                        "field_id": null,
+                                        "text_html": null,
+                                        "background_color": "#d4f2ff",
+                                        "children": []
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "id": "164",
+                        "type": "layout-basic",
+                        "x": 94929.0,
+                        "y": 13750.0,
+                        "w": 5071.0,
+                        "h": 6250.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "93",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 23750.0,
+                "w": 100000.0,
+                "h": 6750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#060d27",
+                "children": []
+              },
+              {
+                "id": "4",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 30500.0,
+                "w": 100000.0,
+                "h": 65500.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#f6f7f9",
+                "children": []
+              },
+              {
+                "id": "113",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 96000.0,
+                "w": 100000.0,
+                "h": 4000.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "18",
+            "type": "layout-basic",
+            "x": 2071.0,
+            "y": 21250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "33",
+                "type": "layout-basic",
+                "x": 2499.0,
+                "y": 22000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "124",
+                    "type": "layout-basic",
+                    "x": 2499.0,
+                    "y": 22000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "37",
+                    "type": "layout-basic",
+                    "x": 3285.0,
+                    "y": 22000.0,
+                    "w": 24286.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "BLOOD PRESSURE",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "98",
+                    "type": "layout-basic",
+                    "x": 27571.0,
+                    "y": 22000.0,
+                    "w": 4929.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "31",
+                "type": "layout-basic",
+                "x": 2499.0,
+                "y": 28125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "36",
+                    "type": "worksheet",
+                    "x": 2499.0,
+                    "y": 28125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.bp_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "34",
+                    "type": "worksheet",
+                    "x": 14642.0,
+                    "y": 28125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.bp_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "19",
+            "type": "layout-basic",
+            "x": 34143.0,
+            "y": 21250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "40",
+                "type": "layout-basic",
+                "x": 34571.0,
+                "y": 22000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "129",
+                    "type": "layout-basic",
+                    "x": 34571.0,
+                    "y": 22000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "43",
+                    "type": "layout-basic",
+                    "x": 35357.0,
+                    "y": 22000.0,
+                    "w": 24072.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "HEART RATE",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "99",
+                    "type": "layout-basic",
+                    "x": 59429.0,
+                    "y": 22000.0,
+                    "w": 5143.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "38",
+                "type": "layout-basic",
+                "x": 34571.0,
+                "y": 28125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "42",
+                    "type": "worksheet",
+                    "x": 34571.0,
+                    "y": 28125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.hr_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "41",
+                    "type": "worksheet",
+                    "x": 46714.0,
+                    "y": 28125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.hr_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "20",
+            "type": "layout-basic",
+            "x": 34143.0,
+            "y": 46250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "52",
+                "type": "layout-basic",
+                "x": 34571.0,
+                "y": 47000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "128",
+                    "type": "layout-basic",
+                    "x": 34571.0,
+                    "y": 47000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "55",
+                    "type": "layout-basic",
+                    "x": 35357.0,
+                    "y": 47000.0,
+                    "w": 23572.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "CALORIE INTAKE",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "102",
+                    "type": "layout-basic",
+                    "x": 58929.0,
+                    "y": 47000.0,
+                    "w": 5643.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "50",
+                "type": "layout-basic",
+                "x": 34571.0,
+                "y": 53125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "54",
+                    "type": "worksheet",
+                    "x": 34571.0,
+                    "y": 53125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.cal_int_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "53",
+                    "type": "worksheet",
+                    "x": 46714.0,
+                    "y": 53125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.cal_int_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "21",
+            "type": "layout-basic",
+            "x": 2071.0,
+            "y": 46250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "46",
+                "type": "layout-basic",
+                "x": 2499.0,
+                "y": 47000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "127",
+                    "type": "layout-basic",
+                    "x": 2499.0,
+                    "y": 47000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "49",
+                    "type": "layout-basic",
+                    "x": 3285.0,
+                    "y": 47000.0,
+                    "w": 23715.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "CALORIES BURNED",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "101",
+                    "type": "layout-basic",
+                    "x": 27000.0,
+                    "y": 47000.0,
+                    "w": 5500.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "44",
+                "type": "layout-basic",
+                "x": 2499.0,
+                "y": 53125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "48",
+                    "type": "worksheet",
+                    "x": 2499.0,
+                    "y": 53125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.cal_bur_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "47",
+                    "type": "worksheet",
+                    "x": 14642.0,
+                    "y": 53125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.cal_bur_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "23",
+            "type": "layout-basic",
+            "x": 66643.0,
+            "y": 46250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "58",
+                "type": "layout-basic",
+                "x": 67071.0,
+                "y": 47000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "131",
+                    "type": "layout-basic",
+                    "x": 67071.0,
+                    "y": 47000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "61",
+                    "type": "layout-basic",
+                    "x": 67857.0,
+                    "y": 47000.0,
+                    "w": 23358.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "TOTAL STEPS",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "103",
+                    "type": "layout-basic",
+                    "x": 91215.0,
+                    "y": 47000.0,
+                    "w": 5857.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "56",
+                "type": "layout-basic",
+                "x": 67071.0,
+                "y": 53125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "60",
+                    "type": "worksheet",
+                    "x": 67071.0,
+                    "y": 53125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.step_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "59",
+                    "type": "worksheet",
+                    "x": 79214.0,
+                    "y": 53125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.steps_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "24",
+            "type": "layout-basic",
+            "x": 34143.0,
+            "y": 71250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "70",
+                "type": "layout-basic",
+                "x": 34571.0,
+                "y": 72000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "125",
+                    "type": "layout-basic",
+                    "x": 34571.0,
+                    "y": 72000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "73",
+                    "type": "layout-basic",
+                    "x": 35357.0,
+                    "y": 72000.0,
+                    "w": 24286.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "SLEEP DURATION",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "105",
+                    "type": "layout-basic",
+                    "x": 59643.0,
+                    "y": 72000.0,
+                    "w": 4929.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "68",
+                "type": "layout-basic",
+                "x": 34571.0,
+                "y": 78125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "72",
+                    "type": "worksheet",
+                    "x": 34571.0,
+                    "y": 78125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.sleep_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "71",
+                    "type": "worksheet",
+                    "x": 46714.0,
+                    "y": 78125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.sleep_dur_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "25",
+            "type": "layout-basic",
+            "x": 2071.0,
+            "y": 71250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "64",
+                "type": "layout-basic",
+                "x": 2499.0,
+                "y": 72000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "126",
+                    "type": "layout-basic",
+                    "x": 2499.0,
+                    "y": 72000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "67",
+                    "type": "layout-basic",
+                    "x": 3285.0,
+                    "y": 72000.0,
+                    "w": 23357.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "WATER INTAKE",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "106",
+                    "type": "layout-basic",
+                    "x": 26642.0,
+                    "y": 72000.0,
+                    "w": 5858.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "62",
+                "type": "layout-basic",
+                "x": 2499.0,
+                "y": 78125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "66",
+                    "type": "worksheet",
+                    "x": 2499.0,
+                    "y": 78125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.water_intake_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "65",
+                    "type": "worksheet",
+                    "x": 14642.0,
+                    "y": 78125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.water_int_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "26",
+            "type": "layout-basic",
+            "x": 66643.0,
+            "y": 21250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "28",
+                "type": "layout-basic",
+                "x": 67071.0,
+                "y": 22000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "130",
+                    "type": "layout-basic",
+                    "x": 67071.0,
+                    "y": 22000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "29",
+                    "type": "layout-basic",
+                    "x": 67857.0,
+                    "y": 22000.0,
+                    "w": 24357.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "BODY MASS INDEX (BMI)",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "100",
+                    "type": "layout-basic",
+                    "x": 92214.0,
+                    "y": 22000.0,
+                    "w": 4858.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "8",
+                "type": "layout-basic",
+                "x": 67071.0,
+                "y": 28125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "17",
+                    "type": "worksheet",
+                    "x": 67357.0,
+                    "y": 28625.0,
+                    "w": 12143.0,
+                    "h": 15125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.bmi_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "15",
+                    "type": "worksheet",
+                    "x": 79500.0,
+                    "y": 28625.0,
+                    "w": 17283.0,
+                    "h": 15125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.bmi_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "27",
+            "type": "layout-basic",
+            "x": 66643.0,
+            "y": 71250.0,
+            "w": 30857.0,
+            "h": 23750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "76",
+                "type": "layout-basic",
+                "x": 67071.0,
+                "y": 72000.0,
+                "w": 30001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "75",
+                    "type": "layout-basic",
+                    "x": 67071.0,
+                    "y": 72000.0,
+                    "w": 786.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0e163c",
+                    "children": []
+                  },
+                  {
+                    "id": "79",
+                    "type": "layout-basic",
+                    "x": 67857.0,
+                    "y": 72000.0,
+                    "w": 23572.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "MOOD SCORE",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "104",
+                    "type": "layout-basic",
+                    "x": 91429.0,
+                    "y": 72000.0,
+                    "w": 5643.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "74",
+                "type": "layout-basic",
+                "x": 67071.0,
+                "y": 78125.0,
+                "w": 30001.0,
+                "h": 16125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "78",
+                    "type": "worksheet",
+                    "x": 67071.0,
+                    "y": 78125.0,
+                    "w": 12143.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.mood_kpi",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "77",
+                    "type": "worksheet",
+                    "x": 79214.0,
+                    "y": 78125.0,
+                    "w": 17857.0,
+                    "h": 16125.0,
+                    "direction": null,
+                    "worksheet_id": "ws.mood_bar",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "137",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 21250.0,
+            "w": 100000.0,
+            "h": 78750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "138",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 21250.0,
+                "w": 66071.0,
+                "h": 78750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#ffffffce",
+                "children": []
+              },
+              {
+                "id": "136",
+                "type": "layout-basic",
+                "x": 66071.0,
+                "y": 21250.0,
+                "w": 33929.0,
+                "h": 78750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": "DESIGNED AND DEVELOPED BY TOBILOBA BABAJIDEÆ\nINSPIRED BY FIRMAN JP FOR VECTORAÆ\n\nOVERVIEWÆ\nThe Health Tracker Dashboard is designed to help individuals monitor and manage their health metrics over a 2-year period, providing a comprehensive view of their daily health data. This tool visualizes various health indicators, allowing users to track changes and identify patterns over time. The dataset includes a range of health metrics generated to mimic real-life data distributions, ensuring realistic and meaningful insights.Æ\n\nFIELD DETAILSÆ\nThe dataset spans from January 1, 2022, to December 31, 2023, comprising daily records of various health metrics. The columns in the dataset and their respective distributions are as follows:Æ\n● Date: Date for each data entryÆ\n● Weight (kg): Body weight measured in kilogramsÆ\n● Height (cm): height measured in centimetersÆ\n● BMI: Body Mass Index calculated from weight and heightÆ\n● Calories Intake: Daily caloric consumption in caloriesÆ\n● Calories Burned: Daily physical activity in caloriesÆ\n● Sleep Duration (hours): Total number of hours spent sleepingÆ\n● Steps Count: Daily number of steps takenÆ\n● Heart Rate (bpm): Resting heart rate in beats per minuteÆ\n● Blood Pressure Systolic (mmHg): Standard systolic blood pressure in mmHgÆ\n● Blood Pressure Diastolic (mmHg): Standard diastolic blood pressure in mmHgÆ\n● Mood Score (1-10): Daily mood assessment taking values between 1 and 10Æ\n● Water Intake (liters): Total liters of water consumedÆ\n\n",
+                "background_color": "#dbdfec",
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      "actions": []
+    },
+    {
+      "id": "dash.health_tracker_table",
+      "name": "Health Tracker Table",
+      "size": {
+        "width": 1400.0,
+        "height": 800.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "3",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#f5f5f5",
+            "children": [
+              {
+                "id": "5",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 13750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#060d27",
+                "children": [
+                  {
+                    "id": "89",
+                    "type": "layout-basic",
+                    "x": 0.0,
+                    "y": 0.0,
+                    "w": 43071.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "HEALTH TRACKER",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "152",
+                    "type": "layout-basic",
+                    "x": 43071.0,
+                    "y": 0.0,
+                    "w": 22429.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "118",
+                    "type": "layout-basic",
+                    "x": 65500.0,
+                    "y": 0.0,
+                    "w": 8429.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "121",
+                        "type": "layout-basic",
+                        "x": 65500.0,
+                        "y": 0.0,
+                        "w": 8429.0,
+                        "h": 13750.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "134",
+                    "type": "layout-basic",
+                    "x": 73929.0,
+                    "y": 0.0,
+                    "w": 3571.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "139",
+                    "type": "layout-basic",
+                    "x": 77500.0,
+                    "y": 0.0,
+                    "w": 3572.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "135",
+                    "type": "layout-basic",
+                    "x": 81072.0,
+                    "y": 0.0,
+                    "w": 714.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "132",
+                    "type": "layout-basic",
+                    "x": 81786.0,
+                    "y": 0.0,
+                    "w": 3571.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "120",
+                    "type": "layout-basic",
+                    "x": 85357.0,
+                    "y": 0.0,
+                    "w": 14643.0,
+                    "h": 13750.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "<Full Name>Æ\nLogged inÆ ●",
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "96",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 13750.0,
+                "w": 100000.0,
+                "h": 10000.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#060d27",
+                "children": [
+                  {
+                    "id": "90",
+                    "type": "layout-basic",
+                    "x": 0.0,
+                    "y": 13750.0,
+                    "w": 100000.0,
+                    "h": 6250.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "144",
+                        "type": "layout-basic",
+                        "x": 0.0,
+                        "y": 13750.0,
+                        "w": 2285.0,
+                        "h": 6250.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "151",
+                        "type": "layout-basic",
+                        "x": 2285.0,
+                        "y": 13750.0,
+                        "w": 8571.0,
+                        "h": 6250.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "145",
+                        "type": "layout-basic",
+                        "x": 10856.0,
+                        "y": 13750.0,
+                        "w": 8571.0,
+                        "h": 6250.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "146",
+                            "type": "layout-basic",
+                            "x": 10856.0,
+                            "y": 13750.0,
+                            "w": 8571.0,
+                            "h": 5875.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "148",
+                            "type": "layout-basic",
+                            "x": 10856.0,
+                            "y": 19625.0,
+                            "w": 8571.0,
+                            "h": 375.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": "#ffffff",
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "id": "91",
+                        "type": "layout-basic",
+                        "x": 19427.0,
+                        "y": 13750.0,
+                        "w": 80573.0,
+                        "h": 6250.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "93",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 23750.0,
+                "w": 100000.0,
+                "h": 6750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#060d27",
+                "children": []
+              },
+              {
+                "id": "4",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 30500.0,
+                "w": 100000.0,
+                "h": 69500.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#f6f7f9",
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "18",
+            "type": "layout-basic",
+            "x": 2071.0,
+            "y": 21250.0,
+            "w": 95857.0,
+            "h": 75000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#ffffff",
+            "children": [
+              {
+                "id": "33",
+                "type": "layout-basic",
+                "x": 2499.0,
+                "y": 22000.0,
+                "w": 95001.0,
+                "h": 6125.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "153",
+                    "type": "layout-basic",
+                    "x": 2499.0,
+                    "y": 22000.0,
+                    "w": 95001.0,
+                    "h": 6125.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": " DATE                  BLOOD PRES.          HEART RATE              HEIGHT                    WEIGHT                      BMI                  CAL. INTAKE           CAL. BURNED             STEPS             SLEEP DUR.              WATER INTAKE           MOOD SCORE",
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "150",
+                "type": "worksheet",
+                "x": 2499.0,
+                "y": 28125.0,
+                "w": 95001.0,
+                "h": 67375.0,
+                "direction": null,
+                "worksheet_id": "ws.table",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "137",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 21250.0,
+            "w": 100000.0,
+            "h": 78750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "138",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 21250.0,
+                "w": 66071.0,
+                "h": 78750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#ffffffce",
+                "children": []
+              },
+              {
+                "id": "136",
+                "type": "layout-basic",
+                "x": 66071.0,
+                "y": 21250.0,
+                "w": 33929.0,
+                "h": 78750.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": "DESIGNED AND DEVELOPED BY TOBILOBA BABAJIDEÆ\nINSPIRED BY FIRMAN JP FOR VECTORAÆ\n\nOVERVIEWÆ\nThe Health Tracker Dashboard is designed to help individuals monitor and manage their health metrics over a 2-year period, providing a comprehensive view of their daily health data. This tool visualizes various health indicators, allowing users to track changes and identify patterns over time. The dataset includes a range of health metrics generated to mimic real-life data distributions, ensuring realistic and meaningful insights.Æ\n\nFIELD DETAILSÆ\nThe dataset spans from January 1, 2022, to December 31, 2023, comprising daily records of various health metrics. The columns in the dataset and their respective distributions are as follows:Æ\n● Date: Date for each data entryÆ\n● Weight (kg): Body weight measured in kilogramsÆ\n● Height (cm): height measured in centimetersÆ\n● BMI: Body Mass Index calculated from weight and heightÆ\n● Calories Intake: Daily caloric consumption in caloriesÆ\n● Calories Burned: Daily physical activity in caloriesÆ\n● Sleep Duration (hours): Total number of hours spent sleepingÆ\n● Steps Count: Daily number of steps takenÆ\n● Heart Rate (bpm): Resting heart rate in beats per minuteÆ\n● Blood Pressure Systolic (mmHg): Standard systolic blood pressure in mmHgÆ\n● Blood Pressure Diastolic (mmHg): Standard diastolic blood pressure in mmHgÆ\n● Mood Score (1-10): Daily mood assessment taking values between 1 and 10Æ\n● Water Intake (liters): Total liters of water consumedÆ\n\n",
+                "background_color": "#dbdfec",
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      "actions": []
+    }
+  ],
+  "theme": {
+    "palette_hexes": [
+      "#000000"
+    ],
+    "font_family": "Roboto",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.health_data",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_bmi",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_cal_int",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_cal_bur",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_bp_sys",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_mood_score",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_bp_dias",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_hr_bpm",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__prior_cal_bur",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__prior_cal_int",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_steps_count",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_sleep_dur",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__prior_mood_score",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__latest_water_intake",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__prior_sleep_dur",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__prior_steps_count",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__prior_water_intake",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_health_data__health_data_csv",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809862144054:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.table",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_120752809864192061:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "semantic-model",
+      "issue": "Built local PBIP semantic model fabric/HealthTracker.SemanticModel: 2 tables (Health Data fact 730 rows import; Date Period disconnected slicer), 41 measures, 22 columns (13 real + 7 calc + 2 slicer). Deserializes clean via TmdlSerializer; measure names model-wide unique; no measure==same-table-column collision; all DAX bracket refs resolve.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__latest_*",
+      "issue": "10 FIXED-LOD 'Latest *' fields -> measures. DAX: VAR _d=[Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[col]), FILTER(ALL('Health Data'),'Health Data'[Date]=_d)). AVG for all except Latest Water Intake=SUM (single-row grain so identical). Verified numerically against CSV max-date (2023-12-31) two independent ways (Tableau-semantics + DAX-mechanics replica), all agree: e.g. Latest BMI=22.86861, Latest Steps Count=13689.97, Latest Water Intake=2.05.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__latest_date",
+      "issue": "'Latest Date' bare-'{ MAX([Date]) }' implicit-FIXED LOD -> hidden helper measure CALCULATE(MAX('Health Data'[Date]),ALL('Health Data')), referenced by all Latest/Prior. PARSER GAP: bare '{ MAX(...) }' (no FIXED keyword) was NOT flagged is_lod=true (only '{FIXED...}' detected); also affects Prior Week/Month/Year and the inner max of Latest Week/Month/Year columns.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__prior_*",
+      "issue": "6 FIXED-LOD 'Prior *' fields -> measures, parameter-driven prior date via SWITCH([Date Period Value]): Last Week=maxDate-7, Last Month=EDATE(-1), Last Year=EDATE(-12). SUM for Cal Bur/Cal Int/Steps, AVG for Mood/Sleep/Water. Tableau 'Prior Week/Month/Year' datetime fields inlined into the _p VAR (not separate measures). Verified vs CSV for all 3 periods (e.g. Last Week 2023-12-24: Prior Steps Count=13289.64; Last Month 2023-11-30: Prior Cal Int=2312.75).",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__*_diff",
+      "issue": "18 'Diff +/ - / No Diff' fields (6 metrics x 3) -> measures VAR _l=[Latest X] VAR _p=[Prior X] RETURN IF(_l>_p,_l-_p) / IF(_l<_p,...) / IF(_l=_p,...). Operands recovered via internal-name->caption substitution (raw formulas carry scrambled Ctrl-drag copy names, e.g. 'Latest HR bpm (copy)(copy)' actually resolves to 'Latest Steps Count'). Exact captions kept incl. +/- suffixes.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__bmi_text__hr_text__bp_text",
+      "issue": "3 status-text fields -> measures over Latest values: BMI text SWITCH(<=18.4/<=24.9/else), HR text (<60/<=100/>100/else), BP text (AHA compound SWITCH(TRUE())). Verified: BMI text='Normal weight', HR text='Normal Heart Rate', BP text='Stage 1 Hypertension'. HR text final ELSE 'Invalid Heart Rate' is an unreachable dead branch (any real number hits one of the first three) - translated faithfully; likely source-workbook artifact.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "param.date_period",
+      "issue": "Tableau parameter 'Date Period' (Last Week/Month/Year, default Last Week) -> disconnected single-column slicer table 'Date Period' + measure [Date Period Value]=SELECTEDVALUE(...,\"Last Week\"). Parameter-equality/slicer idiom; not a Field Parameter, not relationship-bound.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__date_period",
+      "issue": "Tableau boolean field 'Date Period' (period membership filter) -> measure RENAMED to 'In Selected Period' to avoid collision with the 'Date Period' slicer table/column. Returns 1/0 per parameter-selected latest period. NOTE for report_build: a measure visual-filter restricts categories not raw bars - for exact per-bar row restriction, filter on the boolean calc columns 'Latest Week'/'Latest Month'/'Latest Year' directly (e.g. via bookmarks).",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__date_color__label",
+      "issue": "Tableau boolean 'Date Color' (color encoding) -> measure 'Highlight Latest' (1 highlights latest bar; Last Week/Month->Latest Day, Last Year->Latest Month). Tableau 'Label' field (IF [Date Color] THEN 'Yes') CONSOLIDATED into it - report shows data label where Highlight Latest=1.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__date_period_selected",
+      "issue": "Tableau 'Date period selected' (axis; DATENAME day for Week/Month, month for Year) -> two calc columns 'Day Of Month' (int) + 'Month Name' (string, sortByColumn Month Number). 'Date period selected name' (UPPER(month)) CONSOLIDATED into 'Month Name' (report uppercases at visual level).",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__latest_day_week_month_year",
+      "issue": "4 boolean 'Latest Day/Week/Month/Year' -> calc COLUMNS (row-level, filter-independent via MAXX(ALL('Health Data'),[Date])). Faithful 'last COMPLETE period' semantics: Latest Week=Dec 24-30 2023 EXCLUDES maxDate Sun 2023-12-31 (Tableau DATETRUNC('week',maxDate+1)-1wk); Latest Month=Dec 2023 and Latest Year=2023 both INCLUDE maxDate. Verified membership from CSV.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__shape",
+      "issue": "Tableau 'Shape' field (constant 'S', shape-shelf marker) -> EXCLUDED from the semantic model (pure Tableau viz-encoding artifact; handled by PBI visual formatting).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "col.ds_health_data__health_data_csv",
+      "issue": "'Health data.csv' data_type=table pseudo-column (Tableau relationship-model object-id anchor, internal_name [__tableau_internal_object_id__]...) -> EXCLUDED (not real data; already parser-flagged).",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "parser",
+      "issue": "PARSER GAP (report for consolidation): Tableau internal field names are systematically scrambled by Ctrl-drag duplication (e.g. a Diff operand internally '[Latest HR bpm (copy)(copy)_...]' resolves to caption 'Latest Steps Count'). referenced_fields captures identity but NOT operand order/position; recovered by substituting each [internal_name] token with its resolved caption before translating. Recommend the parser emit a resolved/canonical formula.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "dashboard.health_tracker_metrics__health_tracker_table",
+      "issue": "REPORT-LAYER capability note: one Tableau parameter drives BOTH (a) period row-restriction AND (b) axis granularity swap (day<->month) on the 9 trend bars. Power BI cannot swap an axis column by a slicer selection - report_build must implement (b) via bookmarks/per-page filters selecting the correct boolean-column filter + axis field (Day Of Month for Week/Month, Month Name for Year). KPI tiles work directly off the slicer (Prior/Diff read [Date Period Value]).",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "validate",
+      "issue": "Live in-engine EVALUATE not executed at semantic_build: environment has no headless ADOMD/query client (no ADOMD, pyadomd, pythonnet, or consumption skill) and two concurrent agent Power BI Desktop/msmdsrv instances (parallel batch) must not be disturbed. Numeric ground-truth done instead via two independent Python codings (Tableau-semantics + literal DAX-mechanics replica) agreeing to 1e-9 for all 10 Latest and 6x3 Prior values. First live-engine run deferred to report_build/validate against these documented expected values.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "fld.ds_health_data__latest_water_intake__prior_water_intake",
+      "issue": "Source aggregation inconsistency: 'Latest Water Intake' uses SUM but 'Prior Water Intake' uses AVG in the Tableau formulas (single-row-per-date grain so numerically identical, =2.05 latest). Each translated faithfully to its own source aggregation rather than 'fixing' the mismatch.",
+      "severity": "low",
+      "stage": "semantic_build"
+    }
+  ]
+}
