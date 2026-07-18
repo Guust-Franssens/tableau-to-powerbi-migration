@@ -1,0 +1,43 @@
+/// Disconnected slicer for Tableau parameter 'View data for:' ([Parameter 2], list, default 'World'). Drives World/Region/Country granularity of the Pivoted views.
+table 'View data for'
+	lineageTag: b27e86f5-1138-5d0d-8424-6334392dd1e4
+
+	/// Current slicer selection on 'View data for'[View data for], defaulting to Tableau's current value when nothing is selected.
+	measure 'View data for Value' = SELECTEDVALUE('View data for'[View data for], "World")
+		lineageTag: 25ca65d0-b9dd-5a49-809f-44a0b11184d5
+		displayFolder: Parameter
+
+	/// Tableau [DZV: World] = [Parameters].[Parameter 2]='World'.
+	measure 'DZV World' = SELECTEDVALUE('View data for'[View data for], "World") = "World"
+		lineageTag: a3463e8a-de8a-5326-93ab-7d855be79cc8
+		displayFolder: View toggles
+
+	/// Tableau [DZV: Region] = [Parameters].[Parameter 2]='Region'.
+	measure 'DZV Region' = SELECTEDVALUE('View data for'[View data for], "World") = "Region"
+		lineageTag: c05b6532-719e-5a4d-b4f0-4f8a5f4075bc
+		displayFolder: View toggles
+
+	/// Tableau [DZV: Country] = [Parameters].[Parameter 2]='Country'.
+	measure 'DZV Country' = SELECTEDVALUE('View data for'[View data for], "World") = "Country"
+		lineageTag: 877c2eda-e522-5d8f-a11d-299f78e3e630
+		displayFolder: View toggles
+
+	column 'View data for'
+		dataType: string
+		lineageTag: 72d0a415-6c1f-570b-ada5-c00a434a0c0c
+		summarizeBy: none
+		sourceColumn: View data for
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'View data for' = m
+		mode: import
+		source =
+				let
+				    Source = {"World", "Region", "Country"},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"View data for"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"View data for", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

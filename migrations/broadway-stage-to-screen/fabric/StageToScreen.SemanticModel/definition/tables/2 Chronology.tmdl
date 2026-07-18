@@ -1,0 +1,93 @@
+/// Event/timeline fact (106 rows) - Broadway start/end + movie premiere dates per show. Key [Broadway Show] relates many-to-one to '1 Films'[Title]. Type in {Theater,Movie}.
+table '2 Chronology'
+	lineageTag: 6bd8695c-e799-5f3f-b7df-2b51c44895a2
+
+	/// Conditional FIXED LOD {FIXED [Broadway Show]: MAX(IIF([Type]='Movie',[Date],NULL))} -> CALCULATE(MAX,...,ALLEXCEPT([Broadway Show]),Type='Movie'). GROUND-TRUTHED.
+	measure 'Latest Movie Premiere' = CALCULATE(MAX('2 Chronology'[Date]), ALLEXCEPT('2 Chronology', '2 Chronology'[Broadway Show]), '2 Chronology'[Type] = "Movie")
+		formatString: General Date
+		lineageTag: ed3213bb-e5da-5472-923f-50a5fa329bb1
+
+	column 'Broadway Show'
+		dataType: string
+		lineageTag: 81ea144c-4abf-5d6b-a72f-e091e1e19653
+		summarizeBy: none
+		sourceColumn: Broadway Show
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'NYC Broadway Index'
+		dataType: int64
+		lineageTag: fb5ae026-5cb7-58b8-8a6a-30ebdac5bcb0
+		summarizeBy: none
+		sourceColumn: NYC Broadway Index
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Date'
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 57c4650a-90ac-54ea-92c6-2f8bf8f3dd4d
+		summarizeBy: none
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Event'
+		dataType: string
+		lineageTag: da39e176-d0cc-5f23-861f-9f5e3b51eff2
+		summarizeBy: none
+		sourceColumn: Event
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Movie Name'
+		dataType: string
+		lineageTag: fb47f175-ce44-5b8d-9d1a-91a6dd00a723
+		summarizeBy: none
+		sourceColumn: Movie Name
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Type'
+		dataType: string
+		lineageTag: bdd9b59a-596f-54ed-be8c-d0a4cccbbadc
+		summarizeBy: none
+		sourceColumn: Type
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau IF [NYC Broadway Index]=1 'Original' ELSEIF >=2 'Revival' ELSE NULL.
+	column 'Original or Revival' = SWITCH(TRUE(), '2 Chronology'[NYC Broadway Index] = 1, "Original", '2 Chronology'[NYC Broadway Index] >= 2, "Revival", BLANK())
+		dataType: string
+		lineageTag: c73a8d2c-980f-5ab9-9453-34271714a7eb
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Movie Name or Original] = IFNULL([Movie Name],[Broadway Show]).
+	column 'Movie Name or Original' = COALESCE('2 Chronology'[Movie Name], '2 Chronology'[Broadway Show])
+		dataType: string
+		lineageTag: d3badfb4-e6da-594f-8abd-71f6786b0f06
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Chicago Note] = IIF([Broadway Show]='Chicago' AND [NYC Broadway Index]=2, <3-line note>, NULL). Line breaks preserved via UNICHAR(10).
+	column 'Chicago Note' = IF('2 Chronology'[Broadway Show] = "Chicago" && '2 Chronology'[NYC Broadway Index] = 2, "Note that 31 Oct 2024 was not the show end date." & UNICHAR(10) & "It was merely the latest performance active date " & UNICHAR(10) & "that I knew when creating the infographic.", BLANK())
+		dataType: string
+		lineageTag: 544a72ac-441b-5e85-b76d-c5786d6d4457
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition '2 Chronology' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.2_chronology.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Broadway Show", type text}, {"NYC Broadway Index", Int64.Type}, {"Date", type datetime}, {"Event", type text}, {"Movie Name", type text}, {"Type", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

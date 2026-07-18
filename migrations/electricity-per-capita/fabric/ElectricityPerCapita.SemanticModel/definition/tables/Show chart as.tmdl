@@ -1,0 +1,43 @@
+/// Disconnected slicer for Tableau parameter 'Show chart as:' ([Parameter 1], list, default 'Tree'). Drives which view (tree / table / table-no-region) the dashboard shows.
+table 'Show chart as'
+	lineageTag: 20fbb64c-c666-559d-962e-17410acb9507
+
+	/// Current slicer selection on 'Show chart as'[Show chart as], defaulting to Tableau's current value when nothing is selected.
+	measure 'Show chart as Value' = SELECTEDVALUE('Show chart as'[Show chart as], "Tree")
+		lineageTag: 2e0957f2-4aa1-5627-80e1-9b7cfdbf42cc
+		displayFolder: Parameter
+
+	/// Tableau [DZV: show tree map] = [Parameters].[Parameter 1]='Tree'. A view-mode boolean; use for visual show/hide (or replace with a bookmark).
+	measure 'DZV show tree map' = SELECTEDVALUE('Show chart as'[Show chart as], "Tree") = "Tree"
+		lineageTag: 837491f9-01ac-578f-bc80-3a7fb662da65
+		displayFolder: View toggles
+
+	/// Tableau [DZV: table with region] = [Parameters].[Parameter 1]='Table'.
+	measure 'DZV table with region' = SELECTEDVALUE('Show chart as'[Show chart as], "Tree") = "Table"
+		lineageTag: e1ae0668-6a21-54c5-8e8f-c3c0336c4eef
+		displayFolder: View toggles
+
+	/// Tableau [DZV: table without region] = [Parameters].[Parameter 1]='Table no region'.
+	measure 'DZV table without region' = SELECTEDVALUE('Show chart as'[Show chart as], "Tree") = "Table no region"
+		lineageTag: 014f7a1a-8386-5362-9e85-989109946ab1
+		displayFolder: View toggles
+
+	column 'Show chart as'
+		dataType: string
+		lineageTag: 0baf8994-9d98-52fb-b74c-de2eda2c2bf2
+		summarizeBy: none
+		sourceColumn: Show chart as
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Show chart as' = m
+		mode: import
+		source =
+				let
+				    Source = {"Tree", "Table", "Table no region"},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Show chart as"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Show chart as", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

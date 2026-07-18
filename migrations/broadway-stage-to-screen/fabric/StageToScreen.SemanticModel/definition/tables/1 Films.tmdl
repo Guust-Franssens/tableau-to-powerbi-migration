@@ -1,0 +1,213 @@
+/// Film master dimension (22 rows, key [Title]). Source: Tableau extract '1 Films'. Hub of the model - the 3 fact tables relate many-to-one to [Title]. Physical trellis coords (Row/Column, Ticket|Hex) are materialized layout data kept as-is.
+table '1 Films'
+	lineageTag: 1a1f7cda-45fa-5759-8096-98fb1fddfe60
+
+	/// Row count of the film dimension (the infographic's '22 musicals' KPI).
+	measure 'Film Count' = COUNTROWS('1 Films')
+		formatString: #,##0
+		lineageTag: 26d56981-1b1d-593a-af0b-6346ce00f589
+
+	column 'Title'
+		dataType: string
+		lineageTag: cd02e7c2-07ba-5092-b3e0-64481658665c
+		summarizeBy: none
+		sourceColumn: Title
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Watched?'
+		dataType: string
+		lineageTag: e8d81e47-5de2-51c3-ba58-e498c5730764
+		summarizeBy: none
+		sourceColumn: Watched?
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'World Premiere Date'
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: c0e066de-92ae-51fc-b06f-9633ab076a10
+		summarizeBy: none
+		sourceColumn: World Premiere Date
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Row, Ticket'
+		dataType: int64
+		lineageTag: c017b78a-3921-58e3-9ee3-6621e68cbc2c
+		summarizeBy: none
+		sourceColumn: Row, Ticket
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Column, Ticket'
+		dataType: int64
+		lineageTag: 6790868e-50e6-5c44-84e8-52a12ced7bfa
+		summarizeBy: none
+		sourceColumn: Column, Ticket
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Row, Hex'
+		dataType: int64
+		lineageTag: b6fe96e7-e07f-548b-8f4a-1f519993e43a
+		summarizeBy: none
+		sourceColumn: Row, Hex
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Column, Hex'
+		dataType: double
+		lineageTag: 4d68c94a-e033-5274-9c55-bda196890a3b
+		summarizeBy: none
+		sourceColumn: Column, Hex
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Best Picture'
+		dataType: string
+		lineageTag: e3ab5daa-defd-50ca-b74f-d5c2ae745b3d
+		summarizeBy: none
+		sourceColumn: Best Picture
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Certificate (US)'
+		dataType: string
+		lineageTag: 62abaa49-b694-505d-a96a-280339184f32
+		summarizeBy: none
+		sourceColumn: Certificate (US)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Genres (1st)'
+		dataType: string
+		lineageTag: 2684b1d0-d70a-5198-8a77-9aa25bf4000d
+		summarizeBy: none
+		sourceColumn: Genres (1st)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Genres (2nd)'
+		dataType: string
+		lineageTag: fecde29a-7639-59bc-a741-7cedbe536dbb
+		summarizeBy: none
+		sourceColumn: Genres (2nd)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Genres (3rd)'
+		dataType: string
+		lineageTag: e342b5c9-f2e0-52e8-8912-1a405e872f48
+		summarizeBy: none
+		sourceColumn: Genres (3rd)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Genres (full list)'
+		dataType: string
+		lineageTag: 2a264600-630f-5916-96e9-8e087c560ce1
+		summarizeBy: none
+		sourceColumn: Genres (full list)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Image Url (Title)'
+		dataType: string
+		lineageTag: e4d4e657-49aa-5048-aaa2-9924a0038a51
+		summarizeBy: none
+		sourceColumn: Image Url (Title)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'IMDB Rating'
+		dataType: double
+		lineageTag: eb42413b-d376-59d8-9d3d-76ec9ec53dd4
+		summarizeBy: none
+		sourceColumn: IMDB Rating
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'IMDB Url (title)'
+		dataType: string
+		lineageTag: 40fc2265-53b8-527a-9421-ebe6bd2cc797
+		summarizeBy: none
+		sourceColumn: IMDB Url (title)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Number Of Votes'
+		dataType: int64
+		lineageTag: 8403c0a0-bb99-585b-8af5-e131fc61452b
+		summarizeBy: sum
+		sourceColumn: Number Of Votes
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Plot (medium)'
+		dataType: string
+		lineageTag: e6d51835-f302-5301-856c-c75bf97d753c
+		summarizeBy: none
+		sourceColumn: Plot (medium)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Production Companies (List)'
+		dataType: string
+		lineageTag: 5814852e-4aa0-5bf0-95ca-7ab3edd6ead1
+		summarizeBy: none
+		sourceColumn: Production Companies (List)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Runtime (Minutes)'
+		dataType: int64
+		lineageTag: 81b0247e-db6b-5296-8c91-c2d5628f969d
+		summarizeBy: sum
+		sourceColumn: Runtime (Minutes)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Original Broadway Musician(s)'
+		dataType: string
+		lineageTag: e3d44b93-0aec-5e23-83fe-4c55bce76a30
+		summarizeBy: none
+		sourceColumn: Original Broadway Musician(s)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Original Broadway Lyricist(s)'
+		dataType: string
+		lineageTag: 568e7d5c-dbc3-593a-9321-654afec3d1d6
+		summarizeBy: none
+		sourceColumn: Original Broadway Lyricist(s)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Sondheim's Work] = CONTAINS([Lyricist(s)]+' '+[Musician(s)],'Sondheim'). Case-sensitive CONTAINS -> CONTAINSSTRINGEXACT. DAX & coerces blank->"" (Tableau + would null-propagate); NULL->FALSE is equivalent for this boolean flag.
+	column 'Sondheim''s Work' = CONTAINSSTRINGEXACT('1 Films'[Original Broadway Lyricist(s)] & " " & '1 Films'[Original Broadway Musician(s)], "Sondheim")
+		dataType: boolean
+		lineageTag: 4898c9a0-6c9e-5f21-a89a-49b93eba9381
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Genres Revised] = REPLACE([Genres (full list)],',',', '). REPLACE(all) -> SUBSTITUTE(all).
+	column 'Genres Revised' = SUBSTITUTE('1 Films'[Genres (full list)], ",", ", ")
+		dataType: string
+		lineageTag: ab5729b8-a375-5908-bb47-d94fa6bf5d1e
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition '1 Films' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.1_films.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Title", type text}, {"Watched?", type text}, {"World Premiere Date", type datetime}, {"Row, Ticket", Int64.Type}, {"Column, Ticket", Int64.Type}, {"Row, Hex", Int64.Type}, {"Column, Hex", type number}, {"Best Picture", type text}, {"Certificate (US)", type text}, {"Genres (1st)", type text}, {"Genres (2nd)", type text}, {"Genres (3rd)", type text}, {"Genres (full list)", type text}, {"Image Url (Title)", type text}, {"IMDB Rating", type number}, {"IMDB Url (title)", type text}, {"Number Of Votes", Int64.Type}, {"Plot (medium)", type text}, {"Production Companies (List)", type text}, {"Runtime (Minutes)", Int64.Type}, {"Original Broadway Musician(s)", type text}, {"Original Broadway Lyricist(s)", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

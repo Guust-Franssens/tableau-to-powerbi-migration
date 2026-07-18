@@ -1,0 +1,4 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\electricity-per-capita\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: b6b2d2fd-3966-55cb-9004-a3c129387124
+
+	annotation PBI_ResultType = Text

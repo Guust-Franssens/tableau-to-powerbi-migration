@@ -1,0 +1,111 @@
+/// VESTIGIAL source 'By source' (caption 'Country & Regions', 5,496 rows) - NO worksheet in the workbook binds it (verified). Modelled for source-fidelity per the explicit 5-table requirement; safe to omit if trimming. Same FNR kWh columns plus Region/Income group.
+table 'By Source'
+	lineageTag: cd5c4f41-ed72-5732-ab0b-12fbd9b16f26
+
+	column 'Entity'
+		dataType: string
+		lineageTag: 6e9a30d0-8c42-522a-9850-60774ed497ae
+		summarizeBy: none
+		sourceColumn: Entity
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Code'
+		dataType: string
+		lineageTag: 06281a19-ea9b-57f2-a71e-e45fd86f97ba
+		summarizeBy: none
+		sourceColumn: Code
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year'
+		dataType: int64
+		lineageTag: 555ae028-6c9f-51cc-828e-7e96e02f4da8
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fossil fuel electricity per capita - kWh'
+		dataType: double
+		lineageTag: 0f5a3244-cf70-5261-b6f1-e31bad90c50b
+		summarizeBy: sum
+		sourceColumn: Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Nuclear electricity per capita - kWh'
+		dataType: double
+		lineageTag: 9f1e2f92-a04e-5a35-aa1b-3af70037ac0f
+		summarizeBy: sum
+		sourceColumn: Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Renewable electricity per capita - kWh'
+		dataType: double
+		lineageTag: 11f943ba-174f-53aa-9ef8-5b1d688d41bf
+		summarizeBy: sum
+		sourceColumn: Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Region'
+		dataType: string
+		lineageTag: d9ecedb8-f49f-5235-b2e2-975cd276a2f4
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Income group'
+		dataType: string
+		lineageTag: d3e31ff7-aace-506c-903b-769d6ce6c4ac
+		summarizeBy: none
+		sourceColumn: Income group
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [% of Fossil Fuel Electricity] = FF/(FF+Nuc+Ren) row-level ratio (vestigial source).
+	column '% of Fossil Fuel Electricity' = DIVIDE('By Source'[Fossil fuel electricity per capita - kWh], 'By Source'[Fossil fuel electricity per capita - kWh] + 'By Source'[Nuclear electricity per capita - kWh] + 'By Source'[Renewable electricity per capita - kWh])
+		dataType: double
+		lineageTag: f0c0cef2-c42f-58fc-9db3-75bdbcb26032
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [% of Nuclear Electricity] = Nuc/(FF+Nuc+Ren) (vestigial).
+	column '% of Nuclear Electricity' = DIVIDE('By Source'[Nuclear electricity per capita - kWh], 'By Source'[Fossil fuel electricity per capita - kWh] + 'By Source'[Nuclear electricity per capita - kWh] + 'By Source'[Renewable electricity per capita - kWh])
+		dataType: double
+		lineageTag: c5768374-fdfd-59f6-ba93-ed5163370748
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [% of Renewable Electricity] = Ren/(FF+Nuc+Ren) (vestigial).
+	column '% of Renewable Electricity' = DIVIDE('By Source'[Renewable electricity per capita - kWh], 'By Source'[Fossil fuel electricity per capita - kWh] + 'By Source'[Nuclear electricity per capita - kWh] + 'By Source'[Renewable electricity per capita - kWh])
+		dataType: double
+		lineageTag: 4c7fc88f-7db9-507c-9930-2fb3257194ad
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Year for label] = IF [Year]=2020 THEN [Year] END (vestigial).
+	column 'Year for label' = IF('By Source'[Year] = 2020, 'By Source'[Year])
+		dataType: int64
+		lineageTag: 7500f702-4282-5d0f-b1e8-e47d95a80fb6
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'By Source' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.by_source.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Entity", type text}, {"Code", type text}, {"Year", Int64.Type}, {"Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)", type number}, {"Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)", type number}, {"Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)", type number}, {"Region", type text}, {"Income group", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

@@ -1,0 +1,209 @@
+/// Sankey/treemap GEOMETRY rows exported from the 'tree' source (3,320 rows: 3,100 link + 216 node + 4 border). Pure layout coordinates; the consumption columns the tree source also exposes live in 'Elec Generation' (joined child=Entity). The Sankey itself is a HIGH capability gap - see limitations.
+table 'Tree'
+	lineageTag: 726fceef-4089-5235-8956-a4f388e4426a
+
+	/// Tableau [X Axis - Bar chart] = MIN(0.0): a constant 0 axis anchor for the small-multiple bar layout. Kept as a 0 measure.
+	measure 'X Axis Bar chart' = 0
+		formatString: 0.0
+		lineageTag: 36dbed5c-ee66-5343-b525-44fad6cf94f6
+		displayFolder: Axis anchors
+
+	/// Tableau [X Axis - Rank] = MIN(0.0): constant 0 axis anchor.
+	measure 'X Axis Rank' = 0
+		formatString: 0.0
+		lineageTag: 018bb1bb-5d3e-5e58-8a63-fbb362f0fa77
+		displayFolder: Axis anchors
+
+	/// Tableau [X Axis - Text] = MIN(0.0): constant 0 axis anchor.
+	measure 'X Axis Text' = 0
+		formatString: 0.0
+		lineageTag: 4948be10-752b-5e26-a7ca-9e6d8222bc15
+		displayFolder: Axis anchors
+
+	column 'Index'
+		dataType: int64
+		lineageTag: 44034268-6df2-5dbc-97e6-20b5b31a692d
+		summarizeBy: none
+		sourceColumn: index
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Path'
+		dataType: int64
+		lineageTag: 4b899456-7d09-5aa2-85fa-4a2f942ecff5
+		summarizeBy: none
+		sourceColumn: path
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'X'
+		dataType: double
+		lineageTag: 5acc7e6d-6731-5e27-822c-1d849ee10290
+		summarizeBy: none
+		sourceColumn: x
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Y'
+		dataType: double
+		lineageTag: 66976108-212a-5a05-8b0a-b57a4cd47584
+		summarizeBy: none
+		sourceColumn: y
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Usage ration'
+		dataType: double
+		lineageTag: 4145479f-b7f1-557a-bea4-d7367774ff72
+		summarizeBy: none
+		sourceColumn: Usage ration
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Id'
+		dataType: string
+		lineageTag: 7f16e267-2c24-51bb-80be-f9ba22d8f2e8
+		summarizeBy: none
+		sourceColumn: id
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Parent'
+		dataType: string
+		lineageTag: 9c4bc8f9-a215-5997-8522-f64a719cc9d0
+		summarizeBy: none
+		sourceColumn: parent
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Child'
+		dataType: string
+		lineageTag: 339333ef-fef6-5f36-906b-50861ba1583b
+		summarizeBy: none
+		sourceColumn: child
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Usage'
+		dataType: double
+		lineageTag: 21a6c74e-72c0-5cd0-a598-2bb7e3bc05ae
+		summarizeBy: none
+		sourceColumn: Usage
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Type'
+		dataType: string
+		lineageTag: 04879b6d-e8a1-55fa-9521-3b815a266f74
+		summarizeBy: none
+		sourceColumn: type
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Size'
+		dataType: int64
+		lineageTag: 12086a89-f7a2-56ca-8012-3142d273721c
+		summarizeBy: none
+		sourceColumn: size
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [X Normalized] = [x]/{MAX([x])}. The {MAX([x])} is a partition-less LOD = grand-total max -> MAXX(ALL(Tree),[X]).
+	column 'X Normalized' = DIVIDE('Tree'[X], MAXX(ALL('Tree'), 'Tree'[X]))
+		dataType: double
+		lineageTag: 00548b46-54cb-568d-a2cd-7a0267e66f34
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Y Normalized] = [y]/{MAX([y])}.
+	column 'Y Normalized' = DIVIDE('Tree'[Y], MAXX(ALL('Tree'), 'Tree'[Y]))
+		dataType: double
+		lineageTag: 4b546562-cd67-5c7a-b14c-79593e722288
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [X revised (for nodes)] = IF type='node' AND NOT ISNULL(Usage) AND path=0 THEN (Usage/{MAX(Usage)})*[X Normalized] END.
+	column 'X revised (for nodes)' = IF('Tree'[Type] = "node" && NOT ISBLANK('Tree'[Usage]) && 'Tree'[Path] = 0, DIVIDE('Tree'[Usage], MAXX(ALL('Tree'), 'Tree'[Usage])) * 'Tree'[X Normalized])
+		dataType: double
+		lineageTag: 83b63754-8d38-5e54-8b06-eff208cd3128
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Y revised (for nodes)] (internal 'X revised (copy)') = same as X revised but scaling [Y Normalized].
+	column 'Y revised (for nodes)' = IF('Tree'[Type] = "node" && NOT ISBLANK('Tree'[Usage]) && 'Tree'[Path] = 0, DIVIDE('Tree'[Usage], MAXX(ALL('Tree'), 'Tree'[Usage])) * 'Tree'[Y Normalized])
+		dataType: double
+		lineageTag: 007bf800-9b14-52dc-8f4e-074ae3abc0c2
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// DIMENSION-FIXED LOD [X fixed for last path]: IF [path] = {FIXED [id]: MAX(IF type='link' THEN path END)} THEN (Usage ration*[X Normalized])+[X Normalized] ELSE [X Normalized] END. {FIXED [id]: MAX(...)} -> CALCULATE(MAX(Path), ALLEXCEPT(Tree,Id), Type='link').
+	column 'X fixed for last path' = VAR mlp = CALCULATE(MAX('Tree'[Path]), ALLEXCEPT('Tree', 'Tree'[Id]), 'Tree'[Type] = "link") RETURN IF('Tree'[Path] = mlp, ('Tree'[Usage ration] * 'Tree'[X Normalized]) + 'Tree'[X Normalized], 'Tree'[X Normalized])
+		dataType: double
+		lineageTag: da77b2d4-7aa0-535f-b8e3-c02f5c555a9a
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// DIMENSION-FIXED LOD [Y fixed for last path] (internal 'X doubled for last path (copy)'): as X fixed for last path but on [Y Normalized].
+	column 'Y fixed for last path' = VAR mlp = CALCULATE(MAX('Tree'[Path]), ALLEXCEPT('Tree', 'Tree'[Id]), 'Tree'[Type] = "link") RETURN IF('Tree'[Path] = mlp, ('Tree'[Usage ration] * 'Tree'[Y Normalized]) + 'Tree'[Y Normalized], 'Tree'[Y Normalized])
+		dataType: double
+		lineageTag: 55cbdef7-34cc-5dd2-b7b1-b2098d288a43
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// DIMENSION-FIXED LOD [Calculation1]: IF type='node' AND ISNULL([X revised (for nodes)]) THEN {FIXED [id]: AVG(Usage)} END. {FIXED [id]: AVG(Usage)} -> CALCULATE(AVERAGE(Usage), ALLEXCEPT(Tree,Id)).
+	column 'Calculation1' = VAR a = CALCULATE(AVERAGE('Tree'[Usage]), ALLEXCEPT('Tree', 'Tree'[Id])) RETURN IF('Tree'[Type] = "node" && ISBLANK('Tree'[X revised (for nodes)]), a)
+		dataType: double
+		lineageTag: 433e16a1-9f6c-5493-b8cc-54597fcdda0e
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Consumption axis] = [child] (passthrough alias).
+	column 'Consumption axis' = 'Tree'[Child]
+		dataType: string
+		lineageTag: 8ad8dc91-f8c2-5c31-8f92-e2c543590437
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Child (copy)] = [child] (passthrough duplicate).
+	column 'Child (copy)' = 'Tree'[Child]
+		dataType: string
+		lineageTag: db46c01e-28cd-5e3f-9f97-af502967d65f
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Source label] = IF type='link' THEN [parent] END.
+	column 'Source label' = IF('Tree'[Type] = "link", 'Tree'[Parent])
+		dataType: string
+		lineageTag: 8aee68fa-0fe0-5041-ab46-e598c1670ae0
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Filter] (boolean) = [type]='link' AND ISNULL([parent]); the top-of-tree link. Kept as a filterable flag column.
+	column 'Filter' = 'Tree'[Type] = "link" && ISBLANK('Tree'[Parent])
+		dataType: string
+		lineageTag: 6c55e4b3-af17-5be4-95ff-98e389826b33
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Tree' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.tree.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"index", Int64.Type}, {"path", Int64.Type}, {"x", type number}, {"y", type number}, {"Usage ration", type number}, {"id", type text}, {"parent", type text}, {"child", type text}, {"Usage", type number}, {"type", type text}, {"size", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

@@ -1,0 +1,4 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\broadway-stage-to-screen\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: 40b4f749-f303-506e-99b5-58e1683d0887
+
+	annotation PBI_ResultType = Text

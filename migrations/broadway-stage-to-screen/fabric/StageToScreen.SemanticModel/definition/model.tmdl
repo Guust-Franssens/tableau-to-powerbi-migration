@@ -1,0 +1,18 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["1 Films","4 Song Stats","3 Accolades","2 Chronology","Breakdown by","DataFolder"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table '1 Films'
+ref table '4 Song Stats'
+ref table '3 Accolades'
+ref table '2 Chronology'
+ref table 'Breakdown by'
+

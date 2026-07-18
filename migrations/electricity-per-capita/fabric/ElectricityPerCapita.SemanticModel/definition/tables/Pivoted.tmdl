@@ -1,0 +1,127 @@
+/// Per-capita electricity generation unpivoted to one row per Country x Year x Fuel Source (16,269 rows; Fossil Fuel/Nuclear/Renewables; 1985-2022). Tableau source 'Pivoted'. Backs 8 worksheets (per-country bars, per-region lines, All regions trellis).
+table 'Pivoted'
+	lineageTag: 5b6a489d-e4b0-52cb-b7bc-73d05f30ac53
+
+	column 'Country'
+		dataType: string
+		lineageTag: 815c2da3-305b-5225-ac6a-e47430add936
+		summarizeBy: none
+		sourceColumn: Entity
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Code'
+		dataType: string
+		lineageTag: ee3a3d42-5e06-51ed-a5f9-31e0fcd7ff50
+		summarizeBy: none
+		sourceColumn: Code
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year'
+		dataType: int64
+		lineageTag: 2cd29640-dfe6-5b50-97f6-a9d8898ed733
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Region'
+		dataType: string
+		lineageTag: 510c8f0e-8245-5870-a644-17a8d4470682
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fuel Source'
+		dataType: string
+		lineageTag: 732ddd62-a209-51c2-8f4c-25307e8d3d2c
+		summarizeBy: none
+		sourceColumn: Fuel Source
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Electricity generation per capita'
+		dataType: double
+		lineageTag: 40c71f8e-0b1b-5053-ad88-8b7bd961fef7
+		summarizeBy: sum
+		sourceColumn: Electricity generation per capita
+
+		annotation SummarizationSetBy = Automatic
+
+	/// DIMENSION-FIXED LOD [FF Electricity] = {FIXED [Year],[Code]: SUM(IF [Fuel Source]='Fossil Fuel' THEN [Electricity generation per capita] END)}. -> CALCULATE(SUM, FILTER(ALLEXCEPT(Year,Code), Fuel='Fossil Fuel')). GROUND TRUTH USA 2022 = 7559.257. summarizeBy=average because 'Region FF only' shows AVG([FF Electricity]).
+	column 'FF Electricity' = CALCULATE(SUM('Pivoted'[Electricity generation per capita]), FILTER(ALLEXCEPT('Pivoted', 'Pivoted'[Year], 'Pivoted'[Code]), 'Pivoted'[Fuel Source] = "Fossil Fuel"))
+		dataType: double
+		lineageTag: d999f227-3bb4-5292-a46c-7553f911d4dd
+		summarizeBy: average
+
+		annotation SummarizationSetBy = Automatic
+
+	/// DIMENSION-FIXED LOD [Nuclear Electricity] = FIXED [Year],[Code] SUM of Nuclear per capita. GROUND TRUTH FRA 2022 = 4560.504.
+	column 'Nuclear Electricity' = CALCULATE(SUM('Pivoted'[Electricity generation per capita]), FILTER(ALLEXCEPT('Pivoted', 'Pivoted'[Year], 'Pivoted'[Code]), 'Pivoted'[Fuel Source] = "Nuclear"))
+		dataType: double
+		lineageTag: 9205c537-6d22-558d-b374-bf6a2088544d
+		summarizeBy: average
+
+		annotation SummarizationSetBy = Automatic
+
+	/// DIMENSION-FIXED LOD [Renewable Electricity] = FIXED [Year],[Code] SUM of Renewables per capita. GROUND TRUTH USA 2022 = 2832.334.
+	column 'Renewable Electricity' = CALCULATE(SUM('Pivoted'[Electricity generation per capita]), FILTER(ALLEXCEPT('Pivoted', 'Pivoted'[Year], 'Pivoted'[Code]), 'Pivoted'[Fuel Source] = "Renewables"))
+		dataType: double
+		lineageTag: 48a98400-579f-590d-b4bf-cd2dd3d05c45
+		summarizeBy: average
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [FF Electricity%] = FF/(FF+Nuc+Ren) over the FIXED LODs. GROUND TRUTH USA 2022 = 0.59652.
+	column 'FF Electricity%' = DIVIDE('Pivoted'[FF Electricity], 'Pivoted'[FF Electricity] + 'Pivoted'[Nuclear Electricity] + 'Pivoted'[Renewable Electricity])
+		dataType: double
+		lineageTag: f7005f82-8700-553f-aa62-7c3436a77b71
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Nuclear Electricity%] = Nuc/(FF+Nuc+Ren). GROUND TRUTH FRA 2022 = 0.62795.
+	column 'Nuclear Electricity%' = DIVIDE('Pivoted'[Nuclear Electricity], 'Pivoted'[FF Electricity] + 'Pivoted'[Nuclear Electricity] + 'Pivoted'[Renewable Electricity])
+		dataType: double
+		lineageTag: b9918ecc-1edd-5e4c-afb0-1259691bc98e
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Renewable Electricity%] = Ren/(FF+Nuc+Ren). GROUND TRUTH USA 2022 = 0.22351.
+	column 'Renewable Electricity%' = DIVIDE('Pivoted'[Renewable Electricity], 'Pivoted'[FF Electricity] + 'Pivoted'[Nuclear Electricity] + 'Pivoted'[Renewable Electricity])
+		dataType: double
+		lineageTag: 62949540-3252-569d-a408-562247e2ec06
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Year for label] = IF [Year]=2020 THEN [Year] END (a single-year annotation anchor).
+	column 'Year for label' = IF('Pivoted'[Year] = 2020, 'Pivoted'[Year])
+		dataType: int64
+		lineageTag: 23420627-5ffd-57c1-b572-0d3a1a15bda5
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// DIMENSION-FIXED LOD [Region and country count] = [Region] + newlines + STR({FIXED [Region]: COUNTD([Entity])}) + ' countries'. {FIXED [Region]: COUNTD} -> CALCULATE(DISTINCTCOUNT(Country), ALLEXCEPT(Region)).
+	column 'Region and country count' = 'Pivoted'[Region] & UNICHAR(10) & UNICHAR(10) & CALCULATE(DISTINCTCOUNT('Pivoted'[Country]), ALLEXCEPT('Pivoted', 'Pivoted'[Region])) & " countries"
+		dataType: string
+		lineageTag: 0dfc5a4b-c229-5d9b-983d-3fd6f2722bb6
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Pivoted' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.pivoted_per_capita_electricity_generation_by_source.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Entity", type text}, {"Code", type text}, {"Year", Int64.Type}, {"Region", type text}, {"Fuel Source", type text}, {"Electricity generation per capita", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

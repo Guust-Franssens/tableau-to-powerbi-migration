@@ -1,0 +1,34 @@
+/// Field Parameter backing the Tableau 'Breakdown by' parameter (internal '[Parameter 1]', members Award/Category, default 'Award'). Dimension-flavored: it swaps which '3 Accolades' column drives the accolades breakdown - [Award] vs [Category (group)] - replacing the Tableau [Award or Category] CASE calc and the [A or C = Cat] echo helper. Report authors bind this table's 'Breakdown by' column directly to the visual's field well. sourceColumn values are the DAX table-constructor defaults [Value1/2/3] (bracketed), NOT the friendly names. NOTE: no extendedProperty ParameterMetadata is emitted (mirrors the Superstore reference); if native field-swap does not engage in Desktop, the report phase should add extendedProperty ParameterMetadata = {"version":3,"kind":2} to the 'Breakdown by' column.
+table 'Breakdown by'
+	lineageTag: 772b9fdc-9997-5756-bbf1-eb47afb1a216
+
+	column 'Breakdown by'
+		lineageTag: 26594261-6142-56bd-9ee0-d57bc22f8a28
+		summarizeBy: none
+		sourceColumn: [Value1]
+		sortByColumn: 'Breakdown by Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Breakdown by Fields'
+		isHidden
+		lineageTag: 48dd1a78-64cd-546a-ac9a-33571189e249
+		summarizeBy: none
+		sourceColumn: [Value2]
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Breakdown by Order'
+		isHidden
+		formatString: 0
+		lineageTag: 97deb66a-4f28-54a7-9fb9-a1deadfb7caf
+		summarizeBy: none
+		sourceColumn: [Value3]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Breakdown by' = calculated
+		mode: import
+		source = {("Award", NAMEOF('3 Accolades'[Award]), 0), ("Category", NAMEOF('3 Accolades'[Category (group)]), 1)}
+
+	annotation PBI_ResultType = Table

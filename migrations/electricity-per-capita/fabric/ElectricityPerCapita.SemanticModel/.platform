@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "ElectricityPerCapita"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "f106f05f-eb37-57b1-bcec-22f29126dc46"
+  }
+}
