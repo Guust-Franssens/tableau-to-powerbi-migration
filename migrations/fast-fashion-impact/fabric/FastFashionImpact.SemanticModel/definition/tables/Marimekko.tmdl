@@ -1,0 +1,67 @@
+/// Fashion-industry segment analysis (marimekko/mekko chart): market share (%) and Fashion Pulse sustainability score by price Segment and Price Position. Market share = column width, pulse = height/colour.
+table Marimekko
+	lineageTag: 9acf7622-32a1-5338-82da-f43ce47b4df2
+
+	/// Total Fashion Pulse score summed to the price Segment level (segment-fixed total, independent of Price Position). Ground-truth: Middle Segment=327, Premium=106, Lower Middle / Entry Price Points=196, n/a=80.
+	measure 'Segment Pulse LOD' = CALCULATE(SUM('Marimekko'[Pulse Score]), ALLEXCEPT('Marimekko', 'Marimekko'[Segment]))
+		formatString: 0
+		displayFolder: LOD
+		lineageTag: 65b3c830-9c02-5f09-af77-738101c041e1
+
+	/// Price-tier segment grouping fashion brands. One of: Premium, Middle Segment, Lower Middle / Entry Price Points, n/a.
+	column Segment
+		dataType: string
+		lineageTag: 891a07f1-54a9-59a5-9588-fc75dbec3566
+		summarizeBy: none
+		sourceColumn: Segment
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Detailed brand price-position within the segment. One of: Luxury market, Luxury Big Players, Sustainability Champions, Small players, Medium players, Fashion - Large, Sportswear - Large, Fashion - Giant, Sportswear - Giant.
+	column 'Price Position'
+		dataType: string
+		lineageTag: 6bd85e05-632a-5cd5-8662-b217b43a6f2a
+		summarizeBy: none
+		sourceColumn: Price Position
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Market share of the price position, in percent (marimekko column width).
+	column 'Market Share'
+		dataType: int64
+		lineageTag: 632c76ef-0dd6-51a3-ae12-7406b4901055
+		summarizeBy: sum
+		sourceColumn: Market Share
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Fashion Pulse sustainability score (higher = more sustainable); marimekko column height/colour.
+	column 'Pulse Score'
+		dataType: int64
+		lineageTag: 5e1d3988-f457-5ded-88b4-a7712caec31f
+		summarizeBy: sum
+		sourceColumn: Pulse Score
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Fashion Pulse score shown as a data label; same value as Pulse Score.
+	column 'Actual Pulse Score'
+		dataType: int64
+		lineageTag: 2c3df32f-4f04-58e5-bbe2-390768acb162
+		summarizeBy: none
+		sourceColumn: Actual Pulse Score
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Marimekko = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.marimekko_marikekko_segments.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Segment", type text}, {"Price Position", type text}, {"Market Share", Int64.Type}, {"Pulse Score", Int64.Type}, {"Actual Pulse Score", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

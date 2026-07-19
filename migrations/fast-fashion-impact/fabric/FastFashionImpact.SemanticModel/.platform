@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "FastFashionImpact"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "0f415acd-da51-5b9c-a2ef-fe408e1b9dcf"
+  }
+}

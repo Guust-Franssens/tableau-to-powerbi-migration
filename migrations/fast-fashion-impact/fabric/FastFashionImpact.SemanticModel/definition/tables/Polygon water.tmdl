@@ -1,0 +1,87 @@
+/// Polygon (x/y point-path) geometry for the water-droplet silhouette, segmented by water-use stage. 179 vertices; joins to JEANS water on Category.
+table 'Polygon water'
+	lineageTag: be3c72be-83de-5515-9565-ab93df115b0f
+
+	/// Shape identifier 0-6; one shape per water-use stage.
+	column 'Shape Id'
+		dataType: int64
+		lineageTag: ff4e1095-faab-53a7-b311-5ce248a9e5f6
+		summarizeBy: none
+		sourceColumn: shapeId
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Geometry primitive type. Always 'polygon'.
+	column 'Shape Type'
+		dataType: string
+		lineageTag: c854ddc5-a0f6-56a1-911e-c63387f07fea
+		summarizeBy: none
+		sourceColumn: shapeType
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sequential vertex index (0-99) tracing the droplet outline; draw order.
+	column 'Point Id'
+		dataType: int64
+		lineageTag: 6889068f-128e-5078-a06e-67890736c87a
+		summarizeBy: none
+		sourceColumn: pointId
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Vertex X coordinate (screen space) of the water-droplet silhouette.
+	column 'Point X'
+		dataType: int64
+		lineageTag: db981f50-ae3f-5cf9-b8e5-4aa3bde659d2
+		summarizeBy: none
+		sourceColumn: pointX
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Vertex Y coordinate (screen space) of the water-droplet silhouette.
+	column 'Point Y'
+		dataType: int64
+		lineageTag: 015b95af-94cb-5d6e-bb43-32493d1ef1c5
+		summarizeBy: none
+		sourceColumn: pointY
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Water-use stage this shape represents. One of: Raw Materials, Fabric Mill, Industrial Laundry, Consumer wash. Foreign key to JEANS water[Category].
+	column Category
+		dataType: string
+		lineageTag: 17dd4d1a-624b-523c-b3df-4966bf902cbc
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Share of total water use for this stage, in percent.
+	column 'Value (%)'
+		dataType: double
+		lineageTag: d3cff681-4783-5236-9fd6-4dce0a6e39b7
+		summarizeBy: sum
+		sourceColumn: Value (%)
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Point X mirrored horizontally (Point X x -1). Derived.
+	column 'Point X Flipped' = 'Polygon water'[Point X] * -1
+		dataType: int64
+		lineageTag: ce9f1d2c-e2c1-5196-bf6d-8bb8f77bd97c
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Polygon water' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.polygon_water_fast_fashion_data_final.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"shapeId", Int64.Type}, {"shapeType", type text}, {"pointId", Int64.Type}, {"pointX", Int64.Type}, {"pointY", Int64.Type}, {"Category", type text}, {"Value (%)", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+
