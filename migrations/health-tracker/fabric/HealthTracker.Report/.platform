@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "HealthTracker"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "c3f8a1d2-9b4e-4c77-a1e2-3f5b6d8091aa"
+  }
+}

@@ -240,6 +240,59 @@ table 'Health Data'
 		displayFolder: Period Support
 		lineageTag: 449238d0-80c2-445a-b14d-3d40f38fc657
 
+	/// Report-layer KPI delta = Latest - Prior for Calories Burned (period per 'Date Period' page filter). +/- sign section conveys direction (red/green color simplified out - see report limitations); collapses the Tableau Diff+/Diff-/No Diff split into one signed card.
+	measure 'Cal Bur Delta' = [Latest Cal Bur] - [Prior Cal Bur]
+		formatString: "+#,##0.0;-#,##0.0;0.0"
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0001-4a10-9e01-0a1b2c3d4e01
+
+	/// Report-layer KPI delta = Latest - Prior for Calories Intake (period per 'Date Period' page filter).
+	measure 'Cal Int Delta' = [Latest Cal Int] - [Prior Cal Int]
+		formatString: "+#,##0.0;-#,##0.0;0.0"
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0002-4a10-9e01-0a1b2c3d4e02
+
+	/// Report-layer KPI delta = Latest - Prior for Steps Count (period per 'Date Period' page filter).
+	measure 'Steps Count Delta' = [Latest Steps Count] - [Prior Steps Count]
+		formatString: "+#,##0;-#,##0;0"
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0003-4a10-9e01-0a1b2c3d4e03
+
+	/// Report-layer KPI delta = Latest - Prior for Sleep Duration (period per 'Date Period' page filter).
+	measure 'Sleep Duration Delta' = [Latest Sleep Dur] - [Prior Sleep Dur]
+		formatString: "+#,##0.0;-#,##0.0;0.0"
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0004-4a10-9e01-0a1b2c3d4e04
+
+	/// Report-layer KPI delta = Latest - Prior for Mood Score (period per 'Date Period' page filter).
+	measure 'Mood Score Delta' = [Latest Mood Score] - [Prior Mood Score]
+		formatString: "+#,##0.0;-#,##0.0;0.0"
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0005-4a10-9e01-0a1b2c3d4e05
+
+	/// Report-layer KPI delta = Latest - Prior for Water Intake (period per 'Date Period' page filter).
+	measure 'Water Intake Delta' = [Latest Water Intake] - [Prior Water Intake]
+		formatString: "+#,##0.0;-#,##0.0;0.0"
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0006-4a10-9e01-0a1b2c3d4e06
+
+	/// Latest-day Height (cm) LOD helper (mirrors the Latest BMI/etc. pattern) - header 'Current Height' card.
+	measure 'Latest Height' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Height (cm)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0007-4a10-9e01-0a1b2c3d4e07
+
+	/// Latest-day Weight (kg) LOD helper (mirrors the Latest BMI/etc. pattern) - header 'Current Weight' card.
+	measure 'Latest Weight' = VAR _d = [Latest Date] RETURN CALCULATE(AVERAGE('Health Data'[Weight (kg)]), FILTER(ALL('Health Data'), 'Health Data'[Date] = _d))
+		formatString: #,##0.0
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0008-4a10-9e01-0a1b2c3d4e08
+
+	/// Combined 'systolic / diastolic' text for the Blood Pressure KPI card (e.g. '101 / 86').
+	measure 'Latest BP Combined' = FORMAT(ROUND([Latest BP Sys], 0), "0") & " / " & FORMAT(ROUND([Latest BP Dias], 0), "0")
+		displayFolder: Report Support
+		lineageTag: 1a2b3c40-0009-4a10-9e01-0a1b2c3d4e09
+
 	/// Calendar date, one row per day (Tableau dimension 'Date'). Drives all Latest/Prior LOD date logic.
 	column 'Date'
 		dataType: dateTime
