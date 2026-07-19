@@ -3034,6 +3034,66 @@
       "issue": "The shared scripts/check_ai_readiness.py referenced by the agent instructions is not present in the repo; an equivalent scoped verifier was added at migrations/interactive-resume/build/check_ai_readiness.py. It confirms 100% description coverage (47/47 objects) and that all 14 categorical columns enumerate their domain. Consider promoting it to the shared scripts/ folder.",
       "severity": "low",
       "stage": "semantic_build"
+    },
+    {
+      "item": "Desktop render verification (deferred - contended bridge)",
+      "issue": "Report passes structural validation (powerbi-report-author validate: 0 errors, 0 warnings) and an independent field-reference cross-check (all 4 data-field refs resolve against the semantic model TMDL: 'Fun Facts'[Year], 'Fun Facts'[Value], 'Coursework Detail'[Course], 'Coursework Detail'[Abrev Cat]). A live Power BI Desktop reload+screenshot was NOT performed: this is 1 of 5 concurrent migration builds and the single Desktop Bridge was held by two sibling instances (airline-alliance-activity with unsaved changes, superstore-sales-performance); agent policy forbids force-opening/contending a sibling-owned bridge. Structural validation is necessary but NOT sufficient - visual render specifics (tableEx row rendering vs headers-only, shape/oval embedded text, fill transparency, exact bar-top vs overlaid-label registration) remain unverified until a Desktop pass is run.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "pianobar 2nd URL dropped",
+      "issue": "The pianobar mark carried TWO YouTube URL dashboard actions on one mark; a PBIR Web-URL button supports a single Web URL action. Kept the primary (youtube.com/watch?v=TzWuKaXomLc); dropped the secondary (youtu.be/w9U1m2KCBX0). One of the 6 hardcoded links.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "DTC 2nd URL dropped",
+      "issue": "The DTC (Data Technology Credential) badge carried two hardcoded URL actions; kept the primary LinkedIn post (linkedin.com/posts/mariabrock259_...), dropped the secondary volgenau.gmu.edu/news/575686. One of the 6 hardcoded links.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "constant-placeholder calcs rendered as static decorations",
+      "issue": "The 4 constant-string worksheet calcs dropped at semantic_build (Background '.', Favorites ' ', hobby-bars detail ' ', social-icons detail ' ' = Calculation_879046380311916547 / _2596888163891249153 / _879046380873080839 / _879046380664172549) are realized in the report layer as static page background + shapes/text/buttons rather than data-bound marks. No data-model equivalent needed; consistent with the semantic_build disposition.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "interactive Category slicer omitted",
+      "issue": "The Tableau Favorites/Coursework Category filter-card (zone 103) was not reproduced as an interactive slicer, to avoid slicer-default-selection fragility (an unselected slicer makes bound visuals render an all-rows aggregate on first load). The coursework table instead carries a robust visual-level filter Abrev Cat = 'Data/Stats' so it renders deterministically. Trade-off: loses the live category toggle, gains correct first-load rendering.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "social icons are text-glyph buttons, not brand images",
+      "issue": "The 3 hardcoded social links (LinkedIn / Twitter / Tableau Public) are Web-URL button ovals labeled 'in' / 'tw' / 'T' rather than embedded brand-logo images (brand icons were not extractable/licensable from the twbx). Link targets are faithful; iconography is approximated.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "hobby box-chart color + label alignment approximate",
+      "issue": "The hobby 'boxes' are a single-color (#6B9FA9) columnChart of 'Fun Facts'[Value] by [Year] with both axes hidden; the 6 overlaid hobby text labels and click hotspots are absolutely positioned and will not pixel-register to auto-laid-out bar tops (7 data bars vs 6 hobby labels). The Tableau original may have used multiple box colors. Infographic gestalt is preserved; exact per-box color and label-to-bar registration are approximate.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "internship-circle labels are a data-derived enhancement",
+      "issue": "The 4 EXPERIENCE circles are labeled with 'Coursework Detail'[Intern Title] values (Development / Tableau Server / PostgreSQL / Client Delivery). The Tableau originals were unlabeled colored circles; labels were added for clarity and are data-grounded. A deliberate, faithful-to-data deviation from the source visual.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Favorites hover-reveal not replicated",
+      "issue": "Tableau's zone 229 'Favorites' hover-to-reveal interaction has no faithful static equivalent in a single-page PBIR layout; its content is preserved in build notes but is not rendered as an interactive reveal. A bookmark/tooltip-page reconstruction is a possible future enhancement.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "decorative HOVER label + diagonals + ambiguous small badge icons skipped",
+      "issue": "The decorative vertical 'HOVER' label (hover.png), diagonal divider lines, and 5 small ambiguous badge-icon zones (68/71/72/73/74) were not reproduced - decorative, low-information, or visually unidentifiable from the source. All 25 worksheets' core content and all 14 dashboard-action links are otherwise represented.",
+      "severity": "low",
+      "stage": "report_build"
     }
   ]
 }
