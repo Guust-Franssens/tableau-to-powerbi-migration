@@ -78,6 +78,50 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    away (parameter-equality, pivot reshape) and why, and any new `limitations_encountered` entries
    (append them to `migration-spec.json` so the report builder and final summary see them).
 
+## Prep the model for AI (Copilot readiness) — final build phase
+
+A migrated model is not done until it is **Copilot-ready**. Per Microsoft Learn
+([Prepare your data for AI](https://learn.microsoft.com/en-us/power-bi/create-reports/copilot-prepare-data-ai),
+[Optimize for Copilot](https://learn.microsoft.com/en-us/power-bi/create-reports/copilot-evaluate-data)),
+Copilot answer quality depends on the model carrying enough context to disambiguate fields, and the
+DAX-generation path uses the **first 200 characters** of each object's description. Run this as the
+**last phase** of the build (after every measure/column exists and is validated). It is also runnable
+standalone against an already-built model (an "AI-prep-only" pass for retrofits) — it is still the
+model-builder owning its own layer, so no other agent edits these TMDL files.
+
+**Scope — what to bake into the committed model now (research-confirmed):**
+
+- ✅ **Descriptions on every table, column, and measure** — classic TMDL metadata, fully committable.
+- ✅ **Enumerate the domain of categorical/dimension columns** in their description — the single
+  highest-leverage item (lets NL questions resolve category filters). Read the extracted CSV (or query
+  the model) for the distinct values of each low-cardinality string/dimension column and list them.
+  Skip high-cardinality keys / free-text (describe those by role).
+- ✅ **Synonyms** where the display name isn't natural language (Tableau captions like `Cdd 0 1`, `RPK`
+  → `cooling degree days`, `revenue passenger kilometers`) via the model's culture linguistic schema.
+- ⏸️ **Defer (not reliably committable today, per research):** the service "AI data schema" and "AI
+  instructions" live in **LSDL** with no stable file-authoring contract yet; **verified answers** are
+  explicitly **not Git-supported** and require report visuals; "Approved for Copilot" + indexing are
+  tenant/runtime settings. Note these as post-deploy service steps in `limitations_encountered`, don't
+  fake them in files.
+
+**Mechanism — use the Power BI Modeling MCP (validated), not regex-editing of `///`:**
+
+1. `connection_operations` **ConnectFolder** with `folderPath` = the `…SemanticModel` folder — this
+   loads the model **offline, no Power BI Desktop required** (confirmed: loads tables/measures/rels
+   from the TMDL directly).
+2. Understand the data: read the extracted CSV, or `dax_query_operations` **Execute**
+   `EVALUATE VALUES('Table'[Col])` for each categorical column to get its real domain values.
+3. Set descriptions in batch via `table_operations` / `column_operations` / `measure_operations`
+   **Update** with the `description` field (business-meaning first, unit/grain, then the enum domain
+   for categoricals). Lead with meaning: `"Latest recorded Body Mass Index (kg/m²), as of the most
+   recent date."` not a raw `{FIXED …}` dump.
+4. Persist with `database_operations` **ExportToTmdlFolder**, `tmdlFolderPath` = the model's
+   **`definition`** subfolder (NOT the SemanticModel root — that flattens the PBIP layout). The export
+   normalizes identifier quoting/whitespace model-wide (cosmetic; content, lineageTags, and DAX are
+   preserved) — expect a one-time reformat diff; that's fine.
+5. Verify with `python scripts/check_ai_readiness.py migrations/<slug>` — ~100% description coverage,
+   no categorical column missing its domain values — before reporting done.
+
 ## Gotchas
 
 - **`ATTR()`** in a calculated field used at row-granularity (post city-filter, exactly one row) is
@@ -289,3 +333,8 @@ throwing an error" is necessary but not sufficient:
    catch either (both deserialize clean but fail at Desktop load / commit). Assert this programmatically
    before reporting done (see the "Model-integrity checks" gotcha above — this is the exact class that
    shipped a broken `.pbip` in iteration 3).
+8. **The model is Copilot-ready** — every table, column, and measure has a business-meaning
+   description; categorical/dimension columns enumerate their domain values; synonyms are set where the
+   display name isn't natural language (see "Prep the model for AI" above). `python
+   scripts/check_ai_readiness.py migrations/<slug>` reports ~100% description coverage with no
+   categorical column missing its domain values.
