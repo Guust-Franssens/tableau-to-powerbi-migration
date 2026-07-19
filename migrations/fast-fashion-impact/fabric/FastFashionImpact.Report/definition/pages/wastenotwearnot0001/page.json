@@ -1,0 +1,8 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.4.0/schema.json",
+  "name": "wastenotwearnot0001",
+  "displayName": "Waste Not, Wear Not",
+  "displayOption": "FitToPage",
+  "height": 3152,
+  "width": 1499
+}

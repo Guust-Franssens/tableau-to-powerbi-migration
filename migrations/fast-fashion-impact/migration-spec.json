@@ -4268,6 +4268,72 @@
       "issue": "ExportToTmdlFolder cosmetically normalizes model-wide: relationships drop explicit fromCardinality:many/toCardinality:one/crossFilteringBehavior:oneDirection lines when they equal TOM defaults (semantically identical - deserializes back to Many->One OneDirection, verified), and simple identifiers are unquoted (column Segment vs column 'Segment'). Offline validators that parse TMDL must be quoting-agnostic. lineageTags, DAX, summarizeBy, and descriptions are all preserved.",
       "severity": "low",
       "stage": "semantic_build"
+    },
+    {
+      "item": "ws.jeans_polygon_co2",
+      "issue": "Custom Tableau filled-polygon jeans silhouette (MAKEPOINT/polygon spatial geometry, CO2 breakdown) has NO native Power BI equivalent - PBI has no filled-point/polygon geometry mark. Approximated as a donutChart preserving the underlying 6-category Value(%) magnitudes; the denim silhouette shape itself is carried faithfully by the static full-canvas background raster (Group 35). Sheet-swap visibility handled by a boolean measure filter (Jeans Sheet Swap[Show CO2 Jeans]=true).",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.polygon_materials",
+      "issue": "Custom Tableau filled-polygon materials silhouette (polygon spatial geometry) - no native PBI polygon mark. Approximated as a donutChart preserving the 3-category Value(%) split; the silhouette outline is carried by the static background raster. Sheet-swap visibility via Jeans Sheet Swap[Show Materials]=true measure filter.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.polygon_water",
+      "issue": "Custom Tableau filled-polygon water silhouette (polygon spatial geometry) - no native PBI polygon mark. Approximated as a donutChart preserving the 4-category Value(%) split; the silhouette outline is carried by the static background raster. Sheet-swap visibility via Jeans Sheet Swap[Show Water]=true measure filter.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.radar",
+      "issue": "Custom Tableau radial/radar polygon (planetary-boundaries environmental impact by Impact Area x Year, built from polar-math X/Y geometry) - no native PBI radar or polygon mark. The semantic model materialized per-vertex X/Y coordinates, plotted here as a scatterChart tracing the vertices (Impact Area = points, Year = series, Avg X-axis / Avg Y-axis = position). The connecting polygon OUTLINE/FILL and the radial spoke axes are NOT drawn - only vertex positions convey the shape. A clustered bar/line was considered but scatter best preserves the radial vertex geometry.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.rip_polygon",
+      "issue": "Custom Tableau torn-paper ('ripped jeans') decorative polygon encoding consumer-awareness Importance magnitudes (polygon spatial geometry) - no native PBI polygon mark. The decorative torn-paper shape is carried by the static background raster; the underlying data (Importance level x Value%) is rendered as a horizontal bar chart (clusteredBarChart, single series). Ordinal Importance/Likert order is NOT enforced via a model sort-by column (bars sorted by Value descending) because the semantic model is read-only for this build.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.marimekko",
+      "issue": "Marimekko/mekko chart (variable-width 2D: column WIDTH = Market Share, column HEIGHT = Pulse Score, vertical split by Price Position, colour = pulse) - Power BI has NO native variable-width column mark. Approximated as a stacked columnChart: Segment = X-axis columns, Price Position = stacked split, Sum(Pulse Score) = height. The WIDTH dimension (Market Share) cannot be natively represented and is carried to the TOOLTIP only - the single lost encoding of this approximation. Segment columns sorted by total pulse descending.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "param.jeans_sheet_swap",
+      "issue": "Tableau sheet-swap parameter [Parameter 3] (clickable badge that swapped the CO2/Materials/Water jeans silhouette worksheets) reproduced as a single-select slicer on the disconnected 'Jeans Sheet Swap' table (values 1/2/3, explicit default '1') driving three boolean SELECTEDVALUE toggle measures (Show CO2 Jeans/Show Materials/Show Water). Each of the three stacked silhouette donuts carries the matching measure as an Advanced visual-level filter so exactly one is visible at a time. This is a functional slicer-swap rather than Tableau's in-canvas badge; no bookmark navigator was needed.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard.dashboard_1.decorative_layer",
+      "issue": "The dense IronViz infographic's decorative/annotation layer - title 'WASTE NOT, WEAR NOT', all narrative text blocks, the jeans illustration, the numbered tape-measure chain, torn-paper motifs, and the ~14 Tableau Shape/text worksheets (CO2, Cotton, Water, PLANET LIMIT, Asterisk, PROB, R Chem/Energy/Land/Waste/Water, REFS, etc.) - is reproduced as a single static full-canvas background raster (Group 35, 1499x3152, embedded as a base64 data-URI image visual), not as live/data-driven native objects. This preserves visual fidelity exactly but the text is not selectable and those 'worksheets' are not interactive.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.10_avg",
+      "issue": "The eight chain-stage pie worksheets (1.design, 2.raw, 10.avg=Processing, 4.manufac, 5.transport, 6.retail, 7.use, 8.end_of_use) drove wedge angle via an UNRESOLVED Tableau table-calculation not reconstructable from the spec. Each pie is rebuilt as a donutChart of Sum(Value) across the 4 Performance Quartiles, filtered to its Chain Stage. Worksheet '10. avg' resolves to Chain Stage='Processing' with four equal 25% quartile slices (consistent with its 'avg' naming); other stages vary by quartile. Absolute wedge rotation/ordering may differ from the original.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.pop_line",
+      "issue": "Tableau dual-axis line (primary Y = fibre Production m tons/yr, secondary Y2 = Population billions, colour = Fibre) rendered as a single-axis 2-line chart (Cotton vs Polyester production over Year). The secondary Population axis is not reproduced; however Population (billions) is non-null only on Fibre='Population' rows, which the worksheet's Fibre in {Cotton,Polyester} filter excludes - so the original effectively drew only the two production lines and the fidelity loss is negligible.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard.dashboard_1.ordinal_sort",
+      "issue": "Ordinal dimensions (Ripped Polygon Importance/Likert levels; Performance Quartile Q1-Q4) are not guaranteed to render in semantic order because enforcing order requires a model sort-by column and the semantic model is read-only for this build. Visuals sort by value where a natural order matters (rip bars by Value descending); pie slice order follows the Quartile column's default order.",
+      "severity": "low",
+      "stage": "report_build"
     }
   ]
 }
