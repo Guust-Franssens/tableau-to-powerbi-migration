@@ -37,6 +37,37 @@ Do not skip straight to authoring — these three skills are explicitly designed
 | `worksheets[].filters[]` with a `note` about the parameter-equality idiom | A **slicer** on the underlying dimension, not a filter card or calculated column |
 | `theme.palette_hexes` / `font_family` | A starting point for `powerbi-report-design`'s Step 1 (tone/signature) and Step 5 (theme) — not an authoritative theme to clone; feel free to improve on it |
 
+### Visual encoding: cookbook first, CLI second, guessing never
+
+Before you hand-author any `visual.json`, resolve its encoding from the two authoritative sources in
+this order. Do **not** infer field-well/formatting JSON from memory — that is exactly how broken-but-
+`validate`-passing visuals (the Bing→Azure Maps choropleth, dead field-parameter slicers) shipped.
+
+1. **The visual cookbook — `.github/pbi.kb/visual-cookbook.md` + `.github/pbi.kb/visuals/<type>.visual.json`.**
+   This is the project's committed library of worked, `validate`-passing PBIR encodings (cartesian
+   family, part-to-whole/flow, KPI/card/AI, table conditional-formatting, azureMap choropleth, …).
+   **If a template exists for the type/idiom you need, copy it and rebind the fields** — do not
+   re-derive it. Each type's sibling `<type>.md` gives the field-well roles, the Tableau idiom it maps
+   to, and a confidence **tier**: 🟢 render-verified / 🟡 structural-template-ready (copy freely, then
+   verify render) / 🔴 needs-human-Desktop-capture (see step 3 of "When unsure" below — do not ship a
+   guess).
+2. **The `powerbi-report-author` CLI — the source of truth for anything not in the cookbook.** It is a
+   global npm binary on PATH (invoke `powerbi-report-author` by name; it is *not* under a skill
+   folder). Use it to look up encodings, not just to `validate`:
+   - `catalog list` — every built-in visual type + deprecations (`map`/`filledMap`→`azureMap`,
+     `qnaVisual` unsupported).
+   - `catalog describe <type>` — field-well **roles** (required/optional, maxPerRole) + the type's
+     formatting objects. Bind fields to these roles.
+   - `formatting list-objects <type>` / `formatting describe-object <type> <object>` /
+     `formatting describe-property <type> <object> <prop>` — exact property names, enum values, and
+     which objects need id selectors.
+   - `expr encode --kind <t> <v>` — generate a correct PBIR value encoding instead of hand-writing the
+     `expr`/`Literal` wrapper.
+3. **Only if neither covers it** do you fall into the research-then-human-capture loop below — and when
+   you capture a new ground-truth encoding, **add it back to the cookbook** (`visuals/<type>.visual.json`
+   + a `<type>.md` note) so the next migration reuses it instead of rediscovering it. The cookbook is a
+   living asset; growing it is part of the job, not a side task.
+
 ### Chart-type mapping (Tableau `mark_type` → Power BI visual)
 
 | Tableau mark | Power BI visual | Notes |
@@ -66,8 +97,10 @@ wrong encoding. Instead:
    `visual.json` and reuse it as ground truth** — one human round-trip beats many blind render cycles.
    (Exactly how the Superstore Azure Maps choropleth encoding below was captured; a research subagent
    found zero public PBIR examples of it.)
-3. Only then generalize the captured encoding (e.g. into a small re-runnable transform script) and
-   apply it to the remaining visuals.
+3. Only then generalize the captured encoding: **save it into the cookbook**
+   (`.github/pbi.kb/visuals/<type>.visual.json` + a `<type>.md` note marking it 🟢 render-verified),
+   and if it applies to many visuals at once, also capture it as a small re-runnable transform script.
+   The next migration then copies it from the cookbook instead of repeating the human round-trip.
 
 ## Workflow
 

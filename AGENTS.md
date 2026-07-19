@@ -61,6 +61,11 @@ Copilot CLI users register the same servers with `/mcp`, or copy them into
   `pbi-semantic-builder`, `pbi-report-builder`, `pbi-migration-validator`.
 - Any repo-specific skills live under `.github/skills/` (already an enabled skill location via
   `.vscode/settings.json`).
+- **Visual cookbook: [`.github/pbi.kb/visual-cookbook.md`](.github/pbi.kb/visual-cookbook.md) +
+  [`.github/pbi.kb/visuals/`](.github/pbi.kb/visuals/)** — a committed library of worked,
+  `validate`-passing PBIR `visual.json` encodings (one per visual type/idiom), each with roles, the
+  Tableau idiom it maps to, and a confidence tier. `pbi-report-builder` copies these instead of
+  guessing visual JSON; new ground-truth encodings are added back here so every migration compounds.
 
 ### 4. Python tooling
 
