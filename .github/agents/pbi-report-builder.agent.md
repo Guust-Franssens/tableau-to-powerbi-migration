@@ -37,48 +37,88 @@ Do not skip straight to authoring — these three skills are explicitly designed
 | `worksheets[].filters[]` with a `note` about the parameter-equality idiom | A **slicer** on the underlying dimension, not a filter card or calculated column |
 | `theme.palette_hexes` / `font_family` | A starting point for `powerbi-report-design`'s Step 1 (tone/signature) and Step 5 (theme) — not an authoritative theme to clone; feel free to improve on it |
 
-### Visual encoding: cookbook first, CLI second, guessing never
+### Visual encoding: CLI for current truth, render-verified cookbook for proven shapes, research for the rest
 
-Before you hand-author any `visual.json`, resolve its encoding from the two authoritative sources in
-this order. Do **not** infer field-well/formatting JSON from memory — that is exactly how broken-but-
+There are **two** decisions per visual, and they draw on different sources — keep them separate:
+**(A) which** Power BI visual best represents this Tableau worksheet, and **(B) how** to encode it in
+PBIR. Never infer field-well/formatting JSON from memory — that is exactly how broken-but-
 `validate`-passing visuals (the Bing→Azure Maps choropleth, dead field-parameter slicers) shipped.
+`validate` confirms *structure*, not *render*.
 
-1. **The visual cookbook — `.github/pbi.kb/visual-cookbook.md` + `.github/pbi.kb/visuals/<type>.visual.json`.**
-   This is the project's committed library of worked, `validate`-passing PBIR encodings (cartesian
-   family, part-to-whole/flow, KPI/card/AI, table conditional-formatting, azureMap choropleth, …).
-   **If a template exists for the type/idiom you need, copy it and rebind the fields** — do not
-   re-derive it. Each type's sibling `<type>.md` gives the field-well roles, the Tableau idiom it maps
-   to, and a confidence **tier**: 🟢 render-verified / 🟡 structural-template-ready (copy freely, then
-   verify render) / 🔴 needs-human-Desktop-capture (see step 3 of "When unsure" below — do not ship a
-   guess).
-2. **The `powerbi-report-author` CLI — the source of truth for anything not in the cookbook.** It is a
-   global npm binary on PATH (invoke `powerbi-report-author` by name; it is *not* under a skill
-   folder). Use it to look up encodings, not just to `validate`:
+**(A) Which visual — research the mapping, don't assume it.** The chart-mapping table below is a
+starting heuristic, not the final answer. For any visual whose best Power BI equivalent is non-obvious
+or evolving — **maps above all**, but also combo/dual-axis, part-to-whole, KPI, and anything the source
+does with a custom trick — decide the target by **researching Microsoft Learn for current best
+practice** (see the research-subtask model below), cross-checked against what the installed product
+actually supports (`powerbi-report-author catalog list` / `catalog describe`). Product capabilities
+move (Azure Maps reference layers, small multiples, on-object formatting); a mapping that was right a
+year ago may be superseded.
+
+**(B) How to encode it — precedence, most-current/most-trustworthy first:**
+
+1. **`powerbi-report-author` CLI = the live vocabulary and the source of truth for roles/props/enums.**
+   It is a global npm binary on PATH (invoke `powerbi-report-author` by name; it is *not* under a skill
+   folder) and always reflects the **installed** version, so it beats any static doc on currency.
+   Establish/confirm the encoding vocabulary here **first**:
    - `catalog list` — every built-in visual type + deprecations (`map`/`filledMap`→`azureMap`,
      `qnaVisual` unsupported).
-   - `catalog describe <type>` — field-well **roles** (required/optional, maxPerRole) + the type's
-     formatting objects. Bind fields to these roles.
-   - `formatting list-objects <type>` / `formatting describe-object <type> <object>` /
-     `formatting describe-property <type> <object> <prop>` — exact property names, enum values, and
-     which objects need id selectors.
-   - `expr encode --kind <t> <v>` — generate a correct PBIR value encoding instead of hand-writing the
+   - `catalog describe <type>` — field-well **roles** (required/optional, maxPerRole) + formatting objects.
+   - `formatting list-objects` / `describe-object <type> <object>` / `describe-property` — exact
+     property names, enum values, selector requirements.
+   - `expr encode --kind <t> <v>` — generate a correct value encoding instead of hand-writing the
      `expr`/`Literal` wrapper.
-3. **Only if neither covers it** do you fall into the research-then-human-capture loop below — and when
-   you capture a new ground-truth encoding, **add it back to the cookbook** (`visuals/<type>.visual.json`
-   + a `<type>.md` note) so the next migration reuses it instead of rediscovering it. The cookbook is a
-   living asset; growing it is part of the job, not a side task.
+2. **Cookbook composition — but trust it by tier, because the cookbook is a *cache*, not the authority.**
+   `.github/pbi.kb/visual-cookbook.md` + `visuals/<type>.visual.json`/`.md`. The CLI gives you the
+   vocabulary; the cookbook gives you a *worked composition* (the nested JSON that actually holds
+   together for a real idiom — which the CLI cannot compose and `validate` cannot render-check). Trust
+   it **by tier**:
+   - **🟢 render-verified** (proven by an actual render / human Desktop capture) → *more* trustworthy
+     than composing yourself, because it truly rendered. **Copy it and rebind fields**, then reconcile
+     its property names against step 1's CLI output to catch version drift.
+   - **🟡 structural-template** → this is just *cached CLI output that passed `validate`* — no more
+     authoritative than calling the CLI live, and it can be stale. Use it as a shape hint, but let the
+     **live CLI win on any conflict**; do not treat 🟡 as ground truth.
+   - **🔴 needs-capture** → do not ship it; go to step 3.
+3. **Research + human capture for anything neither covers** (the loop under "When unsure" below). When
+   you capture a new working encoding, **write it back to the cookbook as a 🟢 entry** (with the MS
+   Learn citation + date from your research) so the next migration reuses it. Growing/refreshing the
+   cookbook is part of the job, not a side task.
+
+### Research subtasks: keep the mapping current, per idiom (not per instance)
+
+To keep visual choices up to date without re-researching 30 visuals on every dashboard, research **per
+distinct Tableau idiom**, cache the result, and reuse it:
+
+1. **Collect the distinct idioms** in this workbook (mark type × key encoding: e.g. "filled map / region
+   choropleth", "dual-axis line+bar", "part-to-whole", "KPI with trend"). Dedupe — 30 visuals are
+   usually 5-8 idioms.
+2. **For each idiom without current cached guidance, spawn a focused research subtask** that answers:
+   *what is the best Power BI visual for this Tableau idiom today, and how does Microsoft Learn say to
+   build/configure it well?* The subtask must return a recommended visual + concrete configuration
+   notes + **Microsoft Learn citation(s) with the access date**, cross-checked against
+   `catalog describe`. **Maps are the priority** — Azure Maps guidance (reference layers, data-bound
+   layers, bubble vs choropleth) changes and is easy to get subtly wrong.
+3. **Cache it into the cookbook**: add/refresh a `## MS Learn best practice (as of <date>)` section in
+   the idiom's `visuals/<type>.md` with the recommendation + citation. Downstream, every instance of
+   that idiom reuses the cached decision; the dated citation makes staleness visible on the next run.
+4. Only then encode, following the (B) precedence above.
+
+This is what makes the cookbook self-refreshing against Microsoft Learn rather than a frozen snapshot.
 
 ### Chart-type mapping (Tableau `mark_type` → Power BI visual)
+
+> Starting heuristic only — confirm the target via the research-subtask model above (especially maps),
+> and the encoding via the CLI-first precedence above.
 
 | Tableau mark | Power BI visual | Notes |
 |---|---|---|
 | `Bar` | Clustered/stacked bar or column chart | Check `encodings.color` for series grouping |
 | `Line` | Line chart | |
-| `Circle` **with** `reference_lines` present | **Gauge visual** | Classic Tableau "fake gauge" trick (scatter point + Min/Max/Average reference lines on a fixed axis) — Power BI's native Gauge is a fidelity *improvement*, not a workaround. Bind Value/Minimum/Maximum/Target to the measures `pbi-semantic-builder` created for this. |
+| `Circle` **with** `reference_lines` present | Often a **Gauge** — but NOT always | Tableau's "fake gauge" (a point + Min/Max/Avg reference lines on a fixed axis) maps well to the native Gauge *when it's a single KPI vs a target*. If the worksheet compares **multiple** categories/regions, a gauge can't show them — keep it a multi-point dot plot/scatter. Decide by intent + grain, not the reference-line signal alone. |
 | `Circle` **without** `reference_lines` | Scatter chart | |
 | `Area` | Area chart | |
 | `Text` | Table, matrix, or card — infer from shelf shape: single measure + no rows/columns → card; multiple dimensions on rows → table/matrix | |
-| `Map` | **Always `azureMap`** (`map`/`filledMap` are deprecated Bing). Region shaded by a measure → azureMap data-bound **reference-layer choropleth** (see Iteration-4 gotchas); points → bubble layer | Check for geographic `semantic_role` on the bound field |
+| `Map` | **Always `azureMap`** (`map`/`filledMap` are deprecated Bing), but **research the layer type on MS Learn** — region-shaded-by-measure → data-bound reference-layer choropleth; points → bubble layer; routes → line layer. Map encodings are the highest-drift, highest-risk area — always confirm current guidance. | Check for geographic `semantic_role` on the bound field |
 | `Automatic` | Infer from shelf shape (same heuristics as Tableau itself: discrete+discrete → bar-ish, continuous+continuous → scatter/line) | Flag low-confidence inferences for design review rather than guessing silently |
 
 ### When unsure about a visual: research first, then put a human in the loop

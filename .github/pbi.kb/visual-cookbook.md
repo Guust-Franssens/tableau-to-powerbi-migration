@@ -15,13 +15,33 @@ ground truth. This cookbook generalizes that: capture/verify each encoding **onc
 
 1. **Structural template** (🟡) — built deterministically from the `powerbi-report-author` CLI
    (`catalog describe <type>` for roles, `formatting effective-properties <type>` for the formatting
-   surface) and `validate`d. Structurally correct; field-well roles + projection shape are right.
-   Good enough for the report-builder to adapt, but the *render* is not guaranteed.
-2. **Render-verified ground truth** (🟢) — either proven by an actual rendered visual in one of our
-   migrations, OR hand-built by a human in Power BI Desktop and saved, then captured here. Use this
-   tier for anything where structure alone is insufficient (dynamic field parameters + slicer
-   defaults, azureMap reference layers, custom polygon/geometry marks, dual-axis secondary binding,
-   analytics-pane lines).
+   surface) and `validate`d. Structurally correct, but the *render* is not guaranteed. Treat a 🟡
+   entry as **cached CLI output**: no more authoritative than calling the CLI live, and it can go
+   stale — on any conflict, the **live CLI wins**.
+2. **Render-verified ground truth** (🟢) — proven by an actual rendered visual in one of our
+   migrations, OR hand-built by a human in Power BI Desktop and captured here. This is the **one thing
+   more trustworthy than the CLI for *composition*** (the CLI describes properties in isolation and
+   `validate` green-lights structurally-valid-but-wrong JSON; a 🟢 entry actually rendered). Use it for
+   anything where structure alone is insufficient (dynamic field parameters + slicer defaults, azureMap
+   reference layers, custom polygon/geometry marks, dual-axis secondary binding, analytics-pane lines).
+
+## Precedence — CLI for current truth, cookbook for proven shapes, MS Learn for the mapping
+
+The CLI and the cookbook answer *different* questions. The CLI is the **live vocabulary** (roles,
+properties, enums — always reflects the installed version). The cookbook is a **cache of worked
+compositions**. Use them in this order:
+
+1. **Which visual to use** → research **Microsoft Learn** for current best practice (esp. maps),
+   cross-checked against `catalog list`/`catalog describe`. Product capabilities move; don't assume.
+2. **Encoding vocabulary** (roles/props/enums) → the **CLI, first and always** — it catches cookbook
+   staleness.
+3. **Encoding composition** → **🟢 render-verified cookbook entry** if one exists (reconcile its
+   property names against the CLI) **> compose from the CLI** (🟡 templates are stale cache, defer to
+   live CLI) **> research + human capture** (which then becomes a new 🟢 entry).
+
+Each `visuals/<type>.md` carries a `## MS Learn best practice (as of <date>)` section with a dated
+citation, refreshed by the report-builder's per-idiom research subtasks — so the mapping guidance stays
+current instead of freezing. See `.github/agents/pbi-report-builder.agent.md` ("Research subtasks").
 
 ## The CLI is the research tool (deterministic, no guessing)
 
