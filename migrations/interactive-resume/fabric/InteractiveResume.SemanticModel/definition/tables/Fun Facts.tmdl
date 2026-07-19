@@ -1,0 +1,78 @@
+/// Personal hobbies and fun facts (7 rows; one per hobby/fact such as Piano, Singing, Theater, Ultimate Frisbee, White House, Myers Briggs, plus one blank spacer). Each row carries a headline Title, a TYPE tag (HOBBY vs FUN FACT), a narrative Description, an external Link, and a Value used as relative bar length in the infographic. Source: Tableau 'Sheet1 (fun facts)'.
+table 'Fun Facts'
+	lineageTag: 72ff625e-9ace-54cd-8a4d-1bcc3cb526ce
+
+	/// Row count of 'Fun Facts' (each row = one hobby/fun fact). Hidden technical measure; renamed from Tableau's auto-generated 'Number of Records' so measure names stay unique model-wide.
+	measure 'Fun Facts Row Count' = COUNTROWS('Fun Facts')
+		formatString: #,##0
+		isHidden
+		displayFolder: Row Counts
+		lineageTag: 9edbc159-a8c0-5c5d-85a0-ab39fa2445ec
+
+	/// Calendar year associated with the hobby/fun fact (2013 to 2019). Context/sort field, not additive.
+	column Year
+		dataType: int64
+		lineageTag: 3ed3d53f-c01d-5e9c-b34b-e91408fd4f6b
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Relative bar length used to size the hobby marks in the infographic (integer 1 to 4). Additive.
+	column Value
+		dataType: int64
+		lineageTag: 26ae5935-e193-5e4f-a30c-f73975ad261e
+		summarizeBy: sum
+		sourceColumn: Value
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hobby or fun-fact name. One of: Myers Briggs, Piano, Singing, Theater, Ultimate Frisbee, White House.
+	column Title
+		dataType: string
+		lineageTag: dd95f5a2-ef68-573f-8105-c99984147454
+		summarizeBy: none
+		sourceColumn: Title
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Classifies the row as a hobby or a fun fact. One of: HOBBY, FUN FACT.
+	column TYPE
+		dataType: string
+		lineageTag: 5f6b3f3f-02e3-55a7-87d5-eb46ae07d9fe
+		summarizeBy: none
+		sourceColumn: TYPE
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Free-text narrative describing the hobby or fun fact (one paragraph per row).
+	column Description
+		dataType: string
+		lineageTag: 00f64e64-7692-5b2d-96e6-f90338924d03
+		summarizeBy: none
+		sourceColumn: Description
+
+		annotation SummarizationSetBy = Automatic
+
+	/// External URL for the hobby (portfolio photo, YouTube/Instagram, personality-test page). Some rows hold the placeholder 'link'. Tagged as Web URL.
+	column Links
+		dataType: string
+		lineageTag: cf6607b3-d514-5433-b731-340936874ad2
+		dataCategory: WebUrl
+		summarizeBy: none
+		sourceColumn: Links
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Fun Facts' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.sheet1_fun_facts.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Year", Int64.Type}, {"Value", Int64.Type}, {"Title", type text}, {"TYPE", type text}, {"Description", type text}, {"Links", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

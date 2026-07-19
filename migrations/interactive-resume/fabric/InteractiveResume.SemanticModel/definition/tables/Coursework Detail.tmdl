@@ -1,0 +1,104 @@
+/// College coursework with full course-catalog descriptions (14 rows, one per course). Superset of 'Coursework', adding catalog text (Course Descrip), internship work-stream titles, and layout helpers (Index, N). Grouped into Economics and Data Analysis-Statistics. Source: Tableau 'Sheet1 (Coursework) (2)'.
+table 'Coursework Detail'
+	lineageTag: 679fec34-e150-522b-992b-ebf93bb086a4
+
+	/// Row count of 'Coursework Detail' (each row = one course, with catalog detail). Hidden technical measure; renamed from Tableau's auto-generated 'Number of Records' so measure names stay unique model-wide.
+	measure 'Coursework Detail Row Count' = COUNTROWS('Coursework Detail')
+		formatString: #,##0
+		isHidden
+		displayFolder: Row Counts
+		lineageTag: 5bc68304-8ea1-5919-9b94-2edb29cf4007
+
+	/// Full course-catalog description text (one paragraph per course). Free text.
+	column 'Course Descrip'
+		dataType: string
+		lineageTag: 3b168965-3520-5775-a755-a3facae51867
+		summarizeBy: none
+		sourceColumn: Course Descrip
+
+		annotation SummarizationSetBy = Automatic
+
+	/// College course name; 14 distinct, unique per row. One of: Applied Regression Analysis, Biostatistics, Computational Statistical Packages, Computer Science I/II, Econometrics, Economic Public Policy, Exploratory Data Analysis, Health Economics, Intermediate Macro/Micro, International Economics, Managerial Economics, Money and Banking, Money Markets Policy, Statistics for Engineers I/II.
+	column Course
+		dataType: string
+		lineageTag: 3997607a-d3f0-5315-8848-a064221cc38b
+		summarizeBy: none
+		sourceColumn: Course
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Subject area of the course. One of: Economics, Data Analysis-Statistics.
+	column Category
+		dataType: string
+		lineageTag: d62d98cf-3fdc-542d-bb0c-773beff3df4c
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Abbreviated subject area. One of: Economics, Data/Stats.
+	column 'Abrev Cat'
+		dataType: string
+		lineageTag: 9ee0df12-a1fb-5104-9f4c-c81776782316
+		summarizeBy: none
+		sourceColumn: AbrevCat
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Internship work-stream the course maps to. One of: Client Delivery, Development, PostgreSQL, Tableau Server (blank if none).
+	column 'Intern Title'
+		dataType: string
+		lineageTag: add1924d-275c-5226-b80e-168e3fd1ba89
+		summarizeBy: none
+		sourceColumn: InternTitle
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Display order / rank of the course within its category (1 to 4). Not additive.
+	column Number
+		dataType: int64
+		lineageTag: 4b36f684-722d-5eb9-90c1-b93e1c42e561
+		summarizeBy: none
+		sourceColumn: Number
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Free-text internship project description; blank for most courses.
+	column Description
+		dataType: string
+		lineageTag: 08f85dbc-32d6-5ec5-ae4f-e440a4ce3833
+		summarizeBy: none
+		sourceColumn: Description
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Layout helper flag (1 or blank) used for positioning in the Tableau viz. Not additive.
+	column Index
+		dataType: int64
+		lineageTag: 2d90e16d-d6fe-57d4-8c47-468660efa961
+		summarizeBy: none
+		sourceColumn: Index
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Row sequence number (1 to 15) used for layout ordering. Not additive.
+	column N
+		dataType: int64
+		lineageTag: b2894f2b-1a00-5069-801d-dc42e4abe141
+		summarizeBy: none
+		sourceColumn: N
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Coursework Detail' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.sheet1_coursework_2.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Course Descrip", type text}, {"Course", type text}, {"Category", type text}, {"AbrevCat", type text}, {"InternTitle", type text}, {"Number", Int64.Type}, {"Description", type text}, {"Index", Int64.Type}, {"N", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

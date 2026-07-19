@@ -1,0 +1,3039 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "MariaBrock-InteractiveResume.twbx",
+    "tableau_version": "18.1",
+    "source_build": "2019.4.0 (20194.19.1115.1802)",
+    "repository_location_id": "MariaBrock-InteractiveResume",
+    "parsed_at": "2026-07-17T16:14:20.873919+00:00"
+  },
+  "parameters": [],
+  "data_sources": [
+    {
+      "id": "ds.sheet1_fun_facts",
+      "caption": "Sheet1 (fun facts)",
+      "internal_name": "federated.03nuoy71051h3g1dddjm914d7f9d",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_03nuoy71051h3g1dddjm91.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1",
+          "name": "Sheet1",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sheet1_fun_facts__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts__value",
+          "internal_name": "[Value]",
+          "caption": "Value",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts__title",
+          "internal_name": "[Title]",
+          "caption": "Title",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts__type",
+          "internal_name": "[TYPE]",
+          "caption": "TYPE",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts__description",
+          "internal_name": "[Description]",
+          "caption": "Description",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts__links",
+          "internal_name": "[Links]",
+          "caption": "Links",
+          "table_id": "tbl.sheet1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.sheet1_coursework",
+      "caption": "Sheet1 (Coursework)",
+      "internal_name": "federated.10p5u371ck6ze91btem531m9oeua",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_10p5u371ck6ze91btem531.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1_1",
+          "name": "Sheet1",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sheet1_coursework__abrev_cat",
+          "internal_name": "[AbrevCat]",
+          "caption": "Abrev Cat",
+          "table_id": "tbl.sheet1_1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_coursework__intern_title",
+          "internal_name": "[InternTitle]",
+          "caption": "Intern Title",
+          "table_id": "tbl.sheet1_1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_coursework__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1_1",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sheet1_coursework__number",
+          "internal_name": "[Number]",
+          "caption": "Number",
+          "table_id": "tbl.sheet1_1",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_coursework__course",
+          "internal_name": "[Course]",
+          "caption": "Course",
+          "table_id": "tbl.sheet1_1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_coursework__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": "tbl.sheet1_1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_coursework__description",
+          "internal_name": "[Description]",
+          "caption": "Description",
+          "table_id": "tbl.sheet1_1",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.sheet1_coursework_2",
+      "caption": "Sheet1 (Coursework) (2)",
+      "internal_name": "federated.10p5u371ck6ze91btem531m9oeua (copy)",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_10p5u371ck6ze91btem531_1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1_2",
+          "name": "Sheet1",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sheet1_coursework_2__abrev_cat",
+          "internal_name": "[AbrevCat]",
+          "caption": "Abrev Cat",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__intern_title",
+          "internal_name": "[InternTitle]",
+          "caption": "Intern Title",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1_2",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__number",
+          "internal_name": "[Number]",
+          "caption": "Number",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__course_descrip",
+          "internal_name": "[Course Descrip]",
+          "caption": "Course Descrip",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__course",
+          "internal_name": "[Course]",
+          "caption": "Course",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__description",
+          "internal_name": "[Description]",
+          "caption": "Description",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__index",
+          "internal_name": "[Index]",
+          "caption": "Index",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_coursework_2__n",
+          "internal_name": "[N]",
+          "caption": "N",
+          "table_id": "tbl.sheet1_2",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.sheet1_fun_facts_resume",
+      "caption": "Sheet1 (Fun Facts_Resume)",
+      "internal_name": "federated.14a9g2s12op1gk1c0dcok0jlepyp",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_14a9g2s12op1gk1c0dcok0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1_3",
+          "name": "Sheet1",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sheet1_fun_facts_resume__id",
+          "internal_name": "[ID]",
+          "caption": "ID",
+          "table_id": "tbl.sheet1_3",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts_resume__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1_3",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts_resume__fact",
+          "internal_name": "[Fact]",
+          "caption": "Fact",
+          "table_id": "tbl.sheet1_3",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts_resume__description",
+          "internal_name": "[Description]",
+          "caption": "Description",
+          "table_id": "tbl.sheet1_3",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_fun_facts_resume__fact_sum",
+          "internal_name": "[Fact Sum]",
+          "caption": "Fact Sum",
+          "table_id": "tbl.sheet1_3",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.sheet1_maj_min_resume",
+      "caption": "Sheet1 (Maj_Min_Resume)",
+      "internal_name": "federated.1bbg6ml0vv5k111abkfle0h4nlgf",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1bbg6ml0vv5k111abkfle0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1_4",
+          "name": "Sheet1",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sheet1_maj_min_resume__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1_4",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sheet1_maj_min_resume__number",
+          "internal_name": "[Number]",
+          "caption": "Number",
+          "table_id": "tbl.sheet1_4",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_maj_min_resume__title",
+          "internal_name": "[Title]",
+          "caption": "Title",
+          "table_id": "tbl.sheet1_4",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_maj_min_resume__type",
+          "internal_name": "[Type]",
+          "caption": "Type",
+          "table_id": "tbl.sheet1_4",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_maj_min_resume__size",
+          "internal_name": "[Size]",
+          "caption": "Size",
+          "table_id": "tbl.sheet1_4",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.sheet1_project_badges_resume",
+      "caption": "Sheet1 (Project Badges_Resume)",
+      "internal_name": "federated.1mc61dm1jbxwko1e36o0e1styqqu",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1mc61dm1jbxwko1e36o0e1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.sheet1_5",
+          "name": "Sheet1",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sheet1_project_badges_resume__number_of_records",
+          "internal_name": "[Number of Records]",
+          "caption": "Number of Records",
+          "table_id": "tbl.sheet1_5",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sheet1_project_badges_resume__number",
+          "internal_name": "[Number]",
+          "caption": "Number",
+          "table_id": "tbl.sheet1_5",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sheet1_project_badges_resume__abbrev",
+          "internal_name": "[Abbrev]",
+          "caption": "Abbrev",
+          "table_id": "tbl.sheet1_5",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_project_badges_resume__title",
+          "internal_name": "[Title]",
+          "caption": "Title",
+          "table_id": "tbl.sheet1_5",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_project_badges_resume__description",
+          "internal_name": "[Description]",
+          "caption": "Description",
+          "table_id": "tbl.sheet1_5",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_project_badges_resume__links",
+          "internal_name": "[Links]",
+          "caption": "Links",
+          "table_id": "tbl.sheet1_5",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_sheet1_project_badges_resume__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.sheet1_5",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.11",
+      "name": "11",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10p5u371ck6ze91btem531m9oeua (copy)"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_coursework_2__number",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "1"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.22",
+      "name": "22",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10p5u371ck6ze91btem531m9oeua (copy)"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_coursework_2__number",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "2"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.33",
+      "name": "33",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10p5u371ck6ze91btem531m9oeua (copy)"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_coursework_2__number",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "3"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.44",
+      "name": "44",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10p5u371ck6ze91btem531m9oeua (copy)"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_coursework_2__number",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "4"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.ad",
+      "name": "AD",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1mc61dm1jbxwko1e36o0e1styqqu"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__abbrev"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__title"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_project_badges_resume__number",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Title:nk]>Æ\n\n<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Description:nk]>Æ\n"
+    },
+    {
+      "id": "ws.background",
+      "name": "Background",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.14a9g2s12op1gk1c0dcok0jlepyp"
+      ],
+      "mark_type": "Text",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380311916547:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.bubbles",
+      "name": "Bubbles",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bbg6ml0vv5k111abkfle0h4nlgf"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_maj_min_resume__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": {
+          "field_id": "fld.ds_sheet1_maj_min_resume__size"
+        },
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.coursework",
+      "name": "Coursework",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10p5u371ck6ze91btem531m9oeua (copy)"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__n",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__course"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_sheet1_coursework_2__course_descrip"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_coursework_2__abrev_cat",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Data/Stats\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.10p5u371ck6ze91btem531m9oeua (copy)].[none:Course:nk]>Æ\n<[federated.10p5u371ck6ze91btem531m9oeua (copy)].[none:Course Descrip:nk]>"
+    },
+    {
+      "id": "ws.drp",
+      "name": "DRP",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1mc61dm1jbxwko1e36o0e1styqqu"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__abbrev"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__title"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_project_badges_resume__number",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Title:nk]>Æ\n\n<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Description:nk]>Æ\n"
+    },
+    {
+      "id": "ws.dtc",
+      "name": "DTC",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1mc61dm1jbxwko1e36o0e1styqqu"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__abbrev"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__title"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__links"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_project_badges_resume__number",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Title:nk]>Æ\n\n<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Description:nk]>Æ\n.Æ\n"
+    },
+    {
+      "id": "ws.dvp",
+      "name": "DVP",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1mc61dm1jbxwko1e36o0e1styqqu"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__abbrev"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__title"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_project_badges_resume__number",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Title:nk]>Æ\n\n<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Description:nk]>Æ\n"
+    },
+    {
+      "id": "ws.favorites",
+      "name": "Favorites",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10p5u371ck6ze91btem531m9oeua"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_2596888163891249153:nk]"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "FAVORITE...Æ\n.Æ\nMovie: Lord of the Rings trilogyÆ\n.Æ\nAuthor: Brandon SandersonÆ\n.Æ\nSport to Watch: Tennis or SoccerÆ\n.Æ\nArtist/Band: Crosby, Stills, and NashÆ\n.Æ\nSubject: History. Oh and Data Analysis, of course.Æ\n"
+    },
+    {
+      "id": "ws.sd",
+      "name": "SD",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1mc61dm1jbxwko1e36o0e1styqqu"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__abbrev"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__title"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__links"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_project_badges_resume__number",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Title:nk]>Æ\n\n<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Description:nk]>Æ\n.Æ\n"
+    },
+    {
+      "id": "ws.ta",
+      "name": "TA",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1mc61dm1jbxwko1e36o0e1styqqu"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__number",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__abbrev"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__title"
+          },
+          {
+            "field_id": "fld.ds_sheet1_project_badges_resume__links"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_project_badges_resume__number",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Title:nk]>Æ\n\n<[federated.1mc61dm1jbxwko1e36o0e1styqqu].[none:Description:nk]>Æ\n.Æ\n"
+    },
+    {
+      "id": "ws.theaterbar",
+      "name": "Theaterbar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.03nuoy71051h3g1dddjm914d7f9d"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380873080839:nk]"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__type"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_fun_facts__title",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Theater\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:TYPE:nk]>Æ\n\n<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:Description:nk]>Æ\n."
+    },
+    {
+      "id": "ws.whbar",
+      "name": "WHbar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.03nuoy71051h3g1dddjm914d7f9d"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380873080839:nk]"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__type"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_fun_facts__title",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"White House\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:TYPE:nk]>Æ\n\n<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:Description:nk]>Æ\n."
+    },
+    {
+      "id": "ws.box",
+      "name": "box",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.03nuoy71051h3g1dddjm914d7f9d"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__value",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.frisbeebar",
+      "name": "frisbeebar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.03nuoy71051h3g1dddjm914d7f9d"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380873080839:nk]"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__type"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_fun_facts__title",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Ultimate Frisbee\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:TYPE:nk]>Æ\n\n<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:Description:nk]>Æ\n."
+    },
+    {
+      "id": "ws.gmail",
+      "name": "gmail",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.14a9g2s12op1gk1c0dcok0jlepyp"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380664172549:nk]"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "mmbrock259@gmail.com"
+    },
+    {
+      "id": "ws.linked",
+      "name": "linked",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.14a9g2s12op1gk1c0dcok0jlepyp"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380664172549:nk]"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.myersbar",
+      "name": "myersbar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.03nuoy71051h3g1dddjm914d7f9d"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380873080839:nk]"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__type"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_fun_facts__title",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Myers Briggs\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:TYPE:nk]>Æ\n\n<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:Description:nk]>Æ\n."
+    },
+    {
+      "id": "ws.pianobar",
+      "name": "pianobar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.03nuoy71051h3g1dddjm914d7f9d"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380873080839:nk]"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__type"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_fun_facts__title",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Piano\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:TYPE:nk]>Æ\n\n<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:Description:nk]>Æ\n."
+    },
+    {
+      "id": "ws.tab",
+      "name": "tab",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.14a9g2s12op1gk1c0dcok0jlepyp"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380664172549:nk]"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.twitter",
+      "name": "twitter",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.14a9g2s12op1gk1c0dcok0jlepyp"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380664172549:nk]"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.voicebar",
+      "name": "voicebar",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.03nuoy71051h3g1dddjm914d7f9d"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_879046380873080839:nk]"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__description"
+          },
+          {
+            "field_id": "fld.ds_sheet1_fun_facts__type"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sheet1_fun_facts__title",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Singing\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:TYPE:nk]>Æ\n\n<[federated.03nuoy71051h3g1dddjm914d7f9d].[attr:Description:nk]>Æ\n.Æ\n"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.maria_brock_interactive_resume_3",
+      "name": "Maria Brock - Interactive Resume (3)",
+      "size": {
+        "width": 1300.0,
+        "height": 800.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "4",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "3",
+                "type": "worksheet",
+                "x": 231.0,
+                "y": 375.0,
+                "w": 99538.0,
+                "h": 99250.0,
+                "direction": null,
+                "worksheet_id": "ws.background",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "205",
+            "type": "image",
+            "x": 68200.0,
+            "y": 34889.0,
+            "w": 1133.0,
+            "h": 19000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "204",
+            "type": "image",
+            "x": 56800.0,
+            "y": 34889.0,
+            "w": 1133.0,
+            "h": 19000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "203",
+            "type": "image",
+            "x": 45267.0,
+            "y": 34889.0,
+            "w": 1133.0,
+            "h": 19000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "202",
+            "type": "image",
+            "x": 31933.0,
+            "y": 34889.0,
+            "w": 1133.0,
+            "h": 19000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "201",
+            "type": "image",
+            "x": 10000.0,
+            "y": 32556.0,
+            "w": 4200.0,
+            "h": 51111.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "104",
+            "type": "text",
+            "x": 600.0,
+            "y": 1222.0,
+            "w": 98467.0,
+            "h": 97444.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Æ ",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "11",
+            "type": "text",
+            "x": 23615.0,
+            "y": 6500.0,
+            "w": 33615.0,
+            "h": 14750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "MARIA BROCKÆ\nBachelor of Science | George Mason University | 2020",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "18",
+            "type": "text",
+            "x": 84769.0,
+            "y": 5250.0,
+            "w": 13923.0,
+            "h": 13875.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "POSITIONSÆ\n         PROGRAMSÆ\nPROJECTS",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "46",
+            "type": "text",
+            "x": 23692.0,
+            "y": 28375.0,
+            "w": 51231.0,
+            "h": 7125.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "DATA ANALYTICS INTERN | BOOZ ALLEN HAMILTON | JUNE-AUGUST 2019",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "47",
+            "type": "text",
+            "x": 23692.0,
+            "y": 23750.0,
+            "w": 14000.0,
+            "h": 4000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "EXPERIENCE",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "51",
+            "type": "worksheet",
+            "x": 10400.0,
+            "y": 36111.0,
+            "w": 3333.0,
+            "h": 31667.0,
+            "direction": null,
+            "worksheet_id": "ws.bubbles",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "63",
+            "type": "text",
+            "x": 4200.0,
+            "y": 39111.0,
+            "w": 6667.0,
+            "h": 5556.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "MAJORÆ\nEconomics",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "64",
+            "type": "text",
+            "x": 4200.0,
+            "y": 49667.0,
+            "w": 7000.0,
+            "h": 5556.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "MINORÆ\nData Analysis",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "65",
+            "type": "text",
+            "x": 4200.0,
+            "y": 60222.0,
+            "w": 6667.0,
+            "h": 5556.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "MINORÆ\nStatistics",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "68",
+            "type": "image",
+            "x": 87267.0,
+            "y": 32222.0,
+            "w": 3800.0,
+            "h": 6889.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "17",
+            "type": "worksheet",
+            "x": 79333.0,
+            "y": 21111.0,
+            "w": 10600.0,
+            "h": 17667.0,
+            "direction": null,
+            "worksheet_id": "ws.ta",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "71",
+            "type": "image",
+            "x": 87600.0,
+            "y": 44444.0,
+            "w": 2933.0,
+            "h": 5000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "19",
+            "type": "worksheet",
+            "x": 88333.0,
+            "y": 32222.0,
+            "w": 10600.0,
+            "h": 17667.0,
+            "direction": null,
+            "worksheet_id": "ws.sd",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "72",
+            "type": "image",
+            "x": 87800.0,
+            "y": 55000.0,
+            "w": 3800.0,
+            "h": 6889.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "73",
+            "type": "image",
+            "x": 87600.0,
+            "y": 77000.0,
+            "w": 3800.0,
+            "h": 6889.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "74",
+            "type": "image",
+            "x": 87400.0,
+            "y": 66000.0,
+            "w": 3467.0,
+            "h": 6444.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "20",
+            "type": "worksheet",
+            "x": 79333.0,
+            "y": 43333.0,
+            "w": 10600.0,
+            "h": 17667.0,
+            "direction": null,
+            "worksheet_id": "ws.ad",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "21",
+            "type": "worksheet",
+            "x": 88333.0,
+            "y": 54444.0,
+            "w": 10600.0,
+            "h": 17667.0,
+            "direction": null,
+            "worksheet_id": "ws.dtc",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "22",
+            "type": "worksheet",
+            "x": 88333.0,
+            "y": 76667.0,
+            "w": 10600.0,
+            "h": 17667.0,
+            "direction": null,
+            "worksheet_id": "ws.dvp",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "90",
+            "type": "text",
+            "x": 23769.0,
+            "y": 35625.0,
+            "w": 8385.0,
+            "h": 3375.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Hover for Details",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "95",
+            "type": "text",
+            "x": 80923.0,
+            "y": 18375.0,
+            "w": 8538.0,
+            "h": 4500.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Hover for DetailsÆ\nClick the Links",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "103",
+            "type": "filter",
+            "x": 13923.0,
+            "y": 58375.0,
+            "w": 9077.0,
+            "h": 8375.0,
+            "direction": null,
+            "worksheet_id": "ws.coursework",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "105",
+            "type": "image",
+            "x": 667.0,
+            "y": 77667.0,
+            "w": 3000.0,
+            "h": 11556.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "76",
+            "type": "worksheet",
+            "x": 38067.0,
+            "y": 36444.0,
+            "w": 14733.0,
+            "h": 20889.0,
+            "direction": null,
+            "worksheet_id": "ws.22",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "80",
+            "type": "worksheet",
+            "x": 24867.0,
+            "y": 42333.0,
+            "w": 14733.0,
+            "h": 20889.0,
+            "direction": null,
+            "worksheet_id": "ws.11",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "82",
+            "type": "worksheet",
+            "x": 61067.0,
+            "y": 38222.0,
+            "w": 14733.0,
+            "h": 20889.0,
+            "direction": null,
+            "worksheet_id": "ws.44",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "81",
+            "type": "worksheet",
+            "x": 49667.0,
+            "y": 47556.0,
+            "w": 14733.0,
+            "h": 20889.0,
+            "direction": null,
+            "worksheet_id": "ws.33",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "128",
+            "type": "worksheet",
+            "x": 65154.0,
+            "y": 9500.0,
+            "w": 3462.0,
+            "h": 5625.0,
+            "direction": null,
+            "worksheet_id": "ws.linked",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "131",
+            "type": "worksheet",
+            "x": 70077.0,
+            "y": 9000.0,
+            "w": 3923.0,
+            "h": 6375.0,
+            "direction": null,
+            "worksheet_id": "ws.twitter",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "132",
+            "type": "worksheet",
+            "x": 74923.0,
+            "y": 9375.0,
+            "w": 4000.0,
+            "h": 6125.0,
+            "direction": null,
+            "worksheet_id": "ws.tab",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "141",
+            "type": "text",
+            "x": 70385.0,
+            "y": 94000.0,
+            "w": 11154.0,
+            "h": 3375.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Hover Over the Boxes",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "157",
+            "type": "worksheet",
+            "x": 23267.0,
+            "y": 71333.0,
+            "w": 58467.0,
+            "h": 25222.0,
+            "direction": null,
+            "worksheet_id": "ws.box",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "23",
+            "type": "worksheet",
+            "x": 79333.0,
+            "y": 65556.0,
+            "w": 10600.0,
+            "h": 17667.0,
+            "direction": null,
+            "worksheet_id": "ws.drp",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "143",
+            "type": "text",
+            "x": 46769.0,
+            "y": 87000.0,
+            "w": 6308.0,
+            "h": 3500.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "THEATER",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "144",
+            "type": "text",
+            "x": 52846.0,
+            "y": 77500.0,
+            "w": 9154.0,
+            "h": 3375.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "WHITE HOUSE",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "145",
+            "type": "text",
+            "x": 59615.0,
+            "y": 92250.0,
+            "w": 8923.0,
+            "h": 3375.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "ULTIMATE FRISBEE",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "146",
+            "type": "text",
+            "x": 67308.0,
+            "y": 82375.0,
+            "w": 10154.0,
+            "h": 3375.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "MYERS BRIGGS",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "195",
+            "type": "image",
+            "x": 23733.0,
+            "y": 68111.0,
+            "w": 4000.0,
+            "h": 29444.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "198",
+            "type": "image",
+            "x": 2462.0,
+            "y": 1250.0,
+            "w": 20692.0,
+            "h": 35125.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "199",
+            "type": "image",
+            "x": 3467.0,
+            "y": 68333.0,
+            "w": 16800.0,
+            "h": 30444.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "102",
+            "type": "worksheet",
+            "x": 5133.0,
+            "y": 69444.0,
+            "w": 15000.0,
+            "h": 27222.0,
+            "direction": null,
+            "worksheet_id": "ws.coursework",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "206",
+            "type": "image",
+            "x": 22733.0,
+            "y": 67778.0,
+            "w": 1667.0,
+            "h": 30333.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "207",
+            "type": "image",
+            "x": 23400.0,
+            "y": 96444.0,
+            "w": 57333.0,
+            "h": 2889.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "212",
+            "type": "image",
+            "x": 23615.0,
+            "y": 19125.0,
+            "w": 55308.0,
+            "h": 2750.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "213",
+            "type": "image",
+            "x": 23538.0,
+            "y": 34000.0,
+            "w": 55308.0,
+            "h": 2125.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "220",
+            "type": "text",
+            "x": 29333.0,
+            "y": 73222.0,
+            "w": 48333.0,
+            "h": 21000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Æ ",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "142",
+            "type": "text",
+            "x": 39385.0,
+            "y": 72500.0,
+            "w": 6692.0,
+            "h": 3375.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "SINGING",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "140",
+            "type": "text",
+            "x": 30533.0,
+            "y": 92111.0,
+            "w": 6667.0,
+            "h": 3333.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "PIANO",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "161",
+            "type": "worksheet",
+            "x": 32267.0,
+            "y": 87333.0,
+            "w": 3067.0,
+            "h": 3111.0,
+            "direction": null,
+            "worksheet_id": "ws.pianobar",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "162",
+            "type": "worksheet",
+            "x": 39867.0,
+            "y": 77556.0,
+            "w": 3067.0,
+            "h": 3111.0,
+            "direction": null,
+            "worksheet_id": "ws.voicebar",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "163",
+            "type": "worksheet",
+            "x": 47267.0,
+            "y": 82333.0,
+            "w": 3067.0,
+            "h": 3111.0,
+            "direction": null,
+            "worksheet_id": "ws.theaterbar",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "164",
+            "type": "worksheet",
+            "x": 54667.0,
+            "y": 82333.0,
+            "w": 3067.0,
+            "h": 3111.0,
+            "direction": null,
+            "worksheet_id": "ws.whbar",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "165",
+            "type": "worksheet",
+            "x": 62067.0,
+            "y": 87444.0,
+            "w": 3067.0,
+            "h": 3111.0,
+            "direction": null,
+            "worksheet_id": "ws.frisbeebar",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "166",
+            "type": "worksheet",
+            "x": 69333.0,
+            "y": 87444.0,
+            "w": 3067.0,
+            "h": 3111.0,
+            "direction": null,
+            "worksheet_id": "ws.myersbar",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "229",
+            "type": "worksheet",
+            "x": 3214.0,
+            "y": 5250.0,
+            "w": 17000.0,
+            "h": 27750.0,
+            "direction": null,
+            "worksheet_id": "ws.favorites",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "230",
+            "type": "text",
+            "x": 10385.0,
+            "y": 36375.0,
+            "w": 2923.0,
+            "h": 29000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Æ ",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "231",
+            "type": "text",
+            "x": 89308.0,
+            "y": 27250.0,
+            "w": 7692.0,
+            "h": 4125.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "TableauÆ\nAmbassador",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "232",
+            "type": "text",
+            "x": 80538.0,
+            "y": 39000.0,
+            "w": 7692.0,
+            "h": 4125.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "SeniorÆ\nDelegate",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "233",
+            "type": "text",
+            "x": 89538.0,
+            "y": 50000.0,
+            "w": 7692.0,
+            "h": 4125.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "ChoirÆ\nDirector",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "234",
+            "type": "text",
+            "x": 80769.0,
+            "y": 60000.0,
+            "w": 7692.0,
+            "h": 6250.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Digital Æ\nTechnologyÆ\nCredential",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "235",
+            "type": "text",
+            "x": 89385.0,
+            "y": 71125.0,
+            "w": 7692.0,
+            "h": 6250.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "DataÆ\nRedesignÆ\nProject",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "236",
+            "type": "text",
+            "x": 80923.0,
+            "y": 82750.0,
+            "w": 7692.0,
+            "h": 6250.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "DataÆ\nVisualization Æ\nProject",
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.dtc",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.tab",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.whbar",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.frisbeebar",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.myersbar",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.pianobar",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.theaterbar",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.linked",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.ta",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.dtc",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.sd",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.voicebar",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.twitter",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.pianobar",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        }
+      ]
+    }
+  ],
+  "theme": {
+    "palette_hexes": [
+      "#6b9fa9",
+      "#88b793",
+      "#bfd6e1",
+      "#ecd7d2"
+    ],
+    "font_family": "Century Gothic",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.sheet1_fun_facts",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.sheet1_coursework",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.sheet1_coursework_2",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.sheet1_fun_facts_resume",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.sheet1_maj_min_resume",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.sheet1_project_badges_resume",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "dashboard actions (14)",
+      "issue": "All 14 (15 raw; 1 dedup) Tableau dashboard actions are URL/hyperlink actions - zero filter/highlight/navigation/parameter actions. URL actions have NO semantic-model equivalent; they are a report-layer concern (WebUrl-category column rendered as a link, or Button/Image with a Web URL action). Model provides dataCategory=WebUrl on 'Fun Facts'[Links] and 'Project Badges Resume'[Links] (9 of the URLs live there). The remaining 6 URLs are hardcoded/placeholder (3 Fun Facts Resume icons whose table has no Links column: tab/twitter/linked; 2 pianobar YouTube links where data Links=\"link\"; 1 second DTC link) and must be authored by pbi-report-builder as explicit Web URL buttons. pianobar carries TWO URL actions on one mark.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "model relationships",
+      "issue": "Source has 0 joins, 0 blends, and 0 filter/highlight actions, so the 6 data sources are data-independent (a spatially-composed infographic, not a star schema). Data-driven overlap analysis found exactly one genuine cross-table key: 'Fun Facts Resume'[Fact] 1:1 'Fun Facts'[Title] (5 shared values). Shipped as a single INACTIVE 1:1 relationship (documented) so it imposes no fabricated cross-filtering by default; pbi-report-builder may activate it for an optional cross-highlight enhancement. Other candidates rejected: Coursework<->Coursework Detail (near-duplicate copies, not dimension->fact); Major Minor Resume[Title] vs Coursework[Category] (keys misalign - 'Data Analysis-Statistics' != 'Data Analysis'+'Statistics', would orphan 2 of 3 majors).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "near-duplicate data sources",
+      "issue": "'Sheet1 (Coursework)' (->Coursework) and 'Sheet1 (Coursework) (2)' (->Coursework Detail) are near-duplicate sources (same 14 Courses); Coursework Detail is the superset (adds Course Descrip, InternTitle values, Index, N). Both retained per worksheet-binding reconciliation (Favorites binds Coursework; 11/22/33/44/Coursework bind Coursework Detail) - not deduplicated into one table.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "worksheet-level constant calcs (4)",
+      "issue": "4 distinct worksheet-level calculated fields are constant string literals ('.' and ' ') used as single-mark placeholders (Tableau's way to render one decorative mark without a real dimension). Dropped from the semantic model - a decorative shape/text/image is placed directly by pbi-report-builder; no data-model equivalent needed.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Number of Records (x6)",
+      "issue": "Tableau auto-generates a 'Number of Records' (=1) measure per data source; 6 identically-named measures crash Power BI Desktop on load (invisible to offline TmdlSerializer). Each renamed to a unique '<Table> Row Count' = COUNTROWS('<Table>') (hidden).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "extract-based sources -> import",
+      "issue": "All 6 sources are extract-based (.hyper) with no live upstream; materialized to CSV (data/*.csv, per parse-stage limitations) and loaded as import-mode M partitions reading a DataFolder parameter. Structure-and-data faithful; not repointed to any live system.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "AI readiness - synonyms / linguistic schema",
+      "issue": "Q&A synonyms (culture LinguisticMetadata) were not authored: the Power BI Modeling MCP exposes object descriptions but no synonym/culture-schema write operation, and hand-authoring linguistic TMDL is error-prone. Abbreviation meanings were folded into descriptions instead (e.g. 'Abbreviated subject area', 'Internship work-stream', badge codes expanded to full names). A formal synonym set is a low-cost post-deploy enhancement.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "AI readiness - service-only features",
+      "issue": "AI data schema and AI instructions (service LSDL, no stable file-authoring contract), verified answers (not Git-supported; require report visuals), and 'Approved for Copilot' + semantic indexing (tenant/workspace runtime settings) are deferred to post-deploy service configuration - not committable in TMDL today. Descriptions + categorical domain enumeration (the highest-leverage, file-committable items) are done at 100% coverage.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "AI readiness tooling - shared verifier absent",
+      "issue": "The shared scripts/check_ai_readiness.py referenced by the agent instructions is not present in the repo; an equivalent scoped verifier was added at migrations/interactive-resume/build/check_ai_readiness.py. It confirms 100% description coverage (47/47 objects) and that all 14 categorical columns enumerate their domain. Consider promoting it to the shared scripts/ folder.",
+      "severity": "low",
+      "stage": "semantic_build"
+    }
+  ]
+}

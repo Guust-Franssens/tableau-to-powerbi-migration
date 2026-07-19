@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "InteractiveResume"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "3ef4e464-414e-5ed5-8e58-f00944039660"
+  }
+}

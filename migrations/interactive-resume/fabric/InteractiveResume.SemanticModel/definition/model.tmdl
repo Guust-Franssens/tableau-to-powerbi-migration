@@ -1,0 +1,19 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Fun Facts", "Coursework", "Coursework Detail", "Fun Facts Resume", "Major Minor Resume", "Project Badges Resume", "DataFolder"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table 'Fun Facts'
+ref table Coursework
+ref table 'Coursework Detail'
+ref table 'Fun Facts Resume'
+ref table 'Major Minor Resume'
+ref table 'Project Badges Resume'
+

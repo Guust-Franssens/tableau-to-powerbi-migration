@@ -1,0 +1,5 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\interactive-resume\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: 763a9965-04fc-5dd8-a729-392ac7882336
+
+	annotation PBI_ResultType = Text
+
