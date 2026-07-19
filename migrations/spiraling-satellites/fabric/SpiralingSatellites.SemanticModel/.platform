@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "SpiralingSatellites"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "8a881046-22bd-448c-a624-3a0d877585e3"
+  }
+}

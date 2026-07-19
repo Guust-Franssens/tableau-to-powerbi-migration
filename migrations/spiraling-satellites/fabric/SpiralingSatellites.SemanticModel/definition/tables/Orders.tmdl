@@ -1,0 +1,61 @@
+/// Superstore order line-item fact (one row per order line; 10,194 lines). Grain: order line. Holds Sales and Profit in USD plus City and Region, summed to the per-city totals that drive the spiral charts.
+table Orders
+	lineageTag: ecae35bd-a8cc-4c1b-994f-99d32d319a8e
+
+	/// Superstore order identifier (text). Repeats across the lines of a multi-line order; 5,111 distinct orders across 10,194 lines.
+	column 'Order ID'
+		dataType: string
+		lineageTag: 1963cb8f-3ce4-49c2-9b3b-56032bdacaa0
+		summarizeBy: none
+		sourceColumn: Order ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// US city the order shipped to (text). 542 distinct values. Joins to the City dimension.
+	column City
+		dataType: string
+		lineageTag: 4b0ceeaf-d1ab-4510-ad8c-780796eb92cc
+		summarizeBy: none
+		sourceColumn: City
+
+		annotation SummarizationSetBy = Automatic
+
+	/// US sales region (text). One of: Central, East, South, West.
+	column Region
+		dataType: string
+		lineageTag: e714f74d-710d-4dd2-9c5b-f4b0c59b281d
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Order-line sales amount in USD. Additive; summed to each city's total sales.
+	column Sales
+		dataType: double
+		lineageTag: 83582733-ad86-42ed-a6d6-146d0ffda2da
+		summarizeBy: sum
+		sourceColumn: Sales
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Order-line profit in USD; can be negative (a loss). Additive; summed to each city's total profit.
+	column Profit
+		dataType: double
+		lineageTag: 158de0f7-b7a7-403d-9a95-55fc0286542b
+		summarizeBy: sum
+		sourceColumn: Profit
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Orders = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.sample_superstore.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Order ID", type text}, {"City", type text}, {"Region", type text}, {"Sales", type number}, {"Profit", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,174 @@
+/// Spiral geometry: one row per City x Path point (542 cities x 401 paths = 217,342 rows). Holds the computed X/Y scatter coordinates that reproduce the Tableau spiral/polar chart, plus per-point colour and marker helper flags.
+table Spiral
+	lineageTag: 15e9aa27-4957-4cc7-b14c-f1118a1865a4
+
+	/// US city this spiral point belongs to (text). Joins to the City dimension; 542 cities.
+	column City
+		dataType: string
+		lineageTag: 29ee0ceb-0195-4521-a715-880721c07128
+		summarizeBy: none
+		sourceColumn: [City]
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Point index along the spiral (integer 0..400; 0 = centre). Joins to the Model scaffold.
+	column Path
+		dataType: int64
+		lineageTag: 3512af4a-5fd4-4f40-9831-5552e7ddc4f6
+		summarizeBy: none
+		sourceColumn: [Path]
+
+		annotation SummarizationSetBy = Automatic
+
+	/// City profit margin (signed fraction), denormalized from the City dimension. See City[Profit Ratio].
+	column 'Profit Ratio'
+		dataType: double
+		isHidden
+		lineageTag: 697dae22-c465-49c7-814c-5711014195db
+		summarizeBy: none
+		sourceColumn: [Profit Ratio]
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Absolute city profit margin (unsigned fraction), denormalized from the City dimension.
+	column 'Abs Profit Ratio'
+		dataType: double
+		isHidden
+		lineageTag: 860cf457-9ccb-4d99-a65c-56acaed568f7
+		summarizeBy: none
+		sourceColumn: [Abs Profit Ratio]
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Loss flag (denormalized from City): TRUE when Profit Ratio < 0. One of: True, False.
+	column 'Pie Colour'
+		dataType: boolean
+		isHidden
+		lineageTag: 288a0d01-2739-4ca6-ac51-edcc3190964d
+		summarizeBy: none
+		sourceColumn: [Pie Colour]
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Fractional part of Abs Profit Ratio (denormalized from City). Range 0 to <1.
+	column Decimals
+		dataType: double
+		isHidden
+		lineageTag: daffecb5-267b-4eb0-8637-1234d73400d3
+		summarizeBy: none
+		sourceColumn: [Decimals]
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Last path index of the city's spiral (denormalized from City).
+	column 'Max Path'
+		dataType: int64
+		isHidden
+		lineageTag: 9720f4f5-1aa6-425d-80c1-913845d6d3eb
+		summarizeBy: none
+		sourceColumn: [Max Path]
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Polar radius at this point = 500 + Path (Tableau 'Parameter Radius' baked at 500). Grows linearly outward along the spiral.
+	column Radius = 500 + Spiral[Path]
+		dataType: double
+		lineageTag: 56bd85cc-c331-49a3-bca7-973165eb87f7
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Polar angle in radians = RADIANS(Path x 3.6) x (-1 if loss else +1). The sign sets clockwise vs counter-clockwise winding.
+	column Angle = RADIANS(Spiral[Path] * (360.0 / 100.0)) * IF(Spiral[Pie Colour], -1, 1)
+		dataType: double
+		lineageTag: 4cbfd91b-ff19-4d1d-a729-1044d2a47173
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Scatter X coordinate = (Radius x SIN(Angle)) / 360. Plot on a scatter chart X axis to draw the spiral (native fallback for the MAKEPOINT map).
+	column X = (Spiral[Radius] * SIN(Spiral[Angle])) / 360.0
+		dataType: double
+		lineageTag: f9984a60-0624-4a9b-b55d-f75cc37b8aff
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Scatter Y coordinate = (Radius x COS(Angle)) / 360. Plot on a scatter chart Y axis to draw the spiral (native fallback for the MAKEPOINT map).
+	column Y = (Spiral[Radius] * COS(Spiral[Angle])) / 360.0
+		dataType: double
+		lineageTag: 22b35690-8734-4dff-b7b8-3c6bf9dd08cf
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// In-spiral flag: TRUE when the point lies within the city's spiral length (Path <= Abs Profit Ratio x 100). Filter to TRUE to draw only the active spiral. One of: True, False.
+	column 'Spiral Filter' = Spiral[Path] <= Spiral[Abs Profit Ratio] * 100
+		dataType: boolean
+		lineageTag: 2d04c075-acce-488a-9e70-5fd639c5231f
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Signed ordering/colour value along the spiral: negative and descending for loss cities, positive and ascending for profitable cities.
+	column 'New colour' = IF(Spiral[Profit Ratio] < 0, IF(Spiral[Path] = 0, -1, 0) - Spiral[Path], IF(Spiral[Path] = 0, 1, 0) + Spiral[Path])
+		dataType: int64
+		lineageTag: 1b9cb373-eb40-409c-bd17-a873a1638624
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Doughnut wedge size: Decimals at Path=1, 1-Decimals at Path=2, blank otherwise. Used only by the Doughnuts view.
+	column 'Pie Slice Calc' = IF(Spiral[Path] = 1, Spiral[Decimals], IF(Spiral[Path] = 2, 1 - Spiral[Decimals]))
+		dataType: double
+		lineageTag: 0e79cc4a-16d5-4d15-9984-4b7d1bc79a02
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Profit margin shown in the doughnut tooltip at Path=1, otherwise 0.
+	column 'Pie Tooltip Value' = IF(Spiral[Path] = 1, Spiral[Profit Ratio], 0)
+		dataType: double
+		lineageTag: bb940dbb-1813-48f1-a99a-9edbf8d549a9
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Inner-band colour flag; same test as Spiral Filter (Path <= Abs Profit Ratio x 100). One of: True, False.
+	column '100s Inner Colour' = Spiral[Path] <= Spiral[Abs Profit Ratio] * 100
+		dataType: boolean
+		lineageTag: 11402f49-8706-4ba3-97c9-32c30fee2816
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Helper flag: TRUE at the spiral centre (Path = 0). Replaces the Tableau 'MP - First Point' overlay. One of: True, False.
+	column 'Is First Point' = Spiral[Path] = 0
+		dataType: boolean
+		lineageTag: 6772960c-51fe-4ce1-b3a3-23c8a64ecb05
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Helper flag: TRUE at the spiral tip (Path = Max Path). Replaces the Tableau 'MP - Last Point' / needle-tip overlay. One of: True, False.
+	column 'Is Last Point' = Spiral[Path] = Spiral[Max Path]
+		dataType: boolean
+		lineageTag: b1531939-abf9-411f-845a-3e1ba6a5f73e
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Helper flag: TRUE at each full revolution (Path in 100, 200, 300, 400). Replaces the Tableau 'MP - 100s' overlay. One of: True, False.
+	column 'Is 100s Marker' = Spiral[Path] IN {100, 200, 300, 400}
+		dataType: boolean
+		lineageTag: 7cedcd56-abec-45a3-bbbf-40cf9a3be54a
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Spiral = calculated
+		mode: import
+		source = CROSSJOIN(SELECTCOLUMNS(City, "City", City[City], "Profit Ratio", City[Profit Ratio], "Abs Profit Ratio", City[Abs Profit Ratio], "Pie Colour", City[Pie Colour], "Decimals", City[Decimals], "Max Path", City[Max Path]), SELECTCOLUMNS('Model', "Path", 'Model'[Path]))
+
+	annotation PBI_ResultType = Table
+

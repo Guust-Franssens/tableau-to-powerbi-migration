@@ -1,0 +1,25 @@
+/// Plotting scaffold, not business data: a single integer Path column spanning 0..400. Cross-joined to every city to densify the points along each city's spiral. Also called the densification axis.
+table Model
+	lineageTag: d7ee487e-b855-4bcb-b247-a406286fbb5e
+
+	/// Densification index (integer 0..400). One value per point along a city's spiral; 0 is the spiral centre. A plotting scaffold, not business data. Joins to Spiral[Path].
+	column Path
+		dataType: int64
+		lineageTag: 45968838-bccd-48e0-bc53-a4df6cd7e20d
+		summarizeBy: none
+		sourceColumn: Path
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Model = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.model.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Path", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,12 @@
+relationship rel_Orders_City
+	fromColumn: Orders.City
+	toColumn: City.City
+
+relationship rel_Spiral_City
+	fromColumn: Spiral.City
+	toColumn: City.City
+
+relationship rel_Spiral_Model_Path
+	fromColumn: Spiral.Path
+	toColumn: Model.Path
+
