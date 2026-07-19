@@ -1,0 +1,125 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "c2a7453503799bd05812",
+  "position": {
+    "x": 50,
+    "y": 330,
+    "z": 1080,
+    "width": 228,
+    "height": 470,
+    "tabOrder": 1080
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Electricity generation per capita as at 2022:",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Each country's generation figures, grouped by region.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "On the visual to the right we see the differences in average electricity generation per capita across the world.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "There are large inequalities between countries. In many low-income countries, per capita generation is several magnitudes lower than in the richest.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Hover over each country to view historic trends.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

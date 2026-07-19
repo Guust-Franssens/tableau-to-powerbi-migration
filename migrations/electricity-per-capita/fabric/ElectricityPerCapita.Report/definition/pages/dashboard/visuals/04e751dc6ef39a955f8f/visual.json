@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "04e751dc6ef39a955f8f",
+  "position": {
+    "x": 50,
+    "y": 1350,
+    "z": 1160,
+    "width": 1200,
+    "height": 44,
+    "tabOrder": 1160
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "So, what are the sources of electricity generation? And how much do they contribute? A look at their profile over the years.",
+                    "textStyle": {
+                      "fontSize": "12pt",
+                      "color": "#0f4556",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

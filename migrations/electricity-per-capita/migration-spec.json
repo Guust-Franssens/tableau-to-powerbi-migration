@@ -4533,6 +4533,36 @@
       "issue": "Tableau [Global avg in 2022] is the literal constant 3616.7, which equals the FNR 'World' entity's 2022 TOTAL per-capita (3616.692) - NOT the mean of the 209 country per-capita values in this source (that mean is 4074.4). Preserved as the literal 3616.7 to match the workbook's reference line; noted here so a future maintainer does not 'correct' it to a computed average.",
       "severity": "info",
       "stage": "semantic_build"
+    },
+    {
+      "item": "viz.sankey fallback (Tree Sheet worksheet) -> treemap + placeholder note",
+      "issue": "The dashboard's radial Sankey/flow tree (built from the 5 spatial MAKEPOINT/MAKELINE fields flagged HIGH at semantic_build) has NO native Power BI visual. Fallback chosen: a native treemap on 'Elec Generation' (Group=Region, Details=Entity, Values=Sum('Elec gen at 2022')) that conveys the same region->country generation magnitudes, PLUS a labelled textbox documenting that an AppSource/custom Sankey visual is required for exact fidelity. A pivotTable 'Advanced table' (Region>Entity>2022 kWh) is placed alongside as the table representation. Region->country source->consumption flow is thus preserved in aggregate; the literal flow ribbons are not reproduced.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "Parameter-driven alternate views not pre-rendered (no bookmarks)",
+      "issue": "Tableau uses 3 parameters (Show chart as: Tree/Table/Table no region; View data for: World/Region/Country) to swap visible sheets. These are wired as 3 disconnected slicers (default Tree / World / 2022) bound to the param tables, and the DEFAULT state (Tree, World) is what the page renders. The non-default worksheets that those params would reveal - 'Advanced table no region', 'Region FF/Nuclear/Renewables only', 'FF/Nuclear/Renewables per capita / country' - are NOT built as separate always-on visuals to avoid a cluttered page and because no migration in this repo has proven bookmark/toggle wiring. They can be added later via bookmarks or field-parameter-driven visual swapping. The slicers still filter the built visuals where the model relationships allow.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "Small multiples: native PBI Rows small-multiples used instead of Tableau X/Y trellis index calcs",
+      "issue": "The 'All regions' worksheet is a per-country trellis (Tableau built it with dropped X/Y trellis index calculated fields). Rebuilt natively as a single hundredPercentStackedAreaChart with Rows='Country' (native small multiples), Category=Year, Series='Fuel Source', Y=Sum('Electricity generation per capita'), colored via theme dataColors (Fossil Fuel/Nuclear/Renewables = brown/orange/teal, alphabetical). Panel count (~200 countries) may page; a custom 8x6 smallMultiplesLayout is set. This is the recommended native approach and a fidelity improvement over the dropped index calcs.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Tooltip/decorative worksheets deferred: 'Country trend', 'Underline', 'Underline 2'",
+      "issue": "'Country trend' (Line) is a Tableau viz-in-tooltip showing a country's historic trend on hover; not reproduced as a standalone visual (PBI tooltip pages were not built this pass - default tooltips are used). 'Underline' and 'Underline 2' are decorative rule/underline marks used for styling in Tableau; dropped as non-data decoration. No data content is lost from the main dashboard narrative.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Projection-level number formats render-unconfirmed offline",
+      "issue": "World source line charts use projection format '0.0%' on the true-fraction columns FF%/Nuclear%/Renewables % (verified 0-1 fractions in the model, e.g. World 2022 FF%=0.614 - NOT pre-scaled, so '0.0%' is correct). Treemap/table use '#,##0'. These pass 'powerbi-report-author validate' but per accumulated gotchas the projection-level 'format' honoring is 'unconfirmed offline'; worst case is cosmetic (axis/label formatting) and correctable in Desktop. Desktop visual verification was not run this pass (bridge may be contended); structural validation (0 errors) + full TMDL field cross-check (42 refs, clean) were completed instead.",
+      "severity": "low",
+      "stage": "report_build"
     }
   ]
 }

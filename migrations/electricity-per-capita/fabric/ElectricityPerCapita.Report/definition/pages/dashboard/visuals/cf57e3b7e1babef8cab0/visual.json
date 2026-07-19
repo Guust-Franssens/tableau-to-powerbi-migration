@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "cf57e3b7e1babef8cab0",
+  "position": {
+    "x": 50,
+    "y": 1398,
+    "z": 1170,
+    "width": 980,
+    "height": 62,
+    "tabOrder": 1170
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Electricity sources fall into three main groups: Fossil Fuels, Nuclear and Renewables. Fossil fuels (coal, gas, oil) have historically been the dominant source. Renewables include bioenergy, hydro, solar, wind and others.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "cc48c61b6a3de986ae91",
+  "position": {
+    "x": 50,
+    "y": 1112,
+    "z": 1140,
+    "width": 1200,
+    "height": 56,
+    "tabOrder": 1140
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "For reference, each region's average generation in 2022 (bars). The dashed line marks the World average (3,616.7 kWh / capita). Large disparities remain in electricity generated per person.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

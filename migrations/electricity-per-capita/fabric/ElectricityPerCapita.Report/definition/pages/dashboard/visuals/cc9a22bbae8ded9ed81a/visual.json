@@ -1,0 +1,60 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "cc9a22bbae8ded9ed81a",
+  "position": {
+    "x": 460,
+    "y": 1530,
+    "z": 1210,
+    "width": 380,
+    "height": 112,
+    "tabOrder": 1210
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "NUCLEAR",
+                    "textStyle": {
+                      "fontSize": "12pt",
+                      "color": "#0f4556",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "4pt",
+                      "color": "#0f4556"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Nuclear is one of the oldest low-carbon technologies. Almost 10% of global electricity is nuclear-generated; some countries (Sweden, France) rely heavily on it.",
+                    "textStyle": {
+                      "fontSize": "9pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

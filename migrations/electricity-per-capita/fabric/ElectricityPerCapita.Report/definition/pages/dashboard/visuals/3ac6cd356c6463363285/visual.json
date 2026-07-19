@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "3ac6cd356c6463363285",
+  "position": {
+    "x": 50,
+    "y": 4870,
+    "z": 1300,
+    "width": 1200,
+    "height": 44,
+    "tabOrder": 1300
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Visualisations created by Rushil Chhibber  ·  Data from Our World in Data  ·  Regions per World Bank classifications.  ·  Migrated from Tableau to Power BI.",
+                    "textStyle": {
+                      "fontSize": "8pt",
+                      "color": "#666666"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

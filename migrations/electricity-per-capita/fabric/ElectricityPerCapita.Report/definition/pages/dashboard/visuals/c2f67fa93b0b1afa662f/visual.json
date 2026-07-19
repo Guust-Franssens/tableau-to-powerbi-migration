@@ -1,0 +1,38 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "c2f67fa93b0b1afa662f",
+  "position": {
+    "x": 50,
+    "y": 158,
+    "z": 1040,
+    "width": 1200,
+    "height": 50,
+    "tabOrder": 1040
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Exploring the electricity profile of each country — a dive into the country-specific electricity mix, unveiling how much is generated per capita and the generation sources.",
+                    "textStyle": {
+                      "fontSize": "13pt",
+                      "color": "#0f4556",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
