@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SemanticModel",
+    "displayName": "QuadrupleAxisCharts"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "079c7df0-a044-5f10-89cb-437b3d150ad9"
+  }
+}

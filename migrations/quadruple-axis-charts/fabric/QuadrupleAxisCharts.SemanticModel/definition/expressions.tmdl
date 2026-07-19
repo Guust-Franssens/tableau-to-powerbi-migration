@@ -1,0 +1,4 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\quadruple-axis-charts\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: e76d2828-7c1c-5a00-86ea-8fb7b30b9a14
+
+	annotation PBI_ResultType = Text

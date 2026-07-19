@@ -1,0 +1,31 @@
+/// Disconnected slicer for Tableau parameter 'Profit Ratio Goal' (internal [Parameter 3], real range, default 0.12). Range param approximated as a discrete list.
+table 'Profit Ratio Goal'
+	lineageTag: 7e3b9eef-27ad-54cd-8b0c-4566af020c3c
+
+	/// Reads the current slicer selection on 'Profit Ratio Goal'[Profit Ratio Goal], defaulting to Tableau's current value when nothing is selected.
+	measure 'Profit Ratio Goal Value' = SELECTEDVALUE('Profit Ratio Goal'[Profit Ratio Goal], 0.12)
+		formatString: 0.0%
+		lineageTag: 77d3c823-a642-54fc-8961-a041f9c8fb57
+		displayFolder: Parameter
+
+	/// Target profit-ratio goal (disconnected slicer, percent). Discrete approximation of the Tableau range parameter: 0%, 5%, 10%, 12% (default), 15%, 20%, 25%, 30%.
+	column 'Profit Ratio Goal'
+		dataType: double
+		formatString: 0.0%
+		lineageTag: fdcf2884-4f1b-5c6a-910f-b00b298feb45
+		summarizeBy: none
+		sourceColumn: Profit Ratio Goal
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Profit Ratio Goal' = m
+		mode: import
+		source =
+				let
+				    Source = {0, 0.05, 0.1, 0.12, 0.15, 0.2, 0.25, 0.3},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Profit Ratio Goal"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Profit Ratio Goal", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

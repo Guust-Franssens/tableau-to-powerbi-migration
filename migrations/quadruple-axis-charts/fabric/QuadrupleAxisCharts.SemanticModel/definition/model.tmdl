@@ -1,0 +1,18 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Orders","Select Highlight Function","Profit Ratio Goal","Select Hashing","Variable Metric","DataFolder"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table 'Orders'
+ref table 'Select Highlight Function'
+ref table 'Profit Ratio Goal'
+ref table 'Select Hashing'
+ref table 'Variable Metric'
+

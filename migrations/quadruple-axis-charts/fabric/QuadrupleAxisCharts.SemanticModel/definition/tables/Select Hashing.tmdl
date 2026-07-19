@@ -1,0 +1,29 @@
+/// Disconnected slicer for Tableau parameter 'Select Hashing' (internal [Parameter 4], list of hatch patterns, default '╱╱╱'). Feeds [Hashing Display].
+table 'Select Hashing'
+	lineageTag: 43863c82-511a-506d-bd3a-c4b9040886ca
+
+	/// Reads the current slicer selection on 'Select Hashing'[Select Hashing], defaulting to Tableau's current value when nothing is selected.
+	measure 'Select Hashing Value' = SELECTEDVALUE('Select Hashing'[Select Hashing], "╱╱╱")
+		lineageTag: 71572737-889e-5fa7-aae5-aa9d8fca50c8
+		displayFolder: Parameter
+
+	/// Hatch/hash fill-pattern selector (disconnected slicer). Unicode glyph options (blank, diagonal, cross-hatch, shaded) feeding [Hashing Display]; default light diagonal.
+	column 'Select Hashing'
+		dataType: string
+		lineageTag: b868b3d0-f898-55a5-9001-1592b4609f9c
+		summarizeBy: none
+		sourceColumn: Select Hashing
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Select Hashing' = m
+		mode: import
+		source =
+				let
+				    Source = {"   ", "╱╱╱", "╲╲╲", "║║║", "╬╬╬", "▓▓▓", "▒▒▒", "░░░", "▐▐▐"},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Select Hashing"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Select Hashing", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

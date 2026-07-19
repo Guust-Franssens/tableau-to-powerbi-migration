@@ -1,0 +1,29 @@
+/// Disconnected slicer for Tableau parameter 'Select Highlight Function:' (internal [Parameter 2], list, default 'Max'). Drives every window highlight-mark measure.
+table 'Select Highlight Function'
+	lineageTag: c0d23255-9a6f-5e6c-a92f-e01b86d05b65
+
+	/// Reads the current slicer selection on 'Select Highlight Function'[Select Highlight Function], defaulting to Tableau's current value when nothing is selected.
+	measure 'Select Highlight Function Value' = SELECTEDVALUE('Select Highlight Function'[Select Highlight Function], "Max")
+		lineageTag: 921b0278-ccd2-5152-8172-f9d217cb6cd1
+		displayFolder: Parameter
+
+	/// Highlight-function selector (disconnected slicer) choosing which window marks are emphasized. One of: Max, Min, Max & Min, Last, Control, All, None.
+	column 'Select Highlight Function'
+		dataType: string
+		lineageTag: b52cb66d-b88e-556f-95fa-8189d9117db5
+		summarizeBy: none
+		sourceColumn: Select Highlight Function
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Select Highlight Function' = m
+		mode: import
+		source =
+				let
+				    Source = {"Max", "Min", "Max & Min", "Last", "Control", "All", "None"},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Select Highlight Function"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Select Highlight Function", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
