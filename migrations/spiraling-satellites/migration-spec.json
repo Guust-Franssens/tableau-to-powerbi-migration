@@ -1878,6 +1878,36 @@
       "issue": "AI-prep completed: business-meaning descriptions added to all 4 tables and all 33 columns (meaning + unit/grain led, front-loaded for the 200-char DAX Copilot window), plus domain enumerations for the low-cardinality categorical Orders[Region] = {Central, East, South, West} and every boolean flag (One of: True, False). NOT applied because they have no stable Git/TMDL file contract today and must be set later in the Power BI/Fabric service: the linguistic AI data schema + AI instructions (LSDL), Copilot 'verified answers', and the Approved-for-Copilot / semantic-model indexing settings. Persisted via TOM ExportToTmdlFolder (cosmetic quoting/whitespace normalized model-wide; DAX, lineageTags and structure preserved; re-validated: deserialize clean, 46/46 bracket refs resolve, 4/4 tables + 33/33 columns described).",
       "severity": "low",
       "stage": "semantic_build"
+    },
+    {
+      "item": "Scatter small-multiples gap - one satellite per view (single-city slicer substitution)",
+      "issue": "Tableau's satellite/spiral technique renders one city's spiral per worksheet and can trellis many cities as small multiples. Power BI's native scatterChart has NO Rows/small-multiples role (confirmed via `powerbi-report-author catalog describe scatterChart`), and its Category well (max 1) is consumed by Path to trace the spiral, so City cannot also be trellised in the same visual. Reproduced as a single-satellite view driven by a single-select City slicer (default 'Abilene', the largest-magnitude spiral at -270% profit ratio = 2.7 rings). Preserves the author's stated intent ('a satellite chart can really only showcase a single value at a time') and is more interactive than a static trellis, at the cost of not showing all 542 cities at once.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "No connecting polyline for the continuous 'snake' spiral trail",
+      "issue": "scatterChart plots markers only; it cannot draw an ordered line connecting Path 0->400, so the continuous 'snake' trail is approximated by the density of the 401 plotted points (which read as a near-continuous curve) plus accent markers at each 100th point (Is 100s Marker overlay). A truly stroked spiral line is not achievable natively: lineChart cannot plot a 2D polar X/Y coordinate pair. Shape is faithful; line continuity is density-based rather than a stroked path.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Center-hole annotations (Tableau MP-Titles) not reproduced natively",
+      "issue": "The Tableau infographic places the city name and value as text in each spiral's empty centre via a dual-axis text mark. Native scatterChart has no centre-annotation layer. Conveyed instead through the City slicer and per-chart side descriptions. A per-satellite textbox could add the city label but would be static (not bound to the slicer selection), so it was omitted to keep the view data-driven.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Square/circular aspect relies on fixed hidden axes - pending live Desktop confirmation",
+      "issue": "Spiral circularity is enforced by fixing both categoryAxis (X) and valueAxis (Y) to start=-2.6, end=2.6 while hiding the axes (show=false). X/Y are origin-symmetric (Radius 500..900 /360 => +-2.5), so independent auto-scaling would stay near-square even if the fixed range were dropped, making severe distortion unlikely. Not visually confirmed in Desktop this session. If a rendered spiral looks elliptical, set both axes show=true (labels can be recoloured to the page background) to force the fixed range.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Live Power BI Desktop verification deferred (bridge contention)",
+      "issue": "Structural validation passed with 0 errors (`powerbi-report-author validate`) and all 8 distinct Entity.Property references were cross-checked against the semantic model TMDL and resolve. Live Desktop reload+screenshot was deferred: at build time the Desktop bridge had two other in-flight builds attached (airline-alliance-activity WITH unsaved changes, and superstore-sales-performance), and per subagent guidance the single Desktop bridge must not be contended nor a sibling's unsaved instance force-opened. The deliverable is a report-only PBIR folder (no .pbip wrapper) so it cannot be opened standalone without extra scaffolding. Follow-up: open against ../SpiralingSatellites.SemanticModel, refresh, and confirm (a) the scatter traces a continuous spiral for Abilene, (b) ring-band colours cascade light->navy outward, (c) the needle-tip (red) and 100s (gold) overlays align on the base spiral.",
+      "severity": "low",
+      "stage": "report_build"
     }
   ]
 }
