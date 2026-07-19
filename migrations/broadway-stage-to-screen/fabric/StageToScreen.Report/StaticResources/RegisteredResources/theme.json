@@ -1,0 +1,167 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/powerbi-desktop-samples/main/Report%20Theme%20JSON%20Schema/reportThemeSchema-2.153.json",
+  "name": "theme.json",
+  "dataColors": [
+    "#E8B04B",
+    "#C0392B",
+    "#3E6C8E",
+    "#2E7D5B",
+    "#D98A3D",
+    "#7B4B94",
+    "#4A4E69",
+    "#B08968"
+  ],
+  "good": "#2E7D5B",
+  "neutral": "#E6E6E6",
+  "bad": "#C0392B",
+  "maximum": "#E8B04B",
+  "center": "#E6E6E6",
+  "minimum": "#C0392B",
+  "null": "#E6E6E6",
+  "foreground": "#24263A",
+  "foregroundNeutralSecondary": "#6B6E86",
+  "background": "#FAF6EF",
+  "backgroundLight": "#F7F3EC",
+  "tableAccent": "#E8B04B",
+  "textClasses": {
+    "callout": {
+      "fontSize": 28,
+      "fontFace": "Trebuchet MS, Segoe UI, sans-serif",
+      "color": "#24263A"
+    },
+    "title": {
+      "fontSize": 14,
+      "fontFace": "Trebuchet MS, Segoe UI, sans-serif",
+      "color": "#24263A"
+    },
+    "header": {
+      "fontSize": 11,
+      "fontFace": "Trebuchet MS, Segoe UI, sans-serif",
+      "color": "#24263A"
+    },
+    "label": {
+      "fontSize": 9,
+      "fontFace": "Segoe UI, sans-serif",
+      "color": "#24263A"
+    }
+  },
+  "visualStyles": {
+    "*": {
+      "*": {
+        "border": [
+          {
+            "show": false
+          }
+        ],
+        "dropShadow": [
+          {
+            "show": false
+          }
+        ],
+        "background": [
+          {
+            "show": false,
+            "transparency": 100,
+            "color": {
+              "solid": {
+                "color": "#FAF6EF"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "cardVisual": {
+      "*": {
+        "value": [
+          {
+            "bold": true,
+            "fontFamily": "Trebuchet MS, Segoe UI, sans-serif",
+            "$id": "default"
+          }
+        ],
+        "label": [
+          {
+            "show": true,
+            "$id": "default"
+          }
+        ],
+        "border": [
+          {
+            "show": false
+          }
+        ],
+        "title": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "textbox": {
+      "*": {
+        "background": [
+          {
+            "show": false
+          }
+        ],
+        "border": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "shape": {
+      "*": {
+        "outline": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "lineChart": {
+      "*": {
+        "lineStyles": [
+          {
+            "strokeWidth": 2,
+            "lineChartType": "linear",
+            "areaShow": false
+          }
+        ],
+        "legend": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "scatterChart": {
+      "*": {
+        "legend": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "slicer": {
+      "*": {
+        "items": [
+          {
+            "fontFamily": "Segoe UI, sans-serif",
+            "textSize": 10,
+            "fontColor": {
+              "solid": {
+                "color": "#24263A"
+              }
+            },
+            "outlineStyle": 0,
+            "padding": 3
+          }
+        ]
+      }
+    }
+  }
+}
