@@ -1,0 +1,8 @@
+relationship 'Turbine Daily Performance'
+	fromColumn: 'Daily Performance'.'Turbine Id'
+	toColumn: Turbine.'Turbine Id'
+
+relationship 'Turbine CO2 Savings'
+	fromColumn: 'CO2 Savings'.'Turbine Id'
+	toColumn: Turbine.'Turbine Id'
+

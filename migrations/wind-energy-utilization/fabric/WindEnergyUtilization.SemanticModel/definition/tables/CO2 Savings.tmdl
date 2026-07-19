@@ -1,0 +1,138 @@
+/// Annual CO2 / equivalence table (30 rows, one per turbine for year 2024). Source: Tableau relationship-model table 'co2_savings_2024'. Related to Turbine via Turbine Id (1:1, modeled as many-to-one). NOTE grain: these are ANNUAL per-turbine values with no monthly breakdown, so the Tableau CM/PM CO2 measures' MONTH([date]) gate is a structural no-op (see the CO2 measures' doc comments) — a source-data characteristic, not a translation choice.
+table 'CO2 Savings'
+
+	/// Fleet annual CO2 saved (tonnes) = 169,031.37.
+	measure 'Total Co2 Saved' = SUM('CO2 Savings'[Co2 Saved Tonnes])
+		formatString: #,##0.00
+		displayFolder: CO2
+
+	/// Tableau [CM CO2 Saved (Tn)] = AVG of month-gated co2. CO2 is ANNUAL per turbine, so the value is MONTH-INVARIANT (proven): equals the simple mean over 30 turbines = 5,634.38. The Month gate is a structural no-op here.
+	measure 'CM CO2 Saved (Tn)' = AVERAGE('CO2 Savings'[Co2 Saved Tonnes])
+		formatString: #,##0.00
+		displayFolder: CO2
+
+	/// Month-invariant fleet mean of annual homes powered (see CM CO2 Saved note).
+	measure 'CM Homes Powered' = AVERAGE('CO2 Savings'[Homes Powered Annually])
+		formatString: #,##0
+		displayFolder: CO2
+
+	/// Month-invariant fleet mean of tree-equivalents.
+	measure 'CM Trees' = AVERAGE('CO2 Savings'[Trees Equivalent])
+		formatString: #,##0
+		displayFolder: CO2
+
+	/// Selected-turbine annual CO2 saved (month-invariant).
+	measure 'T CM CO2 Saved (Tn)' = VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('CO2 Savings'[Co2 Saved Tonnes]), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0.00
+		displayFolder: CO2
+
+	/// Selected-turbine annual homes powered (month-invariant).
+	measure 'T CM Homes Powered' = VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('CO2 Savings'[Homes Powered Annually]), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0
+		displayFolder: CO2
+
+	/// Selected-turbine 'prior-month' CO2 - annual/month-invariant so identical to T CM CO2 Saved (Tn). Makes T MoM CO2 definitionally 0/blank.
+	measure 'T PM CO2 Saved (Tn)' = VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('CO2 Savings'[Co2 Saved Tonnes]), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0.00
+		displayFolder: CO2
+
+	/// SOURCE BUG (faithful): Tableau's [T CM Cars Offset] is missing parens (MONTH=P1 OR (P1=2024 AND name=param)), so it is NOT turbine-filtered for a specific month (returns the fleet mean) and only turbine-specific when annual. Translated exactly; flagged.
+	measure 'T CM Cars Offset' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN IF(_m = 2024, CALCULATE(AVERAGE('CO2 Savings'[Cars Offset Annually]), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t)), AVERAGE('CO2 Savings'[Cars Offset Annually]))
+		formatString: #,##0
+		displayFolder: CO2
+
+	/// Always blank: CO2 is annual so T CM = T PM (no positive MoM possible). Faithful; flagged.
+	measure 'T Pos MoM CO2 Saved (Tn)' = VAR _cm = [T CM CO2 Saved (Tn)] VAR _pm = [T PM CO2 Saved (Tn)] RETURN IF(_cm > _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: CO2
+
+	/// Always blank: CO2 annual so T CM = T PM. Faithful; flagged.
+	measure 'T Neg MoM CO2 Saved' = VAR _cm = [T CM CO2 Saved (Tn)] VAR _pm = [T PM CO2 Saved (Tn)] RETURN IF(_cm < _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: CO2
+
+	/// Always 0: CO2 annual so T CM = T PM -> (co2/co2)-1 = 0. Faithful; flagged.
+	measure 'T Neut MoM CO2 Saved (Tn)' = VAR _cm = [T CM CO2 Saved (Tn)] VAR _pm = [T PM CO2 Saved (Tn)] RETURN IF(_cm = _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: CO2
+
+	/// Turbine business key (foreign key to Turbine).
+	column 'Turbine Id'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: turbine_id
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Reporting year; constant 2024 (annual grain).
+	column Year
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: year
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Annual energy generated per turbine in megawatt-hours (MWh).
+	column 'Total Energy Generated Mwh'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: total_energy_generated_mwh
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Annual CO2 emissions avoided per turbine in metric tonnes (t). Fleet total = 169,031.37 t.
+	column 'Co2 Saved Tonnes'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: co2_saved_tonnes
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Annual CO2 avoided per turbine in kilograms (kg) = Co2 Saved Tonnes x 1000.
+	column 'Co2 Saved Kg'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: co2_saved_kg
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Equivalent number of homes powered for one year by this turbine's output.
+	column 'Homes Powered Annually'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: sum
+		sourceColumn: homes_powered_annually
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Equivalent number of cars' annual emissions offset by this turbine.
+	column 'Cars Offset Annually'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: sum
+		sourceColumn: cars_offset_annually
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Equivalent number of trees' annual CO2 sequestration.
+	column 'Trees Equivalent'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: sum
+		sourceColumn: trees_equivalent
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'CO2 Savings' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "co2_savings_2024.csv"), [Delimiter = ",", Columns = 8, Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars = true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"turbine_id", type text}, {"year", Int64.Type}, {"total_energy_generated_mwh", type number}, {"co2_saved_tonnes", type number}, {"co2_saved_kg", type number}, {"homes_powered_annually", Int64.Type}, {"cars_offset_annually", Int64.Type}, {"trees_equivalent", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

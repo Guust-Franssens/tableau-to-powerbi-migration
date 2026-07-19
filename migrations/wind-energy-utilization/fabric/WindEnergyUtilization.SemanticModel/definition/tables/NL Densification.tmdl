@@ -1,0 +1,82 @@
+/// Disconnected spiral-geometry scaffold (126 rows: Year, Num=0..125). Source: Tableau relationship-model table 'NL Densification' (the pre-extracted ds.turbine_master_data_nl_wind_energy_2024.csv is this Year/Num scaffold). NOT related to any table - it only supplies the Num index that the spiral X/Y measures sweep to draw the hero spiral performance chart on a native scatter/line visual (NOT a map).
+table 'NL Densification'
+
+	/// Tableau [Radius] = Radius Param + Num + Thickness. Renamed from 'Radius' to avoid confusion with 'Radius Parameter'[Radius].
+	measure 'Spiral Radius' = [Radius Parameter Value] + MIN('NL Densification'[Num]) + [Thickness Value]
+		formatString: 0.000000
+		displayFolder: Spiral
+
+	/// Tableau [Angle] = RADIANS(Num*3.6) + RADIANS(Spiral Start Point). Renamed from 'Angle'.
+	measure 'Spiral Angle' = RADIANS(MIN('NL Densification'[Num]) * (360.0 / 100.0)) + RADIANS([Spiral Start Point Value])
+		formatString: 0.000000
+		displayFolder: Spiral
+
+	/// Tableau [X] cartesian coordinate of the spiral point. Plot on a scatter/line X axis (NOT a map - MAKEPOINT here builds a cartesian spiral, not geography).
+	measure 'Spiral X' = VAR _r = [Spiral Radius] VAR _a = [Spiral Angle] RETURN ((_r * COS(_a)) / 360) * -1
+		formatString: 0.000000
+		displayFolder: Spiral
+
+	/// Tableau [Y] cartesian coordinate of the spiral point. Plot on the scatter/line Y axis.
+	measure 'Spiral Y' = VAR _r = [Spiral Radius] VAR _a = [Spiral Angle] RETURN ((_r * SIN(_a)) / 360) * -1
+		formatString: 0.000000
+		displayFolder: Spiral
+
+	/// Tableau [Spiral Check]: Num if Num <= selected-turbine perf-ratio (abs), else blank.
+	measure 'Spiral Check' = VAR _abs = [T CM Performance Ratio (Abs)] RETURN IF(MIN('NL Densification'[Num]) <= _abs, MIN('NL Densification'[Num]))
+		formatString: #,##0
+		displayFolder: Spiral
+
+	/// Tableau [Spiral Filter] boolean as 1/0: keep Num points up to the selected-turbine perf ratio. Report filters Num where = 1 (default GRWF Turbine 18 -> Num 0..104).
+	measure 'Spiral Filter' = VAR _abs = [T CM Performance Ratio (Abs)] RETURN IF(MIN('NL Densification'[Num]) <= _abs, 1, 0)
+		formatString: #,##0
+		displayFolder: Spiral
+
+	/// Tableau [Spiral Colour]: 'A' for Num<=100 (within one revolution), else 'B'. Explicit ISBLANK guard because DAX BLANK<=100 would wrongly be TRUE.
+	measure 'Spiral Colour' = VAR _c = [Spiral Check] RETURN IF(NOT ISBLANK(_c) && _c <= 100, "A", "B")
+		displayFolder: Spiral
+
+	/// Simplification of Tableau's nested FIXED [Max Path] LOD (spiral point count - 1): with integer Num the count of Num in [0, abs] minus 1 = INT(abs). Default GRWF Turbine 18 = 104.
+	measure 'Spiral Length' = VAR _abs = [T CM Performance Ratio (Abs)] RETURN INT(_abs)
+		formatString: #,##0
+		displayFolder: Spiral
+
+	/// Tableau [Spiral Zero] = MAKEPOINT(0,0) centre marker, X. Plot as a single reference point at the spiral origin.
+	measure 'Spiral Zero X' = 0
+		formatString: 0
+		displayFolder: Spiral
+
+	/// Tableau [Spiral Zero] = MAKEPOINT(0,0) centre marker, Y.
+	measure 'Spiral Zero Y' = 0
+		formatString: 0
+		displayFolder: Spiral
+
+	/// Constant 2024. Part of the disconnected spiral scaffold.
+	column Year
+		dataType: int64
+		formatString: 0
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Spiral point index 0-125 (126 points). Path/detail dimension swept by the spiral X/Y geometry measures to draw the hero spiral chart.
+	column Num
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Num
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'NL Densification' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "nl_densification.csv"), [Delimiter = ",", Columns = 2, Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars = true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Year", Int64.Type}, {"Num", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

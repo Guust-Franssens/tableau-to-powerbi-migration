@@ -1,0 +1,71 @@
+/// Disconnected single-select slicer table backing the Tableau 'Upd Turbine Name Parameter' (default 'GRWF Turbine 18', 30 turbines) - THE turbine selector driving every 'T ...' turbine-specific measure and the spiral length. SELECTEDVALUE equivalent of the Tableau live parameter (parameter-equality idiom).
+table 'Upd Turbine Name Parameter'
+
+	/// Reads the current turbine selection, defaulting to the Tableau default "GRWF Turbine 18".
+	measure 'Upd Turbine Name Parameter Value' = SELECTEDVALUE('Upd Turbine Name Parameter'[Upd Turbine Name], "GRWF Turbine 18")
+		displayFolder: Parameters
+
+	/// Selectable turbine label (30 turbines), e.g. 'GRWF Turbine 18' (default). Read by [Upd Turbine Name Parameter Value] to drive all T (turbine-specific) measures.
+	column 'Upd Turbine Name'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Upd Turbine Name
+		sortByColumn: 'Upd Turbine Name Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sort key ordering the Upd Turbine Name labels.
+	column 'Upd Turbine Name Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Upd Turbine Name Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Upd Turbine Name Parameter' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Upd Turbine Name", "Upd Turbine Name Order"},
+						{
+						{"FLWF Turbine 1", 0},
+						{"ZEWF Turbine 2", 1},
+						{"FRWF Turbine 3", 2},
+						{"NHWF Turbine 4", 3},
+						{"FRWF Turbine 5", 4},
+						{"NHWF Turbine 6", 5},
+						{"GRWF Turbine 7", 6},
+						{"NHWF Turbine 8", 7},
+						{"GRWF Turbine 9", 8},
+						{"GRWF Turbine 10", 9},
+						{"ZEWF Turbine 11", 10},
+						{"FRWF Turbine 12", 11},
+						{"FLWF Turbine 13", 12},
+						{"FRWF Turbine 14", 13},
+						{"NHWF Turbine 15", 14},
+						{"FLWF Turbine 16", 15},
+						{"FRWF Turbine 17", 16},
+						{"GRWF Turbine 18", 17},
+						{"ZEWF Turbine 19", 18},
+						{"NHWF Turbine 20", 19},
+						{"GRWF Turbine 21", 20},
+						{"FLWF Turbine 22", 21},
+						{"ZEWF Turbine 23", 22},
+						{"GRWF Turbine 24", 23},
+						{"ZEWF Turbine 25", 24},
+						{"ZEWF Turbine 26", 25},
+						{"FRWF Turbine 27", 26},
+						{"GRWF Turbine 28", 27},
+						{"ZEWF Turbine 29", 28},
+						{"NHWF Turbine 30", 29}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Upd Turbine Name", type text}, {"Upd Turbine Name Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

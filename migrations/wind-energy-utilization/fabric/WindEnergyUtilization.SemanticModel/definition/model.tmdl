@@ -1,0 +1,25 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Turbine", "Daily Performance", "CO2 Savings", "NL Densification", "Month Parameter", "Page Parameter", "Radius Parameter", "Spiral Start Point", "Thickness", "Region Parameter", "Turbine Id Parameter", "Upd Turbine Name Parameter", "DataFolder"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table Turbine
+ref table 'Daily Performance'
+ref table 'CO2 Savings'
+ref table 'NL Densification'
+ref table 'Month Parameter'
+ref table 'Page Parameter'
+ref table 'Radius Parameter'
+ref table 'Spiral Start Point'
+ref table Thickness
+ref table 'Region Parameter'
+ref table 'Turbine Id Parameter'
+ref table 'Upd Turbine Name Parameter'
+

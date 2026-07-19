@@ -1,0 +1,31 @@
+/// Single-row seed table backing the Tableau 'Radius Parameter' ([Parameter 3], any-numeric, default 500) - a spiral-geometry tuning knob. Held at the Tableau default; can be upgraded to a what-if slider if interactive spiral tuning is wanted.
+table 'Radius Parameter'
+
+	/// Reads the 'Radius Parameter' value, defaulting to the Tableau default 500 (spiral base radius).
+	measure 'Radius Parameter Value' = SELECTEDVALUE('Radius Parameter'[Radius], 500)
+		displayFolder: Parameters
+
+	/// Spiral base-radius tuning value (single-row seed, default 500). Read by [Radius Parameter Value] in the spiral geometry.
+	column Radius
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Radius
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Radius Parameter' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Radius"},
+						{
+						{500}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Radius", type number}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

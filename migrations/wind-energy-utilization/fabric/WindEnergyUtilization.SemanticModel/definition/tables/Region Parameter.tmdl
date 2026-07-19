@@ -1,0 +1,46 @@
+/// Disconnected slicer table backing the Tableau 'Region Parameter' (default 'Flevoland', 5 NL provinces). Not referenced by any calculated field; exposed as a native region slicer domain.
+table 'Region Parameter'
+
+	/// Reads the current 'Region Parameter' selection, defaulting to the Tableau default "Flevoland".
+	measure 'Region Parameter Value' = SELECTEDVALUE('Region Parameter'[Region], "Flevoland")
+		displayFolder: Parameters
+
+	/// Selectable Dutch province. One of: Flevoland, Friesland, Groningen, Noord-Holland, Zeeland (default Flevoland). Read by [Region Parameter Value].
+	column Region
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Region
+		sortByColumn: 'Region Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sort key ordering the Region labels.
+	column 'Region Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Region Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Region Parameter' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Region", "Region Order"},
+						{
+						{"Flevoland", 0},
+						{"Friesland", 1},
+						{"Groningen", 2},
+						{"Noord-Holland", 3},
+						{"Zeeland", 4}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Region", type text}, {"Region Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

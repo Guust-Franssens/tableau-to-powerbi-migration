@@ -1,0 +1,71 @@
+/// Disconnected slicer table backing the Tableau 'Turbine Id Parameter' (default 'NL-WT-2024-001', 30 turbine ids). Not referenced by any calculated field; exposed as a native turbine-id slicer domain.
+table 'Turbine Id Parameter'
+
+	/// Reads the current 'Turbine Id Parameter' selection, defaulting to the Tableau default "NL-WT-2024-001".
+	measure 'Turbine Id Parameter Value' = SELECTEDVALUE('Turbine Id Parameter'[Turbine Id], "NL-WT-2024-001")
+		displayFolder: Parameters
+
+	/// Selectable turbine id, NL-WT-2024-001..030 (default NL-WT-2024-001). Read by [Turbine Id Parameter Value].
+	column 'Turbine Id'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Turbine Id
+		sortByColumn: 'Turbine Id Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sort key ordering the Turbine Id labels.
+	column 'Turbine Id Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Turbine Id Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Turbine Id Parameter' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Turbine Id", "Turbine Id Order"},
+						{
+						{"NL-WT-2024-001", 0},
+						{"NL-WT-2024-002", 1},
+						{"NL-WT-2024-003", 2},
+						{"NL-WT-2024-004", 3},
+						{"NL-WT-2024-005", 4},
+						{"NL-WT-2024-006", 5},
+						{"NL-WT-2024-007", 6},
+						{"NL-WT-2024-008", 7},
+						{"NL-WT-2024-009", 8},
+						{"NL-WT-2024-010", 9},
+						{"NL-WT-2024-011", 10},
+						{"NL-WT-2024-012", 11},
+						{"NL-WT-2024-013", 12},
+						{"NL-WT-2024-014", 13},
+						{"NL-WT-2024-015", 14},
+						{"NL-WT-2024-016", 15},
+						{"NL-WT-2024-017", 16},
+						{"NL-WT-2024-018", 17},
+						{"NL-WT-2024-019", 18},
+						{"NL-WT-2024-020", 19},
+						{"NL-WT-2024-021", 20},
+						{"NL-WT-2024-022", 21},
+						{"NL-WT-2024-023", 22},
+						{"NL-WT-2024-024", 23},
+						{"NL-WT-2024-025", 24},
+						{"NL-WT-2024-026", 25},
+						{"NL-WT-2024-027", 26},
+						{"NL-WT-2024-028", 27},
+						{"NL-WT-2024-029", 28},
+						{"NL-WT-2024-030", 29}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Turbine Id", type text}, {"Turbine Id Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

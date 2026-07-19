@@ -1,0 +1,339 @@
+/// Daily turbine performance fact (10,980 rows = 30 turbines x 366 days, 2024). Source: Tableau relationship-model table 'daily_performance_2024'. Many-to-one to Turbine on Turbine Id. Hosts the energy/capacity-factor/performance/availability CM (current-month), PM (prior-month), T (selected-turbine) and MoM measures gated by the Month Parameter (P1).
+table 'Daily Performance'
+
+	/// Current-month (P1) total actual output (MWh). P1=2024 means annual. Default June=28,240.79 MWh.
+	measure 'CM Total Output' = VAR _m = [Month Parameter Value] RETURN CALCULATE(SUM('Daily Performance'[Energy Actual Mwh]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m))
+		formatString: #,##0.00
+		displayFolder: 01 Fleet KPIs
+
+	/// Prior-month (P1-1) total actual output (MWh). Default (June selected) = May = 36,292.69 MWh.
+	measure 'PM Total Output' = VAR _m = [Month Parameter Value] RETURN CALCULATE(SUM('Daily Performance'[Energy Actual Mwh]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m - 1))
+		formatString: #,##0.00
+		displayFolder: 01 Fleet KPIs
+
+	/// Current-month average capacity factor (fraction). Default June = 0.3007.
+	measure 'CM Capacity Factor' = VAR _m = [Month Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Capacity Factor Actual]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m)) / 100
+		formatString: 0.0%
+		displayFolder: 01 Fleet KPIs
+
+	/// Current-month average performance ratio (fraction). Default June = 0.9919.
+	measure 'CM Performance Ratio' = VAR _m = [Month Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Performance Ratio]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m)) / 100
+		formatString: 0.0%
+		displayFolder: 01 Fleet KPIs
+
+	/// Current-month average availability (fraction). Default June = 0.9407.
+	measure 'CM Availability' = VAR _m = [Month Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Availability Percent]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m)) / 100
+		formatString: 0.0%
+		displayFolder: 01 Fleet KPIs
+
+	/// Full-year actual output (MWh) = 453,167.28.
+	measure 'Total Actual Output (2024)' = SUM('Daily Performance'[Energy Actual Mwh])
+		formatString: #,##0.00
+		displayFolder: 01 Fleet KPIs
+
+	/// Full-year forecast output (MWh) = 455,969.88.
+	measure 'Total Forecast Output (2024)' = SUM('Daily Performance'[Energy Forecast Mwh])
+		formatString: #,##0.00
+		displayFolder: 01 Fleet KPIs
+
+	/// Selected-turbine current-month actual output. Default (GRWF Turbine 18, June) = 1,117.32 MWh.
+	measure 'T CM Total Output' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(SUM('Daily Performance'[Energy Actual Mwh]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0.00
+		displayFolder: 02 Turbine KPIs
+
+	/// Selected-turbine prior-month actual output.
+	measure 'T PM Total Output' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(SUM('Daily Performance'[Energy Actual Mwh]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m - 1), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0.00
+		displayFolder: 02 Turbine KPIs
+
+	/// Selected-turbine current-month capacity factor (fraction, /100).
+	measure 'T CM Capacity Factor' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Capacity Factor Actual]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t)) / 100
+		formatString: 0.0%
+		displayFolder: 02 Turbine KPIs
+
+	/// SOURCE BUG (faithful): Tableau's [T PM Capacity Factor] omits the /100 that [T CM Capacity Factor] applies, so T MoM Capacity Factor compares a fraction (~0.30) to a percent (~30) - a 100x scale mismatch. Translated as-authored; flagged.
+	measure 'T PM Capacity Factor' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Capacity Factor Actual]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m - 1), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0.00
+		displayFolder: 02 Turbine KPIs
+
+	/// Selected-turbine current-month performance ratio (fraction, /100).
+	measure 'T CM Performance Ratio' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Performance Ratio]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t)) / 100
+		formatString: 0.0%
+		displayFolder: 02 Turbine KPIs
+
+	/// Selected-turbine prior-month performance ratio (fraction, /100).
+	measure 'T PM Performance Ratio' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Performance Ratio]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m - 1), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t)) / 100
+		formatString: 0.0%
+		displayFolder: 02 Turbine KPIs
+
+	/// Selected-turbine current-month performance ratio in ABSOLUTE percent (no /100). Drives the spiral length (# of Num points shown). Default (GRWF Turbine 18, June) = 104.68.
+	measure 'T CM Performance Ratio (Abs)' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Performance Ratio]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0.00
+		displayFolder: 02 Turbine KPIs
+
+	/// Selected-turbine current-month availability (fraction, /100).
+	measure 'T CM Availability' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Availability Percent]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t)) / 100
+		formatString: 0.0%
+		displayFolder: 02 Turbine KPIs
+
+	/// Selected-turbine prior-month availability (fraction, /100).
+	measure 'T PM Availability' = VAR _m = [Month Parameter Value] VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(AVERAGE('Daily Performance'[Availability Percent]), FILTER(ALL('Daily Performance'[Month Number]), _m = 2024 || 'Daily Performance'[Month Number] = _m - 1), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t)) / 100
+		formatString: 0.0%
+		displayFolder: 02 Turbine KPIs
+
+	/// Positive month-over-month change in fleet output (fires only when CM > PM).
+	measure 'Pos MoM Total Output' = VAR _cm = [CM Total Output] VAR _pm = [PM Total Output] RETURN IF(_cm > _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 03 MoM Total Output
+
+	/// Negative month-over-month change (fires only when CM < PM).
+	measure 'Neg MoM Total Output' = VAR _cm = [CM Total Output] VAR _pm = [PM Total Output] RETURN IF(_cm < _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 03 MoM Total Output
+
+	/// Neutral month-over-month (fires only when CM = PM).
+	measure 'Neut MoM Total Output' = VAR _cm = [CM Total Output] VAR _pm = [PM Total Output] RETURN IF(_cm = _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 03 MoM Total Output
+
+	/// Selected-turbine positive MoM output.
+	measure 'T Pos MoM Total Output' = VAR _cm = [T CM Total Output] VAR _pm = [T PM Total Output] RETURN IF(_cm > _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine negative MoM output.
+	measure 'T Neg MoM Total Output' = VAR _cm = [T CM Total Output] VAR _pm = [T PM Total Output] RETURN IF(_cm < _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine neutral MoM output.
+	measure 'T Neut MoM Total Output' = VAR _cm = [T CM Total Output] VAR _pm = [T PM Total Output] RETURN IF(_cm = _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine positive MoM performance ratio.
+	measure 'T Pos MoM Performance Ratio' = VAR _cm = [T CM Performance Ratio] VAR _pm = [T PM Performance Ratio] RETURN IF(_cm > _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine negative MoM performance ratio.
+	measure 'T Neg MoM Performance Ratio' = VAR _cm = [T CM Performance Ratio] VAR _pm = [T PM Performance Ratio] RETURN IF(_cm < _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine neutral MoM performance ratio.
+	measure 'T Neut MoM Performance Ratio' = VAR _cm = [T CM Performance Ratio] VAR _pm = [T PM Performance Ratio] RETURN IF(_cm = _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine positive MoM availability.
+	measure 'T Pos MoM Availability' = VAR _cm = [T CM Availability] VAR _pm = [T PM Availability] RETURN IF(_cm > _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine negative MoM availability.
+	measure 'T Neg MoM Availability' = VAR _cm = [T CM Availability] VAR _pm = [T PM Availability] RETURN IF(_cm < _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Selected-turbine neutral MoM availability.
+	measure 'T Neut MoM Availability' = VAR _cm = [T CM Availability] VAR _pm = [T PM Availability] RETURN IF(_cm = _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// SOURCE BUG (faithful): compares [T CM Capacity Factor] (/100 fraction) to [T PM Capacity Factor] (raw percent) - 100x mismatch; near-always blank.
+	measure 'T Pos MoM Capacity Factor' = VAR _cm = [T CM Capacity Factor] VAR _pm = [T PM Capacity Factor] RETURN IF(_cm > _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// SOURCE BUG (faithful): CM(fraction) < PM(percent) almost always true -> this fires ~-99%. See T PM Capacity Factor note.
+	measure 'T Neg MoM Capacity Factor' = VAR _cm = [T CM Capacity Factor] VAR _pm = [T PM Capacity Factor] RETURN IF(_cm < _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// SOURCE BUG (faithful): CM/PM 100x scale mismatch; near-always blank.
+	measure 'T Neut MoM Capacity Factor' = VAR _cm = [T CM Capacity Factor] VAR _pm = [T PM Capacity Factor] RETURN IF(_cm = _pm, DIVIDE(_cm, _pm) - 1)
+		formatString: 0.0%
+		displayFolder: 04 MoM Turbine
+
+	/// Tableau WINDOW_MAX label: 'Max' on the peak month's bar (evaluate with Month on the axis). MAXX over ALLSELECTED months replaces the table calc.
+	measure 'Max Monthly Output' = VAR _cur = [Total Actual Output (2024)] VAR _mx = MAXX(ALLSELECTED('Daily Performance'[Month]), [Total Actual Output (2024)]) RETURN IF(_cur = _mx, "Max")
+		displayFolder: 05 Labels
+
+	/// Tableau WINDOW_MIN label: 'Min' on the trough month's bar.
+	measure 'Min Monthly Output' = VAR _cur = [Total Actual Output (2024)] VAR _mn = MINX(ALLSELECTED('Daily Performance'[Month]), [Total Actual Output (2024)]) RETURN IF(_cur = _mn, "Min")
+		displayFolder: 05 Labels
+
+	/// Card label: selected month name + year, or '2024' when annual (P1=2024).
+	measure 'Month in View' = VAR _p = [Month Parameter Value] RETURN IF(_p = 2024, "2024", FORMAT(DATE(2024, _p, 1), "MMMM") & " 2024")
+		displayFolder: 05 Labels
+
+	/// Bar-colour bucket: 'Selected Month' / 'Annual' / 'Others' (evaluate per month).
+	measure 'Selected Month (Bars)' = VAR _p = [Month Parameter Value] VAR _mn = SELECTEDVALUE('Daily Performance'[Month Number]) RETURN IF(_p = _mn, "Selected Month", IF(_p = 2024, "Annual", "Others"))
+		displayFolder: 05 Labels
+
+	/// Shows 'vs. PM' only when a specific month (not annual) is selected.
+	measure 'vs. PM Label' = IF([Month Parameter Value] <> 2024, "vs. PM")
+		displayFolder: 05 Labels
+
+	/// Shows 'in 2024' only when annual (P1=2024) is selected.
+	measure 'in 2024 Label' = IF([Month Parameter Value] = 2024, "in 2024")
+		displayFolder: 05 Labels
+
+	/// Turbine business key (foreign key to Turbine). NL-WT-2024-001..030.
+	column 'Turbine Id'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: turbine_id
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Daily observation date in 2024. Basis of the Month/Weekday calc columns and the Month Parameter (P1) month gate.
+	column Date
+		dataType: dateTime
+		formatString: yyyy-mm-dd
+		summarizeBy: none
+		sourceColumn: date
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Redundant copy of Date from the source extract.
+	column Timestamp
+		dataType: dateTime
+		isHidden
+		formatString: yyyy-mm-dd
+		summarizeBy: none
+		sourceColumn: timestamp
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Forecast daily energy generation in megawatt-hours (MWh). Additive.
+	column 'Energy Forecast Mwh'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: energy_forecast_mwh
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Actual daily energy generation in megawatt-hours (MWh). Additive; full-year fleet total = 453,167.28 MWh.
+	column 'Energy Actual Mwh'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: energy_actual_mwh
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Forecast capacity factor as a percentage 0-100 (output vs nameplate). Average, not additive.
+	column 'Capacity Factor Forecast'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: capacity_factor_forecast
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Actual capacity factor as a percentage 0-100 (output vs nameplate). Average; KPI measures divide by 100 to a fraction.
+	column 'Capacity Factor Actual'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: capacity_factor_actual
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Daily average wind speed in metres per second (m/s). Average.
+	column 'Avg Wind Speed Ms'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: avg_wind_speed_ms
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Daily maximum wind speed in metres per second (m/s).
+	column 'Max Wind Speed Ms'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: max_wind_speed_ms
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Turbine availability (uptime) as a percentage 0-100. Average; KPI measures divide by 100.
+	column 'Availability Percent'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: availability_percent
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Daily downtime in hours. Additive.
+	column 'Downtime Hours'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: downtime_hours
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Performance ratio as a percentage (actual vs expected yield); can exceed 100. Average; measures divide by 100 except the (Abs) variant.
+	column 'Performance Ratio'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: performance_ratio
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Energy exported to the grid in megawatt-hours (MWh). Additive.
+	column 'Grid Export Mwh'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: grid_export_mwh
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Ambient temperature in degrees Celsius (C). Average.
+	column 'Ambient Temperature C'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: ambient_temperature_c
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Calendar month number 1-12 derived from Date. Join key for the Month Parameter (P1) gate.
+	column 'Month Number' = MONTH('Daily Performance'[Date])
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Full month name derived from Date. One of: January, February, March, April, May, June, July, August, September, October, November, December. Sorted by Month Number.
+	column Month = FORMAT('Daily Performance'[Date], "MMMM")
+		dataType: string
+		summarizeBy: none
+		sortByColumn: 'Month Number'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Day-of-week name derived from Date. One of: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.
+	column Weekday = FORMAT('Daily Performance'[Date], "dddd")
+		dataType: string
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// First initial of the month name (J, F, M, A, ...) for compact axis labels.
+	column 'Month Label' = LEFT('Daily Performance'[Month], 1)
+		dataType: string
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Daily Performance' = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "daily_performance_2024.csv"), [Delimiter = ",", Columns = 14, Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars = true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"turbine_id", type text}, {"date", type date}, {"timestamp", type date}, {"energy_forecast_mwh", type number}, {"energy_actual_mwh", type number}, {"capacity_factor_forecast", type number}, {"capacity_factor_actual", type number}, {"avg_wind_speed_ms", type number}, {"max_wind_speed_ms", type number}, {"availability_percent", type number}, {"downtime_hours", type number}, {"performance_ratio", type number}, {"grid_export_mwh", type number}, {"ambient_temperature_c", type number}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

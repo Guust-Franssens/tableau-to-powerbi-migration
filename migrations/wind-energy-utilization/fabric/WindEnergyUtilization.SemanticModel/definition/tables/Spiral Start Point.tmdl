@@ -1,0 +1,31 @@
+/// Single-row seed table backing the Tableau 'Spiral Start Point' ([Parameter 4], any-numeric, default 180) - spiral start-angle (degrees) tuning knob. Held at the Tableau default.
+table 'Spiral Start Point'
+
+	/// Reads the 'Spiral Start Point' value, defaulting to the Tableau default 180 (spiral start angle, degrees).
+	measure 'Spiral Start Point Value' = SELECTEDVALUE('Spiral Start Point'[Spiral Start Point], 180)
+		displayFolder: Parameters
+
+	/// Spiral start-angle in degrees (single-row seed, default 180). Read by [Spiral Start Point Value] in the spiral geometry.
+	column 'Spiral Start Point'
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Spiral Start Point
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Spiral Start Point' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Spiral Start Point"},
+						{
+						{180}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Spiral Start Point", type number}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+
