@@ -73,6 +73,7 @@ Legend: 🟢 render-proven · 🟡 structural template (CLI) · 🔴 needs human
 | `azureMap` (choropleth reference-layer) | superstore prescriptive `9d3297e6` (render-verified, Desktop-built) |
 | `slicer` (list/dropdown, single/multi) | all migrations |
 | `pageNavigator`, `textbox`, `shape` | all migrations |
+| `actionButton` (static Web URL / link button) | interactive-resume (structural 🟡; social chips + 6 hardcoded links; Desktop click-through not captured) |
 
 ### 🎯 Research targets (Tableau-common, not yet proven) — being templated by cluster agents
 - **Cartesian family**: `areaChart`, `stackedAreaChart`, `hundredPercentStackedAreaChart`,

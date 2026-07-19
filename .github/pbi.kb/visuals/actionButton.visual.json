@@ -1,0 +1,84 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.1.0/schema.json",
+  "name": "10000000000000000021",
+  "position": {
+    "x": 80,
+    "y": 80,
+    "z": 9000,
+    "height": 45,
+    "width": 45,
+    "tabOrder": 9000
+  },
+  "visual": {
+    "visualType": "actionButton",
+    "objects": {
+      "shape": [
+        {
+          "properties": {
+            "tileShape": { "expr": { "Literal": { "Value": "'oval'" } } }
+          }
+        }
+      ],
+      "outline": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "false" } } }
+          },
+          "selector": { "id": "default" }
+        }
+      ],
+      "fill": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "fillColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#6B9FA9'" } } } } },
+            "transparency": { "expr": { "Literal": { "Value": "0D" } } }
+          },
+          "selector": { "id": "default" }
+        }
+      ],
+      "text": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "text": { "expr": { "Literal": { "Value": "'in'" } } },
+            "fontFamily": { "expr": { "Literal": { "Value": "'Segoe UI'" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "13D" } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } },
+            "fontColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#FFFFFF'" } } } } },
+            "horizontalAlignment": { "expr": { "Literal": { "Value": "'center'" } } }
+          },
+          "selector": { "id": "default" }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "border": [
+        { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "padding": [
+        {
+          "properties": {
+            "top": { "expr": { "Literal": { "Value": "0D" } } },
+            "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+            "left": { "expr": { "Literal": { "Value": "0D" } } },
+            "right": { "expr": { "Literal": { "Value": "0D" } } }
+          }
+        }
+      ],
+      "visualLink": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "type": { "expr": { "Literal": { "Value": "'WebUrl'" } } },
+            "webUrl": { "expr": { "Literal": { "Value": "'https://example.com/'" } } }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}
