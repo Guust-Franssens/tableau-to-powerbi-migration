@@ -6076,6 +6076,60 @@
    "issue": "SKIPPED (service/tenant setting, not a model artifact): 'Approved for Copilot' / semantic-model indexing toggles. These are workspace/service settings applied after deployment, out of scope for the local PBIP build.",
    "severity": "low",
    "stage": "semantic_build"
+  },
+  {
+   "item": "slicer.Region Parameter / Turbine Id Parameter",
+   "issue": "Placed as native slicers per report handoff, but their SELECTEDVALUE measures have 0 consumers in the committed model (a documented Tableau parameter->DAX gap inherited from semantic_build) - changing them filters nothing. Region is a display-only domain; Turbine Id is inert.",
+   "severity": "medium",
+   "stage": "report_build"
+  },
+  {
+   "item": "visual.azureMap turbine locator",
+   "issue": "Shows all 30 turbines (fleet locator). The disconnected Upd Turbine Name Parameter cannot cross-filter the Turbine table, so the map cannot isolate the single selected turbine; selection is reflected only in the T-* KPI cards and spiral.",
+   "severity": "low",
+   "stage": "report_build"
+  },
+  {
+   "item": "visual.pivotTable Weekday x Month heatmap",
+   "issue": "Displays FLEET total actual output, not selected-turbine output - the model exposes no day-level turbine-filtered output measure. Faithful to the Tableau fleet heatmap but does not react to the turbine slicer.",
+   "severity": "medium",
+   "stage": "report_build"
+  },
+  {
+   "item": "visual.scatterChart spiral markers",
+   "issue": "Marker color is static teal. Tableau's 'Spiral Colour' encoding is a string measure (returns a color/label) which cannot drive PBIR data-color rules; per-point color fidelity is lost.",
+   "severity": "low",
+   "stage": "report_build"
+  },
+  {
+   "item": "axis.Weekday sort",
+   "issue": "Weekday axis sorts alphabetically - the model has no Weekday sort-order column and the report layer must not modify the semantic model. Minor ordering fidelity loss on the heatmap rows.",
+   "severity": "low",
+   "stage": "report_build"
+  },
+  {
+   "item": "zones.decorative",
+   "issue": "Non-data Tableau zones omitted: Capacity/Owner label, Months headline, Turbine Image (no asset shipped), Page-navigation buttons, and the decorative spiral markers (Spiral 20s / Axis Guides / First / Last / Zero point). These are annotations, not data visuals.",
+   "severity": "low",
+   "stage": "report_build"
+  },
+  {
+   "item": "control.Page Parameter pager",
+   "issue": "Tableau's 5-page, 6-turbines-at-a-time pager (Page Parameter) collapsed into ONE natively-scrolling tableEx turbine list. Native scroll supersedes the page-flip control; the paging buttons have no faithful native equivalent.",
+   "severity": "low",
+   "stage": "report_build"
+  },
+  {
+   "item": "control.Selected Month vs All Year toggle",
+   "issue": "The Tableau 'Selected Month / All Year' toggle (P1=2024 member) is collapsed into the Month slicer default (June) plus a Month-in-View card; the annual view is reachable by selecting the 2024 member of the Month slicer.",
+   "severity": "low",
+   "stage": "report_build"
+  },
+  {
+   "item": "validation.desktop_render",
+   "issue": "Live Desktop render verification deferred: the single shared Power BI Desktop bridge was held by two other concurrent builds (one with unsaved changes) and per policy a competing instance was not force-opened. Sign-off rests on structural validation (powerbi-report-author validate: 0 errors) plus an independent field-reference cross-check (32/32 refs resolve against TMDL). Spiral tracing and azureMap bubble rendering are structurally verified but not yet visually confirmed; PBIR_SCHEMA_UNREACHABLE (offline) means JSON-schema validation was skipped.",
+   "severity": "medium",
+   "stage": "report_build"
   }
  ]
 }
