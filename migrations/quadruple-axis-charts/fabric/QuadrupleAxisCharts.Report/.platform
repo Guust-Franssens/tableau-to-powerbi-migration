@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "QuadrupleAxisCharts"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "fe2ed088-3736-438b-8ca8-b5bccfce1c91"
+  }
+}
