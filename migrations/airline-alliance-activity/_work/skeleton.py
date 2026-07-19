@@ -3,15 +3,18 @@ against the Tableau reference screenshot. Reads real visual.json positions.
 Usage: python skeleton.py <pageIndex 0-based> <outfile.png>
 Canvas is 1400x950 (build.js); scaled to 1600x1000 to match reference PNGs.
 """
+
 import os, sys, json
+from pathlib import Path
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-REPORT = r"C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\airline-alliance-activity\fabric\AirlineAllianceActivity.Report\definition\pages"
-CW, CH = 1400, 950          # build.js canvas
-OW, OH = 1600, 1000         # output (match reference)
+REPORT = str(Path(__file__).resolve().parents[1] / "fabric" / "AirlineAllianceActivity.Report" / "definition" / "pages")
+CW, CH = 1400, 950  # build.js canvas
+OW, OH = 1600, 1000  # output (match reference)
 
 COLOR = {
     "textbox": ("#FFFFFF", "#8899AA"),
@@ -31,8 +34,10 @@ COLOR = {
     "actionButton": ("#8FA9B3", "#1F2E35"),
 }
 
+
 def scale(v, dim_in, dim_out):
     return v / dim_in * dim_out
+
 
 def label_for(j):
     t = j["visual"]["visualType"]
@@ -57,6 +62,7 @@ def label_for(j):
             pass
     return t, txt[:26]
 
+
 def main():
     idx = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     out = sys.argv[2] if len(sys.argv) > 2 else "skeleton.png"
@@ -72,30 +78,34 @@ def main():
     vis.sort(key=lambda j: j["position"].get("z", 0))
 
     fig, ax = plt.subplots(figsize=(16, 10), dpi=100)
-    ax.set_xlim(0, OW); ax.set_ylim(0, OH); ax.invert_yaxis()
+    ax.set_xlim(0, OW)
+    ax.set_ylim(0, OH)
+    ax.invert_yaxis()
     ax.set_facecolor("#F7F7FA")
     ax.set_title(f"Skeleton wireframe (gestalt only) — page {idx} '{pg}' — {len(vis)} visuals", fontsize=11)
 
     for j in vis:
         p = j["position"]
-        x = scale(p["x"], CW, OW); y = scale(p["y"], CH, OH)
-        w = scale(p["width"], CW, OW); h = scale(p["height"], CH, OH)
+        x = scale(p["x"], CW, OW)
+        y = scale(p["y"], CH, OH)
+        w = scale(p["width"], CW, OW)
+        h = scale(p["height"], CH, OH)
         t, txt = label_for(j)
         fill, edge = COLOR.get(t, ("#EEEEEE", "#999999"))
         z = p.get("z", 0)
-        alpha = 0.35 if z < 4000 else 0.92     # backgrounds faded
-        rect = patches.Rectangle((x, y), w, h, facecolor=fill, edgecolor=edge,
-                                 linewidth=1.0, alpha=alpha)
+        alpha = 0.35 if z < 4000 else 0.92  # backgrounds faded
+        rect = patches.Rectangle((x, y), w, h, facecolor=fill, edgecolor=edge, linewidth=1.0, alpha=alpha)
         ax.add_patch(rect)
         if z >= 4000 and w > 30 and h > 14:
             short = t.replace("Chart", "").replace("Visual", "")
             lbl = f"{short}\n{txt}" if txt else short
-            ax.text(x + w/2, y + h/2, lbl, fontsize=5.2, ha="center", va="center", color="#222")
+            ax.text(x + w / 2, y + h / 2, lbl, fontsize=5.2, ha="center", va="center", color="#222")
 
     plt.tight_layout()
     fig.savefig(out)
     plt.close(fig)
     print("saved", out)
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,7 @@
 import json
+from pathlib import Path
 
-P = r"C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\electricity-per-capita\migration-spec.json"
+P = str(Path(__file__).resolve().parents[2] / "migration-spec.json")
 d = json.load(open(P, encoding="utf-8"))
 lim = d["limitations_encountered"]
 before = len(lim)
@@ -64,6 +65,12 @@ print(f"appended {len(NEW)} entries ({before} -> {len(lim)})")
 
 # re-validate against schema
 import jsonschema
-schema = json.load(open(r"C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\docs\migration-spec.schema.json", encoding="utf-8"))
+
+schema = json.load(
+    open(
+        Path(__file__).resolve().parents[4] / "docs" / "migration-spec.schema.json",
+        encoding="utf-8",
+    )
+)
 jsonschema.validate(d, schema)
 print("SCHEMA VALIDATION: OK")
