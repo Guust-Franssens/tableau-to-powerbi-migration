@@ -5,13 +5,12 @@
     "x": 872,
     "y": 386,
     "z": 1110,
-    "width": 378,
     "height": 698,
+    "width": 378,
     "tabOrder": 1110
   },
   "visual": {
     "visualType": "pivotTable",
-    "drillFilterOtherVisuals": true,
     "query": {
       "queryState": {
         "Rows": {
@@ -43,7 +42,8 @@
                 }
               },
               "queryRef": "Elec Generation.Entity",
-              "nativeQueryRef": "Entity"
+              "nativeQueryRef": "Entity",
+              "active": false
             }
           ]
         },
@@ -62,13 +62,13 @@
                       "Property": "Elec gen at 2022"
                     }
                   },
-                  "Function": 0
+                    "Function": 1
                 }
               },
-              "queryRef": "Sum(Elec Generation.Elec gen at 2022)",
-              "nativeQueryRef": "Sum of Elec gen at 2022",
-              "format": "#,##0",
-              "displayName": "kWh / capita (2022)"
+              "queryRef": "Avg(Elec Generation.Elec gen at 2022)",
+              "nativeQueryRef": "Avg of Elec gen at 2022",
+              "displayName": "kWh / capita (2022)",
+              "format": "#,##0"
             }
           ]
         }
@@ -185,6 +185,7 @@
           }
         }
       ]
-    }
+    },
+    "drillFilterOtherVisuals": true
   }
 }

@@ -44,6 +44,28 @@
       ]
     }
   ],
+  "objects": {
+    "outspacePane": [
+      {
+        "properties": {
+          "expanded": {
+            "expr": {
+              "Literal": {
+                "Value": "false"
+              }
+            }
+          },
+          "visible": {
+            "expr": {
+              "Literal": {
+                "Value": "true"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
   "settings": {
     "useStylableVisualContainerHeader": true,
     "defaultDrillFilterOtherVisuals": true,
