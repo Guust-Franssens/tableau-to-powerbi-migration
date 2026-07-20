@@ -18,7 +18,7 @@ Logistics profitability & delay KPIs. GOOD/OK/BAD conditional coloring on scatte
 
 ### Telecommunications Analytics
 
-Radio-tower network dashboard. Notable: a true two-point azureMap route/line map (PathID + PointOrder) - a fidelity win over Tableau's dual-axis workaround.
+Radio-tower network dashboard. Tableau's MAKELINE link-lines between towers have no native Power BI equivalent, so they render as an azureMap point layer (a documented capability gap); the per-region stacked capacity bars and the link-detail table migrate faithfully.
 
 **Radio Towers Dashboard**
 
@@ -42,7 +42,7 @@ Company revenue-growth analysis. Exercised the pipeline's first real Tableau tab
 
 ### Superstore Sales Performance
 
-Three-dashboard analytics suite. Field Parameters for parameter-driven measure/dimension switching, current/prior-period comparison, diverging-gradient Azure Maps choropleths (data-bound reference layer), and region-comparison dot-plots.
+Three-dashboard analytics suite (Ryan Sleeper's Super Sample Superstore). Field Parameters for parameter-driven measure/dimension switching, current/prior-period comparison, azureMap region small-multiples, and region-comparison plots. (Basemap styling and KPI-card encodings are being re-rendered for higher fidelity.)
 
 **Prescriptive**
 
