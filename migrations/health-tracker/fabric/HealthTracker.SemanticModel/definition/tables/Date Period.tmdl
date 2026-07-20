@@ -1,0 +1,47 @@
+/// Disconnected single-column table backing the Tableau parameter 'Date Period' (internal name '[Parameter 1]', list domain: "Last Week"/"Last Month"/"Last Year", default "Last Week"). Deliberately a plain single-select list slicer (NOT a Field Parameter, NOT relationship-bound): the Tableau parameter drives two things - (a) the Prior-period date arithmetic (read via [Date Period Value] inside every 'Prior *' measure) and (b) the highlight/axis-granularity behaviour on the trend bars. A native slicer + SELECTEDVALUE measure is the idiomatic Power BI equivalent for (a); (b) is handled at the report layer (see limitations_encountered - PBI cannot swap an axis column by a slicer, so the report uses bookmarks/per-page filters).
+table 'Date Period'
+	lineageTag: 04cf03d3-ccbb-44bf-9583-b8e319ca638a
+
+	/// Reads the current slicer selection on 'Date Period'[Date Period], defaulting to Tableau's parameter default "Last Week" when nothing is selected (e.g. model freshly opened). Referenced (bare, unqualified) from every 'Prior *' measure and from 'Highlight Latest' / 'In Selected Period' on 'Health Data'. Measure names are model-wide unique in Tabular, so table placement does not affect resolution.
+	measure 'Date Period Value' = SELECTEDVALUE('Date Period'[Date Period], "Last Week")
+		displayFolder: Date Period Support
+		lineageTag: 7fcb716c-08b1-4317-84ef-d32b99e948a4
+
+	/// Period choice: "Last Week" / "Last Month" / "Last Year". Sort order fixed via 'Date Period Order' to match the Tableau parameter's own list order rather than falling back to alphabetical.
+	column 'Date Period'
+		dataType: string
+		lineageTag: d61dc92a-534a-439a-9d3d-604245de2b8d
+		summarizeBy: none
+		sourceColumn: Date Period
+		sortByColumn: 'Date Period Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden sort-order helper for 'Date Period' (0=Last Week, 1=Last Month, 2=Last Year, matching the Tableau parameter's list order).
+	column 'Date Period Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		lineageTag: d3636501-ff83-4aa6-a0e7-17e14b0b1ab4
+		summarizeBy: none
+		sourceColumn: Date Period Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Date Period' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Date Period", "Date Period Order"},
+						{
+							{"Last Week", 0},
+							{"Last Month", 1},
+							{"Last Year", 2}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Date Period", type text}, {"Date Period Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table

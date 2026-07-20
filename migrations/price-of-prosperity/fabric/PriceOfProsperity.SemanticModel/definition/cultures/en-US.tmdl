@@ -1,0 +1,287 @@
+cultureInfo en-US
+
+	linguisticMetadata =
+			{
+			  "Version": "1.0.0",
+			  "Language": "en-US",
+			  "DynamicImprovement": "HighConfidence",
+			  "Entities": {
+			    "co2 per capita": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "CO2 per Capita"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "co2 per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "carbon emissions per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "carbon dioxide per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "co2 emissions per capita": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "gdp per capita": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "GDP per Capita"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "gdp per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "gdp per person": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "income per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "gross domestic product per capita": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "population": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Population"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "population": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "total population": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "inhabitants": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "number of people": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "renewable energy percent": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Renewable Energy %"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "renewable energy percent": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "renewable energy share": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "renewable share": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "percent renewable": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "continent": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Continent"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "continent": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "continents": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "income group": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Income Group"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "income group": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "income level": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "income classification": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "avg co2 per capita": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Avg CO2 per Capita"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "avg co2 per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "average co2 per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "mean carbon emissions per capita": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "avg gdp per capita": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Avg GDP per Capita"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "avg gdp per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "average gdp per capita": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "mean income per capita": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "total population": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Total Population"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "total population": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "sum of population": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "world population": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    },
+			    "avg renewable energy percent": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Country Indicators",
+			          "ConceptualProperty": "Avg Renewable Energy %"
+			        }
+			      },
+			      "State": "Authored",
+			      "Terms": [
+			        {
+			          "avg renewable energy percent": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "average renewable energy": {
+			            "State": "Authored"
+			          }
+			        },
+			        {
+			          "mean renewable share": {
+			            "State": "Authored"
+			          }
+			        }
+			      ]
+			    }
+			  }
+			}
+		contentType: json
+

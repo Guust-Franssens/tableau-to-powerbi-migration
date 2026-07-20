@@ -1,0 +1,60 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "68990926e1ba49e9bfe3",
+  "position": {
+    "x": 50,
+    "y": 1530,
+    "z": 1200,
+    "width": 390,
+    "height": 112,
+    "tabOrder": 1200
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "FOSSIL FUELS",
+                    "textStyle": {
+                      "fontSize": "12pt",
+                      "color": "#0f4556",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "4pt",
+                      "color": "#0f4556"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Fossil fuels are the sum of coal, oil and gas — the largest source of greenhouse-gas emissions and still the majority of electricity generation.",
+                    "textStyle": {
+                      "fontSize": "9pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

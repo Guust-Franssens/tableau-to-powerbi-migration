@@ -1,0 +1,4568 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "Electricitygenerationpercapita2022.twbx",
+    "tableau_version": "18.1",
+    "source_build": "2023.3.3 (20233.24.0202.1238)",
+    "repository_location_id": "Electricitygenerationpercapita2022",
+    "parsed_at": "2026-07-17T16:14:19.575393+00:00"
+  },
+  "parameters": [
+    {
+      "id": "param.show_chart_as",
+      "internal_name": "[Parameter 1]",
+      "caption": "Show chart as:",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Tree",
+        "Table",
+        "Table no region"
+      ],
+      "current_value": "Tree"
+    },
+    {
+      "id": "param.view_data_for",
+      "internal_name": "[Parameter 2]",
+      "caption": "View data for:",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "World",
+        "Region",
+        "Country"
+      ],
+      "current_value": "World"
+    },
+    {
+      "id": "param.slider",
+      "internal_name": "[Parameter 3]",
+      "caption": "Slider",
+      "data_type": "real",
+      "domain_type": "range",
+      "allowed_values": [],
+      "current_value": "2021."
+    }
+  ],
+  "data_sources": [
+    {
+      "id": "ds.per_capita_electricity_fossil_nuclear_renewables",
+      "caption": "per-capita-electricity-fossil-nuclear-renewables",
+      "internal_name": "federated.0pzple80nv2w0013wcza70jbqwye",
+      "connection": {
+        "class": "textscan",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/per-capita-electricity-fossil-nuclear-renewables.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "name": "per-capita-electricity-fossil-nuclear-renewables.csv",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__ff",
+          "internal_name": "[Calculation_1093530317117341870]",
+          "caption": "FF%",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]\r\n/ ([Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__fossil_fuel_electricity_per_capita_kwh",
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear_electricity_per_capita_kwh",
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewable_electricity_per_capita_kwh"
+          ]
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear",
+          "internal_name": "[Calculation_1093530317119185071]",
+          "caption": "Nuclear%",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]\r\n/\r\n([Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__fossil_fuel_electricity_per_capita_kwh",
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear_electricity_per_capita_kwh",
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewable_electricity_per_capita_kwh"
+          ]
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__entity",
+          "internal_name": "[Entity]",
+          "caption": "Entity",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__fossil_fuel_electricity_per_capita_kwh",
+          "internal_name": "[Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]",
+          "caption": "Fossil fuel electricity per capita - kWh",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear_electricity_per_capita_kwh",
+          "internal_name": "[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]",
+          "caption": "Nuclear electricity per capita - kWh",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewables",
+          "internal_name": "[Nuclear% (copy)_1093530317119611056]",
+          "caption": "Renewables %",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]\r\n/\r\n([Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__fossil_fuel_electricity_per_capita_kwh",
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear_electricity_per_capita_kwh",
+            "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewable_electricity_per_capita_kwh"
+          ]
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewable_electricity_per_capita_kwh",
+          "internal_name": "[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]",
+          "caption": "Renewable electricity per capita - kWh",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__per_capita_electricity_fossil_nuclear_renewables_csv",
+          "internal_name": "[__tableau_internal_object_id__].[per-capita-electricity-fossil-nuclear-renewables.csv_02AEB4A0EC09413D84ED090474B5BF27]",
+          "caption": "per-capita-electricity-fossil-nuclear-renewables.csv",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__code",
+          "internal_name": "[Code]",
+          "caption": "Code",
+          "table_id": "tbl.per_capita_electricity_fossil_nuclear_renewables_csv",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.tree",
+      "caption": "tree",
+      "internal_name": "federated.1wpndmq0krn6cp1e0x1q30gd9cej",
+      "connection": {
+        "class": "textscan",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/tree.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.tree_csv",
+          "name": "tree.csv",
+          "source_relation": "table",
+          "custom_sql": null
+        },
+        {
+          "id": "tbl.elec_generation",
+          "name": "Elec generation",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_tree__x_revised_for_nodes",
+          "internal_name": "[Calculation_1093530316342710277]",
+          "caption": "X revised (for nodes)",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [type] = \"node\" \r\n    AND NOT  ISNULL([Usage])\r\n    AND [path] = 0\r\n\r\n    THEN ([Usage] / {MAX([Usage])} ) * [Calculation_1744441189486841860]\r\n\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__path",
+            "fld.ds_tree__type",
+            "fld.ds_tree__usage",
+            "fld.ds_tree__x_normalized"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__x_fixed_for_last_path",
+          "internal_name": "[Calculation_1093530316395446293]",
+          "caption": "X fixed for last path",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [path] = { FIXED [id]: MAX(If [type] = \"link\" THEN [path] ELSE NULL END)}\r\n   \r\n    THEN ([Usage ration] * [Calculation_1744441189486841860]) + [Calculation_1744441189486841860]\r\n\r\nELSE [Calculation_1744441189486841860] \r\n\r\nEND",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__id",
+            "fld.ds_tree__path",
+            "fld.ds_tree__type",
+            "fld.ds_tree__usage_ration",
+            "fld.ds_tree__x_normalized"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__calculation1",
+          "internal_name": "[Calculation_1093530316426797089]",
+          "caption": "Calculation1",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if [type] = \"node\" \r\n\r\n    AND ISNULL([Calculation_1093530316342710277])\r\n\r\n    THEN { FIXED [id]: AVG([Usage])} \r\n\r\nEND",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__id",
+            "fld.ds_tree__type",
+            "fld.ds_tree__usage",
+            "fld.ds_tree__x_revised_for_nodes"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__elec_gen_at_2022",
+          "internal_name": "[Calculation_1093530316439404580]",
+          "caption": "Elec gen at 2022",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF  [Year] = 2022 THEN [Per capita electricity - kWh] END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__per_capita_electricity_kwh",
+            "fld.ds_tree__year"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__max_year",
+          "internal_name": "[Calculation_1093530316440166437]",
+          "caption": "Max year",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if WINDOW_max(MAX([Year])) = MAX([Year]) THEN SUM([Per capita electricity - kWh]) END",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__per_capita_electricity_kwh",
+            "fld.ds_tree__year"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__x_trellis",
+          "internal_name": "[Calculation_1093530316697215029]",
+          "caption": "X-trellis",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(index()-1)%(int(SQRT(size())))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__y_trllis",
+          "internal_name": "[Calculation_1093530316697280566]",
+          "caption": "Y-trllis",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "int((Index()-1)/ (int(sqrt(size()))))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__consumption_axis",
+          "internal_name": "[Calculation_1093530317043372187]",
+          "caption": "Consumption axis",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[child]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__child"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__year_axis_consumption",
+          "internal_name": "[Calculation_1093530317043576988]",
+          "caption": "Year Axis Consumption",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Year]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__year"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__year_axis_cy",
+          "internal_name": "[Calculation_1093530317043875997]",
+          "caption": "Year Axis CY",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{max([Year])}",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__year"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__consumption_axis_test",
+          "internal_name": "[Calculation_1093530317043937438]",
+          "caption": "Consumption Axis Test",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "WINDOW_MIN(\r\n    IF (WINDOW_MIN(MIN([Calculation_1093530317043372187])) = MIN([Calculation_1093530317043372187])) \r\n    THEN 1 ELSE 0 END)",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__consumption_axis"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__x_axis_bar_chart",
+          "internal_name": "[Calculation_1093530317044019359]",
+          "caption": "X Axis -  Bar chart",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MIN(0.0)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__x_axis_rank",
+          "internal_name": "[Calculation_1093530317044072608]",
+          "caption": "X Axis - Rank",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MIN(0.0)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__x_axis_text",
+          "internal_name": "[Calculation_1093530317044117665]",
+          "caption": "X Axis - Text",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MIN(0.0)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__y_axis_position",
+          "internal_name": "[Calculation_1093530317044170914]",
+          "caption": "Y Axis Position",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if SIZE()=1 THEN 0.5\r\nELSEIF SIZE() <>1 and [Calculation_1093530317043937438] = 1 THEN [Calculation_1093530317044252835]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__consumption_axis_test",
+            "fld.ds_tree__normalised_consumption"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__normalised_consumption",
+          "internal_name": "[Calculation_1093530317044252835]",
+          "caption": "Normalised consumption",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "//sum(consumption) / window_max(sum(consumption)\r\n\r\n(SUM([Per capita electricity - kWh])-WINDOW_MIN(SUM([Per capita electricity - kWh])))\r\n/\r\n(WINDOW_MAX(SUM([Per capita electricity - kWh]))-WINDOW_MIN(SUM([Per capita electricity - kWh])))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__per_capita_electricity_kwh"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__cy_consumption",
+          "internal_name": "[Calculation_1093530317044740260]",
+          "caption": "CY Consumption",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "SUM({ FIXED [child]: sum(IF [Year]=[Calculation_1093530317044928677] THEN [Per capita electricity - kWh]\r\nELSE NULL END)})",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__child",
+            "fld.ds_tree__cy",
+            "fld.ds_tree__per_capita_electricity_kwh",
+            "fld.ds_tree__year"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__cy",
+          "internal_name": "[Calculation_1093530317044928677]",
+          "caption": "CY",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{MAX([Year])}",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__year"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__dzv_show_tree_map",
+          "internal_name": "[Calculation_1093530317052887209]",
+          "caption": "DZV: show tree map",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 1] = \"Tree\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__calculation2",
+          "internal_name": "[Calculation_1093530317055598764]",
+          "caption": "Calculation2",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_1093530317044740260] > SUM({ FIXED [Region]: AVG([Per capita electricity - kWh])})",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__cy_consumption",
+            "fld.ds_tree__per_capita_electricity_kwh",
+            "fld.ds_tree__region"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__source_label",
+          "internal_name": "[Calculation_1093530317105406125]",
+          "caption": "Source label",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [type] = \"link\" THEN [parent] END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__parent",
+            "fld.ds_tree__type"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__region_and_country_count",
+          "internal_name": "[Calculation_1093530317126893746]",
+          "caption": "Region and country count",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Region] + \"\r\n\"\r\n+\"\r\n\"+\r\nstr({ FIXED [Region]: COUNTD([Entity])}) + \" countries\"",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__entity",
+            "fld.ds_tree__region"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__x_normalized",
+          "internal_name": "[Calculation_1744441189486841860]",
+          "caption": "X Normalized",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[x]/ {MAX([x])}",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__x"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__filter",
+          "internal_name": "[Calculation_5069786605708824576]",
+          "caption": "Filter",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[type]='link' and ISNULL([parent])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__parent",
+            "fld.ds_tree__type"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__child_copy",
+          "internal_name": "[Child (copy)_1093530317041615002]",
+          "caption": "Child (copy)",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[child]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__child"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__code",
+          "internal_name": "[Code]",
+          "caption": "Code",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__dzv_table_with_region",
+          "internal_name": "[DZV: show tree map (copy)_1093530317053321386]",
+          "caption": "DZV: table with region",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 1] = \"Table\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__dzv_table_without_region",
+          "internal_name": "[DZV: table with region (copy)_757449195613663236]",
+          "caption": "DZV: table without region",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 1] = \"Table no region\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_tree__entity",
+          "internal_name": "[Entity]",
+          "caption": "Entity",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__links_with_usage",
+          "internal_name": "[Links (copy)_1093530316413636635]",
+          "caption": "Links with usage",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if [type]='link' then MAKEPOINT(-[X doubled for last path (copy)_1093530316398051351],[Calculation_1093530316395446293]) END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__type",
+            "fld.ds_tree__x_fixed_for_last_path",
+            "fld.ds_tree__y_fixed_for_last_path"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__nodes",
+          "internal_name": "[Links (copy)_2686115764489637888]",
+          "caption": "Nodes",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if [type]='node' then MAKEPOINT(-[X Normalized (copy)_1744441189486952453],[Calculation_1744441189486841860]) END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__type",
+            "fld.ds_tree__x_normalized",
+            "fld.ds_tree__y_normalized"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__max_year_copy",
+          "internal_name": "[Max year (copy)_1093530317049155751]",
+          "caption": "Max year (copy)",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if [Year] = [Calculation_1093530317044928677] THEN [Per capita electricity - kWh] END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__cy",
+            "fld.ds_tree__per_capita_electricity_kwh",
+            "fld.ds_tree__year"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__nodes_with_usage",
+          "internal_name": "[Nodes (copy)_1093530316345700359]",
+          "caption": "Nodes with usage",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if [type]='node' then MAKEPOINT(-[X revised (copy)_1093530316345606150]-[X Normalized (copy)_1744441189486952453],[Calculation_1093530316342710277]+[Calculation_1744441189486841860]) END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__type",
+            "fld.ds_tree__x_normalized",
+            "fld.ds_tree__x_revised_for_nodes",
+            "fld.ds_tree__y_normalized",
+            "fld.ds_tree__y_revised_for_nodes"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__links",
+          "internal_name": "[Nodes (copy)_1211257235239694336]",
+          "caption": "Links",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if [type]='link' then MAKEPOINT(-[X Normalized (copy)_1744441189486952453],[Calculation_1744441189486841860]) END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__type",
+            "fld.ds_tree__x_normalized",
+            "fld.ds_tree__y_normalized"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__border",
+          "internal_name": "[Nodes (copy)_33988165481054208]",
+          "caption": "Border",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if [type]='border' then MAKEPOINT(-[X Normalized (copy)_1744441189486952453],[Calculation_1744441189486841860]) END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__type",
+            "fld.ds_tree__x_normalized",
+            "fld.ds_tree__y_normalized"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__per_capita_electricity_kwh",
+          "internal_name": "[Per capita electricity - kWh]",
+          "caption": "Per capita electricity - kWh",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__region",
+          "internal_name": "[Region]",
+          "caption": "Region",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__y_normalized",
+          "internal_name": "[X Normalized (copy)_1744441189486952453]",
+          "caption": "Y Normalized",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[y]/ {MAX([y])}",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__y"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__y_fixed_for_last_path",
+          "internal_name": "[X doubled for last path (copy)_1093530316398051351]",
+          "caption": "Y fixed for last path",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [path] = { FIXED [id]: MAX(If [type] = \"link\" THEN [path] ELSE NULL END)}\r\n   \r\n    THEN ([Usage ration] * [X Normalized (copy)_1744441189486952453]) + [X Normalized (copy)_1744441189486952453]\r\n\r\nELSE [X Normalized (copy)_1744441189486952453] \r\n\r\nEND",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__id",
+            "fld.ds_tree__path",
+            "fld.ds_tree__type",
+            "fld.ds_tree__usage_ration",
+            "fld.ds_tree__y_normalized"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__y_revised_for_nodes",
+          "internal_name": "[X revised (copy)_1093530316345606150]",
+          "caption": "Y revised (for nodes)",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [type] = \"node\" \r\n    \r\nAND NOT  ISNULL([Usage])\r\n    AND [path] = 0\r\n    \r\n    THEN ([Usage] / {MAX([Usage])} ) * [X Normalized (copy)_1744441189486952453]\r\n\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_tree__path",
+            "fld.ds_tree__type",
+            "fld.ds_tree__usage",
+            "fld.ds_tree__y_normalized"
+          ]
+        },
+        {
+          "id": "fld.ds_tree__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__elec_generation",
+          "internal_name": "[__tableau_internal_object_id__].[Elec generation_83B5FD0ECA2848929E31A629CDED34ED]",
+          "caption": "Elec generation",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__tree_csv",
+          "internal_name": "[__tableau_internal_object_id__].[tree.csv_D5C7546A97E64FBE8DB0BCDADDF65312]",
+          "caption": "tree.csv",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__child",
+          "internal_name": "[child]",
+          "caption": "Child",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__id",
+          "internal_name": "[id]",
+          "caption": "Id",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__index",
+          "internal_name": "[index]",
+          "caption": "Index",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__parent",
+          "internal_name": "[parent]",
+          "caption": "Parent",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__path",
+          "internal_name": "[path]",
+          "caption": "Path",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__type",
+          "internal_name": "[type]",
+          "caption": "Type",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__x",
+          "internal_name": "[x]",
+          "caption": "X",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__y",
+          "internal_name": "[y]",
+          "caption": "Y",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_tree__usage_ration",
+          "internal_name": "[Usage ration]",
+          "caption": "Usage ration",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_tree__usage",
+          "internal_name": "[Usage]",
+          "caption": "Usage",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_tree__size",
+          "internal_name": "[size]",
+          "caption": "size",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_tree__income_group",
+          "internal_name": "[Income group]",
+          "caption": "Income group",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.pivoted_per_capita_electricity_generation_by_source",
+      "caption": "Pivoted (Per capita electricity generation by source)",
+      "internal_name": "federated.0row5lt1hestpo1c418ip1jteucp",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/Pivoted (Per capita electricity generation by source).hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.pivoted",
+          "name": "Pivoted",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__x_trellis",
+          "internal_name": "[Calculation_1093530316697215029]",
+          "caption": "X-trellis",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(index()-1)%(int(SQRT(size())))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__y_trllis",
+          "internal_name": "[Calculation_1093530316697280566]",
+          "caption": "Y-trllis",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "int((Index()-1)/ (int(sqrt(size()))))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year_for_label",
+          "internal_name": "[Calculation_1093530316724125776]",
+          "caption": "Year for label",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Year] = 2020 THEN [Year] END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__year"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__ff_electricity",
+          "internal_name": "[Calculation_1093530316760719446]",
+          "caption": "FF Electricity%",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_1869275341122306065] / ([Calculation_1869275341122306065]+[FF Electricity (copy)_1093530316758171732]+[Nuclear Electricity (copy)_1093530316758253653])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__ff_electricity_1",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__nuclear_electricity",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__renewable_electricity"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region_and_country_count",
+          "internal_name": "[Calculation_1093530317126893746]",
+          "caption": "Region and country count",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Region] + \"\r\n\"\r\n+\"\r\n\"+\r\nstr({ FIXED [Region]: COUNTD([Entity])}) + \" countries\"",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__country",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__region"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__ff_electricity_1",
+          "internal_name": "[Calculation_1869275341122306065]",
+          "caption": "FF Electricity",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{ FIXED [Year], [Code]: SUM(IF [Fuel Source] = \"Fossil Fuel\" THEN [Electricity generation per capita] ELSE NULL END)}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__code",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__year"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__rank",
+          "internal_name": "[Calculation_757449195555446785]",
+          "caption": "Rank",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "index()",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__dzv_world",
+          "internal_name": "[Calculation_757449195558576130]",
+          "caption": "DZV: World",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 2] = \"World\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__code",
+          "internal_name": "[Code]",
+          "caption": "Code",
+          "table_id": "tbl.pivoted",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__dzv_region",
+          "internal_name": "[DZV: Country (copy)_2499779301702930432]",
+          "caption": "DZV: Region",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 2] = \"Region\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__dzv_country",
+          "internal_name": "[DZV: World (copy)_757449195558641667]",
+          "caption": "DZV: Country",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 2] = \"Country\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__country",
+          "internal_name": "[Entity]",
+          "caption": "Country",
+          "table_id": "tbl.pivoted",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__nuclear_electricity",
+          "internal_name": "[FF Electricity (copy)_1093530316758171732]",
+          "caption": "Nuclear Electricity",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{ FIXED [Year], [Code]: SUM(IF [Fuel Source] = \"Nuclear\" THEN [Electricity generation per capita] ELSE NULL END)}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__code",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__year"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__nuclear_electricity_1",
+          "internal_name": "[FF Electricity% (copy)_1093530316762710103]",
+          "caption": "Nuclear Electricity%",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[FF Electricity (copy)_1093530316758171732] / ([Calculation_1869275341122306065]+[FF Electricity (copy)_1093530316758171732]+[Nuclear Electricity (copy)_1093530316758253653])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__ff_electricity_1",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__nuclear_electricity",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__renewable_electricity"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+          "internal_name": "[Fuel Source]",
+          "caption": "Fuel Source",
+          "table_id": "tbl.pivoted",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__renewable_electricity",
+          "internal_name": "[Nuclear Electricity (copy)_1093530316758253653]",
+          "caption": "Renewable Electricity",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{ FIXED [Year], [Code]: SUM(IF [Fuel Source] = \"Renewables\" THEN [Electricity generation per capita] ELSE NULL END)}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__code",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__year"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__renewable_electricity_1",
+          "internal_name": "[Nuclear Electricity% (copy)_1093530316762796120]",
+          "caption": "Renewable Electricity%",
+          "table_id": "tbl.pivoted",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Nuclear Electricity (copy)_1093530316758253653] / ([Calculation_1869275341122306065]+[FF Electricity (copy)_1093530316758171732]+[Nuclear Electricity (copy)_1093530316758253653])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__ff_electricity_1",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__nuclear_electricity",
+            "fld.ds_pivoted_per_capita_electricity_generation_by_source__renewable_electricity"
+          ]
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.pivoted",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__pivoted",
+          "internal_name": "[__tableau_internal_object_id__].[Pivoted_8803E5C532354AF3A1463FC8AE37248E]",
+          "caption": "Pivoted",
+          "table_id": "tbl.pivoted",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region",
+          "internal_name": "[Region]",
+          "caption": "Region",
+          "table_id": "tbl.pivoted",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+          "internal_name": "[Electricity generation per capita]",
+          "caption": "Electricity generation per capita",
+          "table_id": "tbl.pivoted",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.by_source",
+      "caption": "By source",
+      "internal_name": "federated.0mv4qn01z0cc561g1xpkf1xokalj",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/By source.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.country_regions",
+          "name": "Country & Regions",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_by_source__of_nuclear_electricity",
+          "internal_name": "[% of Fossil Fuels (copy)_1093530316712644685]",
+          "caption": "% of Nuclear Electricity",
+          "table_id": "tbl.country_regions",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]\r\n/\r\n([Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_by_source__fossil_fuel_electricity_per_capita_kwh",
+            "fld.ds_by_source__nuclear_electricity_per_capita_kwh",
+            "fld.ds_by_source__renewable_electricity_per_capita_kwh"
+          ]
+        },
+        {
+          "id": "fld.ds_by_source__of_renewable_electricity",
+          "internal_name": "[% of Nuclear (copy)_1093530316712718414]",
+          "caption": "% of Renewable Electricity",
+          "table_id": "tbl.country_regions",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]\r\n/\r\n([Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_by_source__fossil_fuel_electricity_per_capita_kwh",
+            "fld.ds_by_source__nuclear_electricity_per_capita_kwh",
+            "fld.ds_by_source__renewable_electricity_per_capita_kwh"
+          ]
+        },
+        {
+          "id": "fld.ds_by_source__x_trellis",
+          "internal_name": "[Calculation_1093530316697215029]",
+          "caption": "X-trellis",
+          "table_id": "tbl.country_regions",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(index()-1)%(int(SQRT(size())))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_by_source__y_trllis",
+          "internal_name": "[Calculation_1093530316697280566]",
+          "caption": "Y-trllis",
+          "table_id": "tbl.country_regions",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "int((Index()-1)/ (int(sqrt(size()))))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_by_source__of_fossil_fuel_electricity",
+          "internal_name": "[Calculation_1093530316712517708]",
+          "caption": "% of Fossil Fuel Electricity",
+          "table_id": "tbl.country_regions",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]\r\n/\r\n([Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]+[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_by_source__fossil_fuel_electricity_per_capita_kwh",
+            "fld.ds_by_source__nuclear_electricity_per_capita_kwh",
+            "fld.ds_by_source__renewable_electricity_per_capita_kwh"
+          ]
+        },
+        {
+          "id": "fld.ds_by_source__year_for_label",
+          "internal_name": "[Calculation_1093530316724125776]",
+          "caption": "Year for label",
+          "table_id": "tbl.country_regions",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Year] = 2020 THEN [Year] END",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_by_source__year"
+          ]
+        },
+        {
+          "id": "fld.ds_by_source__fossil_fuel_electricity_per_capita_kwh",
+          "internal_name": "[Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]",
+          "caption": "Fossil fuel electricity per capita - kWh",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_by_source__nuclear_electricity_per_capita_kwh",
+          "internal_name": "[Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]",
+          "caption": "Nuclear electricity per capita - kWh",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_by_source__renewable_electricity_per_capita_kwh",
+          "internal_name": "[Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables)]",
+          "caption": "Renewable electricity per capita - kWh",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_by_source__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_by_source__country_regions",
+          "internal_name": "[__tableau_internal_object_id__].[Country & Regions_162A1BDE27404313A2A496D08127FAA2]",
+          "caption": "Country & Regions",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_by_source__entity",
+          "internal_name": "[Entity]",
+          "caption": "Entity",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_by_source__code",
+          "internal_name": "[Code]",
+          "caption": "Code",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_by_source__region",
+          "internal_name": "[Region]",
+          "caption": "Region",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_by_source__income_group",
+          "internal_name": "[Income group]",
+          "caption": "Income group",
+          "table_id": "tbl.country_regions",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.elec_generation_per_capita_regions",
+      "caption": "Elec generation per capita + regions",
+      "internal_name": "federated.1ux1i5y07ny78h16jmbnw1haj33e",
+      "connection": {
+        "class": "textscan",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/Elec generation per capita + regions.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.elec_generation_per_capita_regions_csv",
+          "name": "Elec generation per capita + regions.csv",
+          "source_relation": "table",
+          "custom_sql": null
+        },
+        {
+          "id": "tbl.elec_generation_1",
+          "name": "Elec generation",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__global_avg_in_2022",
+          "internal_name": "[Calculation_1467329087867940864]",
+          "caption": "Global avg in 2022",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "3616.7",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__ratio",
+          "internal_name": "[Calculation_1467329087870025729]",
+          "caption": "Ratio",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "AVG([Per capita electricity - kWh (Elec generation)])\r\n/\r\nAVG([Calculation_1467329087867940864])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_elec_generation_per_capita_regions__global_avg_in_2022",
+            "fld.ds_elec_generation_per_capita_regions__per_capita_electricity_kwh_1"
+          ]
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__child",
+          "internal_name": "[Entity]",
+          "caption": "Child",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__year_elec_generation",
+          "internal_name": "[Year (Elec generation)]",
+          "caption": "Year (Elec generation)",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__elec_generation_per_capita_regions_csv",
+          "internal_name": "[__tableau_internal_object_id__].[Elec generation per capita + regions.csv_B3B07BC3AEC34A68859236D28C71EB13]",
+          "caption": "Elec generation per capita + regions.csv",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__elec_generation",
+          "internal_name": "[__tableau_internal_object_id__].[Elec generation_A3CB5A6904104A358257CDF92EF21323]",
+          "caption": "Elec generation",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__region",
+          "internal_name": "[Region]",
+          "caption": "Region",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__income_group",
+          "internal_name": "[Income group]",
+          "caption": "Income group",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__code",
+          "internal_name": "[Code]",
+          "caption": "Code",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__per_capita_electricity_kwh",
+          "internal_name": "[Per capita electricity - kWh]",
+          "caption": "Per capita electricity - kWh",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__region_1",
+          "internal_name": "[Region (Elec generation)]",
+          "caption": "Region",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__income_group_1",
+          "internal_name": "[Income group (Elec generation)]",
+          "caption": "Income group",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__entity",
+          "internal_name": "[Entity (Elec generation)]",
+          "caption": "Entity",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__code_1",
+          "internal_name": "[Code (Elec generation)]",
+          "caption": "Code",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_elec_generation_per_capita_regions__per_capita_electricity_kwh_1",
+          "internal_name": "[Per capita electricity - kWh (Elec generation)]",
+          "caption": "Per capita electricity - kWh",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.advanced_table",
+      "name": "Advanced table",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1wpndmq0krn6cp1e0x1q30gd9cej"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_tree__region_and_country_count",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__child",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__y_axis_position",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_tree__x_axis_bar_chart",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__x_axis_bar_chart",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__year_axis_consumption",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__year_axis_consumption",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_tree__region"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[none:child:nk]>Æ\n<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[attr:Region:nk]>Æ\n\nElectricity generation in 2022:Æ\n<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[usr:Calculation_1093530317044740260:qk]>Æ kWh / capita"
+    },
+    {
+      "id": "ws.advanced_table_no_region",
+      "name": "Advanced table no region",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1wpndmq0krn6cp1e0x1q30gd9cej"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_tree__child",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__y_axis_position",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_tree__x_axis_bar_chart",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__x_axis_bar_chart",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__year_axis_consumption",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__year_axis_consumption",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_tree__region"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[none:child:nk]>Æ\n<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[attr:Region:nk]>Æ\n\nElectricity generation in 2022:Æ\n<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[usr:Calculation_1093530317044740260:qk]>Æ kWh / capita"
+    },
+    {
+      "id": "ws.all_regions",
+      "name": "All regions",
+      "title_text": "<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Region:nk]>",
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Area",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region_and_country_count",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__y_trllis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "aggregation": null,
+            "derivation": "pcto",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year_for_label",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__x_trellis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__country"
+          }
+        ]
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "average",
+          "value": null,
+          "scope": "per-cell"
+        }
+      ],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "\t<[federated.0row5lt1hestpo1c418ip1jteucp].[attr:Entity:nk]>Æ (<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Code:nk]>)Æ\nÆ\t<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Year:qk]>Æ\n\nÆ\t⬤ Fossil Fuel electricity: <[federated.0row5lt1hestpo1c418ip1jteucp].[sum:Calculation_1093530316760719446:qk]> (<[federated.0row5lt1hestpo1c418ip1jteucp].[sum:Calculation_1869275341122306065:qk]> kWh / capita)Æ\n<Sheet name=\"Underline 2\" maxwidth=\"350\" maxheight=\"300\" filter=\"<All Fields>\">Æ\nÆ\t⬤ Nuclear electricity: <[federated.0row5lt1hestpo1c418ip1jteucp].[sum:FF Electricity% (copy)_1093530316762710103:qk]> (<[federated.0row5lt1hestpo1c418ip1jteucp].[sum:FF Electricity (copy)_1093530316758171732:qk]> kWh / capita)Æ\n<Sheet name=\"Underline 2\" maxwidth=\"350\" maxheight=\"300\" filter=\"<All Fields>\">Æ\nÆ\t⬤ Renewables electricity: <[federated.0row5lt1hestpo1c418ip1jteucp].[sum:Nuclear Electricity% (copy)_1093530316762796120:qk]> (<[federated.0row5lt1hestpo1c418ip1jteucp].[sum:Nuclear Electricity (copy)_1093530316758253653:qk]> kWh / capita)"
+    },
+    {
+      "id": "ws.average_per_region",
+      "name": "Average per region",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1ux1i5y07ny78h16jmbnw1haj33e"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:none:Calculation_1093530316709851210:nk",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_elec_generation_per_capita_regions__per_capita_electricity_kwh_1",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_elec_generation_per_capita_regions__global_avg_in_2022",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_elec_generation_per_capita_regions__region_1"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_elec_generation_per_capita_regions__year_elec_generation",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "2022"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1ux1i5y07ny78h16jmbnw1haj33e].[attr:Region (Elec generation):nk]>Æ\nÆ Æ\n<[federated.1ux1i5y07ny78h16jmbnw1haj33e].[avg:Per capita electricity - kWh (Elec generation):qk]> kWh / capitaÆ\nÆ Average electricity generation per capita, as at 2022"
+    },
+    {
+      "id": "ws.country_trend",
+      "name": "Country trend",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1wpndmq0krn6cp1e0x1q30gd9cej"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_tree__child",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__per_capita_electricity_kwh",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_tree__max_year",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_tree__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Tooltip (Child)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_tree__year",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_tree__child",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Child:\t<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[none:child:nk]>Æ\nYear:\t<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[none:Year:qk]>Æ\nPer capita electricity - kWh:\t<[federated.1wpndmq0krn6cp1e0x1q30gd9cej].[sum:Per capita electricity - kWh:qk]>"
+    },
+    {
+      "id": "ws.ff_per_capita_country",
+      "name": "FF per capita / country",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__country",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Fossil Fuel\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "2022"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "\t<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Entity:nk]>Æ\nÆ\t<[federated.0row5lt1hestpo1c418ip1jteucp].[attr:Region:nk]>Æ\n\nÆ\tNuclear Electricity generation in 2022:Æ\nÆ\t<[federated.0row5lt1hestpo1c418ip1jteucp].[sum:Electricity generation per capita:qk]>Æ kWh / capita"
+    },
+    {
+      "id": "ws.nuclear_per_capita_country",
+      "name": "Nuclear per capita / country",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__country",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Nuclear\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "2022"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "\t<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Entity:nk]>Æ\nÆ\t<[federated.0row5lt1hestpo1c418ip1jteucp].[attr:Region:nk]>Æ\n\nÆ\tNuclear Electricity generation in 2022:Æ\nÆ\t<[federated.0row5lt1hestpo1c418ip1jteucp].[sum:Electricity generation per capita:qk]>Æ kWh / capita"
+    },
+    {
+      "id": "ws.region_ff_only",
+      "name": "Region FF only",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__ff_electricity_1",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Fossil Fuel\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "%null%"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Region:nk]>Æ\nYear: <[federated.0row5lt1hestpo1c418ip1jteucp].[none:Year:qk]>Æ\nÆ Æ\nAverage generation of Fossil Fuel electricity: <[federated.0row5lt1hestpo1c418ip1jteucp].[avg:Calculation_1869275341122306065:qk]> kWh / capita"
+    },
+    {
+      "id": "ws.region_nuclear_only",
+      "name": "Region Nuclear only",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__nuclear_electricity",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Nuclear\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "%null%"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Region:nk]>Æ\nYear: <[federated.0row5lt1hestpo1c418ip1jteucp].[none:Year:qk]>Æ\nÆ Æ\nAverage generation of Nuclear electricity: <[federated.0row5lt1hestpo1c418ip1jteucp].[avg:FF Electricity (copy)_1093530316758171732:qk]> kWh / capita"
+    },
+    {
+      "id": "ws.region_renewables_only",
+      "name": "Region Renewables only",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__renewable_electricity",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Renewables\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "%null%"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Region:nk]>Æ\nYear: <[federated.0row5lt1hestpo1c418ip1jteucp].[none:Year:qk]>Æ\nÆ Æ\nAverage generation of Renewable electricity: <[federated.0row5lt1hestpo1c418ip1jteucp].[avg:Nuclear Electricity (copy)_1093530316758253653:qk]> kWh / capita"
+    },
+    {
+      "id": "ws.renewables_per_capita_country",
+      "name": "Renewables per capita / country",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__country",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__electricity_generation_per_capita",
+          "type": "quantitative",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__fuel_source",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Renewables\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_pivoted_per_capita_electricity_generation_by_source__year",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "2022"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "\t<[federated.0row5lt1hestpo1c418ip1jteucp].[none:Entity:nk]>Æ\nÆ\t<[federated.0row5lt1hestpo1c418ip1jteucp].[attr:Region:nk]>Æ\n\nÆ\tNuclear Electricity generation in 2022:Æ\nÆ\t<[federated.0row5lt1hestpo1c418ip1jteucp].[sum:Electricity generation per capita:qk]>Æ kWh / capita"
+    },
+    {
+      "id": "ws.tree_sheet",
+      "name": "Tree Sheet",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1wpndmq0krn6cp1e0x1q30gd9cej"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_tree__filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "false"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.underline",
+      "name": "Underline",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1wpndmq0krn6cp1e0x1q30gd9cej"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_1093530316432048163:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Tooltip (Child,Id,Parent,Path)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Comoros\"",
+            "\"Sub-Saharan Africa to Comoros\"",
+            "6",
+            "\"Sub-Saharan Africa\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Tooltip (Child,Parent)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "min(1.0):\t"
+    },
+    {
+      "id": "ws.underline_2",
+      "name": "Underline 2",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0row5lt1hestpo1c418ip1jteucp"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_1467329087887114244:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Tooltip (Region and country count,Code,Fuel Source,Year)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "avg(1.0):\t<[federated.0row5lt1hestpo1c418ip1jteucp].[usr:Calculation_1467329087887114244:qk]>"
+    },
+    {
+      "id": "ws.world_ff_only",
+      "name": "World  FF only",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0pzple80nv2w0013wcza70jbqwye"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__ff",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__fossil_fuel_electricity_per_capita_kwh"
+          },
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__ff"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Fossil FuelsÆ\nYear: <[federated.0pzple80nv2w0013wcza70jbqwye].[none:Year:qk]>Æ\n\nShare of World's electricity generated: <[federated.0pzple80nv2w0013wcza70jbqwye].[sum:Calculation_1093530317117341870:qk]> Æ\n(Average of <[federated.0pzple80nv2w0013wcza70jbqwye].[sum:Fossil fuel electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables):qk]> kWh / capita)"
+    },
+    {
+      "id": "ws.world_nuclear_only",
+      "name": "World Nuclear only",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0pzple80nv2w0013wcza70jbqwye"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear_electricity_per_capita_kwh"
+          },
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__nuclear"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "NuclearÆ\nYear: <[federated.0pzple80nv2w0013wcza70jbqwye].[none:Year:qk]>Æ\n\nShare of World's electricity generated: <[federated.0pzple80nv2w0013wcza70jbqwye].[sum:Calculation_1093530317119185071:qk]> Æ\n(Average of <[federated.0pzple80nv2w0013wcza70jbqwye].[sum:Nuclear electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables):qk]> kWh / capita)"
+    },
+    {
+      "id": "ws.world_renewables_only",
+      "name": "World Renewables only",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0pzple80nv2w0013wcza70jbqwye"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewables",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewable_electricity_per_capita_kwh"
+          },
+          {
+            "field_id": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__renewables"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "RenewablesÆ\nYear: <[federated.0pzple80nv2w0013wcza70jbqwye].[none:Year:qk]>Æ\n\nShare of World's electricity generated: <[federated.0pzple80nv2w0013wcza70jbqwye].[sum:Nuclear% (copy)_1093530317119611056:qk]> Æ\n(Average of <[federated.0pzple80nv2w0013wcza70jbqwye].[sum:Renewable electricity per capita - kWh (adapted for visualization of chart per-capita-electricity-fossil-nuclear-renewables):qk]> kWh / capita)"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.electricity_generation_per_capita_2022",
+      "name": "Electricity Generation per capita: 2022",
+      "size": {
+        "width": 1300.0,
+        "height": 4950.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "1",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#fcfcfc",
+            "children": [
+              {
+                "id": "5",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 1010.0,
+                "w": 92308.0,
+                "h": 1010.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "4",
+                    "type": "layout-basic",
+                    "x": 3846.0,
+                    "y": 1010.0,
+                    "w": 52923.0,
+                    "h": 1010.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "Exploring data on where our electricity comes from.Æ\nA look into how the generation trends are changing.",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "6",
+                    "type": "layout-basic",
+                    "x": 56769.0,
+                    "y": 1010.0,
+                    "w": 39385.0,
+                    "h": 1010.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "Data sourced from: Our World in Data. Æ\nGeneration data up to 2022 was used only.Æ\nRegions defined as per World Bank's classifications.",
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "3",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 2020.0,
+                "w": 92308.0,
+                "h": 323.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#0f4556",
+                "children": []
+              },
+              {
+                "id": "2",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 2343.0,
+                "w": 92308.0,
+                "h": 2263.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": "The World’s Electricity TapestryÆ :Æ Æ\nÆ Æ\nExploring the Electricity profile of each country.Æ\nA dive into country specific Electricity mix - unveiling how much is generated per capita, and the generation sources.Æ\n",
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "7",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 4606.0,
+                "w": 92308.0,
+                "h": 2626.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "11",
+                    "type": "layout-basic",
+                    "x": 3846.0,
+                    "y": 5212.0,
+                    "w": 462.0,
+                    "h": 2020.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0f4556ce",
+                    "children": []
+                  },
+                  {
+                    "id": "8",
+                    "type": "layout-basic",
+                    "x": 4308.0,
+                    "y": 5212.0,
+                    "w": 30538.0,
+                    "h": 2020.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "1.Æ\nAlthough the terms “electricity” and “energy” are often used interchangeably, it's important to understand that electricity is just one component of total energy consumption.",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "12",
+                    "type": "layout-basic",
+                    "x": 34846.0,
+                    "y": 5212.0,
+                    "w": 462.0,
+                    "h": 2020.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0f4556ce",
+                    "children": []
+                  },
+                  {
+                    "id": "9",
+                    "type": "layout-basic",
+                    "x": 35308.0,
+                    "y": 5212.0,
+                    "w": 29846.0,
+                    "h": 2020.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "2.Æ\nComparisons of electricity generation often reflect population size (i.e. generation increases due to population rise). It does not tell us about how much electricity the average person in a given country consumes relative to another.",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "13",
+                    "type": "layout-basic",
+                    "x": 65154.0,
+                    "y": 5212.0,
+                    "w": 462.0,
+                    "h": 2020.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#0f4556ce",
+                    "children": []
+                  },
+                  {
+                    "id": "10",
+                    "type": "layout-basic",
+                    "x": 65616.0,
+                    "y": 5212.0,
+                    "w": 29923.0,
+                    "h": 2020.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "3.Æ\nThis is why the per capita electricity generation - i.e., per person, should also be considered. The largest producers — Iceland, Norway, USA and Canada — generate hundreds of times as much electricity as the smallest.",
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "14",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 7232.0,
+                "w": 92308.0,
+                "h": 15616.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "35",
+                    "type": "layout-basic",
+                    "x": 3846.0,
+                    "y": 7636.0,
+                    "w": 18000.0,
+                    "h": 15212.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "16",
+                        "type": "layout-basic",
+                        "x": 3846.0,
+                        "y": 7636.0,
+                        "w": 17538.0,
+                        "h": 10283.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "Electricity generation Æ\nper capita as at 2022:Æ\nÆ Æ\nEach country's generation figures, grouped by region.Æ\n\nOn the visualisation to the right, we see the differences in average electricity generation per capita across the world.Æ\n\nClearly, there are large inequalities between countries. Æ\n\nIn many low-income countries, per capita electricity generation is several magnitudes lower than in the richest countries.Æ\n\nThis is magnified at a regional level as well.Æ\n\nHover over each country to view historic trends.",
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "33",
+                        "type": "worksheet",
+                        "x": 3846.0,
+                        "y": 17919.0,
+                        "w": 17538.0,
+                        "h": 3738.0,
+                        "direction": null,
+                        "worksheet_id": "ws.tree_sheet",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "36",
+                        "type": "layout-basic",
+                        "x": 3846.0,
+                        "y": 21657.0,
+                        "w": 17538.0,
+                        "h": 970.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": " Show chart as:",
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "15",
+                    "type": "worksheet",
+                    "x": 21846.0,
+                    "y": 7636.0,
+                    "w": 74308.0,
+                    "h": 15212.0,
+                    "direction": null,
+                    "worksheet_id": "ws.tree_sheet",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "68",
+                    "type": "worksheet",
+                    "x": 21846.0,
+                    "y": 7636.0,
+                    "w": 74154.0,
+                    "h": 15212.0,
+                    "direction": null,
+                    "worksheet_id": "ws.advanced_table_no_region",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "37",
+                    "type": "worksheet",
+                    "x": 21846.0,
+                    "y": 7636.0,
+                    "w": 74154.0,
+                    "h": 15212.0,
+                    "direction": null,
+                    "worksheet_id": "ws.advanced_table",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "28",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 22848.0,
+                "w": 92308.0,
+                "h": 4505.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "27",
+                    "type": "layout-basic",
+                    "x": 4615.0,
+                    "y": 23252.0,
+                    "w": 90770.0,
+                    "h": 1899.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "For reference below: Each region's average generation in 2022 (as shown by the blue bars). For comparison, the black line represents the World average generation (3,616.7 kWh / capita).Æ\n\nThere is still a large disparity in the amount of electricity generated per person. Æ\nPopulation growth means that there are some regions where populations still struggle with access to electricity, despite progress being made over the years.",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "26",
+                    "type": "worksheet",
+                    "x": 4615.0,
+                    "y": 25151.0,
+                    "w": 90770.0,
+                    "h": 2202.0,
+                    "direction": null,
+                    "worksheet_id": "ws.average_per_region",
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "38",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 27353.0,
+                "w": 92308.0,
+                "h": 1151.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#0f4556",
+                "children": []
+              },
+              {
+                "id": "39",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 28504.0,
+                "w": 92308.0,
+                "h": 1253.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": "So, what are the sources of electricity generation? Æ\nAnd how much do they contribute? A look into their profile over the years.",
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "47",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 29757.0,
+                "w": 92308.0,
+                "h": 1111.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": "Electricity sources can be broken into 3 main groups: Fossil Fuels, Nuclear and Renewables. Æ\nFossil Fuels have been hostorically the dominant source of electricity production. This includes coal, gas and oil. Renewables include bioenergy, hydro, solar, wind, and others (such as wave and tidal).",
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "61",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 30868.0,
+                "w": 92308.0,
+                "h": 1051.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": " View data for:",
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "48",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 31919.0,
+                "w": 92308.0,
+                "h": 9050.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "46",
+                    "type": "layout-basic",
+                    "x": 3846.0,
+                    "y": 31919.0,
+                    "w": 92308.0,
+                    "h": 2949.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "40",
+                        "type": "layout-basic",
+                        "x": 3846.0,
+                        "y": 32121.0,
+                        "w": 462.0,
+                        "h": 2747.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#b4b4b4",
+                        "children": []
+                      },
+                      {
+                        "id": "41",
+                        "type": "layout-basic",
+                        "x": 4308.0,
+                        "y": 32121.0,
+                        "w": 30385.0,
+                        "h": 2747.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "FOSSIL FUELSÆ\nÆ Æ\nFossil fuels are the sum of coal, oil, and gas. Combined, they are the largest source of greenhouse gas emissions.Æ\nÆ Æ\nThe majority of electricity is still generated from fossil fuels, predominantly coal and gas.",
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "42",
+                        "type": "layout-basic",
+                        "x": 34693.0,
+                        "y": 32121.0,
+                        "w": 846.0,
+                        "h": 2747.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#b4b4b4",
+                        "children": []
+                      },
+                      {
+                        "id": "43",
+                        "type": "layout-basic",
+                        "x": 35539.0,
+                        "y": 32121.0,
+                        "w": 29846.0,
+                        "h": 2747.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "NUCLEARÆ\nÆ Æ\nNuclear energy is one of the oldest low carbon energy technologies.  Æ\nÆ Æ\nAlmost 10% of the global electricity is nuclear generated.Æ\nSome countries, such as Sweden and France rely heavily on it.Æ\n\n",
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "44",
+                        "type": "layout-basic",
+                        "x": 65385.0,
+                        "y": 32121.0,
+                        "w": 846.0,
+                        "h": 2747.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#b4b4b4",
+                        "children": []
+                      },
+                      {
+                        "id": "45",
+                        "type": "layout-basic",
+                        "x": 66231.0,
+                        "y": 32121.0,
+                        "w": 29923.0,
+                        "h": 2747.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "RENEWABLESÆ\nÆ Æ\nAlmost 30% of the global electricity is from renewable sources. Some countries mainly get majority of their electricity from renewables.Æ\nÆ Æ\nDeveloping countries are some of the biggest adapters. Solar, wind, and other technologies are growing quickly overall.",
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "49",
+                    "type": "layout-basic",
+                    "x": 3846.0,
+                    "y": 34868.0,
+                    "w": 92308.0,
+                    "h": 5495.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "53",
+                        "type": "layout-basic",
+                        "x": 3846.0,
+                        "y": 34868.0,
+                        "w": 462.0,
+                        "h": 5495.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#b4b4b4",
+                        "children": []
+                      },
+                      {
+                        "id": "62",
+                        "type": "layout-basic",
+                        "x": 4308.0,
+                        "y": 34868.0,
+                        "w": 30385.0,
+                        "h": 5495.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "71",
+                            "type": "worksheet",
+                            "x": 4308.0,
+                            "y": 34868.0,
+                            "w": 30385.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.region_ff_only",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "50",
+                            "type": "worksheet",
+                            "x": 4308.0,
+                            "y": 34868.0,
+                            "w": 30385.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.world_ff_only",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "63",
+                            "type": "worksheet",
+                            "x": 4308.0,
+                            "y": 34868.0,
+                            "w": 30385.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.ff_per_capita_country",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "id": "54",
+                        "type": "layout-basic",
+                        "x": 34693.0,
+                        "y": 34868.0,
+                        "w": 846.0,
+                        "h": 5495.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#b4b4b4",
+                        "children": []
+                      },
+                      {
+                        "id": "64",
+                        "type": "layout-basic",
+                        "x": 35539.0,
+                        "y": 34868.0,
+                        "w": 29846.0,
+                        "h": 5495.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "72",
+                            "type": "worksheet",
+                            "x": 35539.0,
+                            "y": 34868.0,
+                            "w": 29846.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.region_nuclear_only",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "51",
+                            "type": "worksheet",
+                            "x": 35539.0,
+                            "y": 34868.0,
+                            "w": 29846.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.world_nuclear_only",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "65",
+                            "type": "worksheet",
+                            "x": 35539.0,
+                            "y": 34868.0,
+                            "w": 29846.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.nuclear_per_capita_country",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "id": "55",
+                        "type": "layout-basic",
+                        "x": 65385.0,
+                        "y": 34868.0,
+                        "w": 846.0,
+                        "h": 5495.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#b4b4b4",
+                        "children": []
+                      },
+                      {
+                        "id": "66",
+                        "type": "layout-basic",
+                        "x": 66231.0,
+                        "y": 34868.0,
+                        "w": 29923.0,
+                        "h": 5495.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "73",
+                            "type": "worksheet",
+                            "x": 66231.0,
+                            "y": 34868.0,
+                            "w": 29923.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.region_renewables_only",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "52",
+                            "type": "worksheet",
+                            "x": 66231.0,
+                            "y": 34868.0,
+                            "w": 29923.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.world_renewables_only",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "67",
+                            "type": "worksheet",
+                            "x": 66231.0,
+                            "y": 34868.0,
+                            "w": 29923.0,
+                            "h": 5495.0,
+                            "direction": null,
+                            "worksheet_id": "ws.renewables_per_capita_country",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "69",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 40969.0,
+                "w": 92308.0,
+                "h": 2687.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "56",
+                    "type": "layout-basic",
+                    "x": 3846.0,
+                    "y": 40969.0,
+                    "w": 76385.0,
+                    "h": 2687.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "Electricity generation by Country (per capita) & by source: Year on year trendsÆ\nÆ Æ\nNow, we can look at the electricity generation profiles of various countries, based on these three crucial sources. Æ\nEach grid contains a stacked area chart for each country. They show the percentage of generation per source over the years. Æ\n\nGeneration figures (kWh / capita) are also provided for each source. Hover over each chart to view information accordingly.Æ\nData is provided until 2022, however the starting years differ for each country, depending on availability of data.",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "70",
+                    "type": "layout-basic",
+                    "x": 80231.0,
+                    "y": 40969.0,
+                    "w": 15923.0,
+                    "h": 2687.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": " Data shown from 1985 to 2022.Æ\n\n For easy guidance, you can enterÆ\n a year to set the reference lineÆ\n per country.",
+                    "background_color": null,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "id": "59",
+                "type": "worksheet",
+                "x": 3846.0,
+                "y": 43656.0,
+                "w": 92308.0,
+                "h": 586.0,
+                "direction": null,
+                "worksheet_id": "ws.all_regions",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "58",
+                "type": "worksheet",
+                "x": 3846.0,
+                "y": 44242.0,
+                "w": 92308.0,
+                "h": 54040.0,
+                "direction": null,
+                "worksheet_id": "ws.all_regions",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "60",
+                "type": "layout-basic",
+                "x": 3846.0,
+                "y": 98282.0,
+                "w": 92308.0,
+                "h": 707.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": "Visualisations created by: Rushil Chhibber |Æ https://public.tableau.com/app/profile/rush1056Æ | Data from: Our World in Data | Regions defined as per World Bank's classifications.",
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "74",
+            "type": "layout-basic",
+            "x": 3538.0,
+            "y": 17778.0,
+            "w": 17923.0,
+            "h": 3717.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": []
+    }
+  ],
+  "theme": {
+    "palette_hexes": [
+      "#000000",
+      "#0f4556",
+      "#1b7c9a",
+      "#38a3a5",
+      "#4392f1",
+      "#593d3b",
+      "#666666",
+      "#898989",
+      "#de541e",
+      "#e09f3e",
+      "#f8faf9"
+    ],
+    "font_family": "Arial",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.per_capita_electricity_fossil_nuclear_renewables",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_per_capita_electricity_fossil_nuclear_renewables__per_capita_electricity_fossil_nuclear_renewables_csv",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.tree",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__x_fixed_for_last_path",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__calculation1",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__max_year",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__x_trellis",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__y_trllis",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__consumption_axis_test",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__normalised_consumption",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__cy_consumption",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__calculation2",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__region_and_country_count",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__links_with_usage",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__nodes",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__nodes_with_usage",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__links",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__border",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__y_fixed_for_last_path",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__elec_generation",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_tree__tree_csv",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.pivoted_per_capita_electricity_generation_by_source",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__x_trellis",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__y_trllis",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__region_and_country_count",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__ff_electricity_1",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__rank",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__nuclear_electricity",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__renewable_electricity",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_pivoted_per_capita_electricity_generation_by_source__pivoted",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.by_source",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_by_source__x_trellis",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_by_source__y_trllis",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_by_source__country_regions",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.elec_generation_per_capita_regions",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_elec_generation_per_capita_regions__elec_generation_per_capita_regions_csv",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_elec_generation_per_capita_regions__elec_generation",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.average_per_region",
+      "issue": "could not resolve shelf reference UNRESOLVED:none:Calculation_1093530316709851210:nk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.tree_sheet",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.tree_sheet",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.underline",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1093530316432048163:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.underline_2",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1467329087887114244:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "viz.sankey (ds.tree spatial fields: Nodes, Links, Border, Nodes with usage, Links with usage)",
+      "issue": "The dashboard's tree/Sankey diagram is drawn from 5 spatial MAKEPOINT calculated fields on the 'tree' source; a Sankey/flow diagram has NO native Power BI visual and MAKEPOINT/MAKELINE have no DAX/Power Query equivalent. The 5 spatial fields are NOT modelled. Instead the underlying normalized layout coordinates are retained as ordinary columns on the 'Tree' table (X Normalized, Y Normalized, X/Y revised (for nodes), X/Y fixed for last path, Consumption axis, Source label, Filter) so the report can drive a custom/AppSource Sankey visual or fall back to a decomposition tree / treemap. HIGH capability gap for pbi-report-builder.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "extract.tree.hyper (multi-table extract not fully exported)",
+      "issue": "The 'tree' source's tree.hyper packages TWO tables - tree.csv (3,320 geometry rows, exported to ds.tree.csv) AND 'Elec generation' (6,061 consumption rows) - but the extractor exported only the geometry table. The consumption columns the tree calcs reference ([Per capita electricity - kWh], [Year], [Region], [Entity]) are ABSENT from ds.tree.csv. They were sourced from ds.elec_generation_per_capita_regions.csv (identical data) and the tree consumption calcs (CY, CY Consumption, Max year, Calculation2, Elec gen at 2022, 'Max year (copy)') were relocated onto the 'Elec Generation' table (child=Entity). Parser/extraction gap: multi-table .hyper sources should export every referenced table, not just the first.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "data blending premise (data_sources[])",
+      "issue": "The '5 data sources = data blending' premise is inaccurate for this workbook: every one of the 17 worksheets is single-source and there are NO dashboard actions, so no active Tableau blend exists. The sources are alternative shapes of the same OWID electricity dataset. Mapped to 5 independent fact tables. The only genuine cross-table relationship is the tree noodle tree.csv[child] = 'Elec generation'[Entity] (authoritative from the .twb XML), modelled many-to-many. A conformed 'Year' dimension (1:many, single cross-filter to the 4 year-bearing facts) was added as the faithful translation of a 'blend on Year'.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "geo/entity conformed dimension (deliberately not materialised)",
+      "issue": "The Country/Region 'blend keys' were intentionally NOT built into a shared geo dimension. Entity domains differ across sources (Per Capita FNR has 223 entities incl. 'World'; Elec Generation has 209 countries + 7 regions, no 'World'; Pivoted is country-grain) so a conformed geo dimension would introduce referential-integrity mismatches, and the single-source worksheets never require cross-source geo filtering. Documented as a design decision, not a defect; a report needing cross-source geo slicing would require a curated Entity/Region bridge.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "rel.Tree_ElecGeneration (m:m direction)",
+      "issue": "Tree[Child] -> Elec Generation[Entity] is modelled many-to-many with single cross-filter (Tree filters Elec Generation), chosen so the tree-source worksheets ('Country trend', 'Advanced table', 'Advanced table no region') filter consumption by child node. Deliberate assumption: switch to bothDirections if the report needs an Elec-Generation-side slicer (e.g. Region/Income group) to also filter which tree nodes display. child is non-unique in tree.csv (link+node+border rows) and Entity is non-unique per year, hence m:m rather than a 1:many star.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.tree / ds.pivoted / ds.by_source trellis + window-layout table calcs (dropped)",
+      "issue": "Tableau small-multiple/layout and window table calcs were DROPPED as they compute visual grid coordinates, not model values: X-trellis = (index()-1) % int(SQRT(size())) and Y-trllis = int((index()-1)/int(sqrt(size()))) [small multiples are a native PBI visual feature]; Rank = index(); Consumption Axis Test = WINDOW_MIN(...); Y Axis Position; Normalised consumption = window min/max normalization; and the redundant aliases Year Axis Consumption (= [Year]) and Year Axis CY (= [CY]). The report should use the visual's built-in small-multiples, rank/Top-N and axis-normalization features instead.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.by_source ('By Source' table, vestigial)",
+      "issue": "The 'By source' data source (caption 'Country & Regions', 5,496 rows) is bound by ZERO worksheets (verified across all 17). It is modelled as the 'By Source' table only to satisfy the explicit 5-table requirement; it is vestigial and can be dropped with no loss of report fidelity. Its % ratio calc columns were translated for completeness.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.elec_generation 'Global avg in 2022' (constant provenance)",
+      "issue": "Tableau [Global avg in 2022] is the literal constant 3616.7, which equals the FNR 'World' entity's 2022 TOTAL per-capita (3616.692) - NOT the mean of the 209 country per-capita values in this source (that mean is 4074.4). Preserved as the literal 3616.7 to match the workbook's reference line; noted here so a future maintainer does not 'correct' it to a computed average.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "viz.sankey fallback (Tree Sheet worksheet) -> treemap + placeholder note",
+      "issue": "The dashboard's radial Sankey/flow tree (built from the 5 spatial MAKEPOINT/MAKELINE fields flagged HIGH at semantic_build) has NO native Power BI visual. Fallback chosen: a native treemap on 'Elec Generation' (Group=Region, Details=Entity, Values=Sum('Elec gen at 2022')) that conveys the same region->country generation magnitudes, PLUS a labelled textbox documenting that an AppSource/custom Sankey visual is required for exact fidelity. A pivotTable 'Advanced table' (Region>Entity>2022 kWh) is placed alongside as the table representation. Region->country source->consumption flow is thus preserved in aggregate; the literal flow ribbons are not reproduced.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "Parameter-driven alternate views not pre-rendered (no bookmarks)",
+      "issue": "Tableau uses 3 parameters (Show chart as: Tree/Table/Table no region; View data for: World/Region/Country) to swap visible sheets. These are wired as 3 disconnected slicers (default Tree / World / 2022) bound to the param tables, and the DEFAULT state (Tree, World) is what the page renders. The non-default worksheets that those params would reveal - 'Advanced table no region', 'Region FF/Nuclear/Renewables only', 'FF/Nuclear/Renewables per capita / country' - are NOT built as separate always-on visuals to avoid a cluttered page and because no migration in this repo has proven bookmark/toggle wiring. They can be added later via bookmarks or field-parameter-driven visual swapping. The slicers still filter the built visuals where the model relationships allow.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "Small multiples: native PBI Rows small-multiples used instead of Tableau X/Y trellis index calcs",
+      "issue": "The 'All regions' worksheet is a per-country trellis (Tableau built it with dropped X/Y trellis index calculated fields). Rebuilt natively as a single hundredPercentStackedAreaChart with Rows='Country' (native small multiples), Category=Year, Series='Fuel Source', Y=Sum('Electricity generation per capita'), colored via theme dataColors (Fossil Fuel/Nuclear/Renewables = brown/orange/teal, alphabetical). Panel count (~200 countries) may page; a custom 8x6 smallMultiplesLayout is set. This is the recommended native approach and a fidelity improvement over the dropped index calcs.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Tooltip/decorative worksheets deferred: 'Country trend', 'Underline', 'Underline 2'",
+      "issue": "'Country trend' (Line) is a Tableau viz-in-tooltip showing a country's historic trend on hover; not reproduced as a standalone visual (PBI tooltip pages were not built this pass - default tooltips are used). 'Underline' and 'Underline 2' are decorative rule/underline marks used for styling in Tableau; dropped as non-data decoration. No data content is lost from the main dashboard narrative.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Projection-level number formats render-unconfirmed offline",
+      "issue": "World source line charts use projection format '0.0%' on the true-fraction columns FF%/Nuclear%/Renewables % (verified 0-1 fractions in the model, e.g. World 2022 FF%=0.614 - NOT pre-scaled, so '0.0%' is correct). Treemap/table use '#,##0'. These pass 'powerbi-report-author validate' but per accumulated gotchas the projection-level 'format' honoring is 'unconfirmed offline'; worst case is cosmetic (axis/label formatting) and correctable in Desktop. Desktop visual verification was not run this pass (bridge may be contended); structural validation (0 errors) + full TMDL field cross-check (42 refs, clean) were completed instead.",
+      "severity": "low",
+      "stage": "report_build"
+    }
+  ]
+}

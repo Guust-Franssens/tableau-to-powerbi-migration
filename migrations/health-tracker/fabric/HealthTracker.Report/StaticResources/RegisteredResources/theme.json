@@ -1,0 +1,142 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/powerbi-desktop-samples/main/Report%20Theme%20JSON%20Schema/reportThemeSchema-2.153.json",
+  "name": "theme.json",
+  "dataColors": [
+    "#3F6FE0",
+    "#E15759",
+    "#59A14F",
+    "#4E9BB0",
+    "#F28E2B",
+    "#B07AA1",
+    "#EDC948",
+    "#76B7B2"
+  ],
+  "good": "#2E7D32",
+  "neutral": "#E6E6E6",
+  "bad": "#C62828",
+  "maximum": "#3F6FE0",
+  "center": "#E6E6E6",
+  "minimum": "#C62828",
+  "null": "#E6E6E6",
+  "foreground": "#1B2A4A",
+  "foregroundNeutralSecondary": "#6B7280",
+  "background": "#EEF1F6",
+  "backgroundLight": "#F5F7FA",
+  "tableAccent": "#3F6FE0",
+  "textClasses": {
+    "callout": {
+      "fontSize": 26,
+      "fontFace": "Segoe UI Semibold, Segoe UI, sans-serif",
+      "color": "#1B2A4A"
+    },
+    "title": {
+      "fontSize": 13,
+      "fontFace": "Segoe UI Semibold, Segoe UI, sans-serif",
+      "color": "#1B2A4A"
+    },
+    "header": {
+      "fontSize": 11,
+      "fontFace": "Segoe UI, sans-serif",
+      "color": "#1B2A4A"
+    },
+    "label": {
+      "fontSize": 9,
+      "fontFace": "Segoe UI, sans-serif",
+      "color": "#1B2A4A"
+    }
+  },
+  "visualStyles": {
+    "*": {
+      "*": {
+        "border": [
+          {
+            "show": false
+          }
+        ],
+        "dropShadow": [
+          {
+            "show": false
+          }
+        ],
+        "background": [
+          {
+            "show": false,
+            "transparency": 100,
+            "color": {
+              "solid": {
+                "color": "#EEF1F6"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "cardVisual": {
+      "*": {
+        "value": [
+          {
+            "bold": true,
+            "fontFamily": "Segoe UI Semibold, Segoe UI, sans-serif",
+            "$id": "default"
+          }
+        ],
+        "label": [
+          {
+            "show": true,
+            "$id": "default"
+          }
+        ],
+        "border": [
+          {
+            "show": false
+          }
+        ],
+        "title": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "textbox": {
+      "*": {
+        "background": [
+          {
+            "show": false
+          }
+        ],
+        "border": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "shape": {
+      "*": {
+        "outline": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "slicer": {
+      "*": {
+        "items": [
+          {
+            "fontFamily": "Segoe UI, sans-serif",
+            "textSize": 10,
+            "fontColor": {
+              "solid": {
+                "color": "#1B2A4A"
+              }
+            },
+            "outlineStyle": 0,
+            "padding": 3
+          }
+        ]
+      }
+    }
+  }
+}

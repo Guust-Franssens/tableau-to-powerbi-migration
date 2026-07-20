@@ -1,0 +1,84 @@
+/// City dimension: one row per US city (542 cities). Holds each city's total Sales and Profit (USD) and the derived profit-ratio family that sets its spiral length, colour and winding direction.
+table City
+	lineageTag: ce35abe1-d054-40d4-bc72-87c83c0470f6
+
+	/// US city name (text). Primary key of the City dimension; 542 distinct cities.
+	column City
+		dataType: string
+		lineageTag: cbfe436a-a3ea-46bf-9815-6cd1a14fa905
+		summarizeBy: none
+		sourceColumn: City
+
+		annotation SummarizationSetBy = Automatic
+
+	/// City total sales in USD (sum of Orders[Sales]).
+	column Sales
+		dataType: double
+		lineageTag: ff1b8278-2212-4f91-b120-35118dd2273c
+		summarizeBy: sum
+		sourceColumn: Sales
+
+		annotation SummarizationSetBy = Automatic
+
+	/// City total profit in USD (sum of Orders[Profit]); can be negative.
+	column Profit
+		dataType: double
+		lineageTag: 66433577-f11b-45f8-8ba5-5d2c3082c22d
+		summarizeBy: sum
+		sourceColumn: Profit
+
+		annotation SummarizationSetBy = Automatic
+
+	/// City profit margin = Profit / Sales (signed fraction). Drives spiral length and winding direction. Source quirk: city 'Oswego' is forced positive via ABS() in the original workbook.
+	column 'Profit Ratio' = IF(City[City] = "Oswego", ABS(DIVIDE(City[Profit], City[Sales])), DIVIDE(City[Profit], City[Sales]))
+		dataType: double
+		lineageTag: 843412c7-fbec-42c1-a17d-216759aacea3
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Absolute profit margin |Profit Ratio| (unsigned fraction). Sets how far the spiral extends: point count is about Abs Profit Ratio x 100.
+	column 'Abs Profit Ratio' = ABS(City[Profit Ratio])
+		dataType: double
+		lineageTag: 7286e289-eb50-4f7b-a1c6-c6821bbb593c
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Loss flag: TRUE when Profit Ratio < 0 (the city lost money). Sets spiral colour and reverses winding direction. One of: True, False.
+	column 'Pie Colour' = City[Profit Ratio] < 0
+		dataType: boolean
+		lineageTag: 0d501cf9-439f-49cb-8b2c-7f429320b663
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Fractional part of Abs Profit Ratio (Abs Profit Ratio - INT(Abs Profit Ratio)). Sizes the final partial pie-slice segment. Range 0 to <1.
+	column Decimals = City[Abs Profit Ratio] - INT(City[Abs Profit Ratio])
+		dataType: double
+		lineageTag: 7b304d0b-841b-4254-bf85-4120fc2beee8
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Last path index the city's spiral reaches = floor(Abs Profit Ratio x 100), capped at 400. Marks the spiral end point.
+	column 'Max Path' = MIN(INT(City[Abs Profit Ratio] * 100), 400)
+		dataType: int64
+		lineageTag: 92e98f3c-8316-49b8-a68a-49d352a99252
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition City = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.sample_superstore.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"City", type text}, {"Sales", type number}, {"Profit", type number}}, "en-US"),
+				    #"Grouped Rows" = Table.Group(#"Changed Type", {"City"}, {{"Sales", each List.Sum([Sales]), type number}, {"Profit", each List.Sum([Profit]), type number}})
+				in
+				    #"Grouped Rows"
+
+	annotation PBI_ResultType = Table
+

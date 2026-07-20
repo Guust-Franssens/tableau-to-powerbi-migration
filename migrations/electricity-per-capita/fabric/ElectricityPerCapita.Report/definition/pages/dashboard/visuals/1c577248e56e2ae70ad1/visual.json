@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "1c577248e56e2ae70ad1",
+  "position": {
+    "x": 50,
+    "y": 222,
+    "z": 1050,
+    "width": 390,
+    "height": 84,
+    "tabOrder": 1050
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "1.  Although the terms ‘electricity’ and ‘energy’ are often used interchangeably, electricity is just one component of total energy consumption.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

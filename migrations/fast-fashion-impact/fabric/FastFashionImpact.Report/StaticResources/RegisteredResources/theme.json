@@ -1,0 +1,37 @@
+{
+  "name": "theme.json",
+  "dataColors": [
+    "#FFCC00",
+    "#FF5DA2",
+    "#FF7A33",
+    "#21D0B2",
+    "#FFFFFF",
+    "#A56BFF",
+    "#FF4D4D",
+    "#7ED957",
+    "#4DA6FF",
+    "#F2E9DC"
+  ],
+  "foreground": "#FFFFFF",
+  "foregroundNeutralSecondary": "#E6ECF2",
+  "background": "#22344A",
+  "backgroundLight": "#33475F",
+  "tableAccent": "#FFCC00",
+  "good": "#7ED957",
+  "neutral": "#FFCC00",
+  "bad": "#FF4D4D",
+  "textClasses": {
+    "title": {
+      "fontFace": "Open Sans",
+      "color": "#FFFFFF"
+    },
+    "label": {
+      "fontFace": "Open Sans",
+      "color": "#FFFFFF"
+    },
+    "callout": {
+      "fontFace": "Open Sans",
+      "color": "#FFFFFF"
+    }
+  }
+}

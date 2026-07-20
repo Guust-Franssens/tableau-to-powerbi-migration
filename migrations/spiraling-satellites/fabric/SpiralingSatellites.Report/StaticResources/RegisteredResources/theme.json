@@ -1,0 +1,19 @@
+{
+  "name": "theme.json",
+  "dataColors": [
+    "#152835",
+    "#3f6d84",
+    "#6f93a6",
+    "#89b0c4",
+    "#b9c6cf",
+    "#d8dde1",
+    "#c98a2b",
+    "#c0504d"
+  ],
+  "background": "#f8fcfb",
+  "foreground": "#152835",
+  "tableAccent": "#152835",
+  "maximum": "#152835",
+  "center": "#6f93a6",
+  "minimum": "#d8dde1"
+}

@@ -1,0 +1,31 @@
+/// Single-row seed table backing the Tableau 'Thickness' ([Parameter 5], any-numeric, default 0.1) - spiral radius-increment tuning knob. Held at the Tableau default.
+table Thickness
+
+	/// Reads the 'Thickness' value, defaulting to the Tableau default 0.1 (spiral radius increment per Num step).
+	measure 'Thickness Value' = SELECTEDVALUE('Thickness'[Thickness], 0.1)
+		displayFolder: Parameters
+
+	/// Spiral radius-increment per Num step (single-row seed, default 0.1). Read by [Thickness Value] in the spiral geometry.
+	column Thickness
+		dataType: double
+		summarizeBy: none
+		sourceColumn: Thickness
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Thickness = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Thickness"},
+						{
+						{0.1}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Thickness", type number}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,7 @@
+relationship FunFactsResume_FunFacts
+	isActive: false
+	crossFilteringBehavior: bothDirections
+	fromCardinality: one
+	fromColumn: 'Fun Facts Resume'.Fact
+	toColumn: 'Fun Facts'.Title
+

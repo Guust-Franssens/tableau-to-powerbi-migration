@@ -1,0 +1,27 @@
+{
+  "name": "theme.json",
+  "dataColors": [
+    "#5E79BC",
+    "#76B7B2",
+    "#29263D",
+    "#8FA8D4",
+    "#C1CAE0",
+    "#A7C5C3",
+    "#4A5F94",
+    "#B0BBDA"
+  ],
+  "background": "#F5F5F5",
+  "foreground": "#29263D",
+  "tableAccent": "#5E79BC",
+  "maximum": "#29263D",
+  "center": "#8FA8D4",
+  "minimum": "#F1F1F4",
+  "good": "#76B7B2",
+  "neutral": "#C1CAE0",
+  "bad": "#C05A5A",
+  "textClasses": {
+    "title": { "fontFace": "Arial", "color": "#29263D" },
+    "label": { "fontFace": "Arial", "color": "#3A3752" },
+    "callout": { "fontFace": "Arial", "color": "#29263D" }
+  }
+}

@@ -1,0 +1,77 @@
+/// College coursework highlights (14 rows, one per course) grouped into two subject areas: Economics and Data Analysis-Statistics. Backs the 'Favorites' worksheet. Near-duplicate of 'Coursework Detail' (same 14 courses); both retained because separate worksheets bind them. Source: Tableau 'Sheet1 (Coursework)'.
+table Coursework
+	lineageTag: c207920e-02c3-5593-a967-585b6f7ceb8d
+
+	/// Row count of 'Coursework' (each row = one course). Hidden technical measure; renamed from Tableau's auto-generated 'Number of Records' so measure names stay unique model-wide.
+	measure 'Coursework Row Count' = COUNTROWS('Coursework')
+		formatString: #,##0
+		isHidden
+		displayFolder: Row Counts
+		lineageTag: c13f4b52-aadf-52c9-82f2-4a9892dfedeb
+
+	/// College course name; 14 distinct, unique per row. One of: Applied Regression Analysis, Biostatistics, Computational Statistical Packages, Computer Science I/II, Econometrics, Economic Public Policy, Exploratory Data Analysis, Health Economics, Intermediate Macro/Micro, International Economics, Managerial Economics, Money and Banking, Money Markets Policy, Statistics for Engineers I/II.
+	column Course
+		dataType: string
+		lineageTag: a8217882-40b4-583e-8073-5565fec39b9f
+		summarizeBy: none
+		sourceColumn: Course
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Subject area of the course. One of: Economics, Data Analysis-Statistics.
+	column Category
+		dataType: string
+		lineageTag: 3819f8bc-0bc7-55ee-bf09-6736f0cd7267
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Abbreviated subject area. One of: Economics, Data/Stats.
+	column 'Abrev Cat'
+		dataType: string
+		lineageTag: 4be1eb27-f46b-5c0c-b6f2-52b53abbbf27
+		summarizeBy: none
+		sourceColumn: AbrevCat
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Internship work-stream label; blank in this table (populated in 'Coursework Detail').
+	column 'Intern Title'
+		dataType: string
+		lineageTag: 9be44573-d7d6-5875-8d76-ef1204914af4
+		summarizeBy: none
+		sourceColumn: InternTitle
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Display order / rank of the course within its category (1 to 4). Not additive.
+	column Number
+		dataType: int64
+		lineageTag: 2efe335a-a031-5fad-9586-2197cff128a7
+		summarizeBy: none
+		sourceColumn: Number
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Free-text internship project description; blank for most courses.
+	column Description
+		dataType: string
+		lineageTag: e5cc7a73-48bf-57b5-8108-97b0403e451d
+		summarizeBy: none
+		sourceColumn: Description
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Coursework = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.sheet1_coursework.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Course", type text}, {"Category", type text}, {"AbrevCat", type text}, {"InternTitle", type text}, {"Number", Int64.Type}, {"Description", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

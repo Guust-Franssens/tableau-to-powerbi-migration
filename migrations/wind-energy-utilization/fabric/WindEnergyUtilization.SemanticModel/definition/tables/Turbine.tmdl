@@ -1,0 +1,193 @@
+/// Turbine master dimension (30 Dutch wind turbines). Source: Tableau relationship-model table 'turbine_master_data'. One row per turbine; the 'one' side of the Daily Performance and CO2 Savings relationships (join key: Turbine Id). Hosts the turbine geography (Latitude/Longitude) that backs the native azureMap point layer on the 'Map' worksheet.
+table Turbine
+
+	/// Fleet count = 30.
+	measure 'No of Turbines' = DISTINCTCOUNT('Turbine'[Turbine Id])
+		formatString: #,##0
+		displayFolder: Fleet Summary
+
+	/// Operational turbine count = 28 (2 in Maintenance).
+	measure 'Active Turbines' = CALCULATE(DISTINCTCOUNT('Turbine'[Turbine Id]), 'Turbine'[Operational Status] = "Operational")
+		formatString: #,##0
+		displayFolder: Fleet Summary
+
+	/// Onshore turbine count = 24 (6 offshore).
+	measure 'Onshore Turbines' = CALCULATE(DISTINCTCOUNT('Turbine'[Turbine Id]), 'Turbine'[Onshore Offshore] = "Onshore")
+		formatString: #,##0
+		displayFolder: Fleet Summary
+
+	/// Fleet nameplate capacity (MW) = 130.2. NOTE: Tableau's [CM Total Capacity] SUMs capacity_mw over month-filtered DAILY rows, fan-out-inflating by the day count (e.g. 30x130.2 for June); corrected here to static nameplate. Flagged.
+	measure 'CM Total Capacity' = SUM('Turbine'[Capacity Mw])
+		formatString: #,##0.0
+		displayFolder: Fleet Summary
+
+	/// Selected-turbine nameplate capacity (MW). NOTE: Tableau's [T CM Total Capacity] has BOTH a day-count fan-out AND an AND/OR precedence bug (missing parens: MONTH=P1 OR (P1=2024 AND name=param)); corrected to static per-turbine nameplate. Flagged.
+	measure 'T CM Total Capacity' = VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(SUM('Turbine'[Capacity Mw]), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		formatString: #,##0.0
+		displayFolder: Fleet Summary
+
+	/// Tableau RANK([CM Total Output],'desc') table calc -> RANKX over all turbines by current-month output (evaluate per turbine).
+	measure Rank = RANKX(ALL('Turbine'[Upd Turbine Name]), [CM Total Output], , DESC, Dense)
+		formatString: #,##0
+		displayFolder: Fleet Summary
+
+	/// turbine_id of the parameter-selected turbine (Tableau [Selected Turbine ID]).
+	measure 'Selected Turbine ID' = VAR _t = [Upd Turbine Name Parameter Value] RETURN CALCULATE(SELECTEDVALUE('Turbine'[Turbine Id]), FILTER(ALL('Turbine'[Upd Turbine Name]), 'Turbine'[Upd Turbine Name] = _t))
+		displayFolder: Fleet Summary
+
+	/// Tableau constant [Country] = 'Netherlands'.
+	measure Country = "Netherlands"
+		displayFolder: Fleet Summary
+
+	/// Tableau [Today] = TODAY().
+	measure Today = TODAY()
+		formatString: yyyy-mm-dd
+		displayFolder: Fleet Summary
+
+	/// Unique turbine business key, format NL-WT-2024-NNN (NL-WT-2024-001 through NL-WT-2024-030). Join key to Daily Performance and CO2 Savings.
+	column 'Turbine Id'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: turbine_id
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Full descriptive turbine name, e.g. 'Flevoland Wind Farm - Turbine 1'. 30 distinct, one per turbine.
+	column 'Turbine Name'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: turbine_name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Short turbine label and turbine selector, e.g. 'GRWF Turbine 18'. Domain of the Upd Turbine Name Parameter; drives all T (turbine-specific) measures. 30 distinct.
+	column 'Upd Turbine Name'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: upd_turbine_name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Turbine siting category. One of: Onshore, Offshore (24 onshore, 6 offshore).
+	column 'Onshore Offshore'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: onshore_offshore
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Dutch province where the turbine is sited. One of: Flevoland, Friesland, Groningen, Noord-Holland, Zeeland.
+	column Region
+		dataType: string
+		dataCategory: StateOrProvince
+		summarizeBy: none
+		sourceColumn: region
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Turbine latitude in decimal degrees (WGS84). Geographic role Latitude for map (azureMap) point visuals.
+	column Latitude
+		dataType: double
+		dataCategory: Latitude
+		summarizeBy: none
+		sourceColumn: latitude
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Turbine longitude in decimal degrees (WGS84). Geographic role Longitude for map (azureMap) point visuals.
+	column Longitude
+		dataType: double
+		dataCategory: Longitude
+		summarizeBy: none
+		sourceColumn: longitude
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Turbine OEM / manufacturer. One of: Enercon, GE Renewable, Nordex, Siemens Gamesa, Vestas.
+	column Manufacturer
+		dataType: string
+		summarizeBy: none
+		sourceColumn: manufacturer
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Turbine model. One of: Cypress 5.3, E-115, N149-4.5, SG 5.0-145, V136-4.2, V150-4.2.
+	column Model
+		dataType: string
+		summarizeBy: none
+		sourceColumn: model
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Nameplate (rated) capacity in megawatts (MW). Values: 3.5, 4.2, 4.5, 5.0, 5.3. Fleet total = 130.2 MW.
+	column 'Capacity Mw'
+		dataType: double
+		summarizeBy: sum
+		sourceColumn: capacity_mw
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tower hub height in metres (m).
+	column 'Hub Height M'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: hub_height_m
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Rotor diameter in metres (m).
+	column 'Rotor Diameter M'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: rotor_diameter_m
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Date the turbine was installed / commissioned.
+	column 'Installation Date'
+		dataType: dateTime
+		formatString: yyyy-mm-dd
+		summarizeBy: none
+		sourceColumn: installation_date
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Current operating state. One of: Operational, Maintenance (28 Operational, 2 Maintenance).
+	column 'Operational Status'
+		dataType: string
+		summarizeBy: none
+		sourceColumn: operational_status
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Grid interconnection voltage in kilovolts (kV). One of: 33, 66, 110, 150.
+	column 'Grid Connection Voltage Kv'
+		dataType: int64
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: grid_connection_voltage_kv
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Asset owner / operator. One of: Dutch Wind Consortium, Eneco, Essent, Nuon, RWE, Vattenfall.
+	column Owner
+		dataType: string
+		summarizeBy: none
+		sourceColumn: owner
+
+		annotation SummarizationSetBy = Automatic
+
+	partition Turbine = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(DataFolder & "turbine_master_data.csv"), [Delimiter = ",", Columns = 16, Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars = true]),
+					#"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"turbine_id", type text}, {"turbine_name", type text}, {"upd_turbine_name", type text}, {"onshore_offshore", type text}, {"region", type text}, {"latitude", type number}, {"longitude", type number}, {"manufacturer", type text}, {"model", type text}, {"capacity_mw", type number}, {"hub_height_m", Int64.Type}, {"rotor_diameter_m", Int64.Type}, {"installation_date", type date}, {"operational_status", type text}, {"grid_connection_voltage_kv", Int64.Type}, {"owner", type text}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

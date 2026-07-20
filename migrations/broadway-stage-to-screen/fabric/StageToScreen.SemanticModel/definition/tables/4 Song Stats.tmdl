@@ -1,0 +1,484 @@
+/// Song/track-level fact (6811 rows), keys [Film]/[Original], Type in {Theater,Movie}. Already carries the melted 'Pivot Field Names'/'Pivot Field Values' audio-feature columns (no Power Query unpivot needed - the reshape is materialized in the extract).
+table '4 Song Stats'
+	lineageTag: aac195c6-56e6-5a40-9fbc-32bfa365eef0
+
+	/// Tableau [Track Cnt] = COUNTD([Track ID]).
+	measure 'Track Cnt' = DISTINCTCOUNT('4 Song Stats'[Track ID])
+		formatString: #,##0
+		lineageTag: a006778b-49ce-50d2-926a-cfbb65ea4e13
+
+	/// Tableau IIF(MIN([Type]='Theater'),[Track Cnt],NULL) - the MIN()-boolean all-rows-Theater guard is simplified to a direct Type='Theater' filter (equivalent when the viz splits by Type).
+	measure 'Track Cnt, Theater only' = CALCULATE(DISTINCTCOUNT('4 Song Stats'[Track ID]), '4 Song Stats'[Type] = "Theater")
+		formatString: #,##0
+		lineageTag: 8c45ec52-2538-542a-89ae-480b5b3ebf7a
+
+	/// Tableau IIF(MIN([Type]='Movie'),[Track Cnt],NULL) -> direct Type='Movie' filter (same simplification as Theater only).
+	measure 'Track Cnt, Movie only' = CALCULATE(DISTINCTCOUNT('4 Song Stats'[Track ID]), '4 Song Stats'[Type] = "Movie")
+		formatString: #,##0
+		lineageTag: b07a0062-cc8f-5847-9f75-cd6eb4ee2827
+
+	/// Conditional FIXED LOD {FIXED [Film]: MIN(IIF([Type]='Theater',[Album Popularity ( %)],NULL))} -> CALCULATE(MIN,...,ALLEXCEPT([Film]),Type='Theater'). GROUND-TRUTHED.
+	measure 'Album Popularity, Theater' = CALCULATE(MIN('4 Song Stats'[Album Popularity ( %)]), ALLEXCEPT('4 Song Stats', '4 Song Stats'[Film]), '4 Song Stats'[Type] = "Theater")
+		formatString: 0
+		lineageTag: 2fcd583a-77de-5761-bbc3-f0dd81d2a026
+
+	/// Conditional FIXED LOD {FIXED [Film]: MIN(IIF([Type]='Movie',...))}. GROUND-TRUTHED.
+	measure 'Album Popularity, Movie' = CALCULATE(MIN('4 Song Stats'[Album Popularity ( %)]), ALLEXCEPT('4 Song Stats', '4 Song Stats'[Film]), '4 Song Stats'[Type] = "Movie")
+		formatString: 0
+		lineageTag: 65d47f65-3995-5969-9c39-5a8c198c846e
+
+	/// Tableau [Popularity Diff] = [Album Popularity, Movie] - [Album Popularity, Theater].
+	measure 'Popularity Diff' = [Album Popularity, Movie] - [Album Popularity, Theater]
+		formatString: 0
+		lineageTag: 7e341dc1-eb96-5a87-8f03-579bff144fef
+
+	/// Conditional FIXED LOD {FIXED [Original]: COUNTD(IIF([Type]='Movie',[Track ID],NULL))}. GROUND-TRUTHED.
+	measure 'Track Cnt, Movie Album Total' = CALCULATE(DISTINCTCOUNT('4 Song Stats'[Track ID]), ALLEXCEPT('4 Song Stats', '4 Song Stats'[Original]), '4 Song Stats'[Type] = "Movie")
+		formatString: #,##0
+		lineageTag: 19057ee5-9834-5dac-8345-95db51a3f1fe
+
+	/// Conditional FIXED LOD {FIXED [Original]: COUNTD(IIF([Type]='Theater',...))}. GROUND-TRUTHED.
+	measure 'Track Cnt, Theater Album Total' = CALCULATE(DISTINCTCOUNT('4 Song Stats'[Track ID]), ALLEXCEPT('4 Song Stats', '4 Song Stats'[Original]), '4 Song Stats'[Type] = "Theater")
+		formatString: #,##0
+		lineageTag: 274972d9-eb91-5a36-8b8c-5313e0477155
+
+	/// Conditional FIXED LOD {FIXED [Original],[Pivot Field Names],[Song Stat Value (bin)]: COUNTD(IIF([Type]='Movie',...))}.
+	measure 'Track Cnt, Movie Album + Stat' = CALCULATE(DISTINCTCOUNT('4 Song Stats'[Track ID]), ALLEXCEPT('4 Song Stats', '4 Song Stats'[Original], '4 Song Stats'[Pivot Field Names], '4 Song Stats'[Song Stat Value (bin)]), '4 Song Stats'[Type] = "Movie")
+		formatString: #,##0
+		lineageTag: 4edfde32-72e7-5ed9-96f1-82ac4ee56008
+
+	/// Conditional FIXED LOD {FIXED [Original],[Pivot Field Names],[Song Stat Value (bin)]: COUNTD(IIF([Type]='Theater',...))}.
+	measure 'Track Cnt, Theater Album + Stat' = CALCULATE(DISTINCTCOUNT('4 Song Stats'[Track ID]), ALLEXCEPT('4 Song Stats', '4 Song Stats'[Original], '4 Song Stats'[Pivot Field Names], '4 Song Stats'[Song Stat Value (bin)]), '4 Song Stats'[Type] = "Theater")
+		formatString: #,##0
+		lineageTag: 62710448-7b20-55f3-86f5-e16ec09e84b0
+
+	/// Tableau [Track Cnt, Movie Album + Stat] / [Track Cnt, Movie Album Total].
+	measure 'Track Cnt%, Movie Album + Stat' = DIVIDE([Track Cnt, Movie Album + Stat], [Track Cnt, Movie Album Total])
+		formatString: 0.0%
+		lineageTag: 11febfa5-2c2c-59bc-9b9e-1b3e44eea913
+
+	/// Tableau [Track Cnt, Theater Album + Stat] / [Track Cnt, Theater Album Total].
+	measure 'Track Cnt%, Theater Album + Stat' = DIVIDE([Track Cnt, Theater Album + Stat], [Track Cnt, Theater Album Total])
+		formatString: 0.0%
+		lineageTag: e07f7265-a4a0-5ac4-a96b-bb1a9f5110f8
+
+	column 'Album Name'
+		dataType: string
+		lineageTag: 96047491-1c17-51ba-8e19-235287f25194
+		summarizeBy: none
+		sourceColumn: Album Name
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Film'
+		dataType: string
+		lineageTag: 7b02666c-d5e0-5481-ae3e-c1c7fafb421d
+		summarizeBy: none
+		sourceColumn: Film
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Original'
+		dataType: string
+		lineageTag: 8169a636-6ad6-5b98-9d24-0bae79379b05
+		summarizeBy: none
+		sourceColumn: Original
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Album URL'
+		dataType: string
+		lineageTag: 2bcccf78-6fa5-58a1-9ab6-c1344eed54b3
+		summarizeBy: none
+		sourceColumn: Album URL
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Type'
+		dataType: string
+		lineageTag: 185991bc-c2b1-5fbf-95e2-8359917f074c
+		summarizeBy: none
+		sourceColumn: Type
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Artists Name(s) Original'
+		dataType: string
+		lineageTag: 62f4686f-7479-5026-bbe6-c3a919188c17
+		summarizeBy: none
+		sourceColumn: Artists Name(s) Original
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Artists Name(s) - 1'
+		dataType: string
+		lineageTag: c35e8109-df33-5129-85a0-6b88376a4b8d
+		summarizeBy: none
+		sourceColumn: Artists Name(s) - 1
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Artists Name(s) - 2'
+		dataType: string
+		lineageTag: 69fc925f-11b2-5609-b647-a12c39f2ba07
+		summarizeBy: none
+		sourceColumn: Artists Name(s) - 2
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Artists Name(s) - 3'
+		dataType: string
+		lineageTag: 5775c138-1259-5437-ac08-601de6926d27
+		summarizeBy: none
+		sourceColumn: Artists Name(s) - 3
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Label'
+		dataType: string
+		lineageTag: fc9ede89-a972-5252-bbd4-834772066324
+		summarizeBy: none
+		sourceColumn: Label
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Album Popularity ( %)'
+		dataType: int64
+		lineageTag: 06599141-4662-5cac-ab24-a8bd3ab120fb
+		summarizeBy: none
+		sourceColumn: Album Popularity ( %)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Number'
+		dataType: int64
+		lineageTag: 7ec43b9e-3bb8-5ef9-96fe-47017af3a770
+		summarizeBy: none
+		sourceColumn: Track Number
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Name (Original)'
+		dataType: string
+		lineageTag: 2c5c5e13-84aa-514f-9362-ee11c6738330
+		summarizeBy: none
+		sourceColumn: Track Name (Original)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Name, Combined'
+		dataType: string
+		lineageTag: f4ae1274-93e3-5cc2-971c-a35da144ac24
+		summarizeBy: none
+		sourceColumn: Track Name, Combined
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track ID'
+		dataType: string
+		lineageTag: c3075647-c98c-5703-bb82-901dd2a68643
+		summarizeBy: none
+		sourceColumn: Track ID
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Original Movie Track'
+		dataType: string
+		lineageTag: 6df4d8d9-d7f9-5477-84d0-410025d6410b
+		summarizeBy: none
+		sourceColumn: Original Movie Track
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Original Broadway Track Number'
+		dataType: int64
+		lineageTag: 771c1229-6090-5ed2-bf97-3ea17e5f9d7f
+		summarizeBy: none
+		sourceColumn: Original Broadway Track Number
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Original Broadway Track'
+		dataType: string
+		lineageTag: 89a02ae3-caef-52d7-8e72-d965ba1926b4
+		summarizeBy: none
+		sourceColumn: Original Broadway Track
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists (Original)'
+		dataType: string
+		lineageTag: 91b66959-df82-5b1d-8dc2-1f883127484b
+		summarizeBy: none
+		sourceColumn: Track Artists (Original)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 1'
+		dataType: string
+		lineageTag: 75755483-984d-508d-a8a9-fcfeb3b60579
+		summarizeBy: none
+		sourceColumn: Track Artists - 1
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 2'
+		dataType: string
+		lineageTag: 08b39a5b-663f-59b8-9b42-829d3ba7d11f
+		summarizeBy: none
+		sourceColumn: Track Artists - 2
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 3'
+		dataType: string
+		lineageTag: 10819e95-f795-5c4c-bb71-bb628031fb56
+		summarizeBy: none
+		sourceColumn: Track Artists - 3
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 4'
+		dataType: string
+		lineageTag: a40b6e1b-a0c9-5d36-a5a6-2a1ab2ff5dfa
+		summarizeBy: none
+		sourceColumn: Track Artists - 4
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 5'
+		dataType: string
+		lineageTag: c7d46585-8739-52d3-8db9-63fccac5aa40
+		summarizeBy: none
+		sourceColumn: Track Artists - 5
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 6'
+		dataType: string
+		lineageTag: 7975eb6d-9991-5511-bed0-3a195bf1e36f
+		summarizeBy: none
+		sourceColumn: Track Artists - 6
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 7'
+		dataType: string
+		lineageTag: d99eb118-5ef3-5436-9fd5-02e5d31e66c4
+		summarizeBy: none
+		sourceColumn: Track Artists - 7
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 8'
+		dataType: string
+		lineageTag: c3afd356-aca2-5307-80ba-62812c9b5e67
+		summarizeBy: none
+		sourceColumn: Track Artists - 8
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 9'
+		dataType: string
+		lineageTag: 1dd39e64-61a9-5445-88bb-d7f21944f022
+		summarizeBy: none
+		sourceColumn: Track Artists - 9
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 10'
+		dataType: string
+		lineageTag: 37f473aa-dbe8-5d87-b8f5-d878f17f09ec
+		summarizeBy: none
+		sourceColumn: Track Artists - 10
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 11'
+		dataType: string
+		lineageTag: 08c4d68d-832e-5992-a3bc-389d388b84f7
+		summarizeBy: none
+		sourceColumn: Track Artists - 11
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 12'
+		dataType: string
+		lineageTag: 9710854f-1f9e-5160-a9ec-8d42166c648e
+		summarizeBy: none
+		sourceColumn: Track Artists - 12
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 13'
+		dataType: string
+		lineageTag: 75cc074f-897b-5c8d-adf7-366ee7f6c371
+		summarizeBy: none
+		sourceColumn: Track Artists - 13
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 14'
+		dataType: string
+		lineageTag: 3484e6a0-ed45-5c6f-8056-3735041672e7
+		summarizeBy: none
+		sourceColumn: Track Artists - 14
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 15'
+		dataType: string
+		lineageTag: a9f22293-58d1-5f11-97f5-b936707d8bbd
+		summarizeBy: none
+		sourceColumn: Track Artists - 15
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 16'
+		dataType: string
+		lineageTag: f78c0b8a-a4ad-5cb5-a267-21f75f16133e
+		summarizeBy: none
+		sourceColumn: Track Artists - 16
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 17'
+		dataType: string
+		lineageTag: a37efc8b-2066-56f6-9637-9b120e91a070
+		summarizeBy: none
+		sourceColumn: Track Artists - 17
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 18'
+		dataType: string
+		lineageTag: 8553691e-6263-56bf-b9cc-c83c48f8b65d
+		summarizeBy: none
+		sourceColumn: Track Artists - 18
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 19'
+		dataType: string
+		lineageTag: a4635007-7595-5e60-9f64-3c31f1fbda8d
+		summarizeBy: none
+		sourceColumn: Track Artists - 19
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Artists - 20'
+		dataType: string
+		lineageTag: a5062e2b-7b82-5d5a-9357-0b02aaf73909
+		summarizeBy: none
+		sourceColumn: Track Artists - 20
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track Duration (ms)'
+		dataType: int64
+		lineageTag: fd125176-0309-5583-b526-ffce98ac719b
+		summarizeBy: sum
+		sourceColumn: Track Duration (ms)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Key'
+		dataType: string
+		lineageTag: b229f578-f4cc-5ceb-be05-5e8619f64c39
+		summarizeBy: none
+		sourceColumn: Key
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Mode'
+		dataType: string
+		lineageTag: 12b6cacf-efa4-5e03-bac1-2e5b80c9a01f
+		summarizeBy: none
+		sourceColumn: Mode
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Loudness (db) (-60 - 0)'
+		dataType: double
+		lineageTag: a4cb812b-021e-5be7-bd5b-bda7904a1f6d
+		summarizeBy: none
+		sourceColumn: Loudness (db) (-60 - 0)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Tempo (bpm)'
+		dataType: double
+		lineageTag: 86db051c-b417-510c-a8e7-7f91391effa0
+		summarizeBy: none
+		sourceColumn: Tempo (bpm)
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Time Signature'
+		dataType: int64
+		lineageTag: 4c9cdf71-1d3d-5076-a7dd-ce30674e1263
+		summarizeBy: none
+		sourceColumn: Time Signature
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Track URL'
+		dataType: string
+		lineageTag: 4ccdcd4d-c0ca-5834-9da0-5c6cdb36f497
+		summarizeBy: none
+		sourceColumn: Track URL
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Pivot Field Names'
+		dataType: string
+		lineageTag: 0dea7975-96e0-57c7-9774-9c257bd5b596
+		summarizeBy: none
+		sourceColumn: Pivot Field Names
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Pivot Field Values'
+		dataType: double
+		lineageTag: f35a9b85-e51c-5d1d-8045-7e9d26f97b95
+		summarizeBy: none
+		sourceColumn: Pivot Field Values
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau [Type (Cont)] = FLOAT(IIF(Type='Theater',1,2)). Continuous 1.0/2.0 encoding of Type.
+	column 'Type (Cont)' = IF('4 Song Stats'[Type] = "Theater", 1, 2)
+		dataType: double
+		lineageTag: 58b2f2ee-e7f7-5b0f-9fa0-0e89bc6a0553
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau bin on [Pivot Field Values], size 0.1, peg 0 -> FLOOR to nearest 0.1. +1e-7 epsilon guards FP boundary (values are <=3 decimals); ROUND(,1) cleans FP noise.
+	column 'Song Stat Value (bin)' = ROUND(FLOOR('4 Song Stats'[Pivot Field Values] + 0.0000001, 0.1), 1)
+		dataType: double
+		formatString: 0.0
+		lineageTag: ee9e0811-3fdb-5f72-9056-3783680dcfa2
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau group [Film (Album Pop Highlight)] on [Film] (default 'Other'). Faithful member->bucket SWITCH.
+	column 'Film (Album Pop Highlight)' = SWITCH(TRUE(), '4 Song Stats'[Film] IN {"Chicago", "Mamma Mia!", "Mamma Mia! Here We Go Again", "tick, tick... BOOM!"}, "Chicago, Mamma Mia!, Mamma Mia! Here We Go Again and 1 more", '4 Song Stats'[Film] = "Dear Evan Hansen", "Dear Evan Hansen", "Other")
+		dataType: string
+		lineageTag: 87c20da1-283d-5a1e-b501-aab23594a3c8
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition '4 Song Stats' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.4_song_stats.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Album Name", type text}, {"Film", type text}, {"Original", type text}, {"Album URL", type text}, {"Type", type text}, {"Artists Name(s) Original", type text}, {"Artists Name(s) - 1", type text}, {"Artists Name(s) - 2", type text}, {"Artists Name(s) - 3", type text}, {"Label", type text}, {"Album Popularity ( %)", Int64.Type}, {"Track Number", Int64.Type}, {"Track Name (Original)", type text}, {"Track Name, Combined", type text}, {"Track ID", type text}, {"Original Movie Track", type text}, {"Original Broadway Track Number", Int64.Type}, {"Original Broadway Track", type text}, {"Track Artists (Original)", type text}, {"Track Artists - 1", type text}, {"Track Artists - 2", type text}, {"Track Artists - 3", type text}, {"Track Artists - 4", type text}, {"Track Artists - 5", type text}, {"Track Artists - 6", type text}, {"Track Artists - 7", type text}, {"Track Artists - 8", type text}, {"Track Artists - 9", type text}, {"Track Artists - 10", type text}, {"Track Artists - 11", type text}, {"Track Artists - 12", type text}, {"Track Artists - 13", type text}, {"Track Artists - 14", type text}, {"Track Artists - 15", type text}, {"Track Artists - 16", type text}, {"Track Artists - 17", type text}, {"Track Artists - 18", type text}, {"Track Artists - 19", type text}, {"Track Artists - 20", type text}, {"Track Duration (ms)", Int64.Type}, {"Key", type text}, {"Mode", type text}, {"Loudness (db) (-60 - 0)", type number}, {"Tempo (bpm)", type number}, {"Time Signature", Int64.Type}, {"Track URL", type text}, {"Pivot Field Names", type text}, {"Pivot Field Values", type number}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

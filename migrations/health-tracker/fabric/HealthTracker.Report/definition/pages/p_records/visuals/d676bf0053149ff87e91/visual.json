@@ -1,0 +1,369 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "d676bf0053149ff87e91",
+  "position": {
+    "x": 20,
+    "y": 110,
+    "z": 20,
+    "width": 1360,
+    "height": 666,
+    "tabOrder": 20
+  },
+  "visual": {
+    "visualType": "pivotTable",
+    "query": {
+      "queryState": {
+        "Rows": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Health Data"
+                    }
+                  },
+                  "Property": "Date"
+                }
+              },
+              "queryRef": "Health Data.Date",
+              "nativeQueryRef": "Date",
+              "active": true
+            }
+          ]
+        },
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Blood Pressure Systolic (mmHg)"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Health Data.Blood Pressure Systolic (mmHg))",
+              "nativeQueryRef": "BP Systolic",
+              "displayName": "BP Systolic"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Blood Pressure Diastolic (mmHg)"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Health Data.Blood Pressure Diastolic (mmHg))",
+              "nativeQueryRef": "BP Diastolic",
+              "displayName": "BP Diastolic"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Heart Rate (bpm)"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Health Data.Heart Rate (bpm))",
+              "nativeQueryRef": "Heart Rate",
+              "displayName": "Heart Rate"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Height (cm)"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Health Data.Height (cm))",
+              "nativeQueryRef": "Height",
+              "displayName": "Height"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Weight (kg)"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Health Data.Weight (kg))",
+              "nativeQueryRef": "Weight",
+              "displayName": "Weight"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "BMI"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Health Data.BMI)",
+              "nativeQueryRef": "BMI",
+              "displayName": "BMI"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Calories Intake"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Health Data.Calories Intake)",
+              "nativeQueryRef": "Cal Intake",
+              "displayName": "Cal Intake"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Calories Burned"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Health Data.Calories Burned)",
+              "nativeQueryRef": "Cal Burned",
+              "displayName": "Cal Burned"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Steps Count"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Health Data.Steps Count)",
+              "nativeQueryRef": "Steps",
+              "displayName": "Steps"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Sleep Duration (hours)"
+                    }
+                  },
+                  "Function": 1
+                }
+              },
+              "queryRef": "Avg(Health Data.Sleep Duration (hours))",
+              "nativeQueryRef": "Sleep Dur",
+              "displayName": "Sleep Dur"
+            },
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Health Data"
+                        }
+                      },
+                      "Property": "Water Intake (liters)"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Health Data.Water Intake (liters))",
+              "nativeQueryRef": "Water",
+              "displayName": "Water"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Column": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "Health Data"
+                  }
+                },
+                "Property": "Date"
+              }
+            },
+            "direction": "Descending"
+          }
+        ]
+      }
+    },
+    "objects": {
+      "subTotals": [
+        {
+          "properties": {
+            "rowSubtotals": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            },
+            "columnSubtotals": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "rowHeaders": [
+        {
+          "properties": {
+            "stepped": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "title": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "background": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "stylePreset": [
+        {
+          "properties": {
+            "name": {
+              "expr": {
+                "Literal": {
+                  "Value": "'MinimalStyle'"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

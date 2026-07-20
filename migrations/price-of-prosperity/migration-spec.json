@@ -1,0 +1,1780 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "ThePriceofProsperity-C02emissionsGDPandPopulationtrendsGlobally.twbx",
+    "tableau_version": "18.1",
+    "source_build": "2024.1.0 (20241.24.0328.1309)",
+    "repository_location_id": "ThePriceofProsperity-C02emissionsGDPandPopulationtrendsGlobally",
+    "parsed_at": "2026-07-19T18:38:12.963725+00:00"
+  },
+  "parameters": [
+    {
+      "id": "param.select_y",
+      "internal_name": "[Parameter 1]",
+      "caption": "Select Y",
+      "data_type": "date",
+      "domain_type": "list",
+      "allowed_values": [
+        "#1990-01-01#",
+        "#1991-01-01#",
+        "#1992-01-01#",
+        "#1993-01-01#",
+        "#1994-01-01#",
+        "#1995-01-01#",
+        "#1996-01-01#",
+        "#1997-01-01#",
+        "#1998-01-01#",
+        "#1999-01-01#",
+        "#2000-01-01#",
+        "#2001-01-01#",
+        "#2002-01-01#",
+        "#2003-01-01#",
+        "#2004-01-01#",
+        "#2005-01-01#",
+        "#2006-01-01#",
+        "#2007-01-01#",
+        "#2008-01-01#",
+        "#2009-01-01#",
+        "#2010-01-01#",
+        "#2011-01-01#",
+        "#2012-01-01#",
+        "#2013-01-01#",
+        "#2014-01-01#",
+        "#2015-01-01#",
+        "#2016-01-01#",
+        "#2017-01-01#",
+        "#2018-01-01#",
+        "#2019-01-01#",
+        "#2020-01-01#",
+        "#2021-01-01#",
+        "#2022-01-01#",
+        "#2023-01-01#"
+      ],
+      "current_value": "#1990-01-01#"
+    }
+  ],
+  "data_sources": [
+    {
+      "id": "ds.renewable_energy_vs_gdp",
+      "caption": "Renewable Energy vs GDP",
+      "internal_name": "federated.0d3wmxq1a9toyl1cnidh71ic0sk9",
+      "connection": {
+        "class": "textscan",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_0d3wmxq1a9toyl1cnidh71.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.renewable_energy_vs_gdp_csv",
+          "name": "Renewable Energy vs GDP.csv",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__true",
+          "internal_name": "[Calculation_1024568921931350016]",
+          "caption": "True",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "TRUE",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__false",
+          "internal_name": "[Calculation_1024568921931407361]",
+          "caption": "False",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "FALSE",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__filter_year",
+          "internal_name": "[Calculation_1024568921932070915]",
+          "caption": "Filter Year",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 1] = DATETRUNC('year',[Year])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_renewable_energy_vs_gdp__year"
+          ]
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__decrease_year",
+          "internal_name": "[Calculation_1024568921932611590]",
+          "caption": "Decrease Year",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "calculated",
+          "data_type": "datetime",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "if \r\nyear([Parameters].[Parameter 1]) >= 1990\r\nthen \r\nDATEADD('year',-1,[Parameters].[Parameter 1])\r\n\r\nelse [Parameters].[Parameter 1]\r\n\r\nend",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__country_code",
+          "internal_name": "[Country Code]",
+          "caption": "Country Code",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__country_name",
+          "internal_name": "[Country Name]",
+          "caption": "Country Name",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Bahamas, The": "Bahamas",
+            "Egypt, Arab Rep.": "Egypt",
+            "Gambia, The": "The Gambia",
+            "Hong Kong SAR, China": "Hong Kong",
+            "Iran, Islamic Rep.": "Iran",
+            "Korea, Dem. People's Rep.": "North Korea",
+            "Korea, Rep.": "South Korea",
+            "Kyrgyz Republic": "Kyrgyzstan",
+            "Macao SAR, China": "Macao",
+            "Micronesia, Fed. Sts.": "Micronesia",
+            "Russian Federation": "Russia",
+            "Venezuela, RB": "Venezuela",
+            "Yemen, Rep.": "Yemen"
+          }
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__increase_year",
+          "internal_name": "[Decrease Year (copy)_1024568921933078535]",
+          "caption": "Increase Year",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "calculated",
+          "data_type": "datetime",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF \r\nYEAR([Parameters].[Parameter 1])<2020\r\nTHEN \r\nDATEADD('year',1,[Parameters].[Parameter 1])\r\nELSE \r\n\r\n[Parameters].[Parameter 1]\r\n\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__income_group",
+          "internal_name": "[IncomeGroup]",
+          "caption": "Income Group",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__region",
+          "internal_name": "[Region]",
+          "caption": "Region",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__regions",
+          "internal_name": "[Regions]",
+          "caption": "Regions",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__renewable_energy_vs_gdp_csv",
+          "internal_name": "[__tableau_internal_object_id__].[Renewable Energy vs GDP.csv_67BB8D154F1441F383AE0493A3430C35]",
+          "caption": "Renewable Energy vs GDP.csv",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__renewable_energy_consumption_of_total_final_energy_consumption",
+          "internal_name": "[Renewable_energy_consumption____of_total_final_energy_consumption_]",
+          "caption": "Renewable_energy_consumption____of_total_final_energy_consumption_",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+          "internal_name": "[GDP_per_capita__current_US__]",
+          "caption": "GDP_per_capita__current_US__",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+          "internal_name": "[CO2_emissions__metric_tons_per_capita_]",
+          "caption": "CO2_emissions__metric_tons_per_capita_",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_renewable_energy_vs_gdp__population_total",
+          "internal_name": "[Population__total]",
+          "caption": "Population__total",
+          "table_id": "tbl.renewable_energy_vs_gdp_csv",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.africa",
+      "name": "Africa",
+      "title_text": "Africa <Page Name>Æ ▶ Æ\n",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Regions]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Africa\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]>Æ | <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nCO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nGDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.asia",
+      "name": "Asia",
+      "title_text": "AsiaÆ <Page Name>Æ ▶ ",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Regions]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Asia\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]>Æ |Æ <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nCO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nGDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.c02_cap",
+      "name": "C02/Cap",
+      "title_text": "Avg CO2 Emissions/Capita (metric tons)",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Area",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__year",
+            "aggregation": null,
+            "derivation": "tyr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Country Name)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Country Name,Regions)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Regions)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[tyr:Year:qk]>\nAvg. CO2 Emissions per Capita (metric tons): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>"
+    },
+    {
+      "id": "ws.europe",
+      "name": "Europe",
+      "title_text": "EuropeÆ <Page Name>Æ ▶ ",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Regions]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Europe\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]> | <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nCO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nGDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.gdp_vs_co2",
+      "name": "GDP vs CO2",
+      "title_text": "GDP vs CO2 by Country",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__region",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "%null%"
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__year",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "2002"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]> | <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nAvg CO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nAvg GDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.gdp_cap",
+      "name": "GDP/Cap",
+      "title_text": "Avg GDP/Capita ($)",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Area",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__year",
+            "aggregation": null,
+            "derivation": "tyr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Country Name)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Country Name,Regions)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Regions)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[tyr:Year:qk]>\nAvg. GDP per Capita $: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>"
+    },
+    {
+      "id": "ws.info",
+      "name": "Info",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": {
+          "field_id": "UNRESOLVED:[usr:Calculation_1024568922982674442:ok]"
+        },
+        "size": null,
+        "shape": {
+          "field_id": "UNRESOLVED:[usr:Calculation_1024568922982674442:ok]"
+        },
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Data: The World Bank - data.worldbank.org"
+    },
+    {
+      "id": "ws.map",
+      "name": "Map",
+      "title_text": "World Map and RegionsÆ\nSelect a Country to filter/highlight dashboardÆ ▶",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Multipolygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita"
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us"
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]>Æ | <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>Æ\n<Page Name>\n\nAvg CO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nAvg GDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.n_america",
+      "name": "N. America",
+      "title_text": "North AmericaÆ <Page Name>Æ ▶ ",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Regions]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"North America\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]>Æ |Æ <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nCO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nGDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.oceania",
+      "name": "Oceania",
+      "title_text": "OceaniaÆ <Page Name>Æ ▶ ",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Regions]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Oceania\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]>Æ |Æ <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nCO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nGDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.population",
+      "name": "Population",
+      "title_text": "Total Population",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Area",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__population_total",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__population_total",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__year",
+            "aggregation": null,
+            "derivation": "tyr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (Country Name)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Country Name,Regions)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "UNRESOLVED:[Action (Regions)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[tyr:Year:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.regions",
+      "name": "Regions",
+      "title_text": "Average GDP vs CO2 per Capita <Page Name>, by RegionÆ\nSelect a Region to filter/highlight dashboardÆ ▶",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__region",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "%null%"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nAvg CO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nAvg GDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    },
+    {
+      "id": "ws.s_america",
+      "name": "S. America",
+      "title_text": "South America <Page Name>Æ ▶ ",
+      "data_source_ids": [
+        "federated.0d3wmxq1a9toyl1cnidh71ic0sk9"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__gdp_per_capita_current_us",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__co2_emissions_metric_tons_per_capita",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Regions]"
+        },
+        "size": {
+          "field_id": "fld.ds_renewable_energy_vs_gdp__population_total"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_renewable_energy_vs_gdp__country_name"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Regions]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"South America\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[none:Country Name:nk]>Æ |Æ <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[Regions]>\n\nCO2 Emissions per Capita (metric Tonnes): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:CO2_emissions__metric_tons_per_capita_:qk]>\nGDP per Capita ($): <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[avg:GDP_per_capita__current_US__:qk]>\nTotal Population: <[federated.0d3wmxq1a9toyl1cnidh71ic0sk9].[sum:Population__total:qk]>"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.price_of_prosperity",
+      "name": "Price of Prosperity",
+      "size": {
+        "width": 1366.0,
+        "height": 900.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "3",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#f5f5fa27",
+            "children": [
+              {
+                "id": "5",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 24963.0,
+                "h": 100000.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": "#333333f4",
+                "children": [
+                  {
+                    "id": "7",
+                    "type": "layout-basic",
+                    "x": 1464.0,
+                    "y": 2222.0,
+                    "w": 22035.0,
+                    "h": 18667.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "The Price of ProsperityÆ\nCO2 Emissions, GDP and Population Trends Across Time",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "8",
+                    "type": "layout-basic",
+                    "x": 1464.0,
+                    "y": 20889.0,
+                    "w": 22035.0,
+                    "h": 222.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#8e8ea5",
+                    "children": []
+                  },
+                  {
+                    "id": "10",
+                    "type": "layout-basic",
+                    "x": 1464.0,
+                    "y": 21111.0,
+                    "w": 22035.0,
+                    "h": 33333.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": "The pursuit of economic growth has historically correlated with the exploitation of natural resources. Countries with great wealth today often gained their fortune at an environmental cost, creating a world where for other countries to follow in their footsteps would result in environmental collapse. Wealthy nations have a moral obligation to aid developing countries in achieving economic progress without worsening environmental degradation. Æ\n\nThis visualization explores the relationship between CO2 emissions, GDP, population, and per capita metrics, highlighting the pressing need for affluent nations to balance prosperity with environmental stewardship and support global efforts to address climate change.",
+                    "background_color": null,
+                    "children": []
+                  },
+                  {
+                    "id": "54",
+                    "type": "layout-basic",
+                    "x": 1464.0,
+                    "y": 54444.0,
+                    "w": 22035.0,
+                    "h": 43334.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "12",
+                        "type": "worksheet",
+                        "x": 1464.0,
+                        "y": 54444.0,
+                        "w": 22035.0,
+                        "h": 14445.0,
+                        "direction": null,
+                        "worksheet_id": "ws.gdp_cap",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "11",
+                        "type": "worksheet",
+                        "x": 1464.0,
+                        "y": 68889.0,
+                        "w": 22035.0,
+                        "h": 14444.0,
+                        "direction": null,
+                        "worksheet_id": "ws.c02_cap",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "13",
+                        "type": "worksheet",
+                        "x": 1464.0,
+                        "y": 83333.0,
+                        "w": 22035.0,
+                        "h": 14445.0,
+                        "direction": null,
+                        "worksheet_id": "ws.population",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "6",
+                "type": "layout-basic",
+                "x": 24963.0,
+                "y": 0.0,
+                "w": 75037.0,
+                "h": 100000.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "82",
+                    "type": "layout-basic",
+                    "x": 24963.0,
+                    "y": 0.0,
+                    "w": 75037.0,
+                    "h": 47667.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "86",
+                        "type": "worksheet",
+                        "x": 24963.0,
+                        "y": 556.0,
+                        "w": 39312.0,
+                        "h": 47111.0,
+                        "direction": null,
+                        "worksheet_id": "ws.map",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "22",
+                        "type": "layout-basic",
+                        "x": 64275.0,
+                        "y": 556.0,
+                        "w": 35725.0,
+                        "h": 47111.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "25",
+                            "type": "worksheet",
+                            "x": 65007.0,
+                            "y": 556.0,
+                            "w": 34261.0,
+                            "h": 29889.0,
+                            "direction": null,
+                            "worksheet_id": "ws.regions",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "65",
+                            "type": "layout-basic",
+                            "x": 65007.0,
+                            "y": 30445.0,
+                            "w": 34261.0,
+                            "h": 16111.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": null,
+                            "children": [
+                              {
+                                "id": "62",
+                                "type": "layout-basic",
+                                "x": 65007.0,
+                                "y": 30445.0,
+                                "w": 14569.0,
+                                "h": 16111.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": null,
+                                "children": [
+                                  {
+                                    "id": "66",
+                                    "type": "layout-basic",
+                                    "x": 65666.0,
+                                    "y": 31890.0,
+                                    "w": 13251.0,
+                                    "h": 2667.0,
+                                    "direction": null,
+                                    "worksheet_id": null,
+                                    "field_id": null,
+                                    "text_html": "Charts are sized by:",
+                                    "background_color": null,
+                                    "children": []
+                                  },
+                                  {
+                                    "id": "64",
+                                    "type": "layout-basic",
+                                    "x": 65666.0,
+                                    "y": 34557.0,
+                                    "w": 13251.0,
+                                    "h": 2444.0,
+                                    "direction": null,
+                                    "worksheet_id": null,
+                                    "field_id": null,
+                                    "text_html": "Total Population",
+                                    "background_color": null,
+                                    "children": []
+                                  },
+                                  {
+                                    "id": "63",
+                                    "type": "layout-basic",
+                                    "x": 65666.0,
+                                    "y": 37001.0,
+                                    "w": 13251.0,
+                                    "h": 9555.0,
+                                    "direction": null,
+                                    "worksheet_id": null,
+                                    "field_id": null,
+                                    "text_html": null,
+                                    "background_color": null,
+                                    "children": []
+                                  }
+                                ]
+                              },
+                              {
+                                "id": "87",
+                                "type": "layout-basic",
+                                "x": 79576.0,
+                                "y": 30445.0,
+                                "w": 19692.0,
+                                "h": 16111.0,
+                                "direction": null,
+                                "worksheet_id": null,
+                                "field_id": null,
+                                "text_html": null,
+                                "background_color": "#ffffff",
+                                "children": [
+                                  {
+                                    "id": "88",
+                                    "type": "worksheet",
+                                    "x": 80527.0,
+                                    "y": 31889.0,
+                                    "w": 17790.0,
+                                    "h": 13890.0,
+                                    "direction": null,
+                                    "worksheet_id": "ws.regions",
+                                    "field_id": null,
+                                    "text_html": null,
+                                    "background_color": null,
+                                    "children": []
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "id": "27",
+                    "type": "layout-basic",
+                    "x": 24963.0,
+                    "y": 47667.0,
+                    "w": 75037.0,
+                    "h": 52333.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "29",
+                        "type": "layout-basic",
+                        "x": 24963.0,
+                        "y": 47667.0,
+                        "w": 74305.0,
+                        "h": 25666.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "31",
+                            "type": "worksheet",
+                            "x": 24963.0,
+                            "y": 47667.0,
+                            "w": 24817.0,
+                            "h": 25666.0,
+                            "direction": null,
+                            "worksheet_id": "ws.africa",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": "#f3faf9",
+                            "children": []
+                          },
+                          {
+                            "id": "34",
+                            "type": "worksheet",
+                            "x": 49780.0,
+                            "y": 47667.0,
+                            "w": 24744.0,
+                            "h": 25666.0,
+                            "direction": null,
+                            "worksheet_id": "ws.europe",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": "#f0f3fa",
+                            "children": []
+                          },
+                          {
+                            "id": "37",
+                            "type": "worksheet",
+                            "x": 74524.0,
+                            "y": 47667.0,
+                            "w": 24744.0,
+                            "h": 25666.0,
+                            "direction": null,
+                            "worksheet_id": "ws.oceania",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": "#f9f3ef",
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "id": "30",
+                        "type": "layout-basic",
+                        "x": 24963.0,
+                        "y": 73333.0,
+                        "w": 74305.0,
+                        "h": 25556.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "40",
+                            "type": "worksheet",
+                            "x": 24963.0,
+                            "y": 73333.0,
+                            "w": 24817.0,
+                            "h": 25556.0,
+                            "direction": null,
+                            "worksheet_id": "ws.n_america",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": "#f0f7fa",
+                            "children": []
+                          },
+                          {
+                            "id": "43",
+                            "type": "worksheet",
+                            "x": 49780.0,
+                            "y": 73333.0,
+                            "w": 24744.0,
+                            "h": 25556.0,
+                            "direction": null,
+                            "worksheet_id": "ws.asia",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": "#fbf7fb",
+                            "children": []
+                          },
+                          {
+                            "id": "46",
+                            "type": "worksheet",
+                            "x": 74524.0,
+                            "y": 73333.0,
+                            "w": 24744.0,
+                            "h": 25556.0,
+                            "direction": null,
+                            "worksheet_id": "ws.s_america",
+                            "field_id": null,
+                            "text_html": null,
+                            "background_color": "#fefaf1",
+                            "children": []
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "69",
+            "type": "worksheet",
+            "x": 20644.0,
+            "y": 1843.0,
+            "w": 3075.0,
+            "h": 4263.0,
+            "direction": null,
+            "worksheet_id": "ws.info",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": null,
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "highlight",
+          "field_id": null,
+          "source_worksheet_id": null,
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "highlight",
+          "field_id": null,
+          "source_worksheet_id": null,
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "highlight",
+          "field_id": null,
+          "source_worksheet_id": "ws.regions",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "highlight",
+          "field_id": null,
+          "source_worksheet_id": "ws.map",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.regions",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        }
+      ]
+    }
+  ],
+  "theme": {
+    "palette_hexes": [
+      "#d4d4e6"
+    ],
+    "font_family": "Tableau Regular",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.renewable_energy_vs_gdp",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_renewable_energy_vs_gdp__renewable_energy_vs_gdp_csv",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.map",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.renewable_energy_vs_gdp / [Regions] Tableau Group",
+      "issue": "[Regions] is a Tableau categorical-bin GROUP defined on [Country Name] (6 continents: Africa, Asia, Europe, North America, Oceania, South America), NOT a physical extract column; the parser left it as UNRESOLVED:[Regions] (tableau-dax-translation-guide.md section 6 Tableau-Groups gap). Every scatter, the map color encoding, and the map/scatter filters use it. Reconstructed the full 265-row Country Name -> Continent mapping from the .twb XML to data/dim_region_group.csv and merged it onto the fact table as the 'Continent' column at the Power Query load layer (Table.NestedJoin LeftOuter on Country Name). 48 mapping rows carry Continent='NULL' (World Bank regional aggregates) and drive filter (1) below.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.renewable_energy_vs_gdp / 3 data-source filters (analysis domain)",
+      "issue": "Three workbook data-source-level filters define the analysis domain and were replicated at the Power Query load layer (the faithful equivalent - a data-source filter affects ALL worksheets, scatters and trend charts alike): (1) [Regions] except 'NULL' -> drop the 48 World-Bank regional-aggregate pseudo-countries (World, Arab World, European Union, income groups, etc.) that map to Continent='NULL' (1,632 rows); (2) [Country Name] except 'Greenland' -> drop outlier; (3) [Year] except {2021,2022,2023} -> keep 1990-2020. Net domain = 216 countries x 1990-2020 = 6,696 rows. Rationale: NOT applying filter (1) inflates Total Population ~10x (82.7B vs the correct 7.64B for 2018) and pollutes every average because the WB aggregates double-count their member countries. Applying all three reproduces data/ground_truth.json exactly. Order-independent.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "calculated fields: Filter Year, Decrease Year, Increase Year, True, False",
+      "issue": "None of the 5 Tableau calculated fields became a DAX measure or calculated column. 'Filter Year' ([Select Y] = DATETRUNC('year',[Year])) is the parameter-equality idiom (guide section 2) whose only use is filtering visuals to the selected year -> SIMPLIFIED AWAY; pbi-report-builder should implement a native single-select Year slicer cross-filtering the scatters/map instead. 'Decrease Year'/'Increase Year' are prior/next-year helpers for the year +/- navigation buttons -> replaced by native slicer interaction (SIMPLIFIED AWAY). 'True'/'False' are vestigial boolean-constant helpers -> EXCLUDED. The 'Select Y' parameter (1990-2023) is therefore NOT materialized as a Power BI what-if parameter (a native Year slicer supersedes it). The 4 model measures (Avg CO2 per Capita, Avg GDP per Capita, Total Population, Avg Renewable Energy %) are NEW simple aggregations, not translations of these calc fields.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "numeric validation via live DAX EVALUATE (deferred)",
+      "issue": "This is an offline LOCAL PBIP build (no Fabric workspace was provided; Fabric deployment was explicitly out of scope). The powerbi-modeling offline connection (ConnectFolder / ImportFromTmdlFolder) loads read-only and rejects DAX query Execute/Validate ('DAX query operations are not supported on offline connections'), and Power BI Desktop cannot open the .pbip until the .Report exists (pbi-report-builder's step). Numeric correctness was therefore proven by reproducing every data/ground_truth.json target with an identical pandas filter pipeline: 2018 Total Population = 7,636,740,830; 2018 global Avg CO2/cap = 4.1304; Africa 2018 avg CO2/cap = 1.1662 over 54 countries; Europe 2018 avg GDP/cap = 41,562.07; plus 1990/2000/2010/2018/2020 trend spot-checks and all 6 continents - ALL PASS. Model structure and engine-load were validated via TmdlSerializer.DeserializeDatabaseFromFolder + AS-engine ConnectFolder (1 table, 4 measures, en-US culture with 10 synonym entities all loaded). A live DAX EVALUATE re-check is deferred to the Desktop/report phase (optional per the stated offline validation bar).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "dashboard 'Price of Prosperity' / Year play-axis animation (play/step/loop, 'Hit ▶ to see change over time')",
+      "issue": "Tableau's animated play-axis over the Year parameter has no native Power BI equivalent. Replaced with a native single-select 'Year' slicer defaulting to 2020 (matches the reference capture). This is the faithful STATIC equivalent; the animated transition / auto-play over 1990-2020 and the step/loop controls are lost. Users change the year manually via the slicer.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard 'Price of Prosperity' / Tableau dashboard filter-actions (map 'Select a Country', region scatter 'Select a Region')",
+      "issue": "Tableau dashboard filter/highlight actions were reproduced with native Power BI visual interactions (cross-filter + cross-highlight). The map (Country Code/Country Name) and the region scatter (Continent) cross-filter the rest of the page; the year slicer is set to NOT filter the 3 sidebar area-trend charts (visualInteractions=NoFilter) so their 1990-2020 trends are preserved. Behaviour is equivalent though the exact highlight styling differs from Tableau.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.map / world choropleth colored by Continent (azureMap)",
+      "issue": "Tableau auto-geocoded (Latitude/Longitude generated) from Country. In Power BI, azureMap GEOCODED layers (bubble/marker/filled-map) do NOT render for the frozen 'Country Name' column because it carries no Data Category (geographic role) and the semantic model is frozen (cannot add one). Implemented instead as a DATA-BOUND REFERENCE LAYER choropleth: Category='Country Code' (ISO-3166 alpha-3) property-matched to a Natural Earth 50m admin-0 GeoJSON on its ISO_A3_EH property, colored categorically by Continent (Series/Legend). Renders correctly as filled countries by continent (Desktop-verified). Trade-offs: (a) depends on a public GeoJSON URL (raw.githubusercontent.com natural-earth-vector) fetched at render time; (b) Gibraltar (GIB) and Kosovo (XKX) are unmapped (~2 of 216, hidden via unmappedObjectVisibility=false); (c) the default bubble layer is hidden to match the reference's clean choropleth.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard 'Price of Prosperity' / static '2020' in panel + region-scatter titles",
+      "issue": "Reference titles embed the selected year (e.g. 'Africa 2020', 'Average GDP vs CO2 per Capita 2020, by Region'). Power BI visual titles are static text and the semantic model is frozen (no dynamic-title measure available), so '2020' is hard-coded to match the default slicer selection. If the user changes the Year slicer, the numbers update but the '2020' text in titles does not.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "6 country-grain continent scatters / curated data labels",
+      "issue": "Tableau shows a hand-curated subset of country labels per panel (e.g. Gabon/Algeria/Libya/Seychelles for Africa). Power BI scatter data labels use automatic decluttering, so the set of labeled countries differs from Tableau's curated selection (more/other points may be labeled). Cosmetic; all bubbles and positions are faithful.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.map / customized tooltip",
+      "issue": "azureMap 'Tooltips' role is measure-only and rejects column projections, so 'Country Name' could not be added to the map tooltip. Tooltip shows the 3 measures (Avg GDP per Capita, Avg CO2 per Capita, Total Population); the hovered country is still identified by the Location key. Tableau's fully customized tooltip text is simplified to default measure tooltips.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.map / azureMap basemap branding + ocean labels",
+      "issue": "The native azureMap basemap renders Microsoft basemap chrome that has no Tableau equivalent and cannot be removed: ocean/sea labels (e.g. 'Pacific Ocean', 'Atlantic Ocean', 'Indian Ocean') on the road/base style, plus the mandatory 'Microsoft Azure' attribution wordmark (bottom-left) and the 'Feedback' link (bottom-right). Tableau's original map used a plain background with no such labels or vendor branding. Cosmetic only; it does not affect the choropleth data, the Continent coloring, or any numbers.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard 'Price of Prosperity' / size-legend concentric-bubble glyph tint",
+      "issue": "The 'Charts are sized by: Total Population' size legend was rebuilt as a concentric nested sized-bubble glyph (2-3 nested rings) to mimic Tableau's sized-bubble legend. The rings retain a faint teal tint versus Tableau's neutral-gray rings. Surfaced by the migration validator's spot-check after the capped one-round report polish and accepted as a cosmetic limitation (not re-litigated further, per the validator<->builder round cap). Does not affect any data, encoding, position, or number.",
+      "severity": "low",
+      "stage": "validate"
+    }
+  ]
+}

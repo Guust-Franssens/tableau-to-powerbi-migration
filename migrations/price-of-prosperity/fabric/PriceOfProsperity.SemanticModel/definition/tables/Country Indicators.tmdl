@@ -1,0 +1,139 @@
+/// One row per country per year - World Bank development indicators (CO2 emissions, GDP, population, renewable-energy share) for 216 countries across 1990-2020 (6,696 rows). Sourced from the Tableau 'Renewable Energy vs GDP' .hyper extract; three data-source filters are applied at load (real continents only, Greenland excluded, years 1990-2020). Backs every visual on the 'Price of Prosperity' dashboard.
+table 'Country Indicators'
+	lineageTag: 81024ae9-0c8c-4459-9a25-df61808f0944
+
+	/// Average CO2 emissions per capita (metric tons) over the countries in filter context. Feeds the CO2-vs-GDP scatter (country grain) and the CO2 trend line (year grain). Ground truth: 2018 global = 4.13.
+	measure 'Avg CO2 per Capita' = AVERAGE('Country Indicators'[CO2 per Capita])
+		formatString: 0.00
+		lineageTag: 95fa7af6-eda4-43d4-8937-776ae602259e
+
+	/// Average GDP per capita (current US dollars) over the countries in filter context. Feeds the scatter X-axis and the GDP trend line. Ground truth: 2018 global = 18,907.5.
+	measure 'Avg GDP per Capita' = AVERAGE('Country Indicators'[GDP per Capita])
+		formatString: #,##0.00
+		lineageTag: ce030cc1-266d-4e29-8132-a013ae5b558a
+
+	/// Total population (sum of person counts) over the countries in filter context. Feeds the population trend line and the scatter bubble size. Ground truth: 2018 global = 7,636,740,830.
+	measure 'Total Population' = SUM('Country Indicators'[Population])
+		formatString: #,##0
+		lineageTag: 565a5da4-709e-45e6-9d4e-4e86d8bf3916
+
+	/// Average renewable-energy share (percent of total final energy consumption, 0-100 scale) over the countries in filter context. Feeds the renewable-share trend line. Ground truth: 2018 global = 28.9.
+	measure 'Avg Renewable Energy %' = AVERAGE('Country Indicators'[Renewable Energy %])
+		formatString: 0.00
+		lineageTag: fe5f9fbf-a4ad-459e-af47-ea807cf58ac6
+
+	/// Country name (World Bank English short name) and the row's country key. One of 216 countries, e.g. United States, China, India, Nigeria. World Bank regional aggregates and Greenland are excluded.
+	column 'Country Name'
+		dataType: string
+		lineageTag: c7dc4cf8-8e7a-4fa6-9a5c-3877ab4a2a09
+		summarizeBy: none
+		sourceColumn: Country Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// ISO-3166 alpha-3 country code (World Bank), one per country - an alternative key to Country Name, e.g. USA, CHN, IND, NGA.
+	column 'Country Code'
+		dataType: string
+		lineageTag: 2e237b4b-7357-4efa-bf8d-f7d10695e36c
+		summarizeBy: none
+		sourceColumn: Country Code
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Continent the country sits in, reconstructed from the Tableau [Regions] group (not present in the source extract). One of: Africa, Asia, Europe, North America, Oceania, South America. Drives the scatter/map colour and the continent slicer.
+	column Continent
+		dataType: string
+		lineageTag: 7adb6b42-cb65-4c91-be63-b6f5a2e2e612
+		summarizeBy: none
+		sourceColumn: Continent
+
+		annotation SummarizationSetBy = Automatic
+
+	/// World Bank geographic region (7-region scheme). One of: East Asia & Pacific, Europe & Central Asia, Latin America & Caribbean, Middle East & North Africa, North America, South Asia, Sub-Saharan Africa.
+	column Region
+		dataType: string
+		lineageTag: 612b466c-13b7-4aca-bebf-3d6626011fdb
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	/// World Bank income classification. One of: High income, Upper middle income, Lower middle income, Low income (blank for a few unclassified country-years).
+	column 'Income Group'
+		dataType: string
+		lineageTag: cb3bb9ec-4048-476d-ab4f-ee7de8d7b790
+		summarizeBy: none
+		sourceColumn: IncomeGroup
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Calendar year of the observation, 1990-2020 (derived from the source January-1 date). Use as the trend-chart axis and the single-select year slicer.
+	column Year
+		dataType: int64
+		formatString: 0
+		lineageTag: 1f34530a-06fa-461e-a4c9-25e0bcdfaf2f
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	/// CO2 emissions per person in metric tons (World Bank), at the country-year grain. Aggregate with [Avg CO2 per Capita]; blank where the source has no reading.
+	column 'CO2 per Capita'
+		dataType: double
+		formatString: 0.00
+		lineageTag: c6808408-3c6b-4ba6-98b1-5880d50454f5
+		summarizeBy: sum
+		sourceColumn: CO2_emissions__metric_tons_per_capita_
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Gross Domestic Product per person in current US dollars (World Bank), at the country-year grain. Aggregate with [Avg GDP per Capita].
+	column 'GDP per Capita'
+		dataType: double
+		formatString: #,##0.00
+		lineageTag: bad9dfa1-a221-4bee-ae2f-66f328282324
+		summarizeBy: sum
+		sourceColumn: GDP_per_capita__current_US__
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Total population as a person count (World Bank), at the country-year grain. Sum with [Total Population]; also drives the scatter bubble-size legend.
+	column Population
+		dataType: int64
+		formatString: #,##0
+		lineageTag: f153564e-9cf5-442e-8100-75e7275e6390
+		summarizeBy: sum
+		sourceColumn: Population__total
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Renewable energy consumption as a percentage of total final energy consumption, 0-100 scale (World Bank), at the country-year grain. Aggregate with [Avg Renewable Energy %].
+	column 'Renewable Energy %'
+		dataType: double
+		formatString: 0.00
+		lineageTag: 14bac0d1-3ac2-4730-b4e9-a5af4210e86b
+		summarizeBy: sum
+		sourceColumn: Renewable_energy_consumption____of_total_final_energy_consumption_
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Country Indicators' = m
+		mode: import
+		source =
+				let
+				    Fact = Csv.Document(File.Contents(DataFolder & "ds.renewable_energy_vs_gdp.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    FactHeaders = Table.PromoteHeaders(Fact, [PromoteAllScalars=true]),
+				    Dim = Csv.Document(File.Contents(DataFolder & "dim_region_group.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    DimHeaders = Table.PromoteHeaders(Dim, [PromoteAllScalars=true]),
+				    Merged = Table.NestedJoin(FactHeaders, {"Country Name"}, DimHeaders, {"Country Name"}, "DimJoin", JoinKind.LeftOuter),
+				    WithContinent = Table.ExpandTableColumn(Merged, "DimJoin", {"Continent"}, {"Continent"}),
+				    KeepRealContinents = Table.SelectRows(WithContinent, each [Continent] <> "NULL"),
+				    DropGreenland = Table.SelectRows(KeepRealContinents, each [Country Name] <> "Greenland"),
+				    YearToInt = Table.TransformColumns(DropGreenland, {{"Year", each Int64.From(Text.Start(_, 4)), Int64.Type}}),
+				    Keep1990to2020 = Table.SelectRows(YearToInt, each [Year] <= 2020),
+				    Typed = Table.TransformColumnTypes(Keep1990to2020, {{"Country Name", type text}, {"Country Code", type text}, {"Region", type text}, {"IncomeGroup", type text}, {"Renewable_energy_consumption____of_total_final_energy_consumption_", type number}, {"GDP_per_capita__current_US__", type number}, {"CO2_emissions__metric_tons_per_capita_", type number}, {"Population__total", Int64.Type}, {"Continent", type text}}, "en-US")
+				in
+				    Typed
+
+	annotation PBI_ResultType = Table
+

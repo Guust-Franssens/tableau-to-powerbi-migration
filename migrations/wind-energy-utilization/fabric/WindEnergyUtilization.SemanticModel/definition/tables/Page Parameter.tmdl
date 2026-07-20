@@ -1,0 +1,47 @@
+/// Disconnected slicer table backing the Tableau 'Page Parameter' ([Parameter 2], default '1'). Drove Tableau's show/hide-sheet page-navigation idiom; in Power BI page navigation is native (buttons/bookmarks), so this is retained only as the selection domain + Value measure.
+table 'Page Parameter'
+
+	/// Reads the current 'Page Parameter' selection, defaulting to the Tableau default "1".
+	measure 'Page Parameter Value' = SELECTEDVALUE('Page Parameter'[Page], "1")
+		displayFolder: Parameters
+
+	/// Page selector value for the dashboard navigation parameter. One of: 1, 2, 3, 4, 5, 6 (default 1).
+	column Page
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Page
+		sortByColumn: 'Page Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sort key ordering the Page values.
+	column 'Page Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Page Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Page Parameter' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Page", "Page Order"},
+						{
+						{"1", 0},
+						{"2", 1},
+						{"3", 2},
+						{"4", 3},
+						{"5", 4},
+						{"6", 5}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Page", type text}, {"Page Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

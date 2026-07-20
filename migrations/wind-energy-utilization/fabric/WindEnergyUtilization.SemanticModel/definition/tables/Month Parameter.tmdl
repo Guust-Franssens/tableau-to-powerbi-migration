@@ -1,0 +1,64 @@
+/// Disconnected single-select slicer table backing the Tableau 'Month Parameter' ([Parameter 1], default June=6; '24=2024 means annual/all-year). Native-slicer + SELECTEDVALUE equivalent of the Tableau live parameter that gates every CM/PM measure.
+table 'Month Parameter'
+
+	/// Reads the current 'Month Parameter' slicer selection (Month Number), defaulting to the Tableau default 6 (June). 2024 = annual.
+	measure 'Month Parameter Value' = SELECTEDVALUE('Month Parameter'[Month Number], 6)
+		displayFolder: Parameters
+
+	/// Selectable month value: 1-12 for a specific month, or 2024 for all-year/annual. Read by [Month Parameter Value] (default 6 = June).
+	column 'Month Number'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Month Number
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Month display label for the slicer. One of: January, February, March, April, May, June, July, August, September, October, November, December, or '24 (annual).
+	column Month
+		dataType: string
+		summarizeBy: none
+		sourceColumn: Month
+		sortByColumn: 'Month Order'
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sort key ordering the Month labels Jan..Dec then annual.
+	column 'Month Order'
+		dataType: int64
+		isHidden
+		formatString: #,##0
+		summarizeBy: none
+		sourceColumn: Month Order
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Month Parameter' = m
+		mode: import
+		source =
+				let
+					Source = #table(
+						{"Month Number", "Month", "Month Order"},
+						{
+						{1, "January", 0},
+						{2, "February", 1},
+						{3, "March", 2},
+						{4, "April", 3},
+						{5, "May", 4},
+						{6, "June", 5},
+						{7, "July", 6},
+						{8, "August", 7},
+						{9, "September", 8},
+						{10, "October", 9},
+						{11, "November", 10},
+						{12, "December", 11},
+						{2024, "'24", 12}
+						}
+					),
+					#"Changed Type" = Table.TransformColumnTypes(Source, {{"Month Number", Int64.Type}, {"Month", type text}, {"Month Order", Int64.Type}}, "en-US")
+				in
+					#"Changed Type"
+
+	annotation PBI_ResultType = Table
+

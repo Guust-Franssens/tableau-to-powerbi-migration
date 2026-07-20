@@ -28,6 +28,12 @@ BG = (255, 255, 255)
 LABEL_BG = (243, 243, 243)
 TABLEAU_ACCENT = (78, 121, 167)
 PBI_ACCENT = (225, 119, 66)
+DEFAULT_HERO = [
+    "price-of-prosperity",
+    "health-tracker",
+    "wind-energy-utilization",
+    "shipping-kpis",
+]
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -95,6 +101,45 @@ def compose_pair(
     logger.info("Wrote %s (%dx%d)", out_path.relative_to(REPO_ROOT), width, height)
 
 
+def build_hero(featured: list[str], assets_dir: Path, out_path: Path, max_width: int = 1600) -> None:
+    """Stack the (already cropped) side-by-side composites of the featured slugs into one tall hero
+    image for the top of the README. Reuses the same chrome-cropped panels the gallery uses, so the
+    hero and gallery stay consistent."""
+    tiles = [
+        Image.open(assets_dir / f"{slug}-1.png").convert("RGB")
+        for slug in featured
+        if (assets_dir / f"{slug}-1.png").exists()
+    ]
+    if not tiles:
+        logger.warning("build_hero: no composite tiles found for %s", featured)
+        return
+    width = max(t.width for t in tiles)
+    scaled = [
+        t if t.width == width else t.resize((width, round(t.height * width / t.width)), Image.Resampling.LANCZOS)
+        for t in tiles
+    ]
+    title_h, gap = 72, 28
+    total_h = title_h + sum(t.height + gap for t in scaled)
+    canvas = Image.new("RGB", (width, total_h), BG)
+    draw = ImageDraw.Draw(canvas)
+    draw.text(
+        (width // 2, title_h // 2),
+        "Tableau  \u2192  Power BI     before / after",
+        fill=(40, 40, 40),
+        font=_font(34),
+        anchor="mm",
+    )
+    y = title_h
+    for tile in scaled:
+        canvas.paste(tile, (0, y))
+        y += tile.height + gap
+    if canvas.width > max_width:
+        canvas = canvas.resize((max_width, round(canvas.height * max_width / canvas.width)), Image.Resampling.LANCZOS)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path)
+    logger.info("Wrote %s (%dx%d)", out_path.relative_to(REPO_ROOT), canvas.width, canvas.height)
+
+
 def _render_entry(entry: dict[str, Any], assets_dir: Path, layout: str) -> list[str]:
     """Render every page-pair for one workbook; return the gallery markdown lines for it."""
     slug = entry["slug"]
@@ -142,6 +187,8 @@ def main() -> None:
     ]
     for entry in config["workbooks"]:
         md += _render_entry(entry, assets_dir, args.layout)
+    if args.layout == "side-by-side":
+        build_hero(config.get("hero", DEFAULT_HERO), assets_dir, showcase_dir / "hero-before-after.png")
     readme = showcase_dir / ("README.md" if args.layout == "side-by-side" else "README-stacked.md")
     readme.write_text("\n".join(md).rstrip() + "\n", encoding="utf-8")
     logger.info("Wrote %s", readme.relative_to(REPO_ROOT))

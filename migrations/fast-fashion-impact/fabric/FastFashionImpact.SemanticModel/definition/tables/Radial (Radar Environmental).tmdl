@@ -1,0 +1,106 @@
+/// VESTIGIAL / unused source (wide-format duplicate of Radial with Borders); no worksheet binds it. Retained for lineage completeness only - do not use for analysis.
+table 'Radial (Radar Environmental)'
+	lineageTag: 04a1973e-ea1a-54a1-99e9-65a65b0f32f6
+
+	/// [VESTIGIAL] Environmental impact area. One of: Chemicals usage (Pulse score), Energy emissions (Mn tons), Land use, Waste creation (Mn rons), Water consumption (Bn cubic metres). Source unused - prefer Radial with Borders.
+	column 'Impact Area'
+		dataType: string
+		lineageTag: 09790ae4-15e6-592c-b62e-7ecda02f6a90
+		summarizeBy: none
+		sourceColumn: Impact Area
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Actual measured value for the 2015 scenario.
+	column '2015 Actual'
+		dataType: int64
+		lineageTag: d10f77e6-d49a-563d-b3f7-a290777a740c
+		summarizeBy: none
+		sourceColumn: 2015 Actual
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Actual/target value for the 2030 scenario (text; may be 'n/a' or blank).
+	column '2030 Actual'
+		dataType: string
+		lineageTag: 91e002cd-5df1-569f-a2d2-41ba69dc4107
+		summarizeBy: none
+		sourceColumn: 2030 Actual
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Normalised polar radius for 2015.
+	column '2015 Value'
+		dataType: double
+		lineageTag: edb57079-bf65-5cf0-9aa4-f94a8d539697
+		summarizeBy: sum
+		sourceColumn: 2015 Value
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Normalised polar radius for 2030.
+	column '2030 Value'
+		dataType: double
+		lineageTag: f5fc1e67-d916-526c-a873-153db7da57d0
+		summarizeBy: sum
+		sourceColumn: 2030 Value
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Concentric grid-ring radius 1 for the radar guides.
+	column C1
+		dataType: int64
+		lineageTag: 8e482c59-7ebe-5400-8e78-f7258169958a
+		summarizeBy: none
+		sourceColumn: C1
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Concentric grid-ring radius 2 for the radar guides.
+	column C2
+		dataType: int64
+		lineageTag: bb307e65-7348-507d-a633-f5e369c29214
+		summarizeBy: none
+		sourceColumn: C2
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Concentric grid-ring radius 3 for the radar guides.
+	column C3
+		dataType: int64
+		lineageTag: 4c4bc5e4-602b-51d2-a89f-e3b856cf7190
+		summarizeBy: none
+		sourceColumn: C3
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Concentric grid-ring radius 4 for the radar guides.
+	column C4
+		dataType: int64
+		lineageTag: 9176bbca-9748-5ab1-a1f2-425e089f9743
+		summarizeBy: none
+		sourceColumn: C4
+
+		annotation SummarizationSetBy = Automatic
+
+	/// [VESTIGIAL] Concentric grid-ring radius 5 for the radar guides.
+	column C5
+		dataType: int64
+		lineageTag: 1c1f8b19-3f34-5b2e-939d-2e36a1ddec7b
+		summarizeBy: none
+		sourceColumn: C5
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Radial (Radar Environmental)' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.radial_radar_environmental.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Impact Area", type text}, {"2015 Actual", Int64.Type}, {"2030 Actual", type text}, {"2015 Value", type number}, {"2030 Value", type number}, {"C1", Int64.Type}, {"C2", Int64.Type}, {"C3", Int64.Type}, {"C4", Int64.Type}, {"C5", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

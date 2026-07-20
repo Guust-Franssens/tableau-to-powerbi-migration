@@ -1,0 +1,23 @@
+/// Conformed Year dimension (1985-2023), M-generated. Deliberate composite-model enhancement: the faithful translation of a Tableau 'blend on Year' - single-direction 1:many to each year-bearing fact so a report can slice all sources by one Year.
+table 'Year'
+	lineageTag: 8a7eced8-2659-5ffd-8288-62cfaa19bcaf
+
+	column 'Year'
+		dataType: int64
+		lineageTag: 7c95747e-292a-53a9-8a7c-6289039a375e
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Year' = m
+		mode: import
+		source =
+				let
+				    Source = {1985..2023},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Year"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Year", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

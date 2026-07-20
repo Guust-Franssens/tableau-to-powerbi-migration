@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "d229780ae6185e64dfa6",
+  "position": {
+    "x": 50,
+    "y": 104,
+    "z": 1020,
+    "width": 840,
+    "height": 46,
+    "tabOrder": 1020
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Exploring data on where our electricity comes from — a look into how the generation trends are changing.",
+                    "textStyle": {
+                      "fontSize": "11pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

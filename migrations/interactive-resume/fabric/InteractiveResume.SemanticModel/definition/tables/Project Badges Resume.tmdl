@@ -1,0 +1,78 @@
+/// Professional and academic achievement badges (6 rows: Choir Director, Data Redesign Project, Data Visualization Project, Digital Technology Credential, Senior Delegate, Tableau Ambassador). Each badge has an abbreviation, title, year, narrative, and external link. Source: Tableau 'Sheet1 (Project Badges_Resume)'.
+table 'Project Badges Resume'
+	lineageTag: d0ddc166-7267-5ba4-8994-e3e27ad30ee9
+
+	/// Row count of 'Project Badges Resume' (each row = one achievement badge). Hidden technical measure; renamed from Tableau's auto-generated 'Number of Records' so measure names stay unique model-wide.
+	measure 'Project Badges Resume Row Count' = COUNTROWS('Project Badges Resume')
+		formatString: #,##0
+		isHidden
+		displayFolder: Row Counts
+		lineageTag: ae6d72c2-4947-560d-83b4-61d58ecbbd9b
+
+	/// Short badge code. One of: CD (Choir Director), DRP (Data Redesign Project), DTC (Digital Technology Credential), DVP (Data Visualization Project), SD (Senior Delegate), TA (Tableau Ambassador).
+	column Abbrev
+		dataType: string
+		lineageTag: 13e8dac7-9a11-57f1-9980-cb91203e1a40
+		summarizeBy: none
+		sourceColumn: Abbrev
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Full badge/achievement name. One of: Choir Director, Data Redesign Project, Data Visualization Project, Digital Technology Credential, Senior Delegate, Tableau Ambassador.
+	column Title
+		dataType: string
+		lineageTag: 3c241c00-390d-52d8-91b4-06a6f5858c2c
+		summarizeBy: none
+		sourceColumn: Title
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Badge sort order (1 to 6). Not additive.
+	column Number
+		dataType: int64
+		lineageTag: 256d6eb9-ba3d-558f-9882-1ecdc124e58c
+		summarizeBy: none
+		sourceColumn: Number
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Free-text narrative describing the achievement (one paragraph per badge).
+	column Description
+		dataType: string
+		lineageTag: 52d4285f-820b-51cb-b730-2cbef3baeedb
+		summarizeBy: none
+		sourceColumn: Description
+
+		annotation SummarizationSetBy = Automatic
+
+	/// External URL for the achievement (LinkedIn post, Tableau page, news article). Blank for some badges. Tagged as Web URL.
+	column Links
+		dataType: string
+		lineageTag: 9d6f42c1-2870-599f-987a-2b8f85cf3f28
+		dataCategory: WebUrl
+		summarizeBy: none
+		sourceColumn: Links
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Year the badge/achievement was earned (2015, 2016, 2019, 2020). Context field, not additive.
+	column Year
+		dataType: int64
+		lineageTag: f709ba61-b43d-598b-ac2d-09ada4f3ee6c
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Project Badges Resume' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.sheet1_project_badges_resume.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Abbrev", type text}, {"Title", type text}, {"Number", Int64.Type}, {"Description", type text}, {"Links", type text}, {"Year", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

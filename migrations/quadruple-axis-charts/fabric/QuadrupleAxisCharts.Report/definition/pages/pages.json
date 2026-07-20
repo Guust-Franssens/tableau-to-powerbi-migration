@@ -1,0 +1,18 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.1.0/schema.json",
+  "pageOrder": [
+    "overview",
+    "p01_line_area",
+    "p02_line_plus",
+    "p03_triangles",
+    "p04_pies",
+    "p05_color_size",
+    "p06_highlight",
+    "p07_hashing",
+    "p08_lbar",
+    "p09_barline",
+    "p10_maptrellis",
+    "p11_summary"
+  ],
+  "activePageName": "overview"
+}

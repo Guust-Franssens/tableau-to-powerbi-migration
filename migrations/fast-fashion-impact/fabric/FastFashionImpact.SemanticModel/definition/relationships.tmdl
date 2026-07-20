@@ -1,0 +1,8 @@
+relationship Jeans_JeansPolygon
+	fromColumn: 'Jeans Polygon'.'Shape Id'
+	toColumn: JEANS.ID
+
+relationship JeansWater_PolygonWater
+	fromColumn: 'Polygon water'.Category
+	toColumn: 'JEANS water'.Category
+

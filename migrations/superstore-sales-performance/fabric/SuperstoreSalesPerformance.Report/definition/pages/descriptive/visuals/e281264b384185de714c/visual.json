@@ -42,7 +42,7 @@
             "defaultStyle": {
               "expr": {
                 "Literal": {
-                  "Value": "'road'"
+                  "Value": "'grayscale_light'"
                 }
               }
             },

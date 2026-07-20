@@ -1,0 +1,103 @@
+/// Environmental-impact radar (radar/spider chart) with concentric grid rings: polar radius per impact area for the 2015 vs 2030 scenarios. 5 impact areas x 2 years x 5 rings.
+table 'Radial with Borders'
+	lineageTag: ba4c2f0c-bec4-5069-b0d2-95e54a50203a
+
+	/// Average polar radius (Radial Value) for an impact area / year - the radar spoke length. E.g. Energy emissions 2015=2.97, Water consumption 2030=1.80, Chemicals usage=4.80.
+	measure 'Distance (r)' = AVERAGE('Radial with Borders'[Radial Value])
+		formatString: 0.00
+		displayFolder: Radar
+		lineageTag: 018b2bd8-1486-5b2a-9c91-acbb4e4e5c7e
+
+	/// Environmental impact area (radar spoke). One of: Chemicals usage (Pulse score), Energy emissions (Mn tons), Land use, Waste creation (Mn rons), Water consumption (Bn cubic metres). NOTE source typo 'Mn rons' = 'Mn tons'.
+	column 'Impact Area'
+		dataType: string
+		lineageTag: 49b88e89-a50f-53c7-a664-e530dedd19fd
+		summarizeBy: none
+		sourceColumn: Impact Area
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Actual measured impact value shown as a label (text; mixed numbers, 'n/a' or blank; not for aggregation).
+	column 'Actual Value'
+		dataType: string
+		lineageTag: c402f66f-877c-5a0c-854f-e3f5a4ce8b45
+		summarizeBy: none
+		sourceColumn: Actual Value
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Normalised polar radius for the impact area in the given year; constant across the 5 grid-ring rows of a mark.
+	column 'Radial Value'
+		dataType: double
+		lineageTag: 157a1a05-ebab-5f7e-93c6-37e8e934f31a
+		summarizeBy: sum
+		sourceColumn: Radial Value
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Scenario year of the radar reading: 2015 or 2030.
+	column Year
+		dataType: int64
+		lineageTag: 8c8fffea-8dca-569f-ae61-32cf94bb2317
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Concentric grid-ring name. One of: C1, C2, C3, C4, C5 (guide rings at radius 1-5).
+	column Name
+		dataType: string
+		lineageTag: d413b581-2b86-59d6-bbc4-016903d1ff61
+		summarizeBy: none
+		sourceColumn: Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Grid-ring radius 1-5 for the concentric pentagon guides.
+	column Value
+		dataType: int64
+		lineageTag: 970d9bff-fe46-5cc3-a870-5f65ec8f881f
+		summarizeBy: none
+		sourceColumn: Value
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Polar angle (radians) of the impact-area spoke; step 2*pi/5 per area in alphabetical order. Derived.
+	column Angle = (2 * PI() / CALCULATE(DISTINCTCOUNT('Radial with Borders'[Impact Area]), ALL('Radial with Borders'))) * RANKX(ALL('Radial with Borders'[Impact Area]), 'Radial with Borders'[Impact Area], , ASC, Dense)
+		dataType: double
+		formatString: 0.0000
+		lineageTag: 350d10ad-12cd-5f14-9266-0642a565f73f
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Cartesian X of the radar point = Radial Value x cos(Angle). Derived plotting coordinate.
+	column X-axis = 'Radial with Borders'[Radial Value] * COS('Radial with Borders'[Angle])
+		dataType: double
+		formatString: 0.0000
+		lineageTag: 8bbc6d6c-b83b-5294-a153-0a0facac6954
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Cartesian Y of the radar point = Radial Value x sin(Angle). Derived plotting coordinate.
+	column Y-axis = 'Radial with Borders'[Radial Value] * SIN('Radial with Borders'[Angle])
+		dataType: double
+		formatString: 0.0000
+		lineageTag: d3d52780-2f29-5647-90c4-847033ec0536
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Radial with Borders' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.radial_with_borders_radar_environmental.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Impact Area", type text}, {"Actual Value", type text}, {"Radial Value", type number}, {"Year", Int64.Type}, {"Name", type text}, {"Value", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

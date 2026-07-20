@@ -1,0 +1,43 @@
+/// Sustainability-performance quartile scores by apparel value-chain stage. One row per (Quartile, Chain Stage); backs the quartile performance panel.
+table 'Performance Quartile'
+	lineageTag: 8f6403d4-7341-5b41-8512-499a26e43a29
+
+	/// Performance quartile band. One of: Top Quartile, 2nd Quartile, 3rd Quartile, Bottom Quartile.
+	column Quartile
+		dataType: string
+		lineageTag: 5cfadb60-5903-57fb-9ed8-5c4b3d7f512c
+		summarizeBy: none
+		sourceColumn: Quartile
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Apparel value-chain stage being scored. One of: Raw materials, Processing, Manufacturing, Design & development, Transportation, Retail, Use, End of use, Total Pulse Score.
+	column 'Chain Stage'
+		dataType: string
+		lineageTag: 500f2e41-b75a-5d9a-bef7-9ffd06a90c39
+		summarizeBy: none
+		sourceColumn: Chain Stage
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Sustainability performance score for the quartile at this value-chain stage.
+	column Value
+		dataType: int64
+		lineageTag: e32d8f9f-f911-5553-9ed1-419fd89321ff
+		summarizeBy: sum
+		sourceColumn: Value
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Performance Quartile' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.performance_quartile_quartile_performance.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Quartile", type text}, {"Chain Stage", type text}, {"Value", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

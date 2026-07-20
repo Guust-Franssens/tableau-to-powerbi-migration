@@ -3,9 +3,11 @@
 frozen AirlineAllianceActivity.SemanticModel TMDL display names.
 Re-runnable. Exit 0 = all bindings resolve; exit 1 = at least one bad ref.
 """
-import json, os, re, glob, sys
 
-ROOT = r"C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\airline-alliance-activity\fabric"
+import json, os, re, glob, sys
+from pathlib import Path
+
+ROOT = str(Path(__file__).resolve().parents[1] / "fabric")
 MODEL = os.path.join(ROOT, "AirlineAllianceActivity.SemanticModel", "definition", "tables")
 PAGES = os.path.join(ROOT, "AirlineAllianceActivity.Report", "definition", "pages")
 
@@ -18,12 +20,15 @@ for tf in glob.glob(os.path.join(MODEL, "*.tmdl")):
         m = re.match(r"^table\s+(?:'([^']+)'|(\S+))", line)
         if m:
             cur = m.group(1) or m.group(2)
-            tables.add(cur); cols.setdefault(cur, set()); meas.setdefault(cur, set())
+            tables.add(cur)
+            cols.setdefault(cur, set())
+            meas.setdefault(cur, set())
             continue
         m = re.match(r"^\t(column|measure)\s+(?:'([^']+)'|([^\s=]+))", line)
         if m and cur:
             name = m.group(2) or m.group(3)
             (cols if m.group(1) == "column" else meas)[cur].add(name)
+
 
 def status(entity, prop):
     if entity not in tables:
@@ -31,6 +36,7 @@ def status(entity, prop):
     if prop in cols.get(entity, ()) or prop in meas.get(entity, ()):
         return "OK"
     return "BAD_FIELD"
+
 
 # ---- 2. Recursively collect Column/Measure refs from a visual.json ----
 def collect(node, aliases):
@@ -54,13 +60,14 @@ def collect(node, aliases):
         for it in node:
             yield from collect(it, aliases)
 
+
 # ---- 3. Walk every visual on every page ----
 pj = json.load(open(os.path.join(PAGES, "pages.json"), encoding="utf-8"))
 pagename = {0: "Alliance", 1: "Airlines", 2: "Fleet", 3: "Flight"}
 total = 0
 bad = []
-pair_status = {}           # (entity,prop,kind) -> status
-per_table = {}             # entity -> ref count
+pair_status = {}  # (entity,prop,kind) -> status
+per_table = {}  # entity -> ref count
 for idx, pg in enumerate(pj["pageOrder"]):
     for vf in glob.glob(os.path.join(PAGES, pg, "visuals", "*", "visual.json")):
         vj = json.load(open(vf, encoding="utf-8"))
@@ -71,8 +78,7 @@ for idx, pg in enumerate(pj["pageOrder"]):
             pair_status[(ent, prop, kind)] = st
             per_table[ent] = per_table.get(ent, 0) + 1
             if st != "OK":
-                bad.append((idx, pagename.get(idx), vtype,
-                            os.path.basename(os.path.dirname(vf)), ent, prop, kind, st))
+                bad.append((idx, pagename.get(idx), vtype, os.path.basename(os.path.dirname(vf)), ent, prop, kind, st))
 
 # ---- 4. Report ----
 print(f"Model tables ({len(tables)}): " + ", ".join(sorted(tables)))

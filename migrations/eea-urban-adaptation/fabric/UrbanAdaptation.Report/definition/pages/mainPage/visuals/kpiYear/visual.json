@@ -10,74 +10,85 @@
     "tabOrder": 15000
   },
   "visual": {
-    "visualType": "slicer",
+    "visualType": "cardVisual",
     "query": {
       "queryState": {
-        "Values": {
+        "Data": {
           "projections": [
             {
               "field": {
-                "Column": {
+                "Aggregation": {
                   "Expression": {
-                    "SourceRef": {
-                      "Entity": "UA Cities"
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "UA Cities"
+                        }
+                      },
+                      "Property": "Year"
                     }
                   },
-                  "Property": "Year"
+                  "Function": 3
                 }
               },
-              "queryRef": "UA Cities.Year",
-              "nativeQueryRef": "Sum of Year",
-              "active": true
+              "queryRef": "Min(UA Cities.Year)",
+              "nativeQueryRef": "Year",
+              "displayName": "Year",
+              "format": "0"
             }
           ]
         }
       }
     },
     "objects": {
-      "data": [
+      "value": [
         {
           "properties": {
-            "mode": {
-              "expr": {
-                "Literal": {
-                  "Value": "'Between'"
-                }
-              }
-            }
-          }
+            "fontSize": { "expr": { "Literal": { "Value": "8D" } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } },
+            "labelDisplayUnits": { "expr": { "Literal": { "Value": "'1'" } } },
+            "customFormatString": { "expr": { "Literal": { "Value": "'0'" } } }
+          },
+          "selector": { "id": "default" }
         }
       ],
-      "header": [
+      "label": [
         {
           "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "true"
-                }
-              }
-            },
-            "textSize": {
-              "expr": {
-                "Literal": {
-                  "Value": "8D"
-                }
-              }
-            }
-          }
+            "position": { "expr": { "Literal": { "Value": "'aboveValue'" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "8D" } } }
+          },
+          "selector": { "id": "default" }
         }
       ],
-      "numericInputStyle": [
+      "shapeCustomRectangle": [
         {
           "properties": {
-            "textSize": {
-              "expr": {
-                "Literal": {
-                  "Value": "8D"
-                }
-              }
-            }
+            "tileShape": { "expr": { "Literal": { "Value": "'rectangle'" } } }
+          },
+          "selector": { "id": "default" }
+        }
+      ],
+      "divider": [
+        {
+          "properties": {
+            "show": { "expr": { "Literal": { "Value": "false" } } }
+          },
+          "selector": { "id": "default" }
+        }
+      ],
+      "referenceLabelLayout": [
+        {
+          "properties": {
+            "position": { "expr": { "Literal": { "Value": "'below'" } } }
+          },
+          "selector": { "id": "default" }
+        }
+      ],
+      "layout": [
+        {
+          "properties": {
+            "contentOrder": { "expr": { "Literal": { "Value": "'callout_image_referenceLabel'" } } }
           }
         }
       ]
@@ -86,74 +97,25 @@
       "title": [
         {
           "properties": {
-            "text": {
-              "expr": {
-                "Literal": {
-                  "Value": "'Year'"
-                }
-              }
-            },
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            },
-            "titleWrap": {
-              "expr": {
-                "Literal": {
-                  "Value": "true"
-                }
-              }
-            },
-            "fontSize": {
-              "expr": {
-                "Literal": {
-                  "Value": "9D"
-                }
-              }
-            },
-            "bold": {
-              "expr": {
-                "Literal": {
-                  "Value": "true"
-                }
-              }
-            }
+            "show": { "expr": { "Literal": { "Value": "false" } } },
+            "text": { "expr": { "Literal": { "Value": "'Year'" } } },
+            "fontSize": { "expr": { "Literal": { "Value": "9D" } } },
+            "bold": { "expr": { "Literal": { "Value": "true" } } }
           }
         }
       ],
       "background": [
         {
           "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "true"
-                }
-              }
-            },
-            "transparency": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            }
+            "show": { "expr": { "Literal": { "Value": "true" } } },
+            "transparency": { "expr": { "Literal": { "Value": "0D" } } }
           }
         }
       ],
       "border": [
         {
           "properties": {
-            "width": {
-              "expr": {
-                "Literal": {
-                  "Value": "1D"
-                }
-              }
-            }
+            "width": { "expr": { "Literal": { "Value": "1D" } } }
           }
         }
       ]

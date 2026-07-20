@@ -1,0 +1,5 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\fast-fashion-impact\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: 4846706a-8410-57dc-8655-450bb7ad2b2f
+
+	annotation PBI_ResultType = Text
+

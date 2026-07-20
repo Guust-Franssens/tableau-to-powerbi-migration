@@ -1,14 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
   "name": "819fc3bdcda2d4f59ca8",
-  "position": {
-    "x": 38.4,
-    "y": 658.8,
-    "z": 19000,
-    "width": 576,
-    "height": 194.4,
-    "tabOrder": 19000
-  },
+  "position": { "x": 38.4, "y": 658.8, "z": 19000, "width": 576, "height": 194.4, "tabOrder": 19000 },
   "visual": {
     "visualType": "lineChart",
     "drillFilterOtherVisuals": true,
@@ -16,186 +9,67 @@
       "queryState": {
         "Category": {
           "projections": [
-            {
-              "field": {
-                "Column": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Date"
-                    }
-                  },
-                  "Property": "Month Start"
-                }
-              },
-              "queryRef": "Date.Month Start",
-              "nativeQueryRef": "Month Start",
-              "active": true
-            }
+            { "field": { "Column": { "Expression": { "SourceRef": { "Entity": "Date Granularity" } }, "Property": "Date Granularity" } },
+              "queryRef": "Date Granularity.Date Granularity", "nativeQueryRef": "Date Granularity", "active": true }
           ]
         },
         "Y": {
           "projections": [
-            {
-              "field": {
-                "Measure": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Sample Superstore"
-                    }
-                  },
-                  "Property": "CP Sales"
-                }
-              },
-              "queryRef": "Sample Superstore.CP Sales",
-              "nativeQueryRef": "CP Sales"
-            },
-            {
-              "field": {
-                "Measure": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Sample Superstore"
-                    }
-                  },
-                  "Property": "PP Sales (Trend)"
-                }
-              },
-              "queryRef": "Sample Superstore.PP Sales (Trend)",
-              "nativeQueryRef": "PP Sales (Trend)"
-            }
+            { "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sample Superstore" } }, "Property": "CP Sales (Trend)" } },
+              "queryRef": "Sample Superstore.CP Sales (Trend)", "nativeQueryRef": "CP Sales (Trend)" },
+            { "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sample Superstore" } }, "Property": "PP Sales (Trend)" } },
+              "queryRef": "Sample Superstore.PP Sales (Trend)", "nativeQueryRef": "PP Sales (Trend)" }
           ]
         }
       }
     },
     "objects": {
-      "categoryAxis": [
-        {
-          "properties": {
-            "showAxisTitle": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            },
-            "fontSize": {
-              "expr": {
-                "Literal": {
-                  "Value": "8D"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "valueAxis": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "legend": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            }
-          }
-        }
+      "categoryAxis": [ { "properties": {
+        "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } },
+        "fontSize": { "expr": { "Literal": { "Value": "8D" } } }
+      } } ],
+      "valueAxis": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "legend": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "dataPoint": [
+        { "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#34657F'" } } } } } },
+          "selector": { "metadata": "Sample Superstore.CP Sales (Trend)" } },
+        { "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#BFBFBF'" } } } } } },
+          "selector": { "metadata": "Sample Superstore.PP Sales (Trend)" } }
       ]
     },
     "visualContainerObjects": {
-      "title": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            },
-            "text": {
-              "expr": {
-                "Literal": {
-                  "Value": "'SALES'"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "background": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "border": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "padding": [
-        {
-          "properties": {
-            "top": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            },
-            "bottom": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            },
-            "left": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            },
-            "right": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            }
-          }
-        }
-      ]
+      "title": [ { "properties": {
+        "show": { "expr": { "Literal": { "Value": "false" } } },
+        "text": { "expr": { "Literal": { "Value": "'SALES'" } } }
+      } } ],
+      "background": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "border": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "padding": [ { "properties": {
+        "top": { "expr": { "Literal": { "Value": "0D" } } }, "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+        "left": { "expr": { "Literal": { "Value": "0D" } } }, "right": { "expr": { "Literal": { "Value": "0D" } } }
+      } } ]
     }
+  },
+  "filterConfig": {
+    "filters": [
+      {
+        "name": "flt_window_819fc3bdcda2d4f59ca8",
+        "field": { "Measure": { "Expression": { "SourceRef": { "Entity": "Sample Superstore" } }, "Property": "CP Sales" } },
+        "type": "Advanced",
+        "filter": {
+          "Version": 2,
+          "From": [ { "Name": "s", "Entity": "Sample Superstore", "Type": 0 } ],
+          "Where": [
+            { "Condition": { "Comparison": {
+              "ComparisonKind": 1,
+              "Left": { "Measure": { "Expression": { "SourceRef": { "Source": "s" } }, "Property": "CP Sales" } },
+              "Right": { "Literal": { "Value": "0D" } }
+            } } }
+          ]
+        },
+        "howCreated": "User"
+      }
+    ]
   }
 }
+

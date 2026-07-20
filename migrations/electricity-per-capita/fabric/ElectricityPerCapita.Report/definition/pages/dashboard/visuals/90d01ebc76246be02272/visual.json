@@ -1,0 +1,59 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "90d01ebc76246be02272",
+  "position": {
+    "x": 50,
+    "y": 1930,
+    "z": 1260,
+    "width": 980,
+    "height": 120,
+    "tabOrder": 1260
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Electricity generation by country (per capita) & by source: year-on-year trends.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Each panel is a 100% stacked area chart for one country, showing the share of generation per source over the years. Data is provided until 2022; starting years differ by country depending on availability.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

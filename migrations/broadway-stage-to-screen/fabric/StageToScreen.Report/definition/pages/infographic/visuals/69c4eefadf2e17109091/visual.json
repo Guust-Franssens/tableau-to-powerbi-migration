@@ -1,0 +1,172 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "69c4eefadf2e17109091",
+  "position": {
+    "x": 140,
+    "y": 6180,
+    "z": 37000,
+    "width": 920,
+    "height": 820,
+    "tabOrder": 37000
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "STAGE TO SCREEN  ·  Broadway Musicals Turned Into Movies",
+                    "textStyle": {
+                      "fontSize": "15pt",
+                      "color": "#E8B04B",
+                      "fontFamily": "Trebuchet MS",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "6pt",
+                      "color": "#B9BBD0",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "Migrated from a Tableau Public IronViz to Microsoft Power BI.",
+                    "textStyle": {
+                      "fontSize": "12pt",
+                      "color": "#F5EFE6",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "Data sources: IMDb, Spotify, Playbill, Wikipedia and The Broadway League.",
+                    "textStyle": {
+                      "fontSize": "12pt",
+                      "color": "#B9BBD0",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "6pt",
+                      "color": "#B9BBD0",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "Design notes: several original marks were drawn from custom triangle / hexagon vertex",
+                    "textStyle": {
+                      "fontSize": "11pt",
+                      "color": "#B9BBD0",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "geometry that has no native Power BI equivalent; here they are represented with the closest",
+                    "textStyle": {
+                      "fontSize": "11pt",
+                      "color": "#B9BBD0",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "native charts (labelled scatter grids, cards and small multiples) that preserve the underlying",
+                    "textStyle": {
+                      "fontSize": "11pt",
+                      "color": "#B9BBD0",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              },
+              {
+                "horizontalTextAlignment": "center",
+                "textRuns": [
+                  {
+                    "value": "numbers. Award and 'watched' values are shown as stored in the source.",
+                    "textStyle": {
+                      "fontSize": "11pt",
+                      "color": "#B9BBD0",
+                      "fontFamily": "Segoe UI"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

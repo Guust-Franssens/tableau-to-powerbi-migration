@@ -1,0 +1,4193 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "StagetoScreenIronVizBroadwayMusicalsTurnedintoMovies.twbx",
+    "tableau_version": "18.1",
+    "source_build": "2024.3.0 (20243.25.0110.1701)",
+    "repository_location_id": "StagetoScreenIronVizBroadwayMusicalsTurnedintoMovies",
+    "parsed_at": "2026-07-17T16:14:41.775900+00:00"
+  },
+  "parameters": [
+    {
+      "id": "param.breakdown_by",
+      "internal_name": "[Parameter 1]",
+      "caption": "Breakdown by",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "Award",
+        "Category"
+      ],
+      "current_value": "Award"
+    }
+  ],
+  "data_sources": [
+    {
+      "id": "ds.1_films",
+      "caption": "1 Films",
+      "internal_name": "federated.1xmrgh21tk5pim122jq4w0jxqcvi",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1xmrgh21tk5pim122jq4w0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.1_films",
+          "name": "1 Films",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_1_films__orange",
+          "internal_name": "[.Apple (copy)_3479171459267358725]",
+          "caption": ".Orange",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Orange\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_1_films__best_picture",
+          "internal_name": "[Best Picture]",
+          "caption": "Best Picture",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__apple",
+          "internal_name": "[Calculation_3479171459267321860]",
+          "caption": ".Apple",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Apple\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_1_films__sondheim_s_work",
+          "internal_name": "[Calculation_3522729711955234818]",
+          "caption": "Sondheim's Work",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CONTAINS(\n[Original Broadway Lyricist(s)] + ' ' + [Original Broadway Musician(s)]\n,'Sondheim')",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_1_films__original_broadway_lyricist_s",
+            "fld.ds_1_films__original_broadway_musician_s"
+          ]
+        },
+        {
+          "id": "fld.ds_1_films__column",
+          "internal_name": "[Calculation_3522729711956307976]",
+          "caption": "Column",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(index()-1)%(int(sqrt(size())))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_1_films__row",
+          "internal_name": "[Calculation_3522729711956738057]",
+          "caption": "Row",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "int((Index()-1)/ (int(sqrt(size()))))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_1_films__column_triangle",
+          "internal_name": "[Calculation_3522729711957241866]",
+          "caption": "Column Triangle",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE INDEX()\nWHEN 1 THEN -SQRT(3)/2\nWHEN 2 THEN 0\nWHEN 3 THEN SQRT(3)/2\nEND",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_1_films__genres_revised",
+          "internal_name": "[Calculation_3522729711982628887]",
+          "caption": "Genres Revised",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "REPLACE([Genres (full list)],',',', ')",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_1_films__genres_full_list"
+          ]
+        },
+        {
+          "id": "fld.ds_1_films__row_triangle",
+          "internal_name": "[Column Triangle (copy)_3522729711957483531]",
+          "caption": "Row Triangle",
+          "table_id": "tbl.1_films",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "FLOAT(CASE INDEX()\nWHEN 1 THEN -1\nWHEN 2 THEN 1\nWHEN 3 THEN -1\nEND)",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_1_films__column_hex",
+          "internal_name": "[Column, Hex]",
+          "caption": "Column, Hex",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__column_ticket",
+          "internal_name": "[Column, Ticket]",
+          "caption": "Column, Ticket",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__genres_1st",
+          "internal_name": "[Genres (1st)]",
+          "caption": "Genres (1st)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__genres_2nd",
+          "internal_name": "[Genres (2nd)]",
+          "caption": "Genres (2nd)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__genres_3rd",
+          "internal_name": "[Genres (3rd)]",
+          "caption": "Genres (3rd)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__imdb_rating",
+          "internal_name": "[IMDB Rating]",
+          "caption": "IMDB Rating",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__imdb_url_title",
+          "internal_name": "[IMDB Url (title)]",
+          "caption": "IMDB Url (title)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__image_url_title",
+          "internal_name": "[Image Url (Title)]",
+          "caption": "Image Url (Title)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__number_of_votes",
+          "internal_name": "[Number Of Votes]",
+          "caption": "Number Of Votes",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__plot_medium",
+          "internal_name": "[Plot (medium)]",
+          "caption": "Plot (medium)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__production_companies_list",
+          "internal_name": "[Production Companies (List)]",
+          "caption": "Production Companies (List)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__row_hex",
+          "internal_name": "[Row, Hex]",
+          "caption": "Row, Hex",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__row_ticket",
+          "internal_name": "[Row, Ticket]",
+          "caption": "Row, Ticket",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__watched",
+          "internal_name": "[Watched?]",
+          "caption": "Watched?",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "%null%": "No",
+            "true": "Yes"
+          }
+        },
+        {
+          "id": "fld.ds_1_films__1_films",
+          "internal_name": "[__tableau_internal_object_id__].[1 Films_CE929E853E7447DDA4301B6940B13DC2]",
+          "caption": "1 Films",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_1_films__title",
+          "internal_name": "[Title]",
+          "caption": "Title",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_1_films__world_premiere_date",
+          "internal_name": "[World Premiere Date]",
+          "caption": "World Premiere Date",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_1_films__certificate_us",
+          "internal_name": "[Certificate (US)]",
+          "caption": "Certificate (US)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_1_films__genres_full_list",
+          "internal_name": "[Genres (full list)]",
+          "caption": "Genres (full list)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_1_films__runtime_minutes",
+          "internal_name": "[Runtime (Minutes)]",
+          "caption": "Runtime (Minutes)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_1_films__original_broadway_musician_s",
+          "internal_name": "[Original Broadway Musician(s)]",
+          "caption": "Original Broadway Musician(s)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_1_films__original_broadway_lyricist_s",
+          "internal_name": "[Original Broadway Lyricist(s)]",
+          "caption": "Original Broadway Lyricist(s)",
+          "table_id": "tbl.1_films",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.4_song_stats",
+      "caption": "4 Song Stats",
+      "internal_name": "federated.05baz1m16mal6h1djm0lw1p1gada",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_05baz1m16mal6h1djm0lw1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.pivot",
+          "name": "Pivot",
+          "source_relation": "pivot",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_4_song_stats__orange",
+          "internal_name": "[.Apple (copy)_3522729711978754069]",
+          "caption": ".Orange",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Orange\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_4_song_stats__album_popularity",
+          "internal_name": "[Album Popularity ( %)]",
+          "caption": "Album Popularity (%)",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__album_popularity_theater",
+          "internal_name": "[Album Popularity, Movie (copy)_3522729712006705194]",
+          "caption": "Album Popularity, Theater",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Film]: MIN(IIF([Type] = 'Theater',[Album Popularity ( %)],NULL))}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__album_popularity",
+            "fld.ds_4_song_stats__film",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__album_url",
+          "internal_name": "[Album URL]",
+          "caption": "Album URL",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__artists_name_s_1",
+          "internal_name": "[Artists Name(s) - 1]",
+          "caption": "Artists Name(s) - 1",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__artists_name_s_2",
+          "internal_name": "[Artists Name(s) - 2]",
+          "caption": "Artists Name(s) - 2",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__artists_name_s_3",
+          "internal_name": "[Artists Name(s) - 3]",
+          "caption": "Artists Name(s) - 3",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__type_cont",
+          "internal_name": "[Calculation_3479171459286048790]",
+          "caption": "Type (Cont)",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "FLOAT(IIF(Type = 'Theater',1,2))",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt",
+          "internal_name": "[Calculation_3479171459291013144]",
+          "caption": "Track Cnt",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "COUNTD([Track ID])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__track_id"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_theater_only",
+          "internal_name": "[Calculation_3479171459291406364]",
+          "caption": "Track Cnt, Theater only",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IIF(MIN([Type] = 'Theater'),[Calculation_3479171459291013144],NULL)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__track_cnt",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__column",
+          "internal_name": "[Calculation_3522729711956307976]",
+          "caption": "Column",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(index()-1)%(int(sqrt(size())))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_4_song_stats__row",
+          "internal_name": "[Calculation_3522729711956738057]",
+          "caption": "Row",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "int((Index()-1)/ (int(sqrt(size()))))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_4_song_stats__apple",
+          "internal_name": "[Calculation_3522729711978721300]",
+          "caption": ".Apple",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Apple\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_4_song_stats__album_popularity_movie",
+          "internal_name": "[Calculation_3522729712006463529]",
+          "caption": "Album Popularity, Movie",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Film]: MIN(IIF([Type] = 'Movie',[Album Popularity ( %)],NULL))}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__album_popularity",
+            "fld.ds_4_song_stats__film",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__popularity_diff",
+          "internal_name": "[Calculation_3522729712007819307]",
+          "caption": "Popularity Diff",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_3522729712006463529] - [Album Popularity, Movie (copy)_3522729712006705194]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__album_popularity_movie",
+            "fld.ds_4_song_stats__album_popularity_theater"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_movie_album_total",
+          "internal_name": "[Calculation_3522729712015196208]",
+          "caption": "Track Cnt, Movie Album Total",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Original]:\nCOUNTD(IIF([Type] = 'Movie',[Track ID],NULL)\n)\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__original",
+            "fld.ds_4_song_stats__track_id",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_movie_album_stat",
+          "internal_name": "[Calculation_3522729712016384052]",
+          "caption": "Track Cnt%, Movie Album + Stat",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Track Cnt, Movie Album Total (copy)_3522729712015941682]/[Calculation_3522729712015196208]",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__track_cnt_movie_album_stat_1",
+            "fld.ds_4_song_stats__track_cnt_movie_album_total"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__film_album_pop_highlight",
+          "internal_name": "[Film (Album Pop Highlight)]",
+          "caption": "Film (Album Pop Highlight)",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__film",
+          "internal_name": "[Film]",
+          "caption": "Film",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__key",
+          "internal_name": "[Key]",
+          "caption": "Key",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__label",
+          "internal_name": "[Label]",
+          "caption": "Label",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__loudness_db_60_0",
+          "internal_name": "[Loudness (db) (-60 - 0)]",
+          "caption": "Loudness (db) (-60 - 0)",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__mode",
+          "internal_name": "[Mode]",
+          "caption": "Mode",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__original_broadway_track_number",
+          "internal_name": "[Original Broadway Track Number]",
+          "caption": "Original Broadway Track Number",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__original_broadway_track",
+          "internal_name": "[Original Broadway Track]",
+          "caption": "Original Broadway Track",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__original_movie_track",
+          "internal_name": "[Original Movie Track]",
+          "caption": "Original Movie Track",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__original",
+          "internal_name": "[Original]",
+          "caption": "Original",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Sweeney Todd: The Demon Barber of Fleet Street": "Sweeney Todd"
+          }
+        },
+        {
+          "id": "fld.ds_4_song_stats__song_stat_dimension",
+          "internal_name": "[Pivot Field Names]",
+          "caption": "Song Stat Dimension",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Acousticness (0 - 1)": "Acousticness",
+            "Danceability (0 - 1)": "Danceability",
+            "Energy (0 - 1)": "Energy",
+            "Valence (0 - 1)": "Musical Positiveness"
+          }
+        },
+        {
+          "id": "fld.ds_4_song_stats__song_stat_value",
+          "internal_name": "[Pivot Field Values]",
+          "caption": "Song Stat Value",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__song_stat_value_bin",
+          "internal_name": "[Song Stat Value (bin)]",
+          "caption": "Song Stat Value (bin)",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Pivot Field Values]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": "pivot_derived",
+          "referenced_fields": [
+            "fld.ds_4_song_stats__song_stat_value"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__tempo_bpm",
+          "internal_name": "[Tempo (bpm)]",
+          "caption": "Tempo (bpm)",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__time_signature",
+          "internal_name": "[Time Signature]",
+          "caption": "Time Signature",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_10",
+          "internal_name": "[Track Artists - 10]",
+          "caption": "Track Artists - 10",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_11",
+          "internal_name": "[Track Artists - 11]",
+          "caption": "Track Artists - 11",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_12",
+          "internal_name": "[Track Artists - 12]",
+          "caption": "Track Artists - 12",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_13",
+          "internal_name": "[Track Artists - 13]",
+          "caption": "Track Artists - 13",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_14",
+          "internal_name": "[Track Artists - 14]",
+          "caption": "Track Artists - 14",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_15",
+          "internal_name": "[Track Artists - 15]",
+          "caption": "Track Artists - 15",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_16",
+          "internal_name": "[Track Artists - 16]",
+          "caption": "Track Artists - 16",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_17",
+          "internal_name": "[Track Artists - 17]",
+          "caption": "Track Artists - 17",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_18",
+          "internal_name": "[Track Artists - 18]",
+          "caption": "Track Artists - 18",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_19",
+          "internal_name": "[Track Artists - 19]",
+          "caption": "Track Artists - 19",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_1",
+          "internal_name": "[Track Artists - 1]",
+          "caption": "Track Artists - 1",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_20",
+          "internal_name": "[Track Artists - 20]",
+          "caption": "Track Artists - 20",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_2",
+          "internal_name": "[Track Artists - 2]",
+          "caption": "Track Artists - 2",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_3",
+          "internal_name": "[Track Artists - 3]",
+          "caption": "Track Artists - 3",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_4",
+          "internal_name": "[Track Artists - 4]",
+          "caption": "Track Artists - 4",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_5",
+          "internal_name": "[Track Artists - 5]",
+          "caption": "Track Artists - 5",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_6",
+          "internal_name": "[Track Artists - 6]",
+          "caption": "Track Artists - 6",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_7",
+          "internal_name": "[Track Artists - 7]",
+          "caption": "Track Artists - 7",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_8",
+          "internal_name": "[Track Artists - 8]",
+          "caption": "Track Artists - 8",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_9",
+          "internal_name": "[Track Artists - 9]",
+          "caption": "Track Artists - 9",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_theater_album_stat",
+          "internal_name": "[Track Cnt%, Movie Album + Stat (copy)_3522729712016470069]",
+          "caption": "Track Cnt%, Theater Album + Stat",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Track Cnt, Movie Album + Stat (copy)_3522729712016072755]/[Track Cnt, Movie Album Total (copy)_3522729712015724593]",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__track_cnt_theater_album_stat_1",
+            "fld.ds_4_song_stats__track_cnt_theater_album_total"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_theater_album_stat_1",
+          "internal_name": "[Track Cnt, Movie Album + Stat (copy)_3522729712016072755]",
+          "caption": "Track Cnt, Theater Album + Stat",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Original],[Pivot Field Names],[Song Stat Value (bin)]:\nCOUNTD(IIF([Type] = 'Theater',[Track ID],NULL)\n)\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": "pivot_derived",
+          "referenced_fields": [
+            "fld.ds_4_song_stats__original",
+            "fld.ds_4_song_stats__song_stat_dimension",
+            "fld.ds_4_song_stats__song_stat_value_bin",
+            "fld.ds_4_song_stats__track_id",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_theater_album_total",
+          "internal_name": "[Track Cnt, Movie Album Total (copy)_3522729712015724593]",
+          "caption": "Track Cnt, Theater Album Total",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Original]:\nCOUNTD(IIF([Type] = 'Theater',[Track ID],NULL)\n)\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__original",
+            "fld.ds_4_song_stats__track_id",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_movie_album_stat_1",
+          "internal_name": "[Track Cnt, Movie Album Total (copy)_3522729712015941682]",
+          "caption": "Track Cnt, Movie Album + Stat",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Original],[Pivot Field Names],[Song Stat Value (bin)]:\nCOUNTD(IIF([Type] = 'Movie',[Track ID],NULL)\n)\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": "pivot_derived",
+          "referenced_fields": [
+            "fld.ds_4_song_stats__original",
+            "fld.ds_4_song_stats__song_stat_dimension",
+            "fld.ds_4_song_stats__song_stat_value_bin",
+            "fld.ds_4_song_stats__track_id",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_cnt_movie_only",
+          "internal_name": "[Track Cnt, Movie only (copy)_3522729711942086656]",
+          "caption": "Track Cnt, Movie only",
+          "table_id": "tbl.pivot",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IIF(MIN([Type] = 'Movie'),[Calculation_3479171459291013144],NULL)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_4_song_stats__track_cnt",
+            "fld.ds_4_song_stats__type"
+          ]
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_duration_ms",
+          "internal_name": "[Track Duration (ms)]",
+          "caption": "Track Duration (ms)",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_name_combined",
+          "internal_name": "[Track Name, Combined]",
+          "caption": "Track Name, Combined",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_number",
+          "internal_name": "[Track Number]",
+          "caption": "Track Number",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_url",
+          "internal_name": "[Track URL]",
+          "caption": "Track URL",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__type",
+          "internal_name": "[Type]",
+          "caption": "Type",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__4_song_stats",
+          "internal_name": "[__tableau_internal_object_id__].[4 Song Stats_E3FF364BB481470FB464AF1BC20FF736]",
+          "caption": "4 Song Stats",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_4_song_stats__album_name",
+          "internal_name": "[Album Name]",
+          "caption": "Album Name",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_4_song_stats__artists_name_s_original",
+          "internal_name": "[Artists Name(s) Original]",
+          "caption": "Artists Name(s) Original",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_name_original",
+          "internal_name": "[Track Name (Original)]",
+          "caption": "Track Name (Original)",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_id",
+          "internal_name": "[Track ID]",
+          "caption": "Track ID",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_4_song_stats__track_artists_original",
+          "internal_name": "[Track Artists (Original)]",
+          "caption": "Track Artists (Original)",
+          "table_id": "tbl.pivot",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.2_chronology",
+      "caption": "2 Chronology",
+      "internal_name": "federated.1qpok5j0vxt0971262euw0bwhmc8",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1qpok5j0vxt0971262euw0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.2_chronology",
+          "name": "2 Chronology",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_2_chronology__orange",
+          "internal_name": "[.Apple (copy)_3522729711978496017]",
+          "caption": ".Orange",
+          "table_id": "tbl.2_chronology",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Orange\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_2_chronology__broadway_show",
+          "internal_name": "[Broadway Show]",
+          "caption": "Broadway Show",
+          "table_id": "tbl.2_chronology",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Sweeney Todd: The Demon Barber of Fleet Street": "Sweeney Todd"
+          }
+        },
+        {
+          "id": "fld.ds_2_chronology__latest_movie_premiere",
+          "internal_name": "[Calculation_3479171459268947976]",
+          "caption": "Latest Movie Premiere",
+          "table_id": "tbl.2_chronology",
+          "kind": "calculated",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Broadway Show]:\nMAX(\n    IIF([Type] = 'Movie',[Date],NULL)\n)\n}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_2_chronology__broadway_show",
+            "fld.ds_2_chronology__date",
+            "fld.ds_2_chronology__type"
+          ]
+        },
+        {
+          "id": "fld.ds_2_chronology__original_or_revival",
+          "internal_name": "[Calculation_3479171459269984265]",
+          "caption": "Original or Revival",
+          "table_id": "tbl.2_chronology",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [NYC Broadway Index] = 1 THEN 'Original'\nELSEIF [NYC Broadway Index] >= 2 THEN 'Revival'\nELSE NULL\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_2_chronology__nyc_broadway_index"
+          ]
+        },
+        {
+          "id": "fld.ds_2_chronology__apple",
+          "internal_name": "[Calculation_3522729711978450960]",
+          "caption": ".Apple",
+          "table_id": "tbl.2_chronology",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Apple\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_2_chronology__movie_name_or_original",
+          "internal_name": "[Calculation_3522729712004378664]",
+          "caption": "Movie Name or Original",
+          "table_id": "tbl.2_chronology",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IFNULL([Movie Name],[Broadway Show])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_2_chronology__broadway_show",
+            "fld.ds_2_chronology__movie_name"
+          ]
+        },
+        {
+          "id": "fld.ds_2_chronology__chicago_note",
+          "internal_name": "[Calculation_3522729712021987382]",
+          "caption": "Chicago Note",
+          "table_id": "tbl.2_chronology",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IIF([Broadway Show] = 'Chicago'\nAND [NYC Broadway Index] = 2\n,'Note that 31 Oct 2024 was not the show end date.\nIt was merely the latest performance active date \nthat I knew when creating the infographic.'\n, NULL)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_2_chronology__broadway_show",
+            "fld.ds_2_chronology__nyc_broadway_index"
+          ]
+        },
+        {
+          "id": "fld.ds_2_chronology__date",
+          "internal_name": "[Date]",
+          "caption": "Date",
+          "table_id": "tbl.2_chronology",
+          "kind": "column",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_2_chronology__nyc_broadway_index",
+          "internal_name": "[NYC Broadway Index]",
+          "caption": "NYC Broadway Index",
+          "table_id": "tbl.2_chronology",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "1": "(Original)",
+            "2": "(1st Revival)",
+            "3": "(2nd Revival)",
+            "4": "(3rd Revival)",
+            "5": "(4th Revival)",
+            "6": "(5th Revival)"
+          }
+        },
+        {
+          "id": "fld.ds_2_chronology__type",
+          "internal_name": "[Type]",
+          "caption": "Type",
+          "table_id": "tbl.2_chronology",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_2_chronology__2_chronology",
+          "internal_name": "[__tableau_internal_object_id__].[2 Chronology_767F34875B994C55986485BABAD3D38E]",
+          "caption": "2 Chronology",
+          "table_id": "tbl.2_chronology",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_2_chronology__event",
+          "internal_name": "[Event]",
+          "caption": "Event",
+          "table_id": "tbl.2_chronology",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_2_chronology__movie_name",
+          "internal_name": "[Movie Name]",
+          "caption": "Movie Name",
+          "table_id": "tbl.2_chronology",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.3_accolades",
+      "caption": "3 Accolades",
+      "internal_name": "federated.1u1bysd15bcrkg153o9sz00bcii5",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1u1bysd15bcrkg153o9sz0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.3a_broadway_accolades",
+          "name": "3A Broadway Accolades",
+          "source_relation": "table",
+          "custom_sql": null
+        },
+        {
+          "id": "tbl.3b_film_accolades",
+          "name": "3B Film Accolades",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_3_accolades__orange",
+          "internal_name": "[.Apple (copy)_3522729711978590227]",
+          "caption": ".Orange",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Orange\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_3_accolades__award",
+          "internal_name": "[Award]",
+          "caption": "Award",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Academy Awards": "Oscar",
+            "Golden Globe Awards": "Golden Globe",
+            "Golden Raspberry Awards": "Golden Raspberry",
+            "Grammy Awards": "Grammy",
+            "Tony Awards": "Tony"
+          }
+        },
+        {
+          "id": "fld.ds_3_accolades__record_count",
+          "internal_name": "[Calculation_3479171459273584653]",
+          "caption": "Record Count",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "COUNTD([Award]+[Category]+[Nominee])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_3_accolades__award",
+            "fld.ds_3_accolades__category",
+            "fld.ds_3_accolades__nominee"
+          ]
+        },
+        {
+          "id": "fld.ds_3_accolades__apple",
+          "internal_name": "[Calculation_3522729711978553362]",
+          "caption": ".Apple",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "\"Apple\"",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_3_accolades__award_or_category",
+          "internal_name": "[Calculation_3522729711994744857]",
+          "caption": "Award or Category",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Academy Awards": "Oscar",
+            "Golden Globe Awards": "Golden Globe",
+            "Golden Raspberry Awards": "Golden Raspberry",
+            "Grammy Awards": "Grammy",
+            "Tony Awards": "Tony"
+          },
+          "tableau_formula": "IIF([Parameters].[Parameter 1] = 'Award',[Award],[Category (group)])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_3_accolades__award",
+            "fld.ds_3_accolades__category_group"
+          ]
+        },
+        {
+          "id": "fld.ds_3_accolades__nomination_count",
+          "internal_name": "[Calculation_3522729711997247516]",
+          "caption": "Nomination Count",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Original],[Calculation_3522729711994744857]: [Calculation_3479171459273584653]}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_3_accolades__award_or_category",
+            "fld.ds_3_accolades__original",
+            "fld.ds_3_accolades__record_count"
+          ]
+        },
+        {
+          "id": "fld.ds_3_accolades__a_or_c_cat",
+          "internal_name": "[Calculation_3522729712024068151]",
+          "caption": "A or C = Cat",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 1] = 'Category'",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_3_accolades__category_group",
+          "internal_name": "[Category (group)]",
+          "caption": "Category (group)",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_3_accolades__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_3_accolades__film",
+          "internal_name": "[Film]",
+          "caption": "Film",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Sweeney Todd: The Demon Barber of Fleet Street": "Sweeney Todd"
+          }
+        },
+        {
+          "id": "fld.ds_3_accolades__win_count",
+          "internal_name": "[Nomination Count (copy)_3522729711998095393]",
+          "caption": "Win Count",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{FIXED [Original],[Calculation_3522729711994744857]: COUNTD(IIF([Result] = 'Won',[Award]+[Category]+[Nominee],NULL))}",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_3_accolades__award",
+            "fld.ds_3_accolades__award_or_category",
+            "fld.ds_3_accolades__category",
+            "fld.ds_3_accolades__nominee",
+            "fld.ds_3_accolades__original",
+            "fld.ds_3_accolades__result"
+          ]
+        },
+        {
+          "id": "fld.ds_3_accolades__original",
+          "internal_name": "[Original]",
+          "caption": "Original",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {
+            "Sweeney Todd: The Demon Barber of Fleet Street": "Sweeney Todd"
+          }
+        },
+        {
+          "id": "fld.ds_3_accolades__result",
+          "internal_name": "[Result]",
+          "caption": "Result",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_3_accolades__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_3_accolades__3a_broadway_accolades",
+          "internal_name": "[__tableau_internal_object_id__].[3A Broadway Accolades_CD60EDFB30824524BB9EB6F52AF965DB]",
+          "caption": "3A Broadway Accolades",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_3_accolades__type",
+          "internal_name": "[Type]",
+          "caption": "Type",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_3_accolades__nominee",
+          "internal_name": "[Nominee]",
+          "caption": "Nominee",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_3_accolades__source_url",
+          "internal_name": "[Source URL]",
+          "caption": "Source URL",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_3_accolades__sheet",
+          "internal_name": "[Sheet]",
+          "caption": "Sheet",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_3_accolades__table_name",
+          "internal_name": "[Table Name]",
+          "caption": "Table Name",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.1_tickets",
+      "name": "1 Tickets",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1xmrgh21tk5pim122jq4w0jxqcvi"
+      ],
+      "mark_type": "GanttBar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_1_films__row_ticket",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_1_films__column_ticket",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3479171459266449409:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": {
+          "field_id": "UNRESOLVED:[usr:Calculation_3479171459266473987:qk]"
+        },
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_1_films__apple"
+          },
+          {
+            "field_id": "fld.ds_1_films__orange"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_1_films__title"
+          },
+          {
+            "field_id": "fld.ds_1_films__original_broadway_musician_s"
+          },
+          {
+            "field_id": "fld.ds_1_films__original_broadway_lyricist_s"
+          },
+          {
+            "field_id": "fld.ds_1_films__certificate_us"
+          },
+          {
+            "field_id": "fld.ds_1_films__genres_revised"
+          },
+          {
+            "field_id": "fld.ds_1_films__watched"
+          },
+          {
+            "field_id": "fld.ds_1_films__runtime_minutes"
+          },
+          {
+            "field_id": "fld.ds_1_films__world_premiere_date"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Title:nk]>\n\nWorld Premiere:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:World Premiere Date:ok]>\nDuration:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[min:Runtime (Minutes):qk]> min\nRate:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Certificate (US):nk]>\nGenres:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Calculation_3522729711982628887:nk]>\nOriginal Broadway Lyricist(s):\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Original Broadway Lyricist(s):nk]>\nOriginal Broadway Musician(s):\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Original Broadway Musician(s):nk]>\nHave I watched it?:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Watched?:nk]>\n"
+    },
+    {
+      "id": "ws.2_chronology",
+      "name": "2 Chronology",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1qpok5j0vxt0971262euw0bwhmc8"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_2_chronology__broadway_show",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3479171459268632583:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3479171459268632583:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_2_chronology__date",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_2_chronology__type"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_2_chronology__nyc_broadway_index"
+          },
+          {
+            "field_id": "fld.ds_2_chronology__original_or_revival"
+          },
+          {
+            "field_id": "fld.ds_2_chronology__apple"
+          },
+          {
+            "field_id": "fld.ds_2_chronology__orange"
+          },
+          {
+            "field_id": "fld.ds_2_chronology__movie_name_or_original"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_2_chronology__chicago_note"
+          }
+        ]
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "constant",
+          "value": "#2000-01-01#",
+          "scope": "per-table"
+        },
+        {
+          "id": "refline1",
+          "label": "",
+          "formula": "constant",
+          "value": "#2022-10-31#",
+          "scope": "per-table"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1qpok5j0vxt0971262euw0bwhmc8].[none:Calculation_3522729712004378664:nk]> Æ\n<[federated.1qpok5j0vxt0971262euw0bwhmc8].[none:Event:nk]>:\t<[federated.1qpok5j0vxt0971262euw0bwhmc8].[none:Date:qk]> <[federated.1qpok5j0vxt0971262euw0bwhmc8].[none:NYC Broadway Index:ok]>"
+    },
+    {
+      "id": "ws.3_accolades",
+      "name": "3 Accolades",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1u1bysd15bcrkg153o9sz00bcii5"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_3_accolades__original",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3479171459272503307:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_3_accolades__award_or_category",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3479171459273998352:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3479171459273981967:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[none:Calculation_3522729711974776847:nk]"
+        },
+        "size": {
+          "field_id": "fld.ds_3_accolades__record_count"
+        },
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_3_accolades__apple"
+          },
+          {
+            "field_id": "fld.ds_3_accolades__orange"
+          },
+          {
+            "field_id": "fld.ds_3_accolades__nomination_count"
+          },
+          {
+            "field_id": "fld.ds_3_accolades__win_count"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_3_accolades__award_or_category",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Academy Awards\"",
+            "\"Best Album\"",
+            "\"Best Film Album\"",
+            "\"Best Musical\"",
+            "\"Best Musical Album\"",
+            "\"Best Picture\"",
+            "\"Golden Globe Awards\"",
+            "\"Golden Raspberry Awards\"",
+            "\"Grammy Awards\"",
+            "\"Tony Awards\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1u1bysd15bcrkg153o9sz00bcii5].[none:Original:nk]>Æ\n<[Parameters].[Parameter 1]>:\t<[federated.1u1bysd15bcrkg153o9sz00bcii5].[none:Calculation_3522729711994744857:nk]>Æ\nNomination(s):\t<[federated.1u1bysd15bcrkg153o9sz00bcii5].[min:Calculation_3522729711997247516:qk]>Æ\nWon(s):\t<[federated.1u1bysd15bcrkg153o9sz00bcii5].[min:Nomination Count (copy)_3522729711998095393:qk]>Æ\n"
+    },
+    {
+      "id": "ws.4_imdb",
+      "name": "4 IMDb",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1xmrgh21tk5pim122jq4w0jxqcvi"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_1_films__imdb_rating",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_1_films__number_of_votes",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[none:Calculation_3522729712012955694:nk]"
+        },
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_1_films__watched"
+        },
+        "label": [
+          {
+            "field_id": "fld.ds_1_films__title"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_1_films__title"
+          },
+          {
+            "field_id": "fld.ds_1_films__apple"
+          },
+          {
+            "field_id": "fld.ds_1_films__orange"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "",
+          "formula": "median",
+          "value": null,
+          "scope": "per-table"
+        },
+        {
+          "id": "refline1",
+          "label": "",
+          "formula": "median",
+          "value": null,
+          "scope": "per-table"
+        },
+        {
+          "id": "refline2",
+          "label": "",
+          "formula": "median",
+          "value": null,
+          "scope": "per-table"
+        },
+        {
+          "id": "refline3",
+          "label": "",
+          "formula": "median",
+          "value": null,
+          "scope": "per-table"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[none:Title:nk]>Æ\nIMDB Rating:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[none:IMDB Rating:qk]>Æ\nVote Count:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[none:Number Of Votes:qk]>Æ\nHave I watched it?:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[none:Watched?:nk]>"
+    },
+    {
+      "id": "ws.5_popularity",
+      "name": "5 Popularity",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.05baz1m16mal6h1djm0lw1p1gada"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_4_song_stats__album_popularity",
+            "aggregation": "MIN",
+            "derivation": "min",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_4_song_stats__type_cont",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "UNRESOLVED:[Film (Album Pop Highlight)]"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_4_song_stats__film"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "fld.ds_4_song_stats__original"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__apple"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__orange"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_4_song_stats__album_popularity_movie"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__album_popularity_theater"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__popularity_diff"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__album_name"
+          }
+        ]
+      },
+      "reference_lines": [
+        {
+          "id": "refline0",
+          "label": "Theater",
+          "formula": "min",
+          "value": null,
+          "scope": "per-table"
+        },
+        {
+          "id": "refline1",
+          "label": "Movie",
+          "formula": "max",
+          "value": null,
+          "scope": "per-table"
+        },
+        {
+          "id": "refline2",
+          "label": "",
+          "formula": "constant",
+          "value": "2.6800000000000002",
+          "scope": "per-table"
+        }
+      ],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Album Name:nk]>\nFilm:\t<[federated.05baz1m16mal6h1djm0lw1p1gada].[none:Film:nk]>\nMovie Album Popularity:\t0<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Calculation_3522729712006463529:qk]>Æ\nTheater Album Popularity:\t0<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Album Popularity, Movie (copy)_3522729712006705194:qk]>Æ\nAbs Diff:\t<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Calculation_3522729712007819307:qk]>Æ\n"
+    },
+    {
+      "id": "ws.6_song_stat",
+      "name": "6 Song Stat",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.05baz1m16mal6h1djm0lw1p1gada"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_4_song_stats__original",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_movie_only",
+            "aggregation": null,
+            "derivation": "pcto",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_theater_only",
+            "aggregation": null,
+            "derivation": "pcto",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_4_song_stats__song_stat_dimension",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__song_stat_value_bin",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_4_song_stats__type"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__apple"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__orange"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_movie_album_total"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_theater_album_total"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_movie_album_stat_1"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_theater_album_stat_1"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_movie_album_stat"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_cnt_theater_album_stat"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_4_song_stats__original",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Chicago\"",
+            "\"Dear Evan Hansen\"",
+            "\"Hairspray\"",
+            "\"Les Misérables\"",
+            "\"Mamma Mia!\"",
+            "\"Sweeney Todd: The Demon Barber of Fleet Street\"",
+            "\"The Phantom Of The Opera\"",
+            "\"West Side Story\""
+          ],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_4_song_stats__song_stat_dimension",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Acousticness (0 - 1)\"",
+            "\"Danceability (0 - 1)\"",
+            "\"Energy (0 - 1)\"",
+            "\"Valence (0 - 1)\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.05baz1m16mal6h1djm0lw1p1gada].[none:Original:nk]>Æ\n<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Calculation_3522729712016384052:qk]> (<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Track Cnt, Movie Album Total (copy)_3522729712015941682:qk]>/<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Calculation_3522729712015196208:qk]>) of the songs in the movie album has a Æ\n<[federated.05baz1m16mal6h1djm0lw1p1gada].[none:Pivot Field Names:nk]> value in the <[federated.05baz1m16mal6h1djm0lw1p1gada].[none:Song Stat Value (bin):qk]> bin (bin size = 0.1)Æ\nÆ\nIn contrast, <[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Track Cnt%, Movie Album + Stat (copy)_3522729712016470069:qk]> (<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Track Cnt, Movie Album + Stat (copy)_3522729712016072755:qk]>/<[federated.05baz1m16mal6h1djm0lw1p1gada].[min:Track Cnt, Movie Album Total (copy)_3522729712015724593:qk]>) of the songs in the theater album Æ\nwere in the same binÆ\n"
+    },
+    {
+      "id": "ws.7a_sondheim",
+      "name": "7A Sondheim",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1xmrgh21tk5pim122jq4w0jxqcvi"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_1_films__row_triangle",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_1_films__column_triangle",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_1_films__title"
+          },
+          {
+            "field_id": "fld.ds_1_films__apple"
+          },
+          {
+            "field_id": "fld.ds_1_films__orange"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_1_films__original_broadway_lyricist_s"
+          },
+          {
+            "field_id": "fld.ds_1_films__original_broadway_musician_s"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_1_films__sondheim_s_work",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[none:Title:nk]>Æ\nOriginal Broadway Lyricist:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Original Broadway Lyricist(s):nk]>Æ\nOriginal Broadway Musician:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Original Broadway Musician(s):nk]>"
+    },
+    {
+      "id": "ws.7b_streep",
+      "name": "7B Streep",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.05baz1m16mal6h1djm0lw1p1gada"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_4_song_stats__row",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_4_song_stats__column",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_4_song_stats__track_id"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__apple"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__orange"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_4_song_stats__artists_name_s_original"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_name_original"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__track_artists_original"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__album_name"
+          },
+          {
+            "field_id": "fld.ds_4_song_stats__film"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_4_song_stats__track_artists_original",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.05baz1m16mal6h1djm0lw1p1gada].[attr:Track Name (Original):nk]>Æ\nTrack Artist(s):\t<[federated.05baz1m16mal6h1djm0lw1p1gada].[attr:Track Artists (Original):nk]>Æ\nAlbum:\t<[federated.05baz1m16mal6h1djm0lw1p1gada].[attr:Album Name:nk]>"
+    },
+    {
+      "id": "ws.7c_2021",
+      "name": "7C 2021",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1xmrgh21tk5pim122jq4w0jxqcvi"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_1_films__row",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_1_films__column",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_1_films__title"
+          },
+          {
+            "field_id": "fld.ds_1_films__apple"
+          },
+          {
+            "field_id": "fld.ds_1_films__orange"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_1_films__world_premiere_date"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_1_films__world_premiere_date",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "2021"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[none:Title:nk]>Æ\nWorld Premiere:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:World Premiere Date:ok]>Æ\n"
+    },
+    {
+      "id": "ws.7d_todd",
+      "name": "7D Todd",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1xmrgh21tk5pim122jq4w0jxqcvi"
+      ],
+      "mark_type": "Circle",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3522729711963328526:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3522729711963328526:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_1_films__title"
+          },
+          {
+            "field_id": "fld.ds_1_films__apple"
+          },
+          {
+            "field_id": "fld.ds_1_films__orange"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_1_films__certificate_us"
+          },
+          {
+            "field_id": "fld.ds_1_films__genres_revised"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Action (.Orange)]",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [],
+          "note": null
+        },
+        {
+          "field_id": "fld.ds_1_films__certificate_us",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"R\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[none:Title:nk]>Æ\nGenres:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Calculation_3522729711982628887:nk]>Æ\nRate:\t<[federated.1xmrgh21tk5pim122jq4w0jxqcvi].[attr:Certificate (US):nk]>"
+    },
+    {
+      "id": "ws.grouping_explanation",
+      "name": "Grouping Explanation",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1u1bysd15bcrkg153o9sz00bcii5"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Category (group)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_3_accolades__category",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "UNRESOLVED:[Category (group)]",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "\"Other\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.info_button",
+      "name": "Info Button",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1u1bysd15bcrkg153o9sz00bcii5"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3522729712000688165:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3522729712000688165:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_3522729712000688165:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_3_accolades__apple"
+          },
+          {
+            "field_id": "fld.ds_3_accolades__orange"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<Sheet name=\"Grouping Explanation\" maxwidth=\"720\" maxheight=\"300\" filter=\"<All Fields>\">Æ\n"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.infographic",
+      "name": "Infographic",
+      "size": {
+        "width": 1200.0,
+        "height": 7628.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "4",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#1c2240",
+            "children": [
+              {
+                "id": "3",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 100000.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "5",
+            "type": "worksheet",
+            "x": 39917.0,
+            "y": 8023.0,
+            "w": 46333.0,
+            "h": 8508.0,
+            "direction": null,
+            "worksheet_id": "ws.1_tickets",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "6",
+            "type": "worksheet",
+            "x": 5000.0,
+            "y": 18668.0,
+            "w": 61417.0,
+            "h": 8692.0,
+            "direction": null,
+            "worksheet_id": "ws.2_chronology",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "10",
+            "type": "worksheet",
+            "x": 33667.0,
+            "y": 29667.0,
+            "w": 61333.0,
+            "h": 9806.0,
+            "direction": null,
+            "worksheet_id": "ws.3_accolades",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "11",
+            "type": "worksheet",
+            "x": 4917.0,
+            "y": 41020.0,
+            "w": 38417.0,
+            "h": 5585.0,
+            "direction": null,
+            "worksheet_id": "ws.4_imdb",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "12",
+            "type": "worksheet",
+            "x": 49000.0,
+            "y": 48466.0,
+            "w": 46000.0,
+            "h": 7879.0,
+            "direction": null,
+            "worksheet_id": "ws.5_popularity",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "13",
+            "type": "worksheet",
+            "x": 5000.0,
+            "y": 58180.0,
+            "w": 53750.0,
+            "h": 8705.0,
+            "direction": null,
+            "worksheet_id": "ws.6_song_stat",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "14",
+            "type": "worksheet",
+            "x": 5000.0,
+            "y": 69206.0,
+            "w": 15333.0,
+            "h": 3002.0,
+            "direction": null,
+            "worksheet_id": "ws.7a_sondheim",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "15",
+            "type": "worksheet",
+            "x": 5000.0,
+            "y": 72522.0,
+            "w": 15333.0,
+            "h": 3015.0,
+            "direction": null,
+            "worksheet_id": "ws.7b_streep",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "16",
+            "type": "worksheet",
+            "x": 64333.0,
+            "y": 69192.0,
+            "w": 15333.0,
+            "h": 3055.0,
+            "direction": null,
+            "worksheet_id": "ws.7c_2021",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "17",
+            "type": "worksheet",
+            "x": 64333.0,
+            "y": 72535.0,
+            "w": 15333.0,
+            "h": 3015.0,
+            "direction": null,
+            "worksheet_id": "ws.7d_todd",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "20",
+            "type": "worksheet",
+            "x": 59583.0,
+            "y": 58180.0,
+            "w": 32333.0,
+            "h": 747.0,
+            "direction": null,
+            "worksheet_id": "ws.6_song_stat",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "21",
+            "type": "layout-basic",
+            "x": 78667.0,
+            "y": 49410.0,
+            "w": 8333.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Mamma Mia!",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "22",
+            "type": "layout-basic",
+            "x": 78667.0,
+            "y": 50210.0,
+            "w": 16333.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Mamma Mia! Here We Go Again",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "23",
+            "type": "layout-basic",
+            "x": 78667.0,
+            "y": 50485.0,
+            "w": 15833.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Chicago",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "24",
+            "type": "layout-basic",
+            "x": 78667.0,
+            "y": 51888.0,
+            "w": 13000.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Dear Evan Hansen",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "25",
+            "type": "layout-basic",
+            "x": 78667.0,
+            "y": 50996.0,
+            "w": 15833.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "tick, tick... BOOM!",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "26",
+            "type": "layout-basic",
+            "x": 14500.0,
+            "y": 45097.0,
+            "w": 4417.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Cats",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "27",
+            "type": "layout-basic",
+            "x": 24750.0,
+            "y": 41400.0,
+            "w": 4417.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Chicago",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "28",
+            "type": "layout-basic",
+            "x": 29750.0,
+            "y": 40994.0,
+            "w": 7833.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Les Miserables",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "29",
+            "type": "layout-basic",
+            "x": 36083.0,
+            "y": 41610.0,
+            "w": 7833.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Sweeney Todd",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "30",
+            "type": "layout-basic",
+            "x": 82750.0,
+            "y": 28946.0,
+            "w": 12250.0,
+            "h": 577.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "31",
+            "type": "worksheet",
+            "x": 92750.0,
+            "y": 28867.0,
+            "w": 2167.0,
+            "h": 341.0,
+            "direction": null,
+            "worksheet_id": "ws.info_button",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "32",
+            "type": "layout-basic",
+            "x": 28750.0,
+            "y": 42344.0,
+            "w": 7083.0,
+            "h": 393.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": "Mamma Mia!",
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "34",
+            "type": "layout-basic",
+            "x": 3583.0,
+            "y": 66597.0,
+            "w": 57250.0,
+            "h": 800.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "35",
+            "type": "layout-basic",
+            "x": 4083.0,
+            "y": 57708.0,
+            "w": 57250.0,
+            "h": 996.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "36",
+            "type": "layout-basic",
+            "x": 46500.0,
+            "y": 48086.0,
+            "w": 8833.0,
+            "h": 8639.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "37",
+            "type": "layout-basic",
+            "x": 2917.0,
+            "y": 45936.0,
+            "w": 42583.0,
+            "h": 944.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "38",
+            "type": "layout-basic",
+            "x": 3500.0,
+            "y": 40836.0,
+            "w": 6250.0,
+            "h": 5926.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "41",
+            "type": "layout-basic",
+            "x": 3250.0,
+            "y": 27045.0,
+            "w": 64000.0,
+            "h": 472.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.7c_2021",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.7d_todd",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.info_button",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.1_tickets",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.2_chronology",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.3_accolades",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.4_imdb",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.5_popularity",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.6_song_stat",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.7a_sondheim",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        },
+        {
+          "type": "url",
+          "field_id": null,
+          "source_worksheet_id": "ws.7b_streep",
+          "target_worksheet_ids": [],
+          "run_on": "select"
+        }
+      ]
+    }
+  ],
+  "theme": {
+    "palette_hexes": [
+      "#b4b4b4",
+      "#e15759",
+      "#e6e6e6",
+      "#f28e2b00",
+      "#f29d53",
+      "#fafafa"
+    ],
+    "font_family": "Trebuchet MS",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.1_films",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_1_films__column",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_1_films__row",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_1_films__column_triangle",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_1_films__row_triangle",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_1_films__1_films",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.4_song_stats",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__album_popularity_theater",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__column",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__row",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__album_popularity_movie",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__track_cnt_movie_album_total",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__track_cnt_movie_album_stat",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__track_cnt_theater_album_stat",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__track_cnt_theater_album_stat_1",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__track_cnt_theater_album_total",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__track_cnt_movie_album_stat_1",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_4_song_stats__4_song_stats",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.2_chronology",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_2_chronology__latest_movie_premiere",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_2_chronology__2_chronology",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.3_accolades",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_3_accolades__nomination_count",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_3_accolades__win_count",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_3_accolades__3a_broadway_accolades",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.1_tickets",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459266449409:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.2_chronology",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459268632583:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.2_chronology",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459268632583:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.3_accolades",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459272503307:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.3_accolades",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459273998352:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.3_accolades",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459273981967:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.7d_todd",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729711963328526:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.7d_todd",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729711963328526:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.grouping_explanation",
+      "issue": "could not resolve shelf reference UNRESOLVED:Category (group)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.info_button",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729712000688165:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.info_button",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729712000688165:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.info_button",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729712000688165:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "parser.calculated_field_formula_gap",
+      "severity": "high",
+      "stage": "semantic_build",
+      "issue": "PARSER GAP: every calculated field in migration-spec.json has formula=null (39/39), although is_lod / is_table_calc / referenced_fields / reshape_hint were captured. All Tableau formulas had to be recovered from the source .twb XML (<calculation class='tableau' formula='...'>, plus <categorical-bin>/<bin> for the groups and the 0.1 histogram bin). This is not workbook-specific - it reproduces across every migration-spec in the repo."
+    },
+    {
+      "item": "semantic_model.materialization",
+      "severity": "medium",
+      "stage": "semantic_build",
+      "issue": "All 4 data sources are Tableau .hyper extracts with no live upstream. Built as Power BI IMPORT tables from the materialized extract CSVs (data/ds.*.csv) via the DataFolder M parameter (absolute path). If the customer has real upstream systems behind the extracts, repoint the M partitions."
+    },
+    {
+      "item": "semantic_model.blend_to_relationships",
+      "severity": "medium",
+      "stage": "semantic_build",
+      "issue": "Tableau had ZERO active data blends and each worksheet uses a single source (only '3 Accolades' also references the Parameters pseudo-source). The 4-source 'blend' is conceptual, keyed on Film/Original title. Modeled as 3 single-direction many-to-one relationships fact->'1 Films'[Title]: '4 Song Stats'[Film], '3 Accolades'[Film], '2 Chronology'[Broadway Show]. Single cross-filter (TMDL default) reproduces the 11 Tableau dashboard highlight actions as native cross-highlight without imposing bidirectional filtering the source never had."
+    },
+    {
+      "item": "semantic_model.relationship_case_insensitive_match",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "'4 Song Stats'[Film] has 3 case-only variants vs '1 Films'[Title] (In the Heights / Matilda the Musical / The Phantom of the Opera). Verified 0 TRUE (case-insensitive) unmatched keys across all 3 relationships, so Power BI's documented case-insensitive relationship matching joins them correctly ('1 Films'[Title] has no case-collisions). Keys kept RAW (name==sourceColumn, no renames) to eliminate rename-grep risk. Accolades (19/19) and Chronology (21/21) match exactly."
+    },
+    {
+      "item": "ds.3_accolades.union_to_flat_table",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "'3 Accolades' is a Tableau UNION of 3A Broadway + 3B Film accolade tables, already materialized to one 397-row CSV (the [Sheet]/[Table Name] provenance columns are retained but hidden). Modeled as one flat import table - the union is not rebuilt in Power Query."
+    },
+    {
+      "item": "fld.trellis_column_row.dropped_visual_layout",
+      "severity": "medium",
+      "stage": "semantic_build",
+      "issue": "Custom-geometry trellis table calcs [Column]=(index()-1)%int(sqrt(size())) and [Row]=int((index()-1)/int(sqrt(size()))) (present in BOTH '1 Films' and '4 Song Stats') were DROPPED as visual-layout concerns. They densify a grid of marks via INDEX()/SIZE() over the pane; the film grid is better realized by the materialized 'Row/Column, Ticket' & 'Row/Column, Hex' coordinate columns (kept as real data) or by a native Power BI small-multiples / grid layout in the report phase."
+    },
+    {
+      "item": "fld.column_row_triangle.capability_gap",
+      "severity": "high",
+      "stage": "semantic_build",
+      "issue": "CAPABILITY GAP: [Column Triangle]=CASE INDEX() WHEN 1 THEN -SQRT(3)/2 WHEN 2 THEN 0 WHEN 3 THEN SQRT(3)/2 END and [Row Triangle]=FLOAT(CASE INDEX() WHEN 1 THEN -1 WHEN 2 THEN 1 WHEN 3 THEN -1 END) build custom polygon/triangle MARKS (3 vertices per triangle over a densified INDEX() axis). Power BI has no native polygon-mark equivalent; these are NOT translatable to a model column/measure and were omitted. The report phase must approximate the triangular marks with a custom/AppSource visual, an image, or a shape, or accept reduced fidelity."
+    },
+    {
+      "item": "fld.apple_orange.highlight_helpers_dropped",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "[.Apple]=\"Apple\" and [.Orange]=\"Orange\" constant fields exist in ALL 4 sources (8 fields total) purely as Tableau dashboard-action highlight helpers. Dropped - superseded by native Power BI cross-highlight via the relationships."
+    },
+    {
+      "item": "fld.award_or_category.superseded_by_field_parameter",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "[Award or Category]=IIF([Parameters].[Parameter 1]='Award',[Award],[Category (group)]) and its echo helper [A or C = Cat]=([Parameters].[Parameter 1]='Category') are the parameter-swap idiom. Both DROPPED as standalone fields and replaced by a dimension-flavored Field Parameter 'Breakdown by' that swaps '3 Accolades'[Award] <-> [Category (group)] natively."
+    },
+    {
+      "item": "semantic_model.field_parameter_no_metadata_marker",
+      "severity": "medium",
+      "stage": "semantic_build",
+      "issue": "The 'Breakdown by' Field Parameter mirrors the Superstore 'Scatter Plot Detail' reference EXACTLY: 3-column calc table, bracketed sourceColumn [Value1]/[Value2]/[Value3], sortByColumn on the Order column, NAMEOF() rows. Like the reference, NO 'extendedProperty ParameterMetadata = {\"version\":3,\"kind\":2}' annotation is emitted. If native field-swap does not engage when the report binds this column, the report phase should add that extendedProperty to the 'Breakdown by' column (per the pbi-semantic-builder gotcha for dimension-flavored FPs)."
+    },
+    {
+      "item": "fld.track_cnt_type_only.min_boolean_guard_simplified",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "[Track Cnt, Theater only]=IIF(MIN([Type]='Theater'),[Track Cnt],NULL) (and the Movie twin) use Tableau's MIN()-over-booleans all-rows-are-Theater guard. Simplified to CALCULATE(DISTINCTCOUNT([Track ID]), [Type]=flag) - equivalent whenever the viz splits by Type (the intended use). If a report ever aggregates across mixed Type without splitting, Tableau would return NULL where the DAX returns the flag-filtered count."
+    },
+    {
+      "item": "fld.record_count.null_nominee_and_concat_key",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "[Record Count]=COUNTD([Award]+[Category]+[Nominee]). Modeled with a hidden [Record Key]=[Award]&[Category]&[Nominee] calc column + CALCULATE(DISTINCTCOUNT([Record Key]), NOT ISBLANK([Nominee])). The Nominee-not-blank filter reproduces Tableau's + null-propagation (4 of 397 rows have blank Nominee and are excluded) and prevents a phantom BLANK distinct. [Nomination Count]={FIXED [Original],[Award or Category]:[Record Count]} is modeled as =[Record Count] (the FIXED grain is realized by the report's Original x Breakdown-by axis). [Win Count] adds [Result]='Won'. All ground-truthed."
+    },
+    {
+      "item": "fld.song_stat_value_bin.floor_epsilon",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "Tableau bin on [Pivot Field Values] (size 0.1, peg 0) -> calc column ROUND(FLOOR([Pivot Field Values]+0.0000001, 0.1), 1). The +1e-7 epsilon guards a FP boundary (source values are <=3 decimals) and ROUND(,1) cleans FP noise; verified matching the Tableau bin across 0.0..1.0 boundary probes. Used as an ALLEXCEPT grain column by the 'Album + Stat' measures."
+    },
+    {
+      "item": "fld.groups_to_switch",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "Two Tableau groups became SWITCH calc columns with the exact member lists from the .twb <categorical-bin> (default 'Other'): [Category (group)] on '3 Accolades'[Category] (buckets Best Film Album / Best Musical / Best Musical Album / Best Picture; 331/397 rows fall to 'Other' - faithful) and [Film (Album Pop Highlight)] on '4 Song Stats'[Film] (Chicago+Mamma Mia! x2+tick,tick...BOOM! bucket, and Dear Evan Hansen)."
+    },
+    {
+      "item": "ds.value_aliases_kept_raw",
+      "severity": "medium",
+      "stage": "semantic_build",
+      "issue": "Tableau value-aliases are DISPLAY relabelings kept RAW in the model (report phase should apply them, or add a remap): '3 Accolades'[Award] (Academy Awards->Oscar, Golden Globe Awards->Golden Globe, Golden Raspberry->Golden Raspberry, Grammy->Grammy, Tony->Tony); '2 Chronology'[NYC Broadway Index] (1->(Original)..6->(5th Revival)); '1 Films'[Watched?] (the extract exported the boolean as 't'/blank text, and Tableau aliases true->Yes / null->No - so remap 't'->Yes, blank->No); the 'Sweeney Todd: The Demon Barber of Fleet Street'->'Sweeney Todd' alias (NOT applied to key columns - all relationships use the full title, which matches '1 Films'[Title]); and the 'Song Stat Dimension' relabel of '4 Song Stats'[Pivot Field Names] (Acousticness (0-1)->Acousticness, ..., Valence (0-1)->'Musical Positiveness')."
+    },
+    {
+      "item": "semantic_model.summarize_by_choices",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "Base numeric columns use summarizeBy=none EXCEPT truly additive ones (Number Of Votes, Runtime (Minutes), Track Duration (ms) = sum). Rates/ordinals/coordinates (Album Popularity ( %), IMDB Rating, Tempo (bpm), Loudness (db), Pivot Field Values, Track Number, Time Signature, trellis Row/Column) are none - Tableau accessed them via explicit MIN/AVG, not SUM, and auto-summing a percentage/rating is misleading. This is a deliberate deviation from the BPA 'keep base numerics as sum' default; the explicit LOD measures provide the real aggregations."
+    },
+    {
+      "item": "fld.sondheims_work.null_vs_false",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "[Sondheim's Work]=CONTAINS([Lyricist(s)]+' '+[Musician(s)],'Sondheim') -> boolean calc column CONTAINSSTRINGEXACT([Original Broadway Lyricist(s)] & \" \" & [Original Broadway Musician(s)], \"Sondheim\") (case-sensitive, matching Tableau CONTAINS). DAX & coerces blank->\"\" so the 1 film with a blank lyricist/musician yields FALSE where Tableau's + null-propagation yields NULL - equivalent for a boolean 'is Sondheim' flag."
+    },
+    {
+      "item": "fld.latest_movie_premiere.dimension_as_measure",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "[Latest Movie Premiere] is a Tableau role=dimension date field but its formula is an aggregating FIXED LOD ({FIXED [Broadway Show]: MAX(...)}), so it is modeled as a DAX MEASURE returning a scalar date per show (formatString General Date). If the report needs it as a slicer/axis dimension rather than a value, materialize it as a calc column on '2 Chronology' instead."
+    },
+    {
+      "item": "semantic_model.columns_from_csv_headers",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "Physical columns are authored from the extract CSV headers (source of truth), not the spec fields[] list. '4 Song Stats' keeps all 48 physical columns including the sparse 'Track Artists - 1..20' and the already-melted 'Pivot Field Names'/'Pivot Field Values' pair (so NO Power Query unpivot is needed - the audio-feature reshape is materialized in the extract). Note [Type] values differ by source: Theater/Movie in Song Stats & Chronology, but Theater/Film in Accolades (irrelevant to the modeled measures, which don't filter Accolades[Type])."
+    },
+    {
+      "item": "semantic_model.compatibility_level",
+      "severity": "low",
+      "stage": "semantic_build",
+      "issue": "compatibilityLevel=1606. All translated DAX uses classic CALCULATE/ALLEXCEPT/MIN/MAX/DISTINCTCOUNT/SWITCH/FLOOR (works at 1500+); no window functions (OFFSET/INDEX/WINDOW) are used, so no higher level is required and everything validates offline."
+    },
+    {
+      "item": "semantic_model.validation_mode",
+      "severity": "medium",
+      "stage": "semantic_build",
+      "issue": "No live Power BI Desktop / MCP / EVALUATE was available, so validation is: (1) STRUCTURAL - Microsoft.AnalysisServices.Tabular.TmdlSerializer.DeserializeDatabaseFromFolder -> OK (5 tables, 100 columns of which 10 calculated + 3 field-parameter, 17 measures, 3 relationships, compat 1606) plus model-integrity assertions (model-wide measure-name uniqueness; no measure==column in a table; every DAX [bracket] ref resolves) -> all OK; (2) NUMERIC - Python ground-truth re-implementing each conditional-FIXED-LOD two independent ways (Tableau FIXED semantics vs a literal CALCULATE/ALLEXCEPT replica) -> all PASS on Chicago/Phantom/Cats/Mamma Mia!/etc probes (see _validation/groundtruth_lods.py). A Desktop refresh + EVALUATE spot-check is recommended before publishing."
+    }
+  ]
+}

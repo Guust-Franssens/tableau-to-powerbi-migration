@@ -1,0 +1,137 @@
+/// Award/nomination fact (397 rows) - a materialized UNION of Tableau's 3A Broadway + 3B Film accolade tables (see [Sheet]/[Table Name] provenance cols). Keys [Film]/[Original].
+table '3 Accolades'
+	lineageTag: c8cb4017-152d-5116-9717-f76d070b5562
+
+	/// Tableau [Record Count] = COUNTD([Award]+[Category]+[Nominee]): distinct Award+Category+Nominee keys, excluding both null AND empty-string Nominee. The empty-string guard ([Nominee] <> "") is required because DAX ISBLANK("")=FALSE, so the 4 blank The Producers 2005 Golden Globe rows would otherwise slip through and over-count by +4 (346 vs the correct 342).
+	measure 'Record Count' = CALCULATE(DISTINCTCOUNT('3 Accolades'[Record Key]), NOT ISBLANK('3 Accolades'[Nominee]) && '3 Accolades'[Nominee] <> "")
+		formatString: #,##0
+		lineageTag: 851c2c27-2362-5e42-a4ad-2048b8924e39
+
+	/// Tableau [Nomination Count] = {FIXED [Original],[Award or Category]: [Record Count]}. The FIXED grain is realized by the report's Original x (Breakdown by) axis, so the measure == [Record Count].
+	measure 'Nomination Count' = [Record Count]
+		formatString: #,##0
+		lineageTag: 22800081-9430-520f-bd0b-7b10c7935680
+
+	/// Tableau [Win Count] = {FIXED [Original],[Award or Category]: COUNTD(IIF([Result]='Won',[Award]+[Category]+[Nominee],NULL))}. GROUND-TRUTHED.
+	measure 'Win Count' = CALCULATE(DISTINCTCOUNT('3 Accolades'[Record Key]), '3 Accolades'[Result] = "Won", NOT ISBLANK('3 Accolades'[Nominee]))
+		formatString: #,##0
+		lineageTag: 1f71a373-1041-59ec-a090-8460c400d925
+
+	column 'Type'
+		dataType: string
+		lineageTag: 2db411cf-6b32-5675-a9dc-c7b4db3ca020
+		summarizeBy: none
+		sourceColumn: Type
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Original'
+		dataType: string
+		lineageTag: d47bcd63-2c83-55c7-bd47-924c49926b5a
+		summarizeBy: none
+		sourceColumn: Original
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Film'
+		dataType: string
+		lineageTag: 2fbb60e8-1ec8-5712-a196-1dc3f840869b
+		summarizeBy: none
+		sourceColumn: Film
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Year'
+		dataType: int64
+		lineageTag: ced78b6d-70ac-5e15-aed9-38e413361c5b
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Award'
+		dataType: string
+		lineageTag: 8db10509-830a-5bd4-ad52-2155685a1a7d
+		summarizeBy: none
+		sourceColumn: Award
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Category'
+		dataType: string
+		lineageTag: e0fb9147-8502-51f5-be24-8ab954dfc85e
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Nominee'
+		dataType: string
+		lineageTag: ed0c34b4-0afe-58e5-9348-31e1b13e8c6e
+		summarizeBy: none
+		sourceColumn: Nominee
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Result'
+		dataType: string
+		lineageTag: 09225f04-6644-558e-83a3-06ed7647ee69
+		summarizeBy: none
+		sourceColumn: Result
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Source URL'
+		dataType: string
+		lineageTag: d5550b4a-fc38-519e-b33d-b71f6199d22d
+		summarizeBy: none
+		sourceColumn: Source URL
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Sheet'
+		dataType: string
+		lineageTag: d8aea627-10ae-59a6-ba9d-45e6f886a481
+		summarizeBy: none
+		sourceColumn: Sheet
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Table Name'
+		dataType: string
+		lineageTag: 958d745e-a2ca-58de-a8fc-2c38d6493e84
+		summarizeBy: none
+		sourceColumn: Table Name
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Tableau group [Category (group)] on [Category] (default 'Other'). Faithful member->bucket SWITCH. Used as the 'Category' arm of the 'Breakdown by' Field Parameter.
+	column 'Category (group)' = SWITCH(TRUE(), '3 Accolades'[Category] IN {"Best Compilation Soundtrack Album for a Motion Picture or Television", "Best Compilation Soundtrack Album for a Motion Picture, Television or Other Visual Media", "Best Compilation Soundtrack Album for Motion Picture, Television or Other Visual Media", "Grammy Award for Best Musical Show Album"}, "Best Film Album", '3 Accolades'[Category] IN {"Best Musical", "Best Musical or Comedy - Motion Picture", "Best Revival", "Best Revival of a Musical"}, "Best Musical", '3 Accolades'[Category] IN {"Best Cast Show Album", "Best Musical Show Album", "Best Musical Theater Album"}, "Best Musical Album", '3 Accolades'[Category] IN {"Best Motion Picture - Musical or Comedy", "Best Picture", "Best Picture - Comedy or Musical", "Best Picture - Musical/Comedy"}, "Best Picture", "Other")
+		dataType: string
+		lineageTag: 3d021dba-9c96-5d09-af5e-bf6914dcdf9f
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Hidden helper reproducing Tableau's [Award]+[Category]+[Nominee] concatenation key for the COUNTD-of-concatenation measures. Never blank (Award/Category always populated).
+	column 'Record Key' = '3 Accolades'[Award] & '3 Accolades'[Category] & '3 Accolades'[Nominee]
+		dataType: string
+		lineageTag: 3bbc6d8f-8297-5c26-8892-496992076f33
+		summarizeBy: none
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition '3 Accolades' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.3_accolades.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Type", type text}, {"Original", type text}, {"Film", type text}, {"Year", Int64.Type}, {"Award", type text}, {"Category", type text}, {"Nominee", type text}, {"Result", type text}, {"Source URL", type text}, {"Sheet", type text}, {"Table Name", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

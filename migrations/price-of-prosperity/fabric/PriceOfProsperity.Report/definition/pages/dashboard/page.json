@@ -1,0 +1,51 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
+  "name": "dashboard",
+  "displayName": "Price of Prosperity",
+  "displayOption": "FitToPage",
+  "height": 900,
+  "width": 1366,
+  "objects": {
+    "background": [
+      {
+        "properties": {
+          "color": {
+            "solid": {
+              "color": {
+                "expr": {
+                  "Literal": {
+                    "Value": "'#F5F5FA'"
+                  }
+                }
+              }
+            }
+          },
+          "transparency": {
+            "expr": {
+              "Literal": {
+                "Value": "0D"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "visualInteractions": [
+    {
+      "source": "yearSlicer",
+      "target": "areaGdp",
+      "type": "NoFilter"
+    },
+    {
+      "source": "yearSlicer",
+      "target": "areaCo2",
+      "type": "NoFilter"
+    },
+    {
+      "source": "yearSlicer",
+      "target": "areaPop",
+      "type": "NoFilter"
+    }
+  ]
+}

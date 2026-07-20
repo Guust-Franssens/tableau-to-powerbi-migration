@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "e7a53cb8abdd579396db",
+  "position": {
+    "x": 455,
+    "y": 222,
+    "z": 1060,
+    "width": 390,
+    "height": 84,
+    "tabOrder": 1060
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "2.  Comparisons of electricity generation often reflect population size (generation rises as population rises). They do not tell us how much the average person consumes relative to another.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

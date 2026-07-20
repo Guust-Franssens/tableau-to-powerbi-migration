@@ -40,7 +40,7 @@
       "y": 92,
       "width": 1540,
       "height": 46,
-      "text": "A deterministic parser extracts a schema-validated contract; LLM agents handle only the genuinely fuzzy translation\n(Tableau calculations \u2192 DAX, visual intent \u2192 Power BI visuals). GitHub search for this architecture returns 0 results \u2014 publicly novel.",
+      "text": "A deterministic parser extracts a schema-validated contract; LLM agents handle only the genuinely fuzzy translation\n(Tableau calculations \u2192 DAX, visual intent \u2192 Power BI visuals).",
       "fontSize": 15,
       "fontFamily": 2,
       "strokeColor": "#000000",

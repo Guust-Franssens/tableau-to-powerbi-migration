@@ -1,0 +1,670 @@
+/// Sample Superstore order lines (9994 rows, Tableau extract 'Orders'). Single import fact table; Tableau had 0 joins/blends. NO Date table by design (no time-intelligence in the workbook).
+table 'Orders'
+	lineageTag: c3b82c6f-4460-56ba-b4a6-5b006b9b61b9
+
+	/// Total sales amount in USD. Hidden helper = SUM(Sales); reused by window table-calc measures for clean context transition.
+	measure 'Total Sales' = SUM('Orders'[Sales])
+		formatString: "$"#,##0.00
+		isHidden
+		lineageTag: 416f1c59-e5a9-5b39-babd-db6278af5bbe
+		displayFolder: Base (hidden helpers)
+
+	/// Total profit in USD. Hidden helper = SUM(Profit).
+	measure 'Total Profit' = SUM('Orders'[Profit])
+		formatString: "$"#,##0.00
+		isHidden
+		lineageTag: 03c744c7-180c-5cdf-8085-3a21c90bbc15
+		displayFolder: Base (hidden helpers)
+
+	/// Total units sold. Hidden helper = SUM(Quantity).
+	measure 'Total Quantity' = SUM('Orders'[Quantity])
+		formatString: #,##0
+		isHidden
+		lineageTag: fa08b0fa-ee7f-5f64-8062-53e02b4278db
+		displayFolder: Base (hidden helpers)
+
+	/// Number of order-line rows. Hidden helper = COUNT of order-line rows (Tableau COUNT([Orders]) / Number of Records).
+	measure 'Order Row Count' = COUNTROWS('Orders')
+		formatString: #,##0
+		isHidden
+		lineageTag: b64e71de-d04c-5b07-89f9-af4905fc76b5
+		displayFolder: Base (hidden helpers)
+
+	/// Profit as a share of sales (margin percentage). Tableau [Profit Ratio] = SUM(Profit)/SUM(Sales).
+	measure 'Profit Ratio' = DIVIDE([Total Profit], [Total Sales])
+		formatString: 0.0%
+		lineageTag: 0716bab2-63b7-5204-91b9-aef586255905
+		displayFolder: Base
+
+	/// Number of distinct orders. Tableau [Order Count] = COUNTD([Order ID]).
+	measure 'Order Count' = DISTINCTCOUNT('Orders'[Order ID])
+		formatString: #,##0
+		lineageTag: 7dac0531-3818-5799-a344-cb3d6e01f2a5
+		displayFolder: Base
+
+	/// Total sales for the East region. Tableau [Sales - East] = SUM(IF [Region]='East' THEN [Sales] END). KEEPFILTERS matches the row-level IF (restrict, not override).
+	measure 'Sales - East' = CALCULATE([Total Sales], KEEPFILTERS('Orders'[Region] = "East"))
+		formatString: "$"#,##0.00
+		lineageTag: 584311ff-ff0a-5259-a8de-430a772f01ee
+		displayFolder: Region Split (East/West)
+
+	/// Total sales for the West region. Tableau [Sales - West] = SUM(IF [Region]='West' THEN [Sales] END).
+	measure 'Sales - West' = CALCULATE([Total Sales], KEEPFILTERS('Orders'[Region] = "West"))
+		formatString: "$"#,##0.00
+		lineageTag: 53ead819-539a-54c2-8e93-5568b1294c25
+		displayFolder: Region Split (East/West)
+
+	/// Total profit for the East region. Tableau [Profit - East] = SUM(IF [Region]='East' THEN [Profit] END).
+	measure 'Profit - East' = CALCULATE([Total Profit], KEEPFILTERS('Orders'[Region] = "East"))
+		formatString: "$"#,##0.00
+		lineageTag: 26d9fdfd-1e31-5c64-9877-efcae4eae06c
+		displayFolder: Region Split (East/West)
+
+	/// Total profit for the West region. Tableau [Profit - West] = SUM(IF [Region]='West' THEN [Profit] END).
+	measure 'Profit - West' = CALCULATE([Total Profit], KEEPFILTERS('Orders'[Region] = "West"))
+		formatString: "$"#,##0.00
+		lineageTag: 666b5663-308a-536c-b9b2-94f32a176858
+		displayFolder: Region Split (East/West)
+
+	/// Distinct count of orders, customers, or products, chosen by the Variable Metric slicer. Tableau [Variable Metric COUNTD] = CASE [Parameter 5] WHEN '- Order Count' COUNTD([Order ID]) ... Param-driven COUNTD.
+	measure 'Variable Metric COUNTD' = SWITCH([Variable Metric Value], "- Order Count", DISTINCTCOUNT('Orders'[Order ID]), "- Customer Count", DISTINCTCOUNT('Orders'[Customer ID]), "- Product Count", DISTINCTCOUNT('Orders'[Product ID]))
+		formatString: #,##0
+		lineageTag: 0461c610-7c07-5c06-b316-44f6b67d9f08
+		displayFolder: Variable Metric (Param)
+
+	/// East-region distinct count of orders, customers, or products, chosen by the Variable Metric slicer. Tableau [Variable Metric - East] = CASE [Parameter 5] ... COUNTD(IF [Region]='East' THEN key END).
+	measure 'Variable Metric - East' = SWITCH([Variable Metric Value], "- Order Count", CALCULATE(DISTINCTCOUNT('Orders'[Order ID]), KEEPFILTERS('Orders'[Region] = "East")), "- Customer Count", CALCULATE(DISTINCTCOUNT('Orders'[Customer ID]), KEEPFILTERS('Orders'[Region] = "East")), "- Product Count", CALCULATE(DISTINCTCOUNT('Orders'[Product ID]), KEEPFILTERS('Orders'[Region] = "East")))
+		formatString: #,##0
+		lineageTag: 67a4bf72-7fba-5911-b4dc-7bba828bf347
+		displayFolder: Variable Metric (Param)
+
+	/// West-region distinct count of orders, customers, or products, chosen by the Variable Metric slicer. Tableau [Variable Metric - West] = CASE [Parameter 5] ... COUNTD(IF [Region]='West' THEN key END). (Internal name Ctrl-drag-scrambled to '5th Axis Metric - East (copy)'; resolved via caption.)
+	measure 'Variable Metric - West' = SWITCH([Variable Metric Value], "- Order Count", CALCULATE(DISTINCTCOUNT('Orders'[Order ID]), KEEPFILTERS('Orders'[Region] = "West")), "- Customer Count", CALCULATE(DISTINCTCOUNT('Orders'[Customer ID]), KEEPFILTERS('Orders'[Region] = "West")), "- Product Count", CALCULATE(DISTINCTCOUNT('Orders'[Product ID]), KEEPFILTERS('Orders'[Region] = "West")))
+		formatString: #,##0
+		lineageTag: de942084-5cf4-51b4-a054-6a53bdbf034a
+		displayFolder: Variable Metric (Param)
+
+	/// Profit totaled at the Sub-Category x Region x Ship Mode grain. Tableau LOD {FIXED [Sub-Category],[Region],[Ship Mode]:SUM([Profit])} -> CALCULATE + ALLEXCEPT.
+	measure 'Profit SUM by SubCat, Region, Ship Mode' = CALCULATE([Total Profit], ALLEXCEPT('Orders', 'Orders'[Sub-Category], 'Orders'[Region], 'Orders'[Ship Mode]))
+		formatString: "$"#,##0.00
+		lineageTag: 09f8f1a3-0490-593d-9e16-118623554095
+		displayFolder: LOD
+
+	/// Highest ship-mode profit within each Sub-Category x Region. Tableau nested LOD {FIXED [Sub-Category],[Region]:MAX({FIXED ...,[Ship Mode]:SUM([Profit])})} -> MAXX over ship modes of each mode's fixed profit sum, scoped to Sub-Category+Region.
+	measure 'Profit MAX (SUM by SubCat, Region, Ship Mode)' = CALCULATE(MAXX(VALUES('Orders'[Ship Mode]), CALCULATE([Total Profit])), ALLEXCEPT('Orders', 'Orders'[Sub-Category], 'Orders'[Region]))
+		formatString: "$"#,##0.00
+		lineageTag: 1fd0682e-8235-5af5-8f58-e802d8b19b91
+		displayFolder: LOD
+
+	/// The most profitable ship mode within each Region x Sub-Category. Tableau LOD {FIXED [Region],[Sub-Category]: MAX(IF fixedSum=fixedMax THEN [Ship Mode] END)} -> the ship-mode name whose FIXED profit sum equals the group max (MAX(text)=last alphabetically).
+	measure 'Ship Mode - Most Profitable LOD' = CALCULATE(MAXX(FILTER(VALUES('Orders'[Ship Mode]), [Profit SUM by SubCat, Region, Ship Mode] = [Profit MAX (SUM by SubCat, Region, Ship Mode)]), 'Orders'[Ship Mode]), ALLEXCEPT('Orders', 'Orders'[Region], 'Orders'[Sub-Category]))
+		lineageTag: c372ae4c-668a-5140-a6c6-8a61a185ae07
+		displayFolder: LOD
+
+	/// The most profitable ship mode (Ship Mode on the visual axis). Tableau [Ship Mode - Most Profitable] = IF fixedSum=fixedMax THEN [Ship Mode]. Viz-LOD version (Ship Mode on the row axis) -> SELECTEDVALUE.
+	measure 'Ship Mode - Most Profitable' = IF([Profit SUM by SubCat, Region, Ship Mode] = [Profit MAX (SUM by SubCat, Region, Ship Mode)], SELECTEDVALUE('Orders'[Ship Mode]))
+		lineageTag: b5bb87d8-9066-5ba1-ac7d-fc14e91d450b
+		displayFolder: LOD
+
+	/// Tableau [Ship Mode - Most Profitable Icon] = CASE [Ship Mode - Most Profitable LOD] -> unicode icon.
+	measure 'Ship Mode - Most Profitable Icon' = SWITCH([Ship Mode - Most Profitable LOD], "Same Day", "+️", "First Class", "▢", "Second Class", "▣", "Standard Class", "▤️")
+		lineageTag: ee98eec6-6e88-51f0-9674-18f52a304729
+		displayFolder: Ship Mode (LOD)
+
+	/// Tableau [Ship Mode - Most Profitable Short] = CASE [Ship Mode - Most Profitable LOD] -> short label.
+	measure 'Ship Mode - Most Profitable Short' = SWITCH([Ship Mode - Most Profitable LOD], "Same Day", "Same️", "First Class", "1st️", "Second Class", "2nd", "Standard Class", "Std️")
+		lineageTag: 2c9fe7bc-917e-5632-97c3-cfbda920bdc8
+		displayFolder: Ship Mode (LOD)
+
+	/// Share of order lines shipped within their ship-mode SLA. Tableau [On Time Ship %] = AVG(IF <on-time> THEN 1 END). Faithful: AVERAGEX ignores blanks exactly like Tableau AVG (source has no ELSE 0, so on a pure on-time context this trends to 1 — a source quirk, preserved). See limitations.
+	measure 'On Time Ship %' = AVERAGEX('Orders', IF(('Orders'[Ship Mode] = "Same Day" && 'Orders'[Days to Ship] = 0) || ('Orders'[Ship Mode] = "First Class" && 'Orders'[Days to Ship] <= 2) || ('Orders'[Ship Mode] = "Second Class" && 'Orders'[Days to Ship] <= 4) || ('Orders'[Ship Mode] = "Standard Class" && 'Orders'[Days to Ship] <= 5), 1))
+		formatString: 0.0%
+		lineageTag: dabf362c-435f-51c6-9156-40d4daa424fd
+		displayFolder: On Time / Late
+
+	/// Share of order lines shipped late (missed their ship-mode SLA). Tableau [Late %] = (late COUNT)/TOTAL(COUNT) gated by IF NOT ATTR([On Time Ship?]). Late-record share of the pane. GROUND-TRUTH target.
+	measure 'Late %' = DIVIDE(CALCULATE([Order Row Count], KEEPFILTERS('Orders'[On Time Ship?] = FALSE())), CALCULATE([Order Row Count], REMOVEFILTERS('Orders'[On Time Ship?])))
+		formatString: 0.0%
+		lineageTag: d3c14cfe-bfb2-56d7-99ec-1c6cf9f2b825
+		displayFolder: On Time / Late
+
+	/// Tableau LOD IF [On Time Ship?] THEN {EXCLUDE [On Time Ship?]: IF NOT [Profitable?] THEN '◯'}. EXCLUDE -> REMOVEFILTERS. Pie label-centering trick; report-layer cosmetic. See limitations.
+	measure 'Not Profitable Circle - Exclude Ship' = IF(SELECTEDVALUE('Orders'[On Time Ship?]) = TRUE(), CALCULATE(IF(NOT([Profitable?]), "◯"), REMOVEFILTERS('Orders'[On Time Ship?])))
+		lineageTag: 0dfa3877-33a6-5861-b835-f2e8b3173382
+		displayFolder: On Time / Late
+
+	/// Tableau LOD {EXCLUDE [On Time Ship?]: [Profitable?]} -> profit>0 ignoring the on-time split.
+	measure 'Profitable - Exclude Ship' = CALCULATE([Total Profit], REMOVEFILTERS('Orders'[On Time Ship?])) > 0
+		lineageTag: 64e5edbe-37ae-547d-902f-7b0178060a36
+		displayFolder: On Time / Late
+
+	/// Whether the current context is profitable (profit greater than 0). Tableau [Profitable?] = SUM(Profit)>0.
+	measure 'Profitable?' = [Total Profit] > 0
+		lineageTag: 0b34e4a7-1aa3-59c7-a9a7-abf7b3d8d584
+		displayFolder: Shape / Symbol Marks
+
+	/// Tableau [Not Profitable Circle] = IF NOT [Profitable?] THEN '◯'.
+	measure 'Not Profitable Circle' = IF(NOT([Profitable?]), "◯")
+		lineageTag: 18b9b28a-faef-50aa-a824-391511e6a2f5
+		displayFolder: Shape / Symbol Marks
+
+	/// Whether the current context has fewer than 50 order lines. Tableau [Low Volume] = COUNT([Orders])<50.
+	measure 'Low Volume' = [Order Row Count] < 50
+		lineageTag: 4fa0ba44-b7d5-5bc8-bd7f-80ede1919650
+		displayFolder: Shape / Symbol Marks
+
+	/// Tableau [Low Volume Triangle] = IF [Low Volume] THEN '△'.
+	measure 'Low Volume Triangle' = IF([Low Volume], "△")
+		lineageTag: 33544f46-5466-59fc-afef-b9cffad067f7
+		displayFolder: Shape / Symbol Marks
+
+	/// Tableau [Profitable Circle Color] = SIGN(SUM(Profit)).
+	measure 'Profitable Circle Color' = SIGN([Total Profit])
+		formatString: #,##0
+		lineageTag: c416d413-b621-5e5a-8dfc-39e1d12f2e2a
+		displayFolder: Shape / Symbol Marks
+
+	/// Tableau [Profit Ratio + Symbol] = IF [Profit Ratio]>=0 THEN '+'.
+	measure 'Profit Ratio + Symbol' = IF([Profit Ratio] >= 0, "+")
+		lineageTag: 022e6b49-3b63-5a76-838c-c03df4875aff
+		displayFolder: Shape / Symbol Marks
+
+	/// Tableau [Profit Ratio - Symbol] = IF [Profit Ratio]<0 THEN '−'.
+	measure 'Profit Ratio - Symbol' = IF([Profit Ratio] < 0, "−")
+		lineageTag: 51a4df1e-5f79-59ed-972e-306fbd325286
+		displayFolder: Shape / Symbol Marks
+
+	/// Tableau [Profit Ratio Mark Highlight Color] = NOT ISNULL([Dot Profit Ratio Window]) -> transparent where no dot mark.
+	measure 'Profit Ratio Mark Highlight Color' = NOT(ISBLANK([Dot Profit Ratio Window]))
+		lineageTag: cf9806c2-fdc7-5057-9937-a9cf99aee68e
+		displayFolder: Shape / Symbol Marks
+
+	/// Tableau [Highlight Dummy] = 'x'. Constant placeholder used on Detail/Text to force a single mark.
+	measure 'Highlight Dummy' = "x"
+		lineageTag: b26cf62f-5088-53d8-9106-a251e55db6d1
+		displayFolder: Tableau Helpers
+
+	/// Tableau [Low Discount Circle] = IF ZN(AVG([Discount]))<=0.10 THEN 'O'. ZN -> COALESCE(...,0).
+	measure 'Low Discount Circle' = IF(COALESCE(AVERAGE('Orders'[Discount]), 0) <= 0.10, "O")
+		lineageTag: 5dc29d64-e03c-54c6-a9fd-0b5199f14bbc
+		displayFolder: Discount Marks
+
+	/// Tableau [Mid Discount Circle] = IF AVG(Discount)<=0.25 AND >0.10 THEN 'O'.
+	measure 'Mid Discount Circle' = IF(AVERAGE('Orders'[Discount]) <= 0.25 && AVERAGE('Orders'[Discount]) > 0.10, "O")
+		lineageTag: f3de32c2-5669-540c-81d8-0eb8030e8395
+		displayFolder: Discount Marks
+
+	/// Whether the average discount exceeds 25%. Tableau [Deep Discount?] = AVG(Discount)>0.25.
+	measure 'Deep Discount?' = AVERAGE('Orders'[Discount]) > 0.25
+		lineageTag: bf64d499-9910-503f-8a48-093d08f40324
+		displayFolder: Discount Marks
+
+	/// Tableau [Deep Discount Circle] = IF AVG(Discount)>0.25 THEN 'O'.
+	measure 'Deep Discount Circle' = IF(AVERAGE('Orders'[Discount]) > 0.25, "O")
+		lineageTag: 259636f1-95eb-5726-b0f1-999343582167
+		displayFolder: Discount Marks
+
+	/// Tableau [Deep Discount Dot] = IF AVG(Discount)>0.25 THEN '⬤'.
+	measure 'Deep Discount Dot' = IF(AVERAGE('Orders'[Discount]) > 0.25, "⬤")
+		lineageTag: 5c35f68f-053f-50af-b8f2-e7dad86a6952
+		displayFolder: Discount Marks
+
+	/// Tableau [Deep Discount? (Highlight)] = IF AVG(Discount)>0.25 THEN 0.97 -> conditional-border anchor (report-layer trick).
+	measure 'Deep Discount? (Highlight)' = IF(AVERAGE('Orders'[Discount]) > 0.25, 0.97)
+		formatString: 0.00
+		lineageTag: 3d6a62d1-f0ae-5d52-9ead-b87d9a5b0b86
+		displayFolder: Discount Marks
+
+	/// Whether Profit Ratio exceeds the Profit Ratio Goal slicer value. Tableau [Profit Ratio Over Goal?] = [Profit Ratio] > [Parameter 3].
+	measure 'Profit Ratio Over Goal?' = [Profit Ratio] > [Profit Ratio Goal Value]
+		lineageTag: f2c722d2-80f7-5f37-afcc-4f96f365aae1
+		displayFolder: Profit Ratio Goal
+
+	/// Tableau [Profit Ratio Over Goal Display] = IF [Over Goal?] THEN [Profit Ratio].
+	measure 'Profit Ratio Over Goal Display' = IF([Profit Ratio Over Goal?], [Profit Ratio])
+		formatString: 0.0%
+		lineageTag: 88e37d2c-69c0-5aca-a179-740bf54dd7f6
+		displayFolder: Profit Ratio Goal
+
+	/// Tableau [Profit Ratio Under Goal Display] = IF NOT [Over Goal?] THEN [Profit Ratio].
+	measure 'Profit Ratio Under Goal Display' = IF(NOT([Profit Ratio Over Goal?]), [Profit Ratio])
+		formatString: 0.0%
+		lineageTag: be49454e-cf20-533b-bb6c-3155d7707a96
+		displayFolder: Profit Ratio Goal
+
+	/// Tableau [Profit Ratio Spacer] = LEFT(' ',4-(INT(LOG(ROUND(ABS([Profit Ratio])*100),10))+IIF(...<0,1,0))). Cosmetic label-alignment spacer; report-layer. See limitations.
+	measure 'Profit Ratio Spacer' = LEFT("    ", 4 - (INT(LOG(ROUND(ABS([Profit Ratio]) * 100, 0), 10)) + IF([Profit Ratio] < 0, 1, 0)))
+		lineageTag: b64918e7-3c66-554d-8dbd-f03cdddedd6d
+		displayFolder: Profit Ratio Goal
+
+	/// Whether average sales per order exceed the 460 USD goal. Tableau [Met Sales Goal?] = SUM(Sales)/COUNTD([Order ID]) > 460.
+	measure 'Met Sales Goal?' = DIVIDE([Total Sales], DISTINCTCOUNT('Orders'[Order ID])) > 460
+		lineageTag: 7bf2c211-94a2-5941-99c6-07ae94ed30dd
+		displayFolder: Met Sales Goal
+
+	/// Tableau [Met Sales Goal Dot] = IF [Met Sales Goal?] THEN '⬤ '.
+	measure 'Met Sales Goal Dot' = IF([Met Sales Goal?], "⬤ ")
+		lineageTag: 22b0ee93-e345-5a60-ace7-f19cd607b283
+		displayFolder: Met Sales Goal
+
+	/// Tableau [Met Sales Goal *] = IF [Met Sales Goal?] THEN '*' ELSE ' '.
+	measure 'Met Sales Goal *' = IF([Met Sales Goal?], "*", " ")
+		lineageTag: 247eb1d1-6a09-5682-8116-5a82c4340215
+		displayFolder: Met Sales Goal
+
+	/// Tableau [Met Sales Goal Check] = IF [Met Sales Goal?] THEN '✓'.
+	measure 'Met Sales Goal Check' = IF([Met Sales Goal?], "✓")
+		lineageTag: 95cdc480-133e-5f52-ac2e-06c8ce91a1d3
+		displayFolder: Met Sales Goal
+
+	/// Dense rank of Sub-Categories by order-line count (1 = highest volume). Tableau [Order Volume - Rank of Count] = RANK(COUNT([Orders])). Table calc -> RANKX. Addressing INFERRED over Sub-Category (the volume-bar axis). See limitations.
+	measure 'Order Volume - Rank of Count' = RANKX(ALLSELECTED('Orders'[Sub-Category]), [Order Row Count], , DESC, Dense)
+		formatString: #,##0
+		lineageTag: d2bdd427-5ed6-59d2-924a-4939023b00d0
+		displayFolder: Ranking
+
+	/// Tableau [Rank Volume + - 1] = IF rank=1 THEN '+'.
+	measure 'Rank Volume + - 1' = IF([Order Volume - Rank of Count] = 1, "+")
+		lineageTag: 603cb7d4-0688-56d8-83a6-02110dbd97d1
+		displayFolder: Ranking
+
+	/// Tableau [Rank Volume + - 2] = IF rank=2 THEN '+'.
+	measure 'Rank Volume + - 2' = IF([Order Volume - Rank of Count] = 2, "+")
+		lineageTag: 030f6b63-d5df-5a9e-931c-238d8824a7a2
+		displayFolder: Ranking
+
+	/// Tableau [Rank Volume + - 3] = IF rank=3 THEN '+'.
+	measure 'Rank Volume + - 3' = IF([Order Volume - Rank of Count] = 3, "+")
+		lineageTag: 0d26bc66-a9d3-5963-9d29-afd80b4e3f0f
+		displayFolder: Ranking
+
+	/// Tableau [Star Rating] = LEFT('★★★★★',(COUNT%10+1)/2)+IF COUNT%2=1 THEN '☆'. Pseudo-random rating from row count.
+	measure 'Star Rating' = LEFT("★★★★★", INT((MOD([Order Row Count], 10) + 1) / 2)) & IF(MOD([Order Row Count], 2) = 1, "☆", "")
+		lineageTag: 4ab9c28e-5b51-570f-8d1c-c3d64536158e
+		displayFolder: Ranking
+
+	/// Tableau [3x3 row 1 random] = INT(SUM([Sales]))%100.
+	measure '3x3 row 1 random' = MOD(INT([Total Sales]), 100)
+		formatString: #,##0
+		lineageTag: f4492f4d-db64-5772-90d5-a124fe2ab291
+		displayFolder: Indicator Grid (random)
+
+	/// Tableau [3x3 row 2 random] = INT(SUM([Profit]))%100.
+	measure '3x3 row 2 random' = MOD(INT([Total Profit]), 100)
+		formatString: #,##0
+		lineageTag: 26d6734a-6836-53fc-ac58-7c86283c2ddb
+		displayFolder: Indicator Grid (random)
+
+	/// Tableau [3x3 row 3 random] = INT(SUM([Quantity]))%100.
+	measure '3x3 row 3 random' = MOD(INT([Total Quantity]), 100)
+		formatString: #,##0
+		lineageTag: 156e0042-1ea7-5c05-baba-a47a915d7a02
+		displayFolder: Indicator Grid (random)
+
+	/// Tableau [3x3 Indicator Grid] = 3 rows of ⬛/🔲 indicators from the row-1/2/3 random measures, newline-separated.
+	measure '3x3 Indicator Grid' = IF([3x3 row 1 random] < 33, "⬛️", "🔲") & IF([3x3 row 1 random] >= 33 && [3x3 row 1 random] < 66, "⬛️", "🔲") & IF([3x3 row 1 random] >= 66 && [3x3 row 1 random] < 100, "⬛️", "🔲") & UNICHAR(10) & IF([3x3 row 2 random] < 33, "⬛️", "🔲") & IF([3x3 row 2 random] >= 33 && [3x3 row 2 random] < 66, "⬛️", "🔲") & IF([3x3 row 2 random] >= 66 && [3x3 row 2 random] < 100, "⬛️", "🔲") & UNICHAR(10) & IF([3x3 row 3 random] < 33, "⬛️", "🔲") & IF([3x3 row 3 random] >= 33 && [3x3 row 3 random] < 66, "⬛️", "🔲") & IF([3x3 row 3 random] >= 66 && [3x3 row 3 random] < 100, "⬛️", "🔲")
+		lineageTag: 22f3f2be-fd53-546f-906f-7846906b1749
+		displayFolder: Indicator Grid (random)
+
+	/// Tableau [1x9 Indicator Line] = the 3x3 grid flattened onto one line (no newlines).
+	measure '1x9 Indicator Line' = IF([3x3 row 1 random] < 33, "⬛️", "🔲") & IF([3x3 row 1 random] >= 33 && [3x3 row 1 random] < 66, "⬛️", "🔲") & IF([3x3 row 1 random] >= 66 && [3x3 row 1 random] < 100, "⬛️", "🔲") & IF([3x3 row 2 random] < 33, "⬛️", "🔲") & IF([3x3 row 2 random] >= 33 && [3x3 row 2 random] < 66, "⬛️", "🔲") & IF([3x3 row 2 random] >= 66 && [3x3 row 2 random] < 100, "⬛️", "🔲") & IF([3x3 row 3 random] < 33, "⬛️", "🔲") & IF([3x3 row 3 random] >= 33 && [3x3 row 3 random] < 66, "⬛️", "🔲") & IF([3x3 row 3 random] >= 66 && [3x3 row 3 random] < 100, "⬛️", "🔲")
+		lineageTag: a74b7c0f-e0aa-5c07-a2eb-4c3f3604ba5e
+		displayFolder: Indicator Grid (random)
+
+	/// Column index (0-9) of the state's tile in the map tile-grid layout. Tableau [Map Columns] = INT(INDEX()-1)%10. INDEX() over State (alphabetical) -> RANKX. GROUND-TRUTH target.
+	measure 'Map Columns' = MOD(INT(RANKX(ALLSELECTED('Orders'[State]), CALCULATE(MAX('Orders'[State])), , ASC, Dense) - 1), 10)
+		formatString: #,##0
+		lineageTag: 9d213361-5a4f-5129-9f24-eb25d12552fa
+		displayFolder: Map Tile Grid
+
+	/// Row index of the state's tile in the map tile-grid layout. Tableau [Map Rows] = INT((INDEX()-1)/10)*1.0. INDEX() over State -> RANKX. GROUND-TRUTH target.
+	measure 'Map Rows' = INT((RANKX(ALLSELECTED('Orders'[State]), CALCULATE(MAX('Orders'[State])), , ASC, Dense) - 1) / 10) * 1.0
+		formatString: 0.0
+		lineageTag: af383a0b-2948-5b1f-aa64-d81948610e75
+		displayFolder: Map Tile Grid
+
+	/// Quartile bucket of Sub-Category order volume, shown as a filled-arc glyph. Tableau [Volume Quartile] = quartile of COUNT via WINDOW_PERCENTILE -> ◔◑◕◉ marks. Addressing INFERRED over Sub-Category. See limitations.
+	measure 'Volume Quartile' = VAR C = [Order Row Count] VAR Q1 = PERCENTILEX.INC(ALLSELECTED('Orders'[Sub-Category]), [Order Row Count], 0.25) VAR Q2 = PERCENTILEX.INC(ALLSELECTED('Orders'[Sub-Category]), [Order Row Count], 0.50) VAR Q3 = PERCENTILEX.INC(ALLSELECTED('Orders'[Sub-Category]), [Order Row Count], 0.75) RETURN IF(C <= Q1, "◔", IF(C <= Q2, "◑", IF(C <= Q3, "◕", "◉")))
+		lineageTag: 9d358359-c7d5-5160-a021-bc8074815a97
+		displayFolder: Shape / Symbol Marks
+
+	/// Peak quarterly value of the larger of East/West sales across the visible quarters. Tableau [Sales East/West Max] = WINDOW_MAX(MAX([Sales-East],[Sales-West])) over Order Quarter. GROUND-TRUTH target.
+	measure 'Sales East/West Max' = MAXX(ALLSELECTED('Orders'[Order Quarter]), MAX([Sales - East], [Sales - West]))
+		formatString: "$"#,##0.00
+		lineageTag: 6a2fbab0-adf4-5f62-baf7-5c9a1d98231d
+		displayFolder: 5th/6th Axis (Normalization)
+
+	/// Peak quarterly value of the larger of East/West sales across the visible quarters. Tableau auto-named field 'WINDOW_MAX(MAX([Sales - East],[Sales - West]))' — identical to [Sales East/West Max]; kept as an alias (renamed; bracketed caption is not a legal measure name).
+	measure 'Sales East/West Window Max' = [Sales East/West Max]
+		formatString: "$"#,##0.00
+		lineageTag: 8106beef-365a-5098-b35b-dee4316f730f
+		displayFolder: 5th/6th Axis (Normalization)
+
+	/// Tableau [5th/6th Axis Metric - MAX East/West] = MAX([Variable Metric-East],[Variable Metric-West]) (two-arg scalar MAX).
+	measure 'Axis Metric MAX East/West' = MAX([Variable Metric - East], [Variable Metric - West])
+		formatString: #,##0
+		lineageTag: 9af6adf4-cf80-5628-9b8e-755a6708a7e0
+		displayFolder: 5th/6th Axis (Normalization)
+
+	/// Tableau '[5th/6th Axis Metric - East]/WINDOW_MAX([5th/6th Axis Metric - East])' -> East metric normalized by its window max (renamed; bracketed caption is not a legal measure name).
+	measure 'Axis Metric East Normalized' = DIVIDE([Variable Metric - East], MAXX(ALLSELECTED('Orders'[Order Quarter]), [Variable Metric - East]))
+		formatString: 0.00
+		lineageTag: c6ab7db1-c968-58e1-8f18-ea82c7b46aa3
+		displayFolder: 5th/6th Axis (Normalization)
+
+	/// Tableau [5th/6th Axis Normalized - East] = WINDOW_MAX(MAX Sales E/W) * [VM East] / WINDOW_MAX(MAX(VM East,VM West)). Sizes the East metric onto the shared Sales axis.
+	measure '5th/6th Axis Normalized - East' = DIVIDE([Sales East/West Max] * [Variable Metric - East], MAXX(ALLSELECTED('Orders'[Order Quarter]), MAX([Variable Metric - East], [Variable Metric - West])))
+		formatString: 0.00
+		lineageTag: 37dbfc61-46fb-5019-a227-807119e35fde
+		displayFolder: 5th/6th Axis (Normalization)
+
+	/// Tableau [5th/6th Axis Normalized - West] = WINDOW_MAX(MAX Sales E/W) * [VM West] / WINDOW_MAX(MAX(VM East,VM West)). (Internal names Ctrl-drag-scrambled; resolved via caption.)
+	measure '5th/6th Axis Normalized - West' = DIVIDE([Sales East/West Max] * [Variable Metric - West], MAXX(ALLSELECTED('Orders'[Order Quarter]), MAX([Variable Metric - East], [Variable Metric - West])))
+		formatString: 0.00
+		lineageTag: 6fd18650-c1ca-5625-b8ad-e34b729af28c
+		displayFolder: 5th/6th Axis (Normalization)
+
+	/// Tableau [bar-in-bar negative offset] = -0.05*[Sales East/West Max]. Negative reference-line anchor for the bar-in-bar layout (report-layer trick).
+	measure 'bar-in-bar negative offset' = -0.05 * [Sales East/West Max]
+		formatString: "$"#,##0.00
+		lineageTag: 4a666ba7-7746-56cf-8753-220f4c8d06d2
+		displayFolder: 5th/6th Axis (Normalization)
+
+	/// Tableau [Dot Sales Window]: highlight '⬤' where SUM(Sales) hits WINDOW Max/Min/Last/Control per [Select Highlight Function]. Window over Ship Month (grounded: Area+Dot+Line, Region=South).
+	measure 'Dot Sales Window' = VAR P = [Select Highlight Function Value] VAR Cur = [Total Sales] VAR WMax = MAXX(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR WMin = MINX(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR WAvg = AVERAGEX(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR SPlus = STDEVX.S(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR SMinus = STDEVX.S(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR IsLast = MAX('Orders'[Ship Month]) = CALCULATE(MAX('Orders'[Ship Month]), ALLSELECTED('Orders'[Ship Month])) RETURN IF(P = "All" || (P = "Max" && Cur = WMax) || (P = "Min" && Cur = WMin) || (P = "Last" && IsLast) || (P = "Max & Min" && (Cur = WMax || Cur = WMin)) || (P = "Control" && (Cur > WAvg + SPlus * 2 || Cur < WAvg - SMinus * 2)), "⬤")
+		lineageTag: 11b1d13f-6237-50f8-ab9a-5c6ace893e15
+		displayFolder: Table Calc - Window Highlight Marks
+
+	/// Tableau [Circle Sales Window]: highlight '⚪' on SUM(Sales) window extremes. Window over Ship Month (grounded: Circle+Dot+Line, Region=South).
+	measure 'Circle Sales Window' = VAR P = [Select Highlight Function Value] VAR Cur = [Total Sales] VAR WMax = MAXX(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR WMin = MINX(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR WAvg = AVERAGEX(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR SPlus = STDEVX.S(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR SMinus = STDEVX.S(ALLSELECTED('Orders'[Ship Month]), [Total Sales]) VAR IsLast = MAX('Orders'[Ship Month]) = CALCULATE(MAX('Orders'[Ship Month]), ALLSELECTED('Orders'[Ship Month])) RETURN IF(P = "All" || (P = "Max" && Cur = WMax) || (P = "Min" && Cur = WMin) || (P = "Last" && IsLast) || (P = "Max & Min" && (Cur = WMax || Cur = WMin)) || (P = "Control" && (Cur > WAvg + SPlus * 2 || Cur < WAvg - SMinus * 2)), "⚪")
+		lineageTag: f3e6256d-1eff-5342-84c7-3f82d1382f91
+		displayFolder: Table Calc - Window Highlight Marks
+
+	/// Tableau [Bar Profit Window]: '▯' on SUM(Profit) window extremes. Window over Sub-Category. NOTE: '+' control band uses WINDOW_STDEV(SUM([Sales])) not Profit — a copy-paste quirk, preserved. See limitations.
+	measure 'Bar Profit Window' = VAR P = [Select Highlight Function Value] VAR Cur = [Total Profit] VAR WMax = MAXX(ALLSELECTED('Orders'[Sub-Category]), [Total Profit]) VAR WMin = MINX(ALLSELECTED('Orders'[Sub-Category]), [Total Profit]) VAR WAvg = AVERAGEX(ALLSELECTED('Orders'[Sub-Category]), [Total Profit]) VAR SPlus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Total Sales]) VAR SMinus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Total Profit]) VAR IsLast = MAX('Orders'[Sub-Category]) = CALCULATE(MAX('Orders'[Sub-Category]), ALLSELECTED('Orders'[Sub-Category])) RETURN IF(P = "All" || (P = "Max" && Cur = WMax) || (P = "Min" && Cur = WMin) || (P = "Last" && IsLast) || (P = "Max & Min" && (Cur = WMax || Cur = WMin)) || (P = "Control" && (Cur > WAvg + SPlus * 2 || Cur < WAvg - SMinus * 2)), "▯")
+		lineageTag: 5c59d87b-1575-59c9-a90c-e2a7e5d9010d
+		displayFolder: Table Calc - Window Highlight Marks
+
+	/// Tableau [Triangles Profit Ratio Window]: '△' on [Profit Ratio] window extremes over Sub-Category. '+' band uses WINDOW_STDEV(SUM([Sales])) quirk, preserved.
+	measure 'Triangles Profit Ratio Window' = VAR P = [Select Highlight Function Value] VAR Cur = [Profit Ratio] VAR WMax = MAXX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR WMin = MINX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR WAvg = AVERAGEX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR SPlus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Total Sales]) VAR SMinus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR IsLast = MAX('Orders'[Sub-Category]) = CALCULATE(MAX('Orders'[Sub-Category]), ALLSELECTED('Orders'[Sub-Category])) RETURN IF(P = "All" || (P = "Max" && Cur = WMax) || (P = "Min" && Cur = WMin) || (P = "Last" && IsLast) || (P = "Max & Min" && (Cur = WMax || Cur = WMin)) || (P = "Control" && (Cur > WAvg + SPlus * 2 || Cur < WAvg - SMinus * 2)), "△")
+		lineageTag: 9e81cf9c-88f5-5f80-89c0-79205f94ac3c
+		displayFolder: Table Calc - Window Highlight Marks
+
+	/// Tableau [Dot Profit Ratio Window]: '⬤' on [Profit Ratio] window extremes over Sub-Category. '+' band uses WINDOW_STDEV(SUM([Sales])) quirk, preserved.
+	measure 'Dot Profit Ratio Window' = VAR P = [Select Highlight Function Value] VAR Cur = [Profit Ratio] VAR WMax = MAXX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR WMin = MINX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR WAvg = AVERAGEX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR SPlus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Total Sales]) VAR SMinus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR IsLast = MAX('Orders'[Sub-Category]) = CALCULATE(MAX('Orders'[Sub-Category]), ALLSELECTED('Orders'[Sub-Category])) RETURN IF(P = "All" || (P = "Max" && Cur = WMax) || (P = "Min" && Cur = WMin) || (P = "Last" && IsLast) || (P = "Max & Min" && (Cur = WMax || Cur = WMin)) || (P = "Control" && (Cur > WAvg + SPlus * 2 || Cur < WAvg - SMinus * 2)), "⬤")
+		lineageTag: 9ad41e8d-c7f1-5df3-a848-5c0f6c1490b1
+		displayFolder: Table Calc - Window Highlight Marks
+
+	/// Tableau [Hash Profit Ratio Window]: emits [Hashing Display] hatching on [Profit Ratio] window extremes over Sub-Category. '+' band uses WINDOW_STDEV(SUM([Sales])) quirk, preserved.
+	measure 'Hash Profit Ratio Window' = VAR P = [Select Highlight Function Value] VAR Cur = [Profit Ratio] VAR WMax = MAXX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR WMin = MINX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR WAvg = AVERAGEX(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR SPlus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Total Sales]) VAR SMinus = STDEVX.S(ALLSELECTED('Orders'[Sub-Category]), [Profit Ratio]) VAR IsLast = MAX('Orders'[Sub-Category]) = CALCULATE(MAX('Orders'[Sub-Category]), ALLSELECTED('Orders'[Sub-Category])) RETURN IF(P = "All" || (P = "Max" && Cur = WMax) || (P = "Min" && Cur = WMin) || (P = "Last" && IsLast) || (P = "Max & Min" && (Cur = WMax || Cur = WMin)) || (P = "Control" && (Cur > WAvg + SPlus * 2 || Cur < WAvg - SMinus * 2)), [Hashing Display])
+		lineageTag: 705730af-da27-5917-a310-d8b21e8a8d3b
+		displayFolder: Table Calc - Window Highlight Marks
+
+	/// Tableau [Hashing Display] = CASE [Parameter 4] mapping a 3-char hatch pick to a long repeated-glyph bar.
+	measure 'Hashing Display' = SWITCH([Select Hashing Value], "   ", " ", "╱╱╱", "╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱", "╲╲╲", "╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲", "║║║", "║║║║║║║║║║║║║║║║║║║║║║║", "╬╬╬", "╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬", "▓▓▓", "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓", "▒▒▒", "▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒", "░░░", "░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░", "▐▐▐", "▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐▐")
+		lineageTag: bb74ce5d-4ed8-5c06-8da6-f1b2f3beee57
+		displayFolder: Shape / Symbol Marks
+
+	/// Fake-axis scaffolding: Tableau MAX(1.0) constant placed on a secondary axis (Highlight Table). Power BI supports at most a dual axis; provided as a constant for the report builder. Capability boundary — see limitations.
+	measure 'Axis Anchor One' = 1
+		formatString: #,##0
+		lineageTag: bae65e09-a2cc-5970-a2f5-25c4408fac78
+		displayFolder: Axis Anchors (layout)
+
+	/// Fake-axis scaffolding: collapses Tableau's MAX(0.0)/0.0/0 constant anchors (L-Bar, On Time Pies, SubCat Bar) placed on secondary/tertiary axes to fabricate extra axes. Report-layer capability boundary — see limitations.
+	measure 'Axis Anchor Zero' = 0
+		formatString: #,##0
+		lineageTag: b4f01ed3-dc98-5851-a397-fd6cd507c626
+		displayFolder: Axis Anchors (layout)
+
+	/// Surrogate row identifier from the Tableau extract (one per order line, 9994 rows). Hidden; not a business attribute.
+	column 'Row ID'
+		dataType: int64
+		lineageTag: b3c0d11e-0fe9-5d4a-b42e-cdcfc98c8c66
+		summarizeBy: none
+		sourceColumn: Row ID
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Order identifier; 5009 distinct orders. One order spans multiple line-item rows in this fact table.
+	column 'Order ID'
+		dataType: string
+		lineageTag: d38040b4-7a94-58cb-a9fb-a8d9df69b5a5
+		summarizeBy: none
+		sourceColumn: Order ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Date the order was placed (day grain). Basis for the Order Quarter helper and the quarter-addressed East/West window table-calcs.
+	column 'Order Date'
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: a73c7ace-7e9d-5917-b711-db3a267b64da
+		summarizeBy: none
+		sourceColumn: Order Date
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Date the order shipped (day grain). Basis for Days to Ship, On Time Ship?, and the Ship Month helper the Sales window table-calcs address over.
+	column 'Ship Date'
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 3a1d4b38-08fe-5936-ac6a-feab0a9fa888
+		summarizeBy: none
+		sourceColumn: Ship Date
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Shipping service level (a.k.a. shipping method). One of: First Class, Same Day, Second Class, Standard Class.
+	column 'Ship Mode'
+		dataType: string
+		lineageTag: b362e048-eab9-5fa4-b6f8-4bba14f85965
+		summarizeBy: none
+		sourceColumn: Ship Mode
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Customer identifier; 793 distinct customers. Pairs with Customer Name.
+	column 'Customer ID'
+		dataType: string
+		lineageTag: 5f50e299-160f-56b2-817d-e990c6b7a2c9
+		summarizeBy: none
+		sourceColumn: Customer ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Customer full name; 793 distinct. Basis of the Customer Count variable metric (distinct count).
+	column 'Customer Name'
+		dataType: string
+		lineageTag: b25c1c61-27d7-5593-a6fb-1f79529177cd
+		summarizeBy: none
+		sourceColumn: Customer Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Customer market segment. One of: Consumer, Corporate, Home Office.
+	column 'Segment'
+		dataType: string
+		lineageTag: 3ec2c2d0-b320-5149-b6b5-093199d271ad
+		summarizeBy: none
+		sourceColumn: Segment
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Country of the order. Single value in this extract: United States.
+	column 'Country'
+		dataType: string
+		lineageTag: 39c0782d-ba51-5f12-8d14-30fd00ab6c56
+		summarizeBy: none
+		sourceColumn: Country
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Customer city; 531 distinct.
+	column 'City'
+		dataType: string
+		lineageTag: 474ffba3-2852-5936-91a4-6b4d84a2710d
+		summarizeBy: none
+		sourceColumn: City
+
+		annotation SummarizationSetBy = Automatic
+
+	/// US state of the order (a.k.a. province); 49 distinct. Addressed by the INDEX() map tile-grid table-calcs (Map Rows / Map Columns).
+	column 'State'
+		dataType: string
+		lineageTag: 7b8370c4-7ca0-5a1a-98b7-ab24aadeea08
+		summarizeBy: none
+		sourceColumn: State
+
+		annotation SummarizationSetBy = Automatic
+
+	/// US ZIP code, kept as text to preserve leading zeros; 631 distinct. No calculation uses it numerically.
+	column 'Postal Code'
+		dataType: string
+		lineageTag: c9f36bfe-0d93-5f84-97c0-a7ffb6b806c5
+		summarizeBy: none
+		sourceColumn: Postal Code
+
+		annotation SummarizationSetBy = Automatic
+
+	/// US sales region. One of: Central, East, South, West. The East/West window table-calcs filter on this.
+	column 'Region'
+		dataType: string
+		lineageTag: 66097dd2-bffa-5c39-8b4c-93dccc6d0a1b
+		summarizeBy: none
+		sourceColumn: Region
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Product identifier; 1862 distinct.
+	column 'Product ID'
+		dataType: string
+		lineageTag: dba9f400-fe78-583d-a10a-49fff0e0b4cc
+		summarizeBy: none
+		sourceColumn: Product ID
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Product category. One of: Furniture, Office Supplies, Technology.
+	column 'Category'
+		dataType: string
+		lineageTag: 97a3d63d-9366-5a79-9ad0-3c62f178ae4c
+		summarizeBy: none
+		sourceColumn: Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Product sub-category within Category. One of: Accessories, Appliances, Art, Binders, Bookcases, Chairs, Copiers, Envelopes, Fasteners, Furnishings, Labels, Machines, Paper, Phones, Storage, Supplies, Tables.
+	column 'Sub-Category'
+		dataType: string
+		lineageTag: 94075870-0dde-58ad-9bce-6f19b52d28c1
+		summarizeBy: none
+		sourceColumn: Sub-Category
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Product name; 1850 distinct. Basis of the Product Count variable metric (distinct count).
+	column 'Product Name'
+		dataType: string
+		lineageTag: 6cbb811a-785f-56e3-ab34-85625293c8fb
+		summarizeBy: none
+		sourceColumn: Product Name
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Line-item sales amount in USD (a.k.a. revenue; additive, range 0.44 to 22638.48). Base of [Total Sales] and the Sales window table-calcs.
+	column 'Sales'
+		dataType: double
+		lineageTag: 3965ef9f-27c7-5541-8480-af86d91a4a63
+		summarizeBy: sum
+		sourceColumn: Sales
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Units sold on the line (additive; 1 to 14).
+	column 'Quantity'
+		dataType: int64
+		lineageTag: 4e6320b3-0073-5a65-ab48-1ad6a68d02c8
+		summarizeBy: sum
+		sourceColumn: Quantity
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Discount rate applied to the line (0 to 0.80, i.e. 0% to 80%); percent-formatted.
+	column 'Discount'
+		dataType: double
+		lineageTag: fbed2ef1-5379-5720-b3c9-450c6d1eb28a
+		summarizeBy: sum
+		sourceColumn: Discount
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Line-item profit in USD (a.k.a. margin; additive, range -6599.98 to 8399.98). Base of [Total Profit] and the profit window / profit-ratio table-calcs.
+	column 'Profit'
+		dataType: double
+		lineageTag: 3b32a49b-a450-5352-9903-babe7f9e9565
+		summarizeBy: sum
+		sourceColumn: Profit
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Opaque source column (= Ship Date + ~2556 days); an Excel export artifact referenced by no calculation or worksheet. Hidden, retained for lineage.
+	column 'F22'
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: bdfb027e-49e5-56b0-8ff7-9b065ea32872
+		summarizeBy: none
+		sourceColumn: F22
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Calendar days between order and shipment (Ship Date minus Order Date); row-level integer. From Tableau [Days to Ship].
+	column 'Days to Ship' = DATEDIFF('Orders'[Order Date], 'Orders'[Ship Date], DAY)
+		dataType: int64
+		formatString: #,##0
+		lineageTag: 6482414f-15d1-5616-92f2-9f2d03eee1e7
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Whether the line shipped within its ship-mode SLA (Same Day 0d, First Class 2d, Second Class 4d, Standard Class 5d); row-level TRUE/FALSE. From Tableau [On Time Ship?].
+	column 'On Time Ship?' = ('Orders'[Ship Mode] = "Same Day" && 'Orders'[Days to Ship] = 0) || ('Orders'[Ship Mode] = "First Class" && 'Orders'[Days to Ship] <= 2) || ('Orders'[Ship Mode] = "Second Class" && 'Orders'[Days to Ship] <= 4) || ('Orders'[Ship Mode] = "Standard Class" && 'Orders'[Days to Ship] <= 5)
+		dataType: boolean
+		lineageTag: 56815a98-eab2-58d7-af33-923ed74b83f4
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Ship Date truncated to the first of its month (month grain); hidden helper axis the Sales window table-calcs address over. Tableau tmn:Ship Date axis.
+	column 'Ship Month' = DATE(YEAR('Orders'[Ship Date]), MONTH('Orders'[Ship Date]), 1)
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 53281acc-003e-56f0-8ca1-06a1cb864a4a
+		summarizeBy: none
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	/// Order Date truncated to the first of its quarter (quarter grain); hidden helper axis the East/West and 5th/6th-axis window table-calcs address over. Tableau tqr:Order Date axis.
+	column 'Order Quarter' = DATE(YEAR('Orders'[Order Date]), (QUARTER('Orders'[Order Date]) - 1) * 3 + 1, 1)
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 95c7b270-2225-5100-870b-f21a31718926
+		summarizeBy: none
+		isHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Orders' = m
+		mode: import
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.orders_sample_superstore.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"Row ID", Int64.Type}, {"Order ID", type text}, {"Order Date", type date}, {"Ship Date", type date}, {"Ship Mode", type text}, {"Customer ID", type text}, {"Customer Name", type text}, {"Segment", type text}, {"Country", type text}, {"City", type text}, {"State", type text}, {"Postal Code", type text}, {"Region", type text}, {"Product ID", type text}, {"Category", type text}, {"Sub-Category", type text}, {"Product Name", type text}, {"Sales", type number}, {"Quantity", Int64.Type}, {"Discount", type number}, {"Profit", type number}, {"F22", type date}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

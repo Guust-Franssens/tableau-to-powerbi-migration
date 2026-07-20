@@ -1,0 +1,10 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.1.0/schema.json",
+  "pageOrder": [
+    "p_week",
+    "p_month",
+    "p_year",
+    "p_records"
+  ],
+  "activePageName": "p_week"
+}

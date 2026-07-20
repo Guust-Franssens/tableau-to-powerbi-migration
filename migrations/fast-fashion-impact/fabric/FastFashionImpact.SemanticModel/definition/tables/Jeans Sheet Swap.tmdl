@@ -1,0 +1,45 @@
+/// Disconnected slicer for the infographic silhouette toggle (Tableau [Parameter 3] sheet-swap). Selection 1=CO2/jeans, 2=materials, 3=water; drives the Show CO2 Jeans / Show Materials / Show Water measures. Unrelated to all other tables by design.
+table 'Jeans Sheet Swap'
+	lineageTag: c3738dc5-979d-5d71-b9c5-ce0553bfad7f
+
+	/// Current silhouette-toggle selection ('1'/'2'/'3'), defaulting to '1' when nothing is selected. Helper read for the Show CO2 Jeans / Show Materials / Show Water toggles.
+	measure 'Jeans Sheet Swap Value' = SELECTEDVALUE('Jeans Sheet Swap'[Jeans Sheet Swap], "1")
+		displayFolder: Parameter
+		lineageTag: afbddb1e-f8f7-58dc-a17e-e8209e890d9f
+
+	/// TRUE when the silhouette toggle = '1' (show the jeans/CO2 silhouette). Boolean visibility flag.
+	measure 'Show CO2 Jeans' = [Jeans Sheet Swap Value] = "1"
+		displayFolder: View toggles
+		lineageTag: 1adc4811-1314-5805-b12b-b86b5894180d
+
+	/// TRUE when the silhouette toggle = '2' (show the fibre-materials silhouette). Boolean visibility flag.
+	measure 'Show Materials' = [Jeans Sheet Swap Value] = "2"
+		displayFolder: View toggles
+		lineageTag: 60055b63-1106-5e07-b3e4-9ae39523d8d5
+
+	/// TRUE when the silhouette toggle = '3' (show the water-droplet silhouette). Boolean visibility flag.
+	measure 'Show Water' = [Jeans Sheet Swap Value] = "3"
+		displayFolder: View toggles
+		lineageTag: 801971c3-0db2-57b8-b7d8-791892b83226
+
+	/// Silhouette toggle selection code. One of: '1' (CO2/jeans), '2' (materials), '3' (water). Disconnected slicer value.
+	column 'Jeans Sheet Swap'
+		dataType: string
+		lineageTag: 130fefbc-4efa-5660-8a7c-94ca781711bd
+		summarizeBy: none
+		sourceColumn: Jeans Sheet Swap
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Jeans Sheet Swap' = m
+		mode: import
+		source =
+				let
+				    Source = {"1", "2", "3"},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Jeans Sheet Swap"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Jeans Sheet Swap", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table
+

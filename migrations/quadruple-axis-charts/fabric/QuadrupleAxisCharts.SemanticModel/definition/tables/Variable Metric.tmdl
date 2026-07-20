@@ -1,0 +1,29 @@
+/// Disconnected slicer for Tableau parameter 'Variable Metric' (internal [Parameter 5], list, default '- Order Count'). Drives the Variable Metric COUNTD family.
+table 'Variable Metric'
+	lineageTag: e171d732-feb5-541b-8948-435a530b4b4a
+
+	/// Reads the current slicer selection on 'Variable Metric'[Variable Metric], defaulting to Tableau's current value when nothing is selected.
+	measure 'Variable Metric Value' = SELECTEDVALUE('Variable Metric'[Variable Metric], "- Order Count")
+		lineageTag: 728c6ec2-8059-50df-a992-8f645c559f71
+		displayFolder: Parameter
+
+	/// Variable count-metric selector (disconnected slicer) switching the distinct-count family. One of: None, - Order Count, - Customer Count, - Product Count.
+	column 'Variable Metric'
+		dataType: string
+		lineageTag: 8c05f43d-673a-5773-95b1-5bd68ea64178
+		summarizeBy: none
+		sourceColumn: Variable Metric
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Variable Metric' = m
+		mode: import
+		source =
+				let
+				    Source = {"None", "- Order Count", "- Customer Count", "- Product Count"},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Variable Metric"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Variable Metric", type text}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

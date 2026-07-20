@@ -1,0 +1,11 @@
+relationship rel_SongStats_Film_Films_Title
+	fromColumn: '4 Song Stats'.'Film'
+	toColumn: '1 Films'.'Title'
+
+relationship rel_Accolades_Film_Films_Title
+	fromColumn: '3 Accolades'.'Film'
+	toColumn: '1 Films'.'Title'
+
+relationship rel_Chronology_Show_Films_Title
+	fromColumn: '2 Chronology'.'Broadway Show'
+	toColumn: '1 Films'.'Title'

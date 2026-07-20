@@ -1,0 +1,5 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\spiraling-satellites\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: b9b6d30e-2a52-4fc7-ab23-316f50521600
+
+	annotation PBI_ResultType = Text
+

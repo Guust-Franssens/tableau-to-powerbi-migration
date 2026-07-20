@@ -1,0 +1,60 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "034e1c4d4bd6a2028295",
+  "position": {
+    "x": 860,
+    "y": 1530,
+    "z": 1220,
+    "width": 390,
+    "height": 112,
+    "tabOrder": 1220
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "RENEWABLES",
+                    "textStyle": {
+                      "fontSize": "12pt",
+                      "color": "#0f4556",
+                      "fontWeight": "bold"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "4pt",
+                      "color": "#0f4556"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Almost 30% of global electricity is from renewable sources. Solar, wind and other technologies are growing quickly; some countries get the majority of their electricity from renewables.",
+                    "textStyle": {
+                      "fontSize": "9pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

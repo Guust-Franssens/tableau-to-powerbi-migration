@@ -1,0 +1,59 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "c373ed078b6bd7c1c174",
+  "position": {
+    "x": 1043,
+    "y": 1930,
+    "z": 1270,
+    "width": 207,
+    "height": 86,
+    "tabOrder": 1270
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "Data shown from 1985 to 2022.",
+                    "textStyle": {
+                      "fontSize": "9pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "9pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "Use the year slider to set a reference year per country.",
+                    "textStyle": {
+                      "fontSize": "9pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

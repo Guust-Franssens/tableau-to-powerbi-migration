@@ -1,0 +1,25 @@
+{
+  "name": "theme.json",
+  "dataColors": [
+    "#6B9FA9",
+    "#88B793",
+    "#BFD6E1",
+    "#ECD7D2",
+    "#4E7C86",
+    "#A8C9A0",
+    "#9CBBD0",
+    "#D8A99E"
+  ],
+  "background": "#FFFFFF",
+  "foreground": "#4E5D63",
+  "tableAccent": "#6B9FA9",
+  "maximum": "#4E7C86",
+  "center": "#BFD6E1",
+  "minimum": "#ECD7D2",
+  "textClasses": {
+    "title": { "fontFace": "Century Gothic", "color": "#3A4A4F" },
+    "header": { "fontFace": "Century Gothic", "color": "#3A4A4F" },
+    "label": { "fontFace": "Century Gothic", "color": "#4E5D63" },
+    "callout": { "fontFace": "Century Gothic", "color": "#3A4A4F" }
+  }
+}

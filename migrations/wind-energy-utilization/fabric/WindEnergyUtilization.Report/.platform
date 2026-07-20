@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "WindEnergyUtilization"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "a938aef9-139b-46dc-af47-de7d8bea5253"
+  }
+}

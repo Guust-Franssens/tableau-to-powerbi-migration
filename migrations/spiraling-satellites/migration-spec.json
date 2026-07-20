@@ -1,0 +1,1919 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "SpiralingSatelliteCharts.twbx",
+    "tableau_version": "18.1",
+    "source_build": "2024.3.3 (20243.25.0114.1153)",
+    "repository_location_id": "SpiralingSatelliteCharts",
+    "parsed_at": "2026-07-17T16:14:39.993305+00:00"
+  },
+  "parameters": [
+    {
+      "id": "param.top_customers",
+      "internal_name": "[Parameter 1]",
+      "caption": "Top Customers",
+      "data_type": "integer",
+      "domain_type": "range",
+      "allowed_values": [],
+      "current_value": "5"
+    },
+    {
+      "id": "param.profit_bin_size",
+      "internal_name": "[Parameter 2]",
+      "caption": "Profit Bin Size",
+      "data_type": "integer",
+      "domain_type": "range",
+      "allowed_values": [],
+      "current_value": "200"
+    },
+    {
+      "id": "param.parameter_radius",
+      "internal_name": "[Parameter 3]",
+      "caption": "Parameter Radius",
+      "data_type": "real",
+      "domain_type": "any",
+      "allowed_values": [],
+      "current_value": "500."
+    }
+  ],
+  "data_sources": [
+    {
+      "id": "ds.sample_superstore",
+      "caption": "Sample - Superstore",
+      "internal_name": "Sample - Superstore",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Spiral Chart 3.twb Files/Sample - Superstore.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.orders",
+          "name": "Orders",
+          "source_relation": "table",
+          "custom_sql": null
+        },
+        {
+          "id": "tbl.model",
+          "name": "Model",
+          "source_relation": "table",
+          "custom_sql": null
+        },
+        {
+          "id": "tbl.people",
+          "name": "People",
+          "source_relation": "table",
+          "custom_sql": null
+        },
+        {
+          "id": "tbl.returns",
+          "name": "Returns",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_sample_superstore__profit_ratio",
+          "internal_name": "[Calculation_1368249927221915648]",
+          "caption": "Profit Ratio",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF MIN([City]) = \"Oswego\"\r\nTHEN ABS(SUM([Profit])/SUM([Sales]))\r\nELSE SUM([Profit])/SUM([Sales])\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__city",
+            "fld.ds_sample_superstore__profit",
+            "fld.ds_sample_superstore__sales"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__max_path",
+          "internal_name": "[Calculation_1498572842631897090]",
+          "caption": "Max Path",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{ FIXED [City]:SUM(\r\n\r\n{ FIXED [City],[Path]:\r\nIF [Calculation_1508987416698376201] THEN 1 END\r\n}\r\n\r\n)}-1",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__city",
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__spiral_filter"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__new_colour",
+          "internal_name": "[Calculation_1498572842638008323]",
+          "caption": "New colour",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF [Calculation_1368249927221915648] < 0  THEN IF MIN([Path])= 0 THEN -1 ELSE 0 END -MIN([Path])\r\nELSE IF MIN([Path])= 0 THEN 1 ELSE 0 END + MIN([Path])\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__profit_ratio"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__abs_proit_ratio",
+          "internal_name": "[Calculation_1508987416694005761]",
+          "caption": "Abs Proit Ratio",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "ABS([Calculation_1368249927221915648])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__profit_ratio"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__radius",
+          "internal_name": "[Calculation_1508987416696000517]",
+          "caption": "Radius",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 3]+[Path]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__path"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__x",
+          "internal_name": "[Calculation_1508987416696180742]",
+          "caption": "X",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(MIN([Calculation_1508987416696000517])*SIN([Calculation_1508987416696258567]))/360",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__angle",
+            "fld.ds_sample_superstore__radius"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__angle",
+          "internal_name": "[Calculation_1508987416696258567]",
+          "caption": "Angle",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "RADIANS( (MIN([Path]))* (360 / 100))\r\n\r\n*\r\n\r\nCASE [Calculation_1600185310577041417]\r\nWHEN FALSE THEN 1\r\nELSE -1\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__pie_colour"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__spiral_filter",
+          "internal_name": "[Calculation_1508987416698376201]",
+          "caption": "Spiral Filter",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MIN([Path]) <= ([Calculation_1508987416694005761]*100)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__abs_proit_ratio",
+            "fld.ds_sample_superstore__path"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_spiral",
+          "internal_name": "[Calculation_1508987416704344076]",
+          "caption": "MP - Spiral",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT([Calculation_1508987416696180742],[X (copy)_1508987416696676360])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__x",
+            "fld.ds_sample_superstore__y"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pie_slice_calc",
+          "internal_name": "[Calculation_1600185310569840647]",
+          "caption": "Pie Slice Calc",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "If MIN([Path]) = 1 THEN [Calculation_1600185310575546376]\r\nELSEIF MIN([Path]) = 2 THEN 1-[Calculation_1600185310575546376]\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__decimals",
+            "fld.ds_sample_superstore__path"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__decimals",
+          "internal_name": "[Calculation_1600185310575546376]",
+          "caption": "Decimals",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_1508987416694005761]-FLOOR([Calculation_1508987416694005761])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__abs_proit_ratio"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pie_colour",
+          "internal_name": "[Calculation_1600185310577041417]",
+          "caption": "Pie Colour",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_1368249927221915648]<0",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__profit_ratio"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__pie_tooltip_value",
+          "internal_name": "[Calculation_2292613688363659264]",
+          "caption": "Pie Tooltip Value",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "CASE TRUE\r\nWHEN MIN([Path])=1 THEN [Calculation_1368249927221915648]\r\nELSE 0\r\nEND",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__profit_ratio"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__city",
+          "internal_name": "[City]",
+          "caption": "City",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__country_region",
+          "internal_name": "[Country/Region]",
+          "caption": "Country/Region",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__customer_id",
+          "internal_name": "[Customer ID]",
+          "caption": "Customer ID",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__customer_name",
+          "internal_name": "[Customer Name]",
+          "caption": "Customer Name",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__discount",
+          "internal_name": "[Discount]",
+          "caption": "Discount",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_last_point",
+          "internal_name": "[MP - 100s (copy)_693835884409569286]",
+          "caption": "MP - Last Point",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) = MIN([Calculation_1498572842631897090]) THEN [Calculation_1508987416696180742]\r\nEND\r\n\r\n,\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) = MIN([Calculation_1498572842631897090]) THEN [X (copy)_1508987416696676360]\r\nEND\r\n\r\n)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__max_path",
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__x",
+            "fld.ds_sample_superstore__y"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_first_point",
+          "internal_name": "[MP - Last Point (copy)_1117737200450203648]",
+          "caption": "MP - First Point",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) = 0 THEN [Calculation_1508987416696180742]\r\nEND\r\n\r\n,\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) = 0 THEN [X (copy)_1508987416696676360]\r\nEND\r\n\r\n)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__x",
+            "fld.ds_sample_superstore__y"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_needle",
+          "internal_name": "[MP - Last Point (copy)_1600185310553243650]",
+          "caption": "MP - Needle",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) = MIN([Calculation_1498572842631897090]) THEN [Calculation_1508987416696180742]\r\nWHEN MIN([Path]) = 0 THEN 0\r\nEND\r\n\r\n,\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) = MIN([Calculation_1498572842631897090]) THEN [X (copy)_1508987416696676360]\r\nWHEN MIN([Path]) = 0 THEN 0\r\nEND\r\n\r\n)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__max_path",
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__x",
+            "fld.ds_sample_superstore__y"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_100s",
+          "internal_name": "[MP - Spiral (copy)_1498572842629914625]",
+          "caption": "MP - 100s",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) IN (100,200,300,400,500) THEN [Calculation_1508987416696180742]\r\nEND\r\n\r\n,\r\n\r\nCASE TRUE\r\nWHEN MIN([Path]) IN (100,200,300,400,500) THEN [X (copy)_1508987416696676360]\r\nEND\r\n\r\n)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__path",
+            "fld.ds_sample_superstore__x",
+            "fld.ds_sample_superstore__y"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_zero",
+          "internal_name": "[MP - Spiral (copy)_1508987416705425421]",
+          "caption": "MP - Zero",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(0,0)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_spiral_overlay",
+          "internal_name": "[MP - Spiral (copy)_1600185310561767429]",
+          "caption": "MP - Spiral Overlay",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(\r\n\r\nIF [Calculation_1508987416698376201]\r\nTHEN\r\n[Calculation_1508987416696180742]\r\nELSE NULL\r\nEND\r\n,\r\n\r\nIF [Calculation_1508987416698376201]\r\nTHEN\r\n[X (copy)_1508987416696676360]\r\nELSE NULL\r\nEND\r\n\r\n)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__spiral_filter",
+            "fld.ds_sample_superstore__x",
+            "fld.ds_sample_superstore__y"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_titles",
+          "internal_name": "[MP - Zero (copy)_1600185310550966272]",
+          "caption": "MP - Titles",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(3,3)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_sample_superstore__mp_axis_guides",
+          "internal_name": "[MP - Zero (copy)_481322277674856449]",
+          "caption": "MP - Axis guides",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "spatial",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MAKEPOINT(\r\nCASE [Path]\r\nWHEN 1 THEN 0  //Centre\r\nWHEN 2 THEN 0  // Up\r\nWHEN 3 THEN 0  // Down\r\nWHEN 4 THEN 0  //Centre\r\nWHEN 5 THEN 2.9  // Right\r\nWHEN 6 THEN -2.9 // Left\r\nEND\r\n\r\n,\r\n\r\nCASE [Path]\r\nWHEN 1 THEN 0  //Centre\r\nWHEN 2 THEN 2.9  // Up\r\nWHEN 3 THEN -2.9  // Down\r\nWHEN 4 THEN 0  //Centre\r\nWHEN 5 THEN 0  // Right\r\nWHEN 6 THEN 0 // Left\r\nEND\r\n\r\n)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__path"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__order_date",
+          "internal_name": "[Order Date]",
+          "caption": "Order Date",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__order_id_returns",
+          "internal_name": "[Order ID (Returns)]",
+          "caption": "Order ID (Returns)",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__order_id",
+          "internal_name": "[Order ID]",
+          "caption": "Order ID",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__path",
+          "internal_name": "[Path]",
+          "caption": "Path",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__postal_code",
+          "internal_name": "[Postal Code]",
+          "caption": "Postal Code",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__product_id",
+          "internal_name": "[Product ID]",
+          "caption": "Product ID",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__manufacturer",
+          "internal_name": "[Product Name (group)]",
+          "caption": "Manufacturer",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__product_name",
+          "internal_name": "[Product Name]",
+          "caption": "Product Name",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__profit_bin",
+          "internal_name": "[Profit (bin)]",
+          "caption": "Profit (bin)",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Profit]",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__profit"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__profit",
+          "internal_name": "[Profit]",
+          "caption": "Profit",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__quantity",
+          "internal_name": "[Quantity]",
+          "caption": "Quantity",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__region_people",
+          "internal_name": "[Region (People)]",
+          "caption": "Region (People)",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__region",
+          "internal_name": "[Region]",
+          "caption": "Region",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__regional_manager",
+          "internal_name": "[Regional Manager]",
+          "caption": "Regional Manager",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__returned",
+          "internal_name": "[Returned]",
+          "caption": "Returned",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__row_id",
+          "internal_name": "[Row ID]",
+          "caption": "Row ID",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__segment",
+          "internal_name": "[Segment]",
+          "caption": "Segment",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__ship_date",
+          "internal_name": "[Ship Date]",
+          "caption": "Ship Date",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "date",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__ship_mode",
+          "internal_name": "[Ship Mode]",
+          "caption": "Ship Mode",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__100s_inner_colour",
+          "internal_name": "[Spiral Filter (copy)_1251156339679744001]",
+          "caption": "100s Inner Colour",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "MIN([Path]) <= ([Calculation_1508987416694005761]*100)",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__abs_proit_ratio",
+            "fld.ds_sample_superstore__path"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__state_province",
+          "internal_name": "[State/Province]",
+          "caption": "State/Province",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__sub_category",
+          "internal_name": "[Sub-Category]",
+          "caption": "Sub-Category",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__y",
+          "internal_name": "[X (copy)_1508987416696676360]",
+          "caption": "Y",
+          "table_id": null,
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "(MIN([Calculation_1508987416696000517])*COS([Calculation_1508987416696258567]))/360",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_sample_superstore__angle",
+            "fld.ds_sample_superstore__radius"
+          ]
+        },
+        {
+          "id": "fld.ds_sample_superstore__model",
+          "internal_name": "[__tableau_internal_object_id__].[Model_8569678B6C674C1A9DC7B23D76F6DA06]",
+          "caption": "Model",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__orders",
+          "internal_name": "[__tableau_internal_object_id__].[Orders_ECFCA1FB690A41FE803BC071773BA862]",
+          "caption": "Orders",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__people",
+          "internal_name": "[__tableau_internal_object_id__].[People_D73023733B004CC1B3CB1ACF62F4A965]",
+          "caption": "People",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__returns",
+          "internal_name": "[__tableau_internal_object_id__].[Returns_2AA0FE4D737A4F63970131D0E7480A03]",
+          "caption": "Returns",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": true,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_sample_superstore__sales",
+          "internal_name": "[Sales]",
+          "caption": "Sales",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.banding",
+      "name": "Banding",
+      "title_text": "... with bandingÆ\nGives a sense of a greater extent of the values is possible.",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__city",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Start point (0%)"
+    },
+    {
+      "id": "ws.beyond_100",
+      "name": "Beyond 100%",
+      "title_text": "Satellite Chart beyond 100%Æ\nDepth and quantity of colour draws the attention and focus on those particularly significant.",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__city",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__spiral_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Start point (0%)"
+    },
+    {
+      "id": "ws.doughnuts",
+      "name": "Doughnuts",
+      "title_text": "A major issue with a standard Doughnut Chart or Pie ChartÆ\nDoughnut charts and Pie charts are recognisable and work well for percentages - until those percentages move past 100%, then they become obsolete as a visualisation.Æ\nExample below:",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__city",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_175077503786336257:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_175077503786336257:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__path",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "1",
+            "2"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": ""
+    },
+    {
+      "id": "ws.pointer_needle",
+      "name": "Pointer needle",
+      "title_text": "... with pointer needleÆ\nProvides a visual focus onto the point of importance, the end point.  Helping the user with a particularly unusual visual.",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__city",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_sample_superstore__spiral_filter",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "true"
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Start point (0%)"
+    },
+    {
+      "id": "ws.snake",
+      "name": "Snake",
+      "title_text": "... snake line with prominent 100% indicatorsÆ\nThe thicker snake line gives even more emphasis on the colour depth and quantity.  The 100% indicators allow for a quicker understanding of the size of the metric.",
+      "data_source_ids": [
+        "Sample - Superstore"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "UNRESOLVED:Longitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_sample_superstore__city",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:Latitude (generated)",
+            "aggregation": null,
+            "derivation": null,
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Start point (0%)"
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.spiraling_satellite_charts",
+      "name": "Spiraling Satellite Charts",
+      "size": {
+        "width": 1320.0,
+        "height": 1800.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "2",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": "#f8fcfb",
+            "children": [
+              {
+                "id": "15",
+                "type": "layout-basic",
+                "x": 5455.0,
+                "y": 2333.0,
+                "w": 89090.0,
+                "h": 93667.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": [
+                  {
+                    "id": "30",
+                    "type": "layout-basic",
+                    "x": 5455.0,
+                    "y": 2333.0,
+                    "w": 89090.0,
+                    "h": 7778.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "34",
+                        "type": "layout-basic",
+                        "x": 5455.0,
+                        "y": 2333.0,
+                        "w": 89090.0,
+                        "h": 7778.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "35",
+                    "type": "layout-basic",
+                    "x": 5455.0,
+                    "y": 10111.0,
+                    "w": 89090.0,
+                    "h": 4722.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "28",
+                        "type": "layout-basic",
+                        "x": 5455.0,
+                        "y": 10111.0,
+                        "w": 28106.0,
+                        "h": 4722.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "Satellite or orbital charts are an unusual visualisation type that occupy the same visualisation space as your standard pie chart.  The difference is, a satellite chart uses a circle marker to denote the position around the radial that the value represents, rather than a slice of a pie.  That circle is connected to a line that arcs around from the top to the circle marker.",
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "38",
+                        "type": "layout-basic",
+                        "x": 33561.0,
+                        "y": 10111.0,
+                        "w": 32878.0,
+                        "h": 4722.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "The satellite chart can really only showcase a single value at a time, whereas a pie chart or doughnut chart can show multiple values as a part-to-whole solution.  That doesn't mean one is better than the other, just they are different visuals that are valid options to the visualisation developer.",
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "39",
+                        "type": "layout-basic",
+                        "x": 66439.0,
+                        "y": 10111.0,
+                        "w": 5000.0,
+                        "h": 4722.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "32",
+                        "type": "layout-basic",
+                        "x": 71439.0,
+                        "y": 10111.0,
+                        "w": 9091.0,
+                        "h": 4722.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "Design & method:Æ\nData: Æ\nBluesky:Æ\nLinkedIn:Æ\n",
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "33",
+                        "type": "layout-basic",
+                        "x": 80530.0,
+                        "y": 10111.0,
+                        "w": 14015.0,
+                        "h": 4722.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": "Samuel ParsonsÆ\nTableau SuperstoreÆ\n@sparsonsdataviz.bsky.socialÆ\nsparsonsdatavizÆ\n",
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "37",
+                    "type": "layout-basic",
+                    "x": 5455.0,
+                    "y": 14833.0,
+                    "w": 89090.0,
+                    "h": 1222.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": "#acb2c3",
+                    "children": []
+                  },
+                  {
+                    "id": "13",
+                    "type": "layout-basic",
+                    "x": 5455.0,
+                    "y": 16055.0,
+                    "w": 89090.0,
+                    "h": 79945.0,
+                    "direction": null,
+                    "worksheet_id": null,
+                    "field_id": null,
+                    "text_html": null,
+                    "background_color": null,
+                    "children": [
+                      {
+                        "id": "17",
+                        "type": "worksheet",
+                        "x": 5455.0,
+                        "y": 16055.0,
+                        "w": 89090.0,
+                        "h": 14680.0,
+                        "direction": null,
+                        "worksheet_id": "ws.doughnuts",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "22",
+                        "type": "layout-basic",
+                        "x": 5455.0,
+                        "y": 30735.0,
+                        "w": 89090.0,
+                        "h": 6112.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": [
+                          {
+                            "id": "24",
+                            "type": "layout-basic",
+                            "x": 5455.0,
+                            "y": 30735.0,
+                            "w": 28106.0,
+                            "h": 5556.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": "A doughnut chart is essentially a pie chart with a hole in it.  It visualises a single or multiple slices of a pie, cut at various angles.  However, doughnut charts when hole in the centre is large and a small slice of the pie is left visible, actually can be perceived as a bar that runs around the outside of the doughnut.  Both concepts of reading the chart are acceptable.",
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "23",
+                            "type": "layout-basic",
+                            "x": 33561.0,
+                            "y": 30735.0,
+                            "w": 32878.0,
+                            "h": 5556.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": "What if we could take the concept of a doughnut chart and extend the bar that runs around the outside past the 100% mark and start to add layers as the value increases beyond 100%?  We would create a spiral with multiple rings to it.  Each full ring representing 100% adding up together.",
+                            "background_color": null,
+                            "children": []
+                          },
+                          {
+                            "id": "21",
+                            "type": "layout-basic",
+                            "x": 66439.0,
+                            "y": 30735.0,
+                            "w": 28106.0,
+                            "h": 5556.0,
+                            "direction": null,
+                            "worksheet_id": null,
+                            "field_id": null,
+                            "text_html": "To make this easier to read, we could alter the chart from a doughnut to a satellite chart.  As explained above, the concepts between these charts are similar, the advantage a satellite chart would give us here, is the ability to follow the orbit around multiple rings.  This will allow for an easier comprehension of what the chart is portraying.",
+                            "background_color": null,
+                            "children": []
+                          }
+                        ]
+                      },
+                      {
+                        "id": "29",
+                        "type": "layout-basic",
+                        "x": 5455.0,
+                        "y": 36847.0,
+                        "w": 89090.0,
+                        "h": 1222.0,
+                        "direction": null,
+                        "worksheet_id": null,
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": "#acb2c3",
+                        "children": []
+                      },
+                      {
+                        "id": "1",
+                        "type": "worksheet",
+                        "x": 5455.0,
+                        "y": 38069.0,
+                        "w": 89090.0,
+                        "h": 14680.0,
+                        "direction": null,
+                        "worksheet_id": "ws.beyond_100",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "10",
+                        "type": "worksheet",
+                        "x": 5455.0,
+                        "y": 52749.0,
+                        "w": 89090.0,
+                        "h": 14680.0,
+                        "direction": null,
+                        "worksheet_id": "ws.banding",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "12",
+                        "type": "worksheet",
+                        "x": 5455.0,
+                        "y": 67429.0,
+                        "w": 89090.0,
+                        "h": 14680.0,
+                        "direction": null,
+                        "worksheet_id": "ws.pointer_needle",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      },
+                      {
+                        "id": "18",
+                        "type": "worksheet",
+                        "x": 5455.0,
+                        "y": 82109.0,
+                        "w": 89090.0,
+                        "h": 13891.0,
+                        "direction": null,
+                        "worksheet_id": "ws.snake",
+                        "field_id": null,
+                        "text_html": null,
+                        "background_color": null,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "4",
+            "type": "layout-basic",
+            "x": 110000.0,
+            "y": 6600.0,
+            "w": 16000.0,
+            "h": 33200.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "8",
+                "type": "worksheet",
+                "x": 110000.0,
+                "y": 6600.0,
+                "w": 16000.0,
+                "h": 1222.0,
+                "direction": null,
+                "worksheet_id": "ws.beyond_100",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      "actions": []
+    }
+  ],
+  "theme": {
+    "palette_hexes": [
+      "#152835",
+      "#acb2c3",
+      "#d1d5d8",
+      "#f8fcfb",
+      "#ffffff"
+    ],
+    "font_family": "Arial",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.sample_superstore",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__max_path",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_spiral",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_last_point",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_first_point",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_needle",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_100s",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_zero",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_spiral_overlay",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_titles",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__mp_axis_guides",
+      "issue": "data_type 'spatial' (MAKEPOINT/MAKELINE-derived map geometry) has no native DAX/Power Query equivalent - requires a custom/ArcGIS visual or reducing to plain lat/long measure columns with reduced fidelity (e.g. no native origin-destination line rendering)",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__model",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__orders",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__people",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_sample_superstore__returns",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.banding",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.banding",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.beyond_100",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.beyond_100",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.doughnuts",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_175077503786336257:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.doughnuts",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_175077503786336257:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.pointer_needle",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.pointer_needle",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.snake",
+      "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.snake",
+      "issue": "could not resolve shelf reference UNRESOLVED:Latitude (generated)",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "MAKEPOINT spatial fields (MP - Spiral, MP - First/Last Point, MP - Needle, MP - 100s, MP - Spiral Overlay, MP - Zero, MP - Titles, MP - Axis guides)",
+      "issue": "Power BI has no native point-geometry type equivalent to Tableau MAKEPOINT plotted on a Map. Capability gap. Reproduced by materialising the underlying computed coordinate columns Spiral[X]/Spiral[Y] and driving a native scatterChart (X=Spiral[X], Y=Spiral[Y]) as a per-City small-multiple. Boolean helper columns Is First Point (Path=0), Is Last Point (Path=Max Path), Is 100s Marker (Path IN 100,200,300,400) replace the MP-First/Last/100s overlay layers for conditional formatting/needle endpoints. MP-Zero(0,0), MP-Titles(3,3) and MP-Axis guides (6-row CASE scaffold) are static annotation layers left to the report builder. Fidelity: spiral shape reproduced exactly; Tableau Map background/geographic-projection semantics are not applicable and intentionally dropped.",
+      "severity": "high",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Spiral densification (Orders 1=1 Model cross join over Path axis)",
+      "issue": "Tableau densifies each city's spiral across the Model table's Path domain (0..400) via a 1=1 object-model join (a table-calc/INDEX-style scaffold). Materialised as calculated table Spiral = CROSSJOIN(City, Model[Path]) = 542 cities x 401 paths = 217,342 rows. The per-city ratio family (Profit Ratio, Abs Profit Ratio, Pie Colour, Decimals, Max Path) is denormalised onto Spiral via SELECTCOLUMNS so the row-level trig columns are self-contained (no cross-table RELATED inside calculated columns - deliberate robustness choice).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Max Path (nested FIXED [City] LOD)",
+      "issue": "Nested FIXED LOD { FIXED [City]: SUM({ FIXED [City],[Path]: IF SpiralFilter THEN 1 END }) } - 1 counts path rows under the spiral filter minus one. Translated to calculated column Max Path = MIN(INT([Abs Profit Ratio]*100), 400) = floor(AbsRatio*100) capped at the Model scaffold maximum (400). Ground-truthed: Houston->15, Oswego->166.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Parameter Radius (what-if parameter, default 500)",
+      "issue": "Feeds the row-level Radius = [Parameter Radius] + [Path] calc. A live Power BI what-if parameter cannot drive a calculated column (it would require re-expressing every coordinate as a measure over a disconnected slicer, which changes the scatter binding model). Baked at its default value 500. Fidelity ceiling: radius is fixed; interactive radius tuning from the Tableau parameter is not reproduced. Other parameters (Top Customers=5, Profit Bin Size=200, Model=5) are unused by the spiral worksheets and omitted.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Profit Ratio - Oswego special-case (possible source quirk)",
+      "issue": "Source formula hardcodes IF MIN([City]) = 'Oswego' THEN ABS(SUM(Profit)/SUM(Sales)) ELSE SUM(Profit)/SUM(Sales). Only this one city is ABS'd, which flips its Pie Colour (Profit Ratio<0) to False and reverses its spiral winding direction. Almost certainly an author test artifact. Translated FAITHFULLY (not silently normalised) and flagged here for customer confirmation. Also: source caption typo 'Abs Proit Ratio' cleaned to 'Abs Profit Ratio'.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Omitted tables and vestigial fields",
+      "issue": "People (Region, 4 rows) and Returns (Order ID, 800 rows) hyper tables are unreferenced by any of the 5 spiral worksheets and were omitted. Report/vestigial fields not modelled: Profit (bin); Manufacturer (a rename aliasing [Profit]); the Doughnuts MIN(1) pie-wedge constant; Number of Records. The four Tableau relationship-anchor pseudo-columns (data_type=table) are excluded per convention.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Import-mode extract materialisation",
+      "issue": "Extract-based (.hyper) source. Orders (10,194 rows) imported from data/ds.sample_superstore.csv (columns Order ID, City, Region, Sales, Profit). The Model Path densification scaffold (401 rows, Path 0..400) was exported from the .hyper Model table to data/ds.model.csv and imported. Import mode with explicit en-US culture on Table.TransformColumnTypes. No live connection retained.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Validation coverage (no live engine in batch)",
+      "issue": "Structural: TOM TmdlSerializer.DeserializeDatabaseFromFolder deserialises cleanly (same parser Power BI Desktop uses); 46/46 DAX bracket references resolve; 0 measures (measure-name uniqueness and measure/column collision checks trivially hold). Numeric: X/Y verified two independent ways in Python against the source CSV (agree to 2.6e-15) for 6 probes - Houston P0/P15, New York City P10, Oswego P0/P166, Naperville P5. A live EVALUATE was not run: no Power BI Desktop/PBIP is open in this headless parallel batch and Tableau-rendered coordinate values are not persisted in the .twb (coordinates are deterministic given the CSV + formulas, which is what the Python ground-truth computes).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Copilot readiness (AI-prep pass) - service-only AI features not committable from TMDL",
+      "issue": "AI-prep completed: business-meaning descriptions added to all 4 tables and all 33 columns (meaning + unit/grain led, front-loaded for the 200-char DAX Copilot window), plus domain enumerations for the low-cardinality categorical Orders[Region] = {Central, East, South, West} and every boolean flag (One of: True, False). NOT applied because they have no stable Git/TMDL file contract today and must be set later in the Power BI/Fabric service: the linguistic AI data schema + AI instructions (LSDL), Copilot 'verified answers', and the Approved-for-Copilot / semantic-model indexing settings. Persisted via TOM ExportToTmdlFolder (cosmetic quoting/whitespace normalized model-wide; DAX, lineageTags and structure preserved; re-validated: deserialize clean, 46/46 bracket refs resolve, 4/4 tables + 33/33 columns described).",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "Scatter small-multiples gap - one satellite per view (single-city slicer substitution)",
+      "issue": "Tableau's satellite/spiral technique renders one city's spiral per worksheet and can trellis many cities as small multiples. Power BI's native scatterChart has NO Rows/small-multiples role (confirmed via `powerbi-report-author catalog describe scatterChart`), and its Category well (max 1) is consumed by Path to trace the spiral, so City cannot also be trellised in the same visual. Reproduced as a single-satellite view driven by a single-select City slicer (default 'Abilene', the largest-magnitude spiral at -270% profit ratio = 2.7 rings). Preserves the author's stated intent ('a satellite chart can really only showcase a single value at a time') and is more interactive than a static trellis, at the cost of not showing all 542 cities at once.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "No connecting polyline for the continuous 'snake' spiral trail",
+      "issue": "scatterChart plots markers only; it cannot draw an ordered line connecting Path 0->400, so the continuous 'snake' trail is approximated by the density of the 401 plotted points (which read as a near-continuous curve) plus accent markers at each 100th point (Is 100s Marker overlay). A truly stroked spiral line is not achievable natively: lineChart cannot plot a 2D polar X/Y coordinate pair. Shape is faithful; line continuity is density-based rather than a stroked path.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Center-hole annotations (Tableau MP-Titles) not reproduced natively",
+      "issue": "The Tableau infographic places the city name and value as text in each spiral's empty centre via a dual-axis text mark. Native scatterChart has no centre-annotation layer. Conveyed instead through the City slicer and per-chart side descriptions. A per-satellite textbox could add the city label but would be static (not bound to the slicer selection), so it was omitted to keep the view data-driven.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Square/circular aspect relies on fixed hidden axes - pending live Desktop confirmation",
+      "issue": "Spiral circularity is enforced by fixing both categoryAxis (X) and valueAxis (Y) to start=-2.6, end=2.6 while hiding the axes (show=false). X/Y are origin-symmetric (Radius 500..900 /360 => +-2.5), so independent auto-scaling would stay near-square even if the fixed range were dropped, making severe distortion unlikely. Not visually confirmed in Desktop this session. If a rendered spiral looks elliptical, set both axes show=true (labels can be recoloured to the page background) to force the fixed range.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "Live Power BI Desktop verification deferred (bridge contention)",
+      "issue": "Structural validation passed with 0 errors (`powerbi-report-author validate`) and all 8 distinct Entity.Property references were cross-checked against the semantic model TMDL and resolve. Live Desktop reload+screenshot was deferred: at build time the Desktop bridge had two other in-flight builds attached (airline-alliance-activity WITH unsaved changes, and superstore-sales-performance), and per subagent guidance the single Desktop bridge must not be contended nor a sibling's unsaved instance force-opened. The deliverable is a report-only PBIR folder (no .pbip wrapper) so it cannot be opened standalone without extra scaffolding. Follow-up: open against ../SpiralingSatellites.SemanticModel, refresh, and confirm (a) the scatter traces a continuous spiral for Abilene, (b) ring-band colours cascade light->navy outward, (c) the needle-tip (red) and 100s (gold) overlays align on the base spiral.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "City dimension changed from calculated table to import (group-by CSV) to break a circular dependency that blocked model load",
+      "issue": "Power BI Desktop refused to load the model with \"Relationship 'rel_Orders_City' uses an invalid column ID 32.\" Root cause: City was a CALCULATED table = ADDCOLUMNS(DISTINCT(Orders[City]), \"Sales\", CALCULATE(SUM(Orders[Sales])), \"Profit\", CALCULATE(SUM(Orders[Profit]))). The CALCULATE aggregate columns use context transition, which the engine treats as relationship-dependent, so adding rel_Orders_City (Orders[City]->City[City]) closed a dependency cycle: City[Sales]/[Profit] depend on relationships touching Orders -> rel_Orders_City references City[City] -> needs City compiled -> cycle. The engine could not assign City's columns valid IDs, surfacing as an 'invalid column ID'. Only rel_Orders_City was flagged because it is the single edge that closes the loop (City depends on Orders); rel_Spiral_City targets the same City[City] but City does not depend on Spiral, so no cycle. FIX: re-sourced City as an IMPORT dimension whose M partition reads ds.sample_superstore.csv and does Table.Group by City summing Sales/Profit (identical result to the former CALCULATE(SUM(...)) aggregates and to the Python ground-truth). This severs City's data dependency on Orders, so Orders->City no longer closes any loop. All 3 relationships were KEPT (Orders->City preserved as requested so a City slicer still filters Spiral). The 5 City calc columns (Profit Ratio incl. the Oswego ABS quirk, Abs Profit Ratio, Pie Colour, Decimals, Max Path), all descriptions and lineageTags are unchanged. Verified offline: TmdlSerializer deserialize clean (4 tables / 33 columns / 3 rels), City partition is now MPartitionSource with no Orders reference (dependency graph acyclic), 43/43 DAX bracket refs resolve (the 3 former Orders[...] refs removed), and Python group-by reproduces every ground-truth probe (Houston Sales=64504.76/Profit=-10153.55, Oswego 321.98/-536.13, New York City 256368.16/62036.98, Naperville 1288.30/-146.53; 542 cities) with X/Y/Max Path unchanged. NOTE: neither offline TmdlSerializer nor the MCP ConnectFolder reproduce this cycle (both load the broken model clean); only Power BI Desktop's full metadata-compile engine detects it, so the definitive load confirmation is done in Desktop by the report validator.",
+      "severity": "high",
+      "stage": "semantic_build"
+    }
+  ]
+}

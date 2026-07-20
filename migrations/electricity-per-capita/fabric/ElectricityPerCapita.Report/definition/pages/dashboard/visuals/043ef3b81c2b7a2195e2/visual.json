@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "043ef3b81c2b7a2195e2",
+  "position": {
+    "x": 300,
+    "y": 330,
+    "z": 1090,
+    "width": 950,
+    "height": 50,
+    "tabOrder": 1090
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "⚠ Original view: a radial Sankey / flow tree built from spatial MAKEPOINT/MAKELINE geometry — no native Power BI equivalent. Shown natively below as a treemap (region → country, sized by 2022 generation) + table. An AppSource Sankey custom visual is required for exact fidelity.",
+                    "textStyle": {
+                      "fontSize": "9pt",
+                      "color": "#8a4b1e"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

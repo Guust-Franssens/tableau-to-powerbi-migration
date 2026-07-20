@@ -1,0 +1,25 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Polygon Materials","JEANS","Jeans Polygon","Marimekko","Radial with Borders","Radial (Radar Environmental)","Performance Quartile","Fibre Production 1970-2018","Polygon water","Ripped Polygon","JEANS water","Jeans Sheet Swap"]
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table 'Polygon Materials'
+ref table JEANS
+ref table 'Jeans Polygon'
+ref table Marimekko
+ref table 'Radial with Borders'
+ref table 'Radial (Radar Environmental)'
+ref table 'Performance Quartile'
+ref table 'Fibre Production 1970-2018'
+ref table 'Polygon water'
+ref table 'Ripped Polygon'
+ref table 'JEANS water'
+ref table 'Jeans Sheet Swap'
+

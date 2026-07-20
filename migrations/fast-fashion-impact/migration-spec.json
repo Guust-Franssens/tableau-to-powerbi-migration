@@ -1,0 +1,4339 @@
+{
+  "migration_spec_version": "1.0",
+  "source": {
+    "file_name": "FastFashionsEnvironmentalWakeUpCall.twbx",
+    "tableau_version": "18.1",
+    "source_build": "2024.1.0 (20241.24.0524.1727)",
+    "repository_location_id": "FastFashionsEnvironmentalWakeUpCall",
+    "parsed_at": "2026-07-17T16:14:28.795692+00:00"
+  },
+  "parameters": [
+    {
+      "id": "param.top_customers",
+      "internal_name": "[Parameter 1]",
+      "caption": "Top Customers",
+      "data_type": "integer",
+      "domain_type": "range",
+      "allowed_values": [],
+      "current_value": "5"
+    },
+    {
+      "id": "param.profit_bin_size",
+      "internal_name": "[Parameter 2]",
+      "caption": "Profit Bin Size",
+      "data_type": "integer",
+      "domain_type": "range",
+      "allowed_values": [],
+      "current_value": "200"
+    },
+    {
+      "id": "param.jeans_sheet_swap",
+      "internal_name": "[Parameter 3]",
+      "caption": "Jeans Sheet Swap",
+      "data_type": "string",
+      "domain_type": "list",
+      "allowed_values": [
+        "1",
+        "2",
+        "3"
+      ],
+      "current_value": "1"
+    }
+  ],
+  "data_sources": [
+    {
+      "id": "ds.polygon_materials_fast_fashion_data_final",
+      "caption": "Polygon Materials (Fast Fashion Data FINAL)",
+      "internal_name": "federated.00y6f261qog3m00ztlui30za3zf6",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_00y6f261qog3m00ztlui30.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.polygon_materials",
+          "name": "Polygon Materials",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__point_x_flipped",
+          "internal_name": "[Calculation_432908530534424577]",
+          "caption": "Point X Flipped",
+          "table_id": "tbl.polygon_materials",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[pointX] * -1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_polygon_materials_fast_fashion_data_final__point_x"
+          ]
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__materials_flag",
+          "internal_name": "[Calculation_432908530804445197]",
+          "caption": "Materials flag",
+          "table_id": "tbl.polygon_materials",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 3] = '2'",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__references",
+          "internal_name": "[Calculation_491173864436760576]",
+          "caption": "REFERENCES",
+          "table_id": "tbl.polygon_materials",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "'References'",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__polygon_materials",
+          "internal_name": "[__tableau_internal_object_id__].[Polygon Materials_AAF5CAAF1869498BA4AD1726D61ABF9E]",
+          "caption": "Polygon Materials",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__point_id",
+          "internal_name": "[pointId]",
+          "caption": "Point Id",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__point_x",
+          "internal_name": "[pointX]",
+          "caption": "Point X",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__point_y",
+          "internal_name": "[pointY]",
+          "caption": "Point Y",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__shape_id",
+          "internal_name": "[shapeId]",
+          "caption": "Shape Id",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__shape_type",
+          "internal_name": "[shapeType]",
+          "caption": "Shape Type",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_materials_fast_fashion_data_final__value",
+          "internal_name": "[Value (%)]",
+          "caption": "Value (%)",
+          "table_id": "tbl.polygon_materials",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.jeans_fast_fashion_data_final",
+      "caption": "JEANS (Fast Fashion Data FINAL)",
+      "internal_name": "federated.0njmxyg1x8e5fh1ciklp61oteabb",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_0njmxyg1x8e5fh1ciklp61.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.jeans",
+          "name": "JEANS",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_jeans_fast_fashion_data_final__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": "tbl.jeans",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_fast_fashion_data_final__jeans",
+          "internal_name": "[__tableau_internal_object_id__].[JEANS_433BB89D7BBA4C9BB22E737095ABD389]",
+          "caption": "JEANS",
+          "table_id": "tbl.jeans",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_fast_fashion_data_final__id",
+          "internal_name": "[ID]",
+          "caption": "ID",
+          "table_id": "tbl.jeans",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_jeans_fast_fashion_data_final__value",
+          "internal_name": "[Value (%)]",
+          "caption": "Value (%)",
+          "table_id": "tbl.jeans",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.jeans_polygon_fast_fashion_data_final",
+      "caption": "Jeans Polygon (Fast Fashion Data FINAL)",
+      "internal_name": "federated.0oyl16e10p0p9q112nx1f04n74c1",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_0oyl16e10p0p9q112nx1f0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.jeans_polygon",
+          "name": "Jeans Polygon",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__point_x_flipped",
+          "internal_name": "[Calculation_1106196671921565696]",
+          "caption": "Point X FLipped",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[pointX] * -1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_jeans_polygon_fast_fashion_data_final__point_x"
+          ]
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__co2_flag",
+          "internal_name": "[Calculation_432908530804346892]",
+          "caption": "Co2 flag",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 3] = '1'",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__jeans_polygon",
+          "internal_name": "[__tableau_internal_object_id__].[Jeans Polygon_7F0B27EED4F54F2A9A9DC15F4214FB52]",
+          "caption": "Jeans Polygon",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__point_id",
+          "internal_name": "[pointId]",
+          "caption": "Point Id",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__point_x",
+          "internal_name": "[pointX]",
+          "caption": "Point X",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__point_y",
+          "internal_name": "[pointY]",
+          "caption": "Point Y",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__shape_id",
+          "internal_name": "[shapeId]",
+          "caption": "Shape Id",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__shape_label",
+          "internal_name": "[shapeLabel]",
+          "caption": "Shape Label",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__shape_type",
+          "internal_name": "[shapeType]",
+          "caption": "Shape Type",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_polygon_fast_fashion_data_final__value",
+          "internal_name": "[Value (%)]",
+          "caption": "Value (%)",
+          "table_id": "tbl.jeans_polygon",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.marimekko_marikekko_segments",
+      "caption": "Marimekko (Marikekko - Segments)",
+      "internal_name": "federated.0qr326c05vsvyo12orw6213f3m41",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_0qr326c05vsvyo12orw621.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.marimekko",
+          "name": "Marimekko",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__calculation1",
+          "internal_name": "[Calculation1]",
+          "caption": "Calculation1",
+          "table_id": "tbl.marimekko",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "RUNNING_SUM(SUM([Calculation_1516305717278158849]))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_marimekko_marikekko_segments__segment_pulse_lod"
+          ]
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__segment_pulse_lod",
+          "internal_name": "[Calculation_1516305717278158849]",
+          "caption": "Segment Pulse LOD",
+          "table_id": "tbl.marimekko",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "{ FIXED [Segment]: SUM([Pulse Score]) }",
+          "is_lod": true,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_marimekko_marikekko_segments__pulse_score",
+            "fld.ds_marimekko_marikekko_segments__segment"
+          ]
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__running_total_x_axis",
+          "internal_name": "[Calculation_1516305717279453186]",
+          "caption": "Running Total X Axis",
+          "table_id": "tbl.marimekko",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "IF FIRST() = 0 then MIN([Calculation_1516305717278158849])\r\nelseif MIN([Segment]) !=  LOOKUP(MIN([Segment]),-1) then PREVIOUS_VALUE(0) + MIN([Calculation_1516305717278158849])\r\n\r\nELSE PREVIOUS_VALUE(0)\r\n\r\nEND",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_marimekko_marikekko_segments__segment",
+            "fld.ds_marimekko_marikekko_segments__segment_pulse_lod"
+          ]
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__segment",
+          "internal_name": "[Segment]",
+          "caption": "Segment",
+          "table_id": "tbl.marimekko",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__marimekko",
+          "internal_name": "[__tableau_internal_object_id__].[Marimekko_5B0CF244006642B7ACA1D35645FBAA1A]",
+          "caption": "Marimekko",
+          "table_id": "tbl.marimekko",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__price_position",
+          "internal_name": "[Price Position]",
+          "caption": "Price Position",
+          "table_id": "tbl.marimekko",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__market_share",
+          "internal_name": "[Market Share]",
+          "caption": "Market Share",
+          "table_id": "tbl.marimekko",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__pulse_score",
+          "internal_name": "[Pulse Score]",
+          "caption": "Pulse Score",
+          "table_id": "tbl.marimekko",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_marimekko_marikekko_segments__actual_pulse_score",
+          "internal_name": "[Actual Pulse Score]",
+          "caption": "Actual Pulse Score",
+          "table_id": "tbl.marimekko",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.radial_with_borders_radar_environmental",
+      "caption": "Radial with Borders (Radar Environmental)",
+      "internal_name": "federated.10ml7f11wz2drr1cl47rt1805zl4",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_10ml7f11wz2drr1cl47rt1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.radial_with_borders",
+          "name": "Radial with Borders",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__angle",
+          "internal_name": "[Calculation_2608710102206984192]",
+          "caption": "Angle",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "RUNNING_SUM(\r\n(2*PI())/\r\nMIN({COUNTD([Impact Area])}))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_radial_with_borders_radar_environmental__impact_area"
+          ]
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__distance_r",
+          "internal_name": "[Calculation_2608710102207197185]",
+          "caption": "Distance (r)",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "AVG([Radial Value])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_radial_with_borders_radar_environmental__radial_value"
+          ]
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__x_axis",
+          "internal_name": "[Calculation_2608710102207664130]",
+          "caption": "X-axis",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_2608710102207197185] * COS([Calculation_2608710102206984192])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_radial_with_borders_radar_environmental__angle",
+            "fld.ds_radial_with_borders_radar_environmental__distance_r"
+          ]
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__planetary_boundary",
+          "internal_name": "[Calculation_2608710102243155972]",
+          "caption": "Planetary Boundary",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__energy",
+          "internal_name": "[Calculation_2608710102249811973]",
+          "caption": "Energy",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__land",
+          "internal_name": "[Calculation_2608710102249902087]",
+          "caption": "Land",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__chemicals",
+          "internal_name": "[Calculation_2608710102249926664]",
+          "caption": "Chemicals",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__waste",
+          "internal_name": "[Calculation_2608710102249971721]",
+          "caption": "Waste",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__y_axis",
+          "internal_name": "[X-axis (copy)_2608710102207754243]",
+          "caption": "Y-axis",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_2608710102207197185] * SIN([Calculation_2608710102206984192])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_radial_with_borders_radar_environmental__angle",
+            "fld.ds_radial_with_borders_radar_environmental__distance_r"
+          ]
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__radial_with_borders",
+          "internal_name": "[__tableau_internal_object_id__].[Radial with Borders_3BE97AC0D44043358DB4D195C5272762]",
+          "caption": "Radial with Borders",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__impact_area",
+          "internal_name": "[Impact Area]",
+          "caption": "Impact Area",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__actual_value",
+          "internal_name": "[Actual Value]",
+          "caption": "Actual Value",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__radial_value",
+          "internal_name": "[Radial Value]",
+          "caption": "Radial Value",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__name",
+          "internal_name": "[Name]",
+          "caption": "Name",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_with_borders_radar_environmental__value",
+          "internal_name": "[Value]",
+          "caption": "Value",
+          "table_id": "tbl.radial_with_borders",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.radial_radar_environmental",
+      "caption": "Radial (Radar Environmental)",
+      "internal_name": "federated.1a9zswd0nb6hu412jdkjm1vdez31",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1a9zswd0nb6hu412jdkjm1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.radial",
+          "name": "Radial",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_radial_radar_environmental__angle",
+          "internal_name": "[Calculation_2608710102206984192]",
+          "caption": "Angle",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "RUNNING_SUM(\r\n(2*PI())/\r\nMIN({COUNTD([Impact Area])}))",
+          "is_lod": false,
+          "is_table_calc": true,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_radial_radar_environmental__impact_area"
+          ]
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__distance_r",
+          "internal_name": "[Calculation_2608710102207197185]",
+          "caption": "Distance (r)",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "AVG([Radial Value])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__x_axis",
+          "internal_name": "[Calculation_2608710102207664130]",
+          "caption": "X-axis",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_2608710102207197185] * COS([Calculation_2608710102206984192])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_radial_radar_environmental__angle",
+            "fld.ds_radial_radar_environmental__distance_r"
+          ]
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__planetary_boundary",
+          "internal_name": "[Calculation_2608710102243155972]",
+          "caption": "Planetary Boundary",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__energy",
+          "internal_name": "[Calculation_2608710102249811973]",
+          "caption": "Energy",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__water",
+          "internal_name": "[Calculation_2608710102249873414]",
+          "caption": "Water",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__land",
+          "internal_name": "[Calculation_2608710102249902087]",
+          "caption": "Land",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__chemicals",
+          "internal_name": "[Calculation_2608710102249926664]",
+          "caption": "Chemicals",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__waste",
+          "internal_name": "[Calculation_2608710102249971721]",
+          "caption": "Waste",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__y_axis",
+          "internal_name": "[X-axis (copy)_2608710102207754243]",
+          "caption": "Y-axis",
+          "table_id": "tbl.radial",
+          "kind": "calculated",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Calculation_2608710102207197185] * SIN([Calculation_2608710102206984192])",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_radial_radar_environmental__angle",
+            "fld.ds_radial_radar_environmental__distance_r"
+          ]
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__radial",
+          "internal_name": "[__tableau_internal_object_id__].[Radial_DFAC6DB8E5C54F2EB80BC7295DC9FCCC]",
+          "caption": "Radial",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__impact_area",
+          "internal_name": "[Impact Area]",
+          "caption": "Impact Area",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__2015_actual",
+          "internal_name": "[2015 Actual]",
+          "caption": "2015 Actual",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__2030_actual",
+          "internal_name": "[2030 Actual]",
+          "caption": "2030 Actual",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__2015_value",
+          "internal_name": "[2015 Value]",
+          "caption": "2015 Value",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__2030_value",
+          "internal_name": "[2030 Value]",
+          "caption": "2030 Value",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__c1",
+          "internal_name": "[C1]",
+          "caption": "C1",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__c2",
+          "internal_name": "[C2]",
+          "caption": "C2",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__c3",
+          "internal_name": "[C3]",
+          "caption": "C3",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__c4",
+          "internal_name": "[C4]",
+          "caption": "C4",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_radial_radar_environmental__c5",
+          "internal_name": "[C5]",
+          "caption": "C5",
+          "table_id": "tbl.radial",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.performance_quartile_quartile_performance",
+      "caption": "Performance Quartile (Quartile Performance)",
+      "internal_name": "federated.1bus7db05aytbt1d9oc0q02ha0nz",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1bus7db05aytbt1d9oc0q0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.performance_quartile",
+          "name": "Performance Quartile",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_performance_quartile_quartile_performance__quartile",
+          "internal_name": "[Quartile]",
+          "caption": "Quartile",
+          "table_id": "tbl.performance_quartile",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_performance_quartile_quartile_performance__performance_quartile",
+          "internal_name": "[__tableau_internal_object_id__].[Performance Quartile_E97537230CF843878ECFA516053AB0FA]",
+          "caption": "Performance Quartile",
+          "table_id": "tbl.performance_quartile",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "internal_name": "[Chain Stage]",
+          "caption": "Chain Stage",
+          "table_id": "tbl.performance_quartile",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_performance_quartile_quartile_performance__value",
+          "internal_name": "[Value]",
+          "caption": "Value",
+          "table_id": "tbl.performance_quartile",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.fibre_production_1970_2018_fast_fashion_data_final",
+      "caption": "Fibre Production 1970-2018 (Fast Fashion Data FINAL)",
+      "internal_name": "federated.1f7t9f90swbl1b1gncr2y1fxno7n",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1f7t9f90swbl1b1gncr2y1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.fibre_production_1970_2018",
+          "name": "Fibre Production 1970-2018",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__cotton",
+          "internal_name": "[Calculation_1106196671929663489]",
+          "caption": "Cotton",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__co2",
+          "internal_name": "[Calculation_1106196671931736066]",
+          "caption": "CO2",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__energy",
+          "internal_name": "[Calculation_1106196671932219395]",
+          "caption": "ENERGY",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__asterisk",
+          "internal_name": "[Calculation_1516305717314969609]",
+          "caption": "ASTERISK",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__water",
+          "internal_name": "[Calculation_432908530494328832]",
+          "caption": "WATER",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__problem",
+          "internal_name": "[Calculation_899031087302598656]",
+          "caption": "PROBLEM",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "calculated",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "''",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__fibre",
+          "internal_name": "[Fibre]",
+          "caption": "Fibre",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__year",
+          "internal_name": "[Year]",
+          "caption": "Year",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__fibre_production_1970_2018",
+          "internal_name": "[__tableau_internal_object_id__].[Fibre Production 1970-2018_CDDE8A7314914B8F9D5FA957DCF0C487]",
+          "caption": "Fibre Production 1970-2018",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__production_m_tons_per_year",
+          "internal_name": "[Production (m tons per year)]",
+          "caption": "Production (m tons per year)",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        },
+        {
+          "id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__population_billions",
+          "internal_name": "[Population (billions)]",
+          "caption": "Population (billions)",
+          "table_id": "tbl.fibre_production_1970_2018",
+          "kind": "column",
+          "data_type": "real",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.polygon_water_fast_fashion_data_final",
+      "caption": "Polygon water (Fast Fashion Data FINAL)",
+      "internal_name": "federated.1gv8m4b0am4aa017fl7zh1lozmyf",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1gv8m4b0am4aa017fl7zh1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.polygon_water",
+          "name": "Polygon water",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__point_x_flipped",
+          "internal_name": "[Calculation_432908530534899714]",
+          "caption": "Point X Flipped",
+          "table_id": "tbl.polygon_water",
+          "kind": "calculated",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[pointX] * -1",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": [
+            "fld.ds_polygon_water_fast_fashion_data_final__point_x"
+          ]
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__water_flag",
+          "internal_name": "[Calculation_432908530804527118]",
+          "caption": "Water flag",
+          "table_id": "tbl.polygon_water",
+          "kind": "calculated",
+          "data_type": "boolean",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "tableau_formula": "[Parameters].[Parameter 3] = '3'",
+          "is_lod": false,
+          "is_table_calc": false,
+          "reshape_hint": null,
+          "referenced_fields": []
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__polygon_water",
+          "internal_name": "[__tableau_internal_object_id__].[Polygon water_662FB8E673C54A759133E64DEBE3B1D5]",
+          "caption": "Polygon water",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__point_id",
+          "internal_name": "[pointId]",
+          "caption": "Point Id",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__point_x",
+          "internal_name": "[pointX]",
+          "caption": "Point X",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__point_y",
+          "internal_name": "[pointY]",
+          "caption": "Point Y",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__shape_id",
+          "internal_name": "[shapeId]",
+          "caption": "Shape Id",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__shape_type",
+          "internal_name": "[shapeType]",
+          "caption": "Shape Type",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_polygon_water_fast_fashion_data_final__value",
+          "internal_name": "[Value (%)]",
+          "caption": "Value (%)",
+          "table_id": "tbl.polygon_water",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.ripped_polygon_consumer_importance",
+      "caption": "Ripped Polygon (Consumer Importance)",
+      "internal_name": "federated.1r5o6ls08z79by1e67d2f0f9p11s",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1r5o6ls08z79by1e67d2f0.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.ripped_polygon",
+          "name": "Ripped Polygon",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__importance",
+          "internal_name": "[Importance]",
+          "caption": "Importance",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__ripped_polygon",
+          "internal_name": "[__tableau_internal_object_id__].[Ripped Polygon_8FDFAE47271B4252A17DBBC1C18AF5A6]",
+          "caption": "Ripped Polygon",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__point_id",
+          "internal_name": "[pointId]",
+          "caption": "Point Id",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__point_x",
+          "internal_name": "[pointX]",
+          "caption": "Point X",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__point_y",
+          "internal_name": "[pointY]",
+          "caption": "Point Y",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__shape_id",
+          "internal_name": "[shapeId]",
+          "caption": "Shape Id",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__shape_type",
+          "internal_name": "[shapeType]",
+          "caption": "Shape Type",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_ripped_polygon_consumer_importance__value",
+          "internal_name": "[Value]",
+          "caption": "Value",
+          "table_id": "tbl.ripped_polygon",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    },
+    {
+      "id": "ds.jeans_water_fast_fashion_data_final",
+      "caption": "JEANS water (Fast Fashion Data FINAL)",
+      "internal_name": "federated.1rnn57i0nwlmid17hb62y1cf3l4l",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "database": null,
+        "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
+        "hyper_file": "Data/Extracts/federated_1rnn57i0nwlmid17hb62y1.hyper"
+      },
+      "tables": [
+        {
+          "id": "tbl.jeans_water",
+          "name": "JEANS water",
+          "source_relation": "table",
+          "custom_sql": null
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds_jeans_water_fast_fashion_data_final__category",
+          "internal_name": "[Category]",
+          "caption": "Category",
+          "table_id": "tbl.jeans_water",
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_water_fast_fashion_data_final__id",
+          "internal_name": "[ID]",
+          "caption": "ID",
+          "table_id": "tbl.jeans_water",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_water_fast_fashion_data_final__jeans_water",
+          "internal_name": "[__tableau_internal_object_id__].[JEANS water_850CAA9D55AA40C0834C4CCF97F271CC]",
+          "caption": "JEANS water",
+          "table_id": "tbl.jeans_water",
+          "kind": "column",
+          "data_type": "table",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds_jeans_water_fast_fashion_data_final__value",
+          "internal_name": "[Value (%)]",
+          "caption": "Value (%)",
+          "table_id": "tbl.jeans_water",
+          "kind": "column",
+          "data_type": "integer",
+          "role": "measure",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {},
+          "from_metadata_record": true
+        }
+      ]
+    }
+  ],
+  "worksheets": [
+    {
+      "id": "ws.1_design",
+      "name": "1. design",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Design & development\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1bus7db05aytbt1d9oc0q02ha0nz].[none:Quartile:nk]>Æ\nPulse Score: <[federated.1bus7db05aytbt1d9oc0q02ha0nz].[sum:Value:qk]>"
+    },
+    {
+      "id": "ws.10_avg",
+      "name": "10. avg",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Processing\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "The number on each pie shows it's pulse score. Æ\n\nThe Blue represents the top quartile of size of companies whereas the Gold represents smaller companies in the bottom quartile. Æ\n\nIn the journey from design to end of use, it is clear larger companies consistently score better from an environmental standpoint."
+    },
+    {
+      "id": "ws.2_raw",
+      "name": "2. raw",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Raw materials\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1bus7db05aytbt1d9oc0q02ha0nz].[none:Quartile:nk]>Æ\nPulse Score: <[federated.1bus7db05aytbt1d9oc0q02ha0nz].[sum:Value:qk]>"
+    },
+    {
+      "id": "ws.4_manufac",
+      "name": "4. manufac",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Manufacturing\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1bus7db05aytbt1d9oc0q02ha0nz].[none:Quartile:nk]>Æ\nPulse Score: <[federated.1bus7db05aytbt1d9oc0q02ha0nz].[sum:Value:qk]>"
+    },
+    {
+      "id": "ws.5_transport",
+      "name": "5. transport",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Transportation\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1bus7db05aytbt1d9oc0q02ha0nz].[none:Quartile:nk]>Æ\nPulse Score: <[federated.1bus7db05aytbt1d9oc0q02ha0nz].[sum:Value:qk]>"
+    },
+    {
+      "id": "ws.6_retail",
+      "name": "6. retail",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Retail\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1bus7db05aytbt1d9oc0q02ha0nz].[none:Quartile:nk]>Æ\nPulse Score: <[federated.1bus7db05aytbt1d9oc0q02ha0nz].[sum:Value:qk]>"
+    },
+    {
+      "id": "ws.7_use",
+      "name": "7. use",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"Use\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1bus7db05aytbt1d9oc0q02ha0nz].[none:Quartile:nk]>Æ\nPulse Score: <[federated.1bus7db05aytbt1d9oc0q02ha0nz].[sum:Value:qk]>"
+    },
+    {
+      "id": "ws.8_end_of_use",
+      "name": "8. end of use",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Pie",
+      "encodings": {
+        "rows": [],
+        "columns": [
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "UNRESOLVED:usr:Calculation_782781928617705474:qk",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+          "type": "categorical",
+          "exclude_nulls": false,
+          "members": [
+            "\"End of use\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1bus7db05aytbt1d9oc0q02ha0nz].[none:Quartile:nk]>Æ\nPulse Score: <[federated.1bus7db05aytbt1d9oc0q02ha0nz].[sum:Value:qk]>"
+    },
+    {
+      "id": "ws.asterisk",
+      "name": "Asterisk",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1f7t9f90swbl1b1gncr2y1fxno7n"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": {
+          "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__asterisk"
+        },
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "The Pulse Score, based on the Sustainable Apparel Coalition's Higg Index, is a global measure of sustainability in the fashion industry. It encompasses data from both large and small to medium-sized companies, offering a comprehensive view of industry-wide sustainability performance.Æ\n\nMeasured on a scale from   1−100Æ\n\nOverall, the Pulse Score of the fashion industry is: 42 / 100 (2019)Æ\n\nSpecific industries are listed below, the length of the bar show pulse score whereas the width of each bar signifies the size of market share in the entire fashion industry."
+    },
+    {
+      "id": "ws.bar",
+      "name": "Bar ",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0njmxyg1x8e5fh1ciklp61oteabb"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_jeans_fast_fashion_data_final__value",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_jeans_fast_fashion_data_final__category"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.co2",
+      "name": "CO2",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1f7t9f90swbl1b1gncr2y1fxno7n"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__co2"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_432908530803965957:nk]"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "33.4 kg of CO2 released during it's lifetimeÆ\nThey can be split out into 6 stages, hover over the jeans to find out more about how it's distributed.."
+    },
+    {
+      "id": "ws.cotton",
+      "name": "Cotton",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1f7t9f90swbl1b1gncr2y1fxno7n"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__cotton"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_432908530804068361:nk]"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "20% fabric waste in denim production.Æ\nDenim waste often ends up in landfills or is incinerated, adding to greenhouse gas emissions and environmental harm."
+    },
+    {
+      "id": "ws.jeans_polygon_co2",
+      "name": "JEANS POLYGON - co2",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0oyl16e10p0p9q112nx1f04n74c1"
+      ],
+      "mark_type": "Polygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_jeans_polygon_fast_fashion_data_final__point_y",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_jeans_polygon_fast_fashion_data_final__point_x_flipped",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_jeans_polygon_fast_fashion_data_final__category"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_jeans_polygon_fast_fashion_data_final__shape_id"
+          },
+          {
+            "field_id": "fld.ds_jeans_polygon_fast_fashion_data_final__co2_flag"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_jeans_polygon_fast_fashion_data_final__value"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0oyl16e10p0p9q112nx1f04n74c1].[sum:Value (%):qk]>%Æ\n<[federated.0oyl16e10p0p9q112nx1f04n74c1].[none:Category:nk]>"
+    },
+    {
+      "id": "ws.marimekko",
+      "name": "Marimekko",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0qr326c05vsvyo12orw6213f3m41"
+      ],
+      "mark_type": "Bar",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__pulse_score",
+            "aggregation": null,
+            "derivation": "pcto",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__running_total_x_axis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": null,
+        "size": {
+          "field_id": "fld.ds_marimekko_marikekko_segments__segment_pulse_lod"
+        },
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__pulse_score"
+          },
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__price_position"
+          },
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__segment"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.marketshare",
+      "name": "MarketShare",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.0qr326c05vsvyo12orw6213f3m41"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__segment",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__price_position",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__pulse_score",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_marimekko_marikekko_segments__market_share"
+        },
+        "size": {
+          "field_id": "fld.ds_marimekko_marikekko_segments__market_share"
+        },
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_marimekko_marikekko_segments__actual_pulse_score"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.0qr326c05vsvyo12orw6213f3m41].[none:Segment:nk]> | <[federated.0qr326c05vsvyo12orw6213f3m41].[none:Price Position:nk]>Æ\nPulse Score: <[federated.0qr326c05vsvyo12orw6213f3m41].[none:Actual Pulse Score:nk]>Æ\nMarket Share: <[federated.0qr326c05vsvyo12orw6213f3m41].[sum:Market Share:qk]>%"
+    },
+    {
+      "id": "ws.planet_limit",
+      "name": "PLANET LIMIT",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10ml7f11wz2drr1cl47rt1805zl4"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_radial_with_borders_radar_environmental__planetary_boundary"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__planetary_boundary"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "The sustainable boundary of our planet"
+    },
+    {
+      "id": "ws.polygon_materials",
+      "name": "POLYGON - materials",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.00y6f261qog3m00ztlui30za3zf6"
+      ],
+      "mark_type": "Polygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_polygon_materials_fast_fashion_data_final__point_y",
+            "aggregation": "AVG",
+            "derivation": "avg",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_polygon_materials_fast_fashion_data_final__point_x_flipped",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_polygon_materials_fast_fashion_data_final__category"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_polygon_materials_fast_fashion_data_final__shape_id"
+          },
+          {
+            "field_id": "fld.ds_polygon_materials_fast_fashion_data_final__materials_flag"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_polygon_materials_fast_fashion_data_final__value"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.00y6f261qog3m00ztlui30za3zf6].[sum:Value (%):qk]>%Æ\n<[federated.00y6f261qog3m00ztlui30za3zf6].[none:Category:nk]>"
+    },
+    {
+      "id": "ws.polygon_water",
+      "name": "POLYGON - water",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1gv8m4b0am4aa017fl7zh1lozmyf"
+      ],
+      "mark_type": "Polygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_polygon_water_fast_fashion_data_final__point_y",
+            "aggregation": "MIN",
+            "derivation": "min",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_polygon_water_fast_fashion_data_final__point_x_flipped",
+            "aggregation": "MIN",
+            "derivation": "min",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_polygon_water_fast_fashion_data_final__category"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_polygon_water_fast_fashion_data_final__shape_id"
+          },
+          {
+            "field_id": "fld.ds_polygon_water_fast_fashion_data_final__water_flag"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_polygon_water_fast_fashion_data_final__value"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1gv8m4b0am4aa017fl7zh1lozmyf].[sum:Value (%):qk]>%Æ\n<[federated.1gv8m4b0am4aa017fl7zh1lozmyf].[none:Category:nk]>"
+    },
+    {
+      "id": "ws.pop_line",
+      "name": "POP Line",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1f7t9f90swbl1b1gncr2y1fxno7n"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__production_m_tons_per_year",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__population_billions",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__year",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__fibre"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [
+        {
+          "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__fibre",
+          "type": "categorical",
+          "exclude_nulls": true,
+          "members": [
+            "\"Cotton\"",
+            "\"Polyester\""
+          ],
+          "note": null
+        }
+      ],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1f7t9f90swbl1b1gncr2y1fxno7n].[sum:Production (m tons per year):qk]>Æ\nTotal Fibre Production (million mt/yr) | <[federated.1f7t9f90swbl1b1gncr2y1fxno7n].[none:Year:qk]>"
+    },
+    {
+      "id": "ws.prob",
+      "name": "PROB",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1f7t9f90swbl1b1gncr2y1fxno7n"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__problem"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "The fashion industry has faced criticism for its disregard of social and environmental concerns, with its significant contribution to CO2 emissions, water consumption, energy consumption, and textile waste. Æ\n\nThis has been exacerbated by the rise of fast fashion, characterized by frequent, low-priced clothing turnover. As consumption and production have surged, driven by low prices and high turnover, clothing has become more disposable, leading to environmental degradation. Æ\n\nShown by the graph, by the 2010s, textile-production growth overtook world-population growth, largely driven by the rise of fast fashion.Æ\n\nThroughout this viz, try to hover over everything you see in order to gain some more information about the chart."
+    },
+    {
+      "id": "ws.r_chem",
+      "name": "R Chem",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10ml7f11wz2drr1cl47rt1805zl4"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__chemicals"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Phosphorus fertilizer use exceeds safe limits by over 220%. The fashion industry, particularly cotton production, is a major contributor, using 4% of global fertilizers. This causes harmful runoff and algal blooms. Cotton, on 3% of agricultural land, consumes 16% of insecticides and 7% of herbicides. Toxic discharges from processing plants harm the environment and health, leading to conditions like cancer. Better chemical management by 2030 could save €7 billion annually by reducing health impacts."
+    },
+    {
+      "id": "ws.r_energy",
+      "name": "R ENergy",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10ml7f11wz2drr1cl47rt1805zl4"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__energy"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Current atmospheric CO2 levels exceed safe limits by 20%, with fashion industry emissions projected to rise over 60% to 2.8 billion tons annually by 2030. Improved energy management in the fashion industry could save the global economy €67 billion. Key manufacturing locations are highly vulnerable to climate change, making efficient energy use crucial."
+    },
+    {
+      "id": "ws.r_land",
+      "name": "R Land",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10ml7f11wz2drr1cl47rt1805zl4"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__land"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Deforestation for cotton cultivation exceeds safe limits by 17%. By 2030, the fashion industry will need 35% more land, totaling over 115 million hectares, for cotton, fibers, and livestock. This land is crucial for food crops or forest preservation. With a global population of 8.5 billion by 2030, food production must increase by 60%, creating a conflict between textile and food production. The fashion industry must adopt less land-intensive materials to avoid higher land costs and restricted access."
+    },
+    {
+      "id": "ws.r_waste",
+      "name": "R Waste",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10ml7f11wz2drr1cl47rt1805zl4"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__waste"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "Humankind produces 2.1 billion tons of waste annually, exceeding the Earth's absorption capacity by 1.6 times. The fashion industry's waste is projected to increase by 60% from 2015 to 2030, adding 57Æ million tons annually, reaching 148Æ million tons by 2030. This equals 17.5 kg of waste per person per year. Most clothing waste is landfilled or incinerated, with only 20% collected for reuse or recycling globally."
+    },
+    {
+      "id": "ws.r_water",
+      "name": "R Water",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10ml7f11wz2drr1cl47rt1805zl4"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__waste"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "The fashion industry consumes 79 billion cubic meters of water annually, projected to increase by 50% by 2030. This is critical as major cotton producers like China and India already face high water stress. By 2030, the water demand-supply gap could reach 40%, forcing a choice between cotton production and clean drinking water. Maintaining current water use levels in the fashion industry could save the global economy €32 billion annually. "
+    },
+    {
+      "id": "ws.radar",
+      "name": "RADAR",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.10ml7f11wz2drr1cl47rt1805zl4"
+      ],
+      "mark_type": "Polygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__x_axis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          },
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__x_axis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__y_axis",
+            "aggregation": null,
+            "derivation": "usr",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_radial_with_borders_radar_environmental__year"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__impact_area"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_radial_with_borders_radar_environmental__actual_value"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.10ml7f11wz2drr1cl47rt1805zl4].[none:Impact Area:nk]> | <[federated.10ml7f11wz2drr1cl47rt1805zl4].[none:Year:ok]>Æ\n<[federated.10ml7f11wz2drr1cl47rt1805zl4].[attr:Actual Value:nk]>Æ\n"
+    },
+    {
+      "id": "ws.refs",
+      "name": "REFS",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.00y6f261qog3m00ztlui30za3zf6"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_polygon_materials_fast_fashion_data_final__references"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "References\n\nhttps://online.ucpress.edu/cse/article/3/1/1/108932/The-Spatially-Explicit-Water-Footprint-of-Blue\n\nhttps://media-publications.bcg.com/france/Pulse-of-the-Fashion-Industry2019.pdf\n\nhttps://www.greylockglass.com/wp-content/uploads/2021/08/Pulse-of-the-Fashion-Industry_2017.pdf\n\nhttps://www.makefashionbetter.com/blog/the-environmental-impact-of-the-denim-industry\n\nhttps://link.springer.com/article/10.1186/s12940-018-0433-7\n\nhttps://pubsonline.informs.org/doi/abs/10.1287/msom.2021.1054?journalCode=msom\n\nhttps://www.geneco.uk.com/news/fast-fashion-and-its-impactsÆ\n"
+    },
+    {
+      "id": "ws.rip_polygon",
+      "name": "Rip Polygon",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1r5o6ls08z79by1e67d2f0f9p11s"
+      ],
+      "mark_type": "Polygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__point_y",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__point_x",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_ripped_polygon_consumer_importance__importance"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__shape_id"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__value"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1r5o6ls08z79by1e67d2f0f9p11s].[sum:Value:qk]>%Æ\n<[federated.1r5o6ls08z79by1e67d2f0f9p11s].[none:Importance:nk]>"
+    },
+    {
+      "id": "ws.rip_polygon_2",
+      "name": "Rip Polygon (2)",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1r5o6ls08z79by1e67d2f0f9p11s"
+      ],
+      "mark_type": "Polygon",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__point_y",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__point_x",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_ripped_polygon_consumer_importance__importance"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__shape_id"
+          }
+        ],
+        "tooltip": [
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__value"
+          },
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__shape_id"
+          },
+          {
+            "field_id": "fld.ds_ripped_polygon_consumer_importance__point_id"
+          }
+        ]
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "<[federated.1r5o6ls08z79by1e67d2f0f9p11s].[sum:Value:qk]>%Æ\n<[federated.1r5o6ls08z79by1e67d2f0f9p11s].[none:Importance:nk]>Æ\nPoint <[federated.1r5o6ls08z79by1e67d2f0f9p11s].[attr:pointId:qk]>Æ\nShape <[federated.1r5o6ls08z79by1e67d2f0f9p11s].[none:shapeId:ok]>"
+    },
+    {
+      "id": "ws.sheet_1",
+      "name": "Sheet 1",
+      "title_text": null,
+      "data_source_ids": [],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.sheet_22",
+      "name": "Sheet 22",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Square",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_performance_quartile_quartile_performance__quartile",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__value"
+        },
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_performance_quartile_quartile_performance__value"
+          }
+        ],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.sheet_22_2",
+      "name": "Sheet 22 (2)",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1bus7db05aytbt1d9oc0q02ha0nz"
+      ],
+      "mark_type": "Line",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_performance_quartile_quartile_performance__value",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [
+          {
+            "field_id": "fld.ds_performance_quartile_quartile_performance__chain_stage",
+            "aggregation": null,
+            "derivation": "none",
+            "nested_with": null
+          }
+        ],
+        "color": {
+          "field_id": "fld.ds_performance_quartile_quartile_performance__quartile"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    },
+    {
+      "id": "ws.water",
+      "name": "WATER",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1f7t9f90swbl1b1gncr2y1fxno7n"
+      ],
+      "mark_type": "Shape",
+      "encodings": {
+        "rows": [],
+        "columns": [],
+        "color": null,
+        "size": null,
+        "shape": null,
+        "label": [
+          {
+            "field_id": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__energy"
+          }
+        ],
+        "detail": [
+          {
+            "field_id": "UNRESOLVED:[none:Calculation_432908530804084747:nk]"
+          }
+        ],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": "2,000 gallons of water!Æ\nThis includes the water needed to grow cotton, which is a very thirsty crop, and the water required to process the fabric."
+    },
+    {
+      "id": "ws.water_1",
+      "name": "Water",
+      "title_text": null,
+      "data_source_ids": [
+        "federated.1rnn57i0nwlmid17hb62y1cf3l4l"
+      ],
+      "mark_type": "Automatic",
+      "encodings": {
+        "rows": [
+          {
+            "field_id": "fld.ds_jeans_water_fast_fashion_data_final__value",
+            "aggregation": "SUM",
+            "derivation": "sum",
+            "nested_with": null
+          }
+        ],
+        "columns": [],
+        "color": {
+          "field_id": "fld.ds_jeans_water_fast_fashion_data_final__category"
+        },
+        "size": null,
+        "shape": null,
+        "label": [],
+        "detail": [],
+        "tooltip": []
+      },
+      "reference_lines": [],
+      "filters": [],
+      "measure_names_values_pivot": null,
+      "manual_sort": [],
+      "customized_tooltip_text": null
+    }
+  ],
+  "dashboards": [
+    {
+      "id": "dash.dashboard_1",
+      "name": "Dashboard 1",
+      "size": {
+        "width": 1499.0,
+        "height": 3152.0,
+        "sizing_mode": "fixed"
+      },
+      "zones": {
+        "id": "",
+        "type": "layout-floating",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100000.0,
+        "h": 100000.0,
+        "direction": null,
+        "worksheet_id": null,
+        "field_id": null,
+        "text_html": null,
+        "background_color": null,
+        "children": [
+          {
+            "id": "4",
+            "type": "layout-basic",
+            "x": 0.0,
+            "y": 0.0,
+            "w": 100000.0,
+            "h": 100000.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "3",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 100000.0,
+                "direction": null,
+                "worksheet_id": null,
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "7",
+            "type": "worksheet",
+            "x": 12809.0,
+            "y": 17100.0,
+            "w": 30420.0,
+            "h": 9486.0,
+            "direction": null,
+            "worksheet_id": "ws.pop_line",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "15",
+            "type": "worksheet",
+            "x": 7605.0,
+            "y": 12849.0,
+            "w": 6871.0,
+            "h": 4124.0,
+            "direction": null,
+            "worksheet_id": "ws.prob",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "29",
+            "type": "worksheet",
+            "x": 81521.0,
+            "y": 17164.0,
+            "w": 5804.0,
+            "h": 2633.0,
+            "direction": null,
+            "worksheet_id": "ws.cotton",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "30",
+            "type": "worksheet",
+            "x": 63175.0,
+            "y": 19289.0,
+            "w": 5070.0,
+            "h": 2284.0,
+            "direction": null,
+            "worksheet_id": "ws.co2",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "48",
+            "type": "worksheet",
+            "x": 82455.0,
+            "y": 21383.0,
+            "w": 5203.0,
+            "h": 2316.0,
+            "direction": null,
+            "worksheet_id": "ws.water",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "53",
+            "type": "layout-basic",
+            "x": 68579.0,
+            "y": 16434.0,
+            "w": 12742.0,
+            "h": 10152.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": [
+              {
+                "id": "28",
+                "type": "worksheet",
+                "x": 68579.0,
+                "y": 16434.0,
+                "w": 12742.0,
+                "h": 10152.0,
+                "direction": null,
+                "worksheet_id": "ws.jeans_polygon_co2",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "51",
+                "type": "worksheet",
+                "x": 68579.0,
+                "y": 16434.0,
+                "w": 12742.0,
+                "h": 10152.0,
+                "direction": null,
+                "worksheet_id": "ws.polygon_materials",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              },
+              {
+                "id": "52",
+                "type": "worksheet",
+                "x": 68579.0,
+                "y": 16434.0,
+                "w": 12742.0,
+                "h": 10152.0,
+                "direction": null,
+                "worksheet_id": "ws.polygon_water",
+                "field_id": null,
+                "text_html": null,
+                "background_color": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": "62",
+            "type": "worksheet",
+            "x": 73916.0,
+            "y": 36326.0,
+            "w": 23616.0,
+            "h": 20812.0,
+            "direction": null,
+            "worksheet_id": "ws.marketshare",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "63",
+            "type": "layout-basic",
+            "x": 53903.0,
+            "y": 36834.0,
+            "w": 20147.0,
+            "h": 19734.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "71",
+            "type": "worksheet",
+            "x": 80320.0,
+            "y": 32931.0,
+            "w": 4670.0,
+            "h": 2157.0,
+            "direction": null,
+            "worksheet_id": "ws.asterisk",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "88",
+            "type": "layout-basic",
+            "x": 7738.0,
+            "y": 38198.0,
+            "w": 37225.0,
+            "h": 14784.0,
+            "direction": null,
+            "worksheet_id": null,
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "87",
+            "type": "worksheet",
+            "x": 9606.0,
+            "y": 38071.0,
+            "w": 33289.0,
+            "h": 15102.0,
+            "direction": null,
+            "worksheet_id": "ws.radar",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "89",
+            "type": "worksheet",
+            "x": 20013.0,
+            "y": 42259.0,
+            "w": 12675.0,
+            "h": 6028.0,
+            "direction": null,
+            "worksheet_id": "ws.planet_limit",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "90",
+            "type": "worksheet",
+            "x": 9673.0,
+            "y": 42449.0,
+            "w": 3069.0,
+            "h": 1618.0,
+            "direction": null,
+            "worksheet_id": "ws.r_waste",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "91",
+            "type": "worksheet",
+            "x": 39960.0,
+            "y": 42640.0,
+            "w": 3069.0,
+            "h": 1428.0,
+            "direction": null,
+            "worksheet_id": "ws.r_chem",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "92",
+            "type": "worksheet",
+            "x": 15677.0,
+            "y": 50666.0,
+            "w": 3135.0,
+            "h": 1491.0,
+            "direction": null,
+            "worksheet_id": "ws.r_land",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "93",
+            "type": "worksheet",
+            "x": 33689.0,
+            "y": 50571.0,
+            "w": 3336.0,
+            "h": 1713.0,
+            "direction": null,
+            "worksheet_id": "ws.r_energy",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "94",
+            "type": "worksheet",
+            "x": 24683.0,
+            "y": 37690.0,
+            "w": 3536.0,
+            "h": 1491.0,
+            "direction": null,
+            "worksheet_id": "ws.r_water",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "105",
+            "type": "worksheet",
+            "x": 81321.0,
+            "y": 71605.0,
+            "w": 6671.0,
+            "h": 2538.0,
+            "direction": null,
+            "worksheet_id": "ws.1_design",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "112",
+            "type": "worksheet",
+            "x": 60040.0,
+            "y": 72240.0,
+            "w": 6671.0,
+            "h": 2538.0,
+            "direction": null,
+            "worksheet_id": "ws.2_raw",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "114",
+            "type": "worksheet",
+            "x": 81121.0,
+            "y": 75063.0,
+            "w": 6671.0,
+            "h": 2538.0,
+            "direction": null,
+            "worksheet_id": "ws.4_manufac",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "115",
+            "type": "worksheet",
+            "x": 59106.0,
+            "y": 76396.0,
+            "w": 6671.0,
+            "h": 2538.0,
+            "direction": null,
+            "worksheet_id": "ws.5_transport",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "116",
+            "type": "worksheet",
+            "x": 80720.0,
+            "y": 79600.0,
+            "w": 6671.0,
+            "h": 2538.0,
+            "direction": null,
+            "worksheet_id": "ws.6_retail",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "117",
+            "type": "worksheet",
+            "x": 58639.0,
+            "y": 80806.0,
+            "w": 6671.0,
+            "h": 2538.0,
+            "direction": null,
+            "worksheet_id": "ws.7_use",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "118",
+            "type": "worksheet",
+            "x": 79920.0,
+            "y": 84391.0,
+            "w": 6671.0,
+            "h": 2538.0,
+            "direction": null,
+            "worksheet_id": "ws.8_end_of_use",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "122",
+            "type": "worksheet",
+            "x": 64843.0,
+            "y": 66878.0,
+            "w": 18746.0,
+            "h": 4188.0,
+            "direction": null,
+            "worksheet_id": "ws.10_avg",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "133",
+            "type": "worksheet",
+            "x": 9406.0,
+            "y": 61168.0,
+            "w": 29019.0,
+            "h": 6948.0,
+            "direction": null,
+            "worksheet_id": "ws.rip_polygon",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          },
+          {
+            "id": "174",
+            "type": "worksheet",
+            "x": 801.0,
+            "y": 98572.0,
+            "w": 6671.0,
+            "h": 1079.0,
+            "direction": null,
+            "worksheet_id": "ws.refs",
+            "field_id": null,
+            "text_html": null,
+            "background_color": null,
+            "children": []
+          }
+        ]
+      },
+      "actions": []
+    }
+  ],
+  "theme": {
+    "palette_hexes": [
+      "#ffffff"
+    ],
+    "font_family": "Open Sans",
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
+  "limitations_encountered": [
+    {
+      "item": "ds.polygon_materials_fast_fashion_data_final",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_polygon_materials_fast_fashion_data_final__polygon_materials",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.jeans_fast_fashion_data_final",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_jeans_fast_fashion_data_final__jeans",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.jeans_polygon_fast_fashion_data_final",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_jeans_polygon_fast_fashion_data_final__jeans_polygon",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.marimekko_marikekko_segments",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_marimekko_marikekko_segments__calculation1",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_marimekko_marikekko_segments__segment_pulse_lod",
+      "issue": "LOD expression - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_marimekko_marikekko_segments__running_total_x_axis",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_marimekko_marikekko_segments__marimekko",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.radial_with_borders_radar_environmental",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_radial_with_borders_radar_environmental__angle",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_radial_with_borders_radar_environmental__radial_with_borders",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.radial_radar_environmental",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_radial_radar_environmental__angle",
+      "issue": "table calculation - verify DAX translation grain/filter-context against a known Tableau value",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_radial_radar_environmental__radial",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.performance_quartile_quartile_performance",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_performance_quartile_quartile_performance__performance_quartile",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.fibre_production_1970_2018_fast_fashion_data_final",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_fibre_production_1970_2018_fast_fashion_data_final__fibre_production_1970_2018",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.polygon_water_fast_fashion_data_final",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_polygon_water_fast_fashion_data_final__polygon_water",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.ripped_polygon_consumer_importance",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_ripped_polygon_consumer_importance__ripped_polygon",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.jeans_water_fast_fashion_data_final",
+      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream system",
+      "severity": "medium",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds_jeans_water_fast_fashion_data_final__jeans_water",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.1_design",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.1_design",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.10_avg",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.10_avg",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.2_raw",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.2_raw",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.4_manufac",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.4_manufac",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.5_transport",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.5_transport",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.6_retail",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.6_retail",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.7_use",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.7_use",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.8_end_of_use",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "ws.8_end_of_use",
+      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "model",
+      "issue": "11 data sources form an INDEPENDENT INFOGRAPHIC CONSTELLATION with ZERO genuine Tableau data blends. Every worksheet binds exactly one real federated.* source; the parser's 'multi-source' flags are all Parameters pseudo-source references (the [Parameter 3] sheet-swap), not blends. Dashboard has only 3 edit-parameter-action (sheet-swap nav) and no cross-worksheet filter/highlight actions. Modeled 9 sources as independent tables + 2 explicit many->one relationships.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "model.relationships",
+      "issue": "2 relationships built from the Tableau geometry-table + value-table blend idiom, made explicit as physical joins: Jeans Polygon[Shape Id]->JEANS[ID] (verified 8 unique ids, 0 unmatched) and Polygon water[Category]->JEANS water[Category] (verified 4 unique cats, 0 unmatched). Both many->one, single-direction (dim->detail). Tableau blend aggregates-then-links; reproduced safely because each 'one' side is a unique-key value table (no fan-out).",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "parser",
+      "issue": "PARSER GAP (repo-wide): all 35 calculated-field formulas are null in migration-spec.json (kind='calculated' but formula absent). Recovered every formula from the source .twb <calculation class='tableau' formula='...'> XML before translating.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "parser",
+      "issue": "PARSER GAP: worksheets are over-reported as 'multi-source' when the only additional source is the Parameters pseudo-source. Recommend excluding 'Parameters' from source-count / blend detection to avoid false-positive blends.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.radial_radar_environmental",
+      "issue": "Data source 'Radial (Radar Environmental)' is VESTIGIAL - no worksheet binds it (leftover duplicate of the live 'Radial with Borders'). Kept as an isolated table for completeness; all 10 of its calcs dropped.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.radial_with_borders.field:Impact Area",
+      "issue": "SOURCE DATA TYPO: Impact Area member 'Waste creation (Mn rons)' should read 'Mn tons' (cf. 'Energy emissions (Mn tons)'). Preserved faithfully as a data value; flag to customer.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.jeans_polygon.calc:Point X FLipped",
+      "issue": "Calculated-field caption typo 'Point X FLipped' (capital L) normalized to 'Point X Flipped' for cross-table naming consistency with the other two mirror columns; flag to customer.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "report_layer",
+      "issue": "CAPABILITY NOTE for pbi-report-builder: the marimekko cumulative column-width (RUNNING_SUM 'Calculation1' + 'Running Total X Axis' table calcs) and the radar's polar->cartesian scatter need a custom/marimekko visual and a scatter-line visual respectively. Model provides the building blocks: Segment Pulse LOD measure, Distance (r) measure, and Angle/X-axis/Y-axis calc columns.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.radial_with_borders.calc:Angle",
+      "issue": "Angle reproduces Tableau RUNNING_SUM((2*PI)/COUNTD(Impact Area)) as (2*PI/DISTINCTCOUNT)*RANKX(ALL(Impact Area),ASC,Dense). ORDERING ASSUMPTION: alphabetical Impact-Area rank; this only rotates the radar (spoke assignment), polygon shape/values unchanged. RANKX-on-text tie-breaking passes offline dual-method ground truth but is only fully confirmed on a live engine.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ds.radial_with_borders.calc:X-axis",
+      "issue": "Tableau X-axis/Y-axis = Distance(r)*COS/SIN(Angle) where Distance(r)=AVG(Radial Value). Modeled as row-level calc columns substituting the base Radial Value for the aggregate - valid because Radial Value is constant per (Impact Area, Year) mark (verified). Revisit as a measure if a future extract varies Radial Value within a mark.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "modeling.types",
+      "issue": "Mixed-content columns typed text to avoid refresh nulling: Radial with Borders[Actual Value] (blanks + numbers). Marimekko[Actual Pulse Score] Tableau-declared string but all clean ints duplicating Pulse Score -> typed int64, summarizeBy none. Report should treat Actual Value as a label, not a measure.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ai_prep.copilot_readiness",
+      "issue": "AI/Copilot-readiness pass DONE: business-meaning descriptions set on all 12 tables, 70 columns, 6 measures (100% coverage), with enum domains listed on every categorical column (e.g. Marimekko[Segment], Performance Quartile[Chain Stage], Ripped Polygon[Importance]). Applied via powerbi-modeling-mcp offline (ConnectFolder->Update->ExportToTmdlFolder), no Power BI Desktop needed.",
+      "severity": "info",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ai_prep.skipped_features",
+      "issue": "Skipped (not committable via Git/TMDL today, per agent instructions): AI data schema + AI instructions (LSDL - no stable file contract), verified answers (not Git-supported), and Approved-for-Copilot / indexing (Fabric service settings, not model files). Revisit when a file-level contract exists.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "tooling.powerbi_modeling_mcp",
+      "issue": "CONCURRENCY GOTCHA: the powerbi-modeling-mcp connection registry is GLOBAL/shared across parallel agent sessions. Its 'uses the last connection if omitted' default is RACY - during this build two sibling migrations (spiraling-satellites, interactive-resume) connected concurrently and a table Update with no connectionName resolved against a sibling's model ('table not found', transaction rolled back cleanly - no cross-model write). MUST pin connectionName on EVERY call when builds run in parallel.",
+      "severity": "medium",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "tooling.tmdl_export",
+      "issue": "ExportToTmdlFolder cosmetically normalizes model-wide: relationships drop explicit fromCardinality:many/toCardinality:one/crossFilteringBehavior:oneDirection lines when they equal TOM defaults (semantically identical - deserializes back to Many->One OneDirection, verified), and simple identifiers are unquoted (column Segment vs column 'Segment'). Offline validators that parse TMDL must be quoting-agnostic. lineageTags, DAX, summarizeBy, and descriptions are all preserved.",
+      "severity": "low",
+      "stage": "semantic_build"
+    },
+    {
+      "item": "ws.jeans_polygon_co2",
+      "issue": "Custom Tableau filled-polygon jeans silhouette (MAKEPOINT/polygon spatial geometry, CO2 breakdown) has NO native Power BI equivalent - PBI has no filled-point/polygon geometry mark. Approximated as a donutChart preserving the underlying 6-category Value(%) magnitudes; the denim silhouette shape itself is carried faithfully by the static full-canvas background raster (Group 35). Sheet-swap visibility handled by a boolean measure filter (Jeans Sheet Swap[Show CO2 Jeans]=true).",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.polygon_materials",
+      "issue": "Custom Tableau filled-polygon materials silhouette (polygon spatial geometry) - no native PBI polygon mark. Approximated as a donutChart preserving the 3-category Value(%) split; the silhouette outline is carried by the static background raster. Sheet-swap visibility via Jeans Sheet Swap[Show Materials]=true measure filter.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.polygon_water",
+      "issue": "Custom Tableau filled-polygon water silhouette (polygon spatial geometry) - no native PBI polygon mark. Approximated as a donutChart preserving the 4-category Value(%) split; the silhouette outline is carried by the static background raster. Sheet-swap visibility via Jeans Sheet Swap[Show Water]=true measure filter.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.radar",
+      "issue": "Custom Tableau radial/radar polygon (planetary-boundaries environmental impact by Impact Area x Year, built from polar-math X/Y geometry) - no native PBI radar or polygon mark. The semantic model materialized per-vertex X/Y coordinates, plotted here as a scatterChart tracing the vertices (Impact Area = points, Year = series, Avg X-axis / Avg Y-axis = position). The connecting polygon OUTLINE/FILL and the radial spoke axes are NOT drawn - only vertex positions convey the shape. A clustered bar/line was considered but scatter best preserves the radial vertex geometry.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.rip_polygon",
+      "issue": "Custom Tableau torn-paper ('ripped jeans') decorative polygon encoding consumer-awareness Importance magnitudes (polygon spatial geometry) - no native PBI polygon mark. The decorative torn-paper shape is carried by the static background raster; the underlying data (Importance level x Value%) is rendered as a horizontal bar chart (clusteredBarChart, single series). Ordinal Importance/Likert order is NOT enforced via a model sort-by column (bars sorted by Value descending) because the semantic model is read-only for this build.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.marimekko",
+      "issue": "Marimekko/mekko chart (variable-width 2D: column WIDTH = Market Share, column HEIGHT = Pulse Score, vertical split by Price Position, colour = pulse) - Power BI has NO native variable-width column mark. Approximated as a stacked columnChart: Segment = X-axis columns, Price Position = stacked split, Sum(Pulse Score) = height. The WIDTH dimension (Market Share) cannot be natively represented and is carried to the TOOLTIP only - the single lost encoding of this approximation. Segment columns sorted by total pulse descending.",
+      "severity": "high",
+      "stage": "report_build"
+    },
+    {
+      "item": "param.jeans_sheet_swap",
+      "issue": "Tableau sheet-swap parameter [Parameter 3] (clickable badge that swapped the CO2/Materials/Water jeans silhouette worksheets) reproduced as a single-select slicer on the disconnected 'Jeans Sheet Swap' table (values 1/2/3, explicit default '1') driving three boolean SELECTEDVALUE toggle measures (Show CO2 Jeans/Show Materials/Show Water). Each of the three stacked silhouette donuts carries the matching measure as an Advanced visual-level filter so exactly one is visible at a time. This is a functional slicer-swap rather than Tableau's in-canvas badge; no bookmark navigator was needed.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard.dashboard_1.decorative_layer",
+      "issue": "The dense IronViz infographic's decorative/annotation layer - title 'WASTE NOT, WEAR NOT', all narrative text blocks, the jeans illustration, the numbered tape-measure chain, torn-paper motifs, and the ~14 Tableau Shape/text worksheets (CO2, Cotton, Water, PLANET LIMIT, Asterisk, PROB, R Chem/Energy/Land/Waste/Water, REFS, etc.) - is reproduced as a single static full-canvas background raster (Group 35, 1499x3152, embedded as a base64 data-URI image visual), not as live/data-driven native objects. This preserves visual fidelity exactly but the text is not selectable and those 'worksheets' are not interactive.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.10_avg",
+      "issue": "The eight chain-stage pie worksheets (1.design, 2.raw, 10.avg=Processing, 4.manufac, 5.transport, 6.retail, 7.use, 8.end_of_use) drove wedge angle via an UNRESOLVED Tableau table-calculation not reconstructable from the spec. Each pie is rebuilt as a donutChart of Sum(Value) across the 4 Performance Quartiles, filtered to its Chain Stage. Worksheet '10. avg' resolves to Chain Stage='Processing' with four equal 25% quartile slices (consistent with its 'avg' naming); other stages vary by quartile. Absolute wedge rotation/ordering may differ from the original.",
+      "severity": "medium",
+      "stage": "report_build"
+    },
+    {
+      "item": "ws.pop_line",
+      "issue": "Tableau dual-axis line (primary Y = fibre Production m tons/yr, secondary Y2 = Population billions, colour = Fibre) rendered as a single-axis 2-line chart (Cotton vs Polyester production over Year). The secondary Population axis is not reproduced; however Population (billions) is non-null only on Fibre='Population' rows, which the worksheet's Fibre in {Cotton,Polyester} filter excludes - so the original effectively drew only the two production lines and the fidelity loss is negligible.",
+      "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "dashboard.dashboard_1.ordinal_sort",
+      "issue": "Ordinal dimensions (Ripped Polygon Importance/Likert levels; Performance Quartile Q1-Q4) are not guaranteed to render in semantic order because enforcing order requires a model sort-by column and the semantic model is read-only for this build. Visuals sort by value where a natural order matters (rip bars by Value descending); pie slice order follows the Quartile column's default order.",
+      "severity": "low",
+      "stage": "report_build"
+    }
+  ]
+}

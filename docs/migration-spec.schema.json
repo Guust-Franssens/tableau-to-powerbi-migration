@@ -73,8 +73,8 @@
             "items": {
               "type": "object",
               "properties": {
-                "left": { "type": "string" },
-                "right": { "type": "string" },
+                "left": { "type": ["string", "null"] },
+                "right": { "type": ["string", "null"] },
                 "type": { "type": "string", "enum": ["inner", "left", "right", "full"] },
                 "conditions": {
                   "type": "array",

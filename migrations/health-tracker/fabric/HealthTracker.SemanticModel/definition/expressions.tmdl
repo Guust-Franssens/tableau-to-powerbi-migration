@@ -1,0 +1,5 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\health-tracker\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: 40eda864-e8cc-4e92-9d8c-1741a36b55b6
+
+	annotation PBI_ResultType = Text
+

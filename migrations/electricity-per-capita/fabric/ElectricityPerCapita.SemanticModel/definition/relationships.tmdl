@@ -1,0 +1,22 @@
+relationship Year_PerCapitaFNR
+	fromColumn: 'Per Capita FNR'.'Year'
+	toColumn: 'Year'.'Year'
+
+relationship Year_Pivoted
+	fromColumn: 'Pivoted'.'Year'
+	toColumn: 'Year'.'Year'
+
+relationship Year_ElecGeneration
+	fromColumn: 'Elec Generation'.'Year'
+	toColumn: 'Year'.'Year'
+
+relationship Year_BySource
+	fromColumn: 'By Source'.'Year'
+	toColumn: 'Year'.'Year'
+
+relationship Tree_ElecGeneration
+	fromColumn: 'Elec Generation'.'Entity'
+	toColumn: 'Tree'.'Child'
+	fromCardinality: many
+	toCardinality: many
+	crossFilteringBehavior: oneDirection

@@ -1,0 +1,30 @@
+/// Disconnected slicer for Tableau parameter 'Slider' ([Parameter 3], real range, current 2021) - a year selector. Not referenced by any Tableau calc; provided as a report-facing year slider.
+table 'Year Slider'
+	lineageTag: 9391cd08-a847-58ad-82b6-fb7f1bb0521c
+
+	/// Current slicer selection on 'Year Slider'[Year Slider], defaulting to Tableau's current value when nothing is selected.
+	measure 'Year Slider Value' = SELECTEDVALUE('Year Slider'[Year Slider], 2021)
+		formatString: 0
+		lineageTag: 80da6f03-e0b0-54a0-a2b8-9e2b114e8ab9
+		displayFolder: Parameter
+
+	column 'Year Slider'
+		dataType: int64
+		formatString: 0
+		lineageTag: 9d83237c-1aa1-5b0b-8f68-6b69f414e058
+		summarizeBy: none
+		sourceColumn: Year Slider
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Year Slider' = m
+		mode: import
+		source =
+				let
+				    Source = {1985, 1986, 1987, 1988, 1989, 1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023},
+				    #"Converted to Table" = Table.FromList(Source, Splitter.SplitByNothing(), {"Year Slider"}),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Converted to Table", {{"Year Slider", Int64.Type}}, "en-US")
+				in
+				    #"Changed Type"
+
+	annotation PBI_ResultType = Table

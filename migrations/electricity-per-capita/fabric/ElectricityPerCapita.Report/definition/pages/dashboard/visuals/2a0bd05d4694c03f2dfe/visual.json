@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "2a0bd05d4694c03f2dfe",
+  "position": {
+    "x": 860,
+    "y": 222,
+    "z": 1070,
+    "width": 390,
+    "height": 84,
+    "tabOrder": 1070
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "3.  This is why per capita electricity generation — per person — should also be considered. The largest producers (Iceland, Norway, USA, Canada) generate hundreds of times as much as the smallest.",
+                    "textStyle": {
+                      "fontSize": "10pt",
+                      "color": "#404040"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

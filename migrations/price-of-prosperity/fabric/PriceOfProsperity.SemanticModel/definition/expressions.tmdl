@@ -1,0 +1,5 @@
+expression DataFolder = "C:\Users\gfranssens\vscode-projects\tableau-to-pbi-migration\migrations\price-of-prosperity\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+	lineageTag: 0e570347-3596-41fa-943c-d4ee705e6714
+
+	annotation PBI_ResultType = Text
+
