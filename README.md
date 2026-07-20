@@ -24,6 +24,15 @@
   <i>Left: the original Tableau Public dashboard. Right: the Power BI report this pipeline generated from it, a live Power BI Desktop render over the migrated semantic model. More pairs are in the <a href="docs/showcase/README.md">showcase</a>.</i>
 </p>
 
+<p align="center">
+  <a href="docs/showcase/demo/agents-reasoning.mp4"><img src="docs/showcase/demo/poster.png" width="760" alt="Watch the 70-second demo: the four-agent pipeline, the fidelity validator catching a real bug, and before/after proof with exact numbers"></a>
+</p>
+
+<p align="center">
+  <b><a href="docs/showcase/demo/agents-reasoning.mp4">&#9654;&nbsp; Watch the 70-second demo</a></b> &nbsp;&mdash;&nbsp; the four-agent pipeline, then a replay of the fidelity validator <b>catching a real off-by-one bug</b> and the model builder fixing it, then before/after proof with exact numbers.<br/>
+  <sub><i>Silent and captioned. Generated reproducibly from this repo's own ground truth by <a href="scripts/make_demo_video.py"><code>scripts/make_demo_video.py</code></a>.</i></sub>
+</p>
+
 ---
 
 Point it at a Tableau `.twb` / `.twbx` and it produces a working **Fabric Power BI semantic model + report**. **16 real, publicly available Tableau Public dashboards** have been run through it end to end, spanning KPI dashboards, IronViz infographics, network and origin-destination maps, a what-if calculator, and a 91-worksheet enterprise workbook.
