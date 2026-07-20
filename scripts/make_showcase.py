@@ -34,6 +34,11 @@ DEFAULT_HERO = [
     "wind-energy-utilization",
     "shipping-kpis",
 ]
+SOCIAL_STRIP = [
+    "price-of-prosperity",
+    "health-tracker",
+    "wind-energy-utilization",
+]
 
 
 def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -152,6 +157,44 @@ def build_hero(featured: list[str], assets_dir: Path, out_path: Path, max_width:
     logger.info("Wrote %s (%dx%d)", out_path.relative_to(REPO_ROOT), canvas.width, canvas.height)
 
 
+def build_social_strip(  # pylint: disable=too-many-locals  # cohesive multi-panel layout
+    featured: list[str], assets_dir: Path, out_path: Path, tile_height: int = 1400
+) -> None:
+    """Combine the featured after/before composites (Power BI on top, Tableau below) side by side into a
+    single titled image: three proofs in one asset for a LinkedIn post. Uses the -stacked-afterbefore
+    tiles so each column already reads AFTER over BEFORE."""
+    tiles: list[Image.Image] = []
+    for slug in featured:
+        p = assets_dir / f"{slug}-1-stacked-afterbefore.png"
+        if p.exists():
+            img = Image.open(p).convert("RGB")
+            tiles.append(
+                img.resize((round(img.width * tile_height / img.height), tile_height), Image.Resampling.LANCZOS)
+            )
+    if not tiles:
+        logger.warning("build_social_strip: no after/before tiles found for %s", featured)
+        return
+    title_h, pad, gap = 96, 40, 32
+    strip_w = pad * 2 + sum(t.width for t in tiles) + gap * (len(tiles) - 1)
+    canvas = Image.new("RGB", (strip_w, title_h + pad + tile_height + pad), BG)
+    draw = ImageDraw.Draw(canvas)
+    draw.text((pad, title_h // 2 + 6), "AFTER  \u00b7  Power BI", fill=PBI_ACCENT, font=_font(38), anchor="lm")
+    draw.text(
+        (strip_w - pad, title_h // 2 + 6),
+        "migrated by AI from  \u00b7  Tableau (BEFORE)",
+        fill=TABLEAU_ACCENT,
+        font=_font(38),
+        anchor="rm",
+    )
+    x = pad
+    for tile in tiles:
+        canvas.paste(tile, (x, title_h))
+        x += tile.width + gap
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path)
+    logger.info("Wrote %s (%dx%d)", out_path.relative_to(REPO_ROOT), canvas.width, canvas.height)
+
+
 def _render_entry(entry: dict[str, Any], assets_dir: Path, layout: str, order: str = "before-after") -> list[str]:
     """Render every page-pair for one workbook; return the gallery markdown lines for it."""
     slug = entry["slug"]
@@ -221,6 +264,8 @@ def main() -> None:
         md += _render_entry(entry, assets_dir, args.layout, args.order)
     if args.layout == "side-by-side" and not after_before:
         build_hero(config.get("hero", DEFAULT_HERO), assets_dir, showcase_dir / "hero-before-after.png")
+    if after_before:
+        build_social_strip(SOCIAL_STRIP, assets_dir, showcase_dir / "social-after-before.png")
     if after_before:
         readme_name = "README-afterbefore.md"
     elif args.layout == "stacked":
