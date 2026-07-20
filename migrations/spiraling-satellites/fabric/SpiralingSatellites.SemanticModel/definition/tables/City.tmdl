@@ -7,7 +7,7 @@ table City
 		dataType: string
 		lineageTag: cbfe436a-a3ea-46bf-9815-6cd1a14fa905
 		summarizeBy: none
-		sourceColumn: [City]
+		sourceColumn: City
 
 		annotation SummarizationSetBy = Automatic
 
@@ -16,7 +16,7 @@ table City
 		dataType: double
 		lineageTag: ff1b8278-2212-4f91-b120-35118dd2273c
 		summarizeBy: sum
-		sourceColumn: [Sales]
+		sourceColumn: Sales
 
 		annotation SummarizationSetBy = Automatic
 
@@ -25,7 +25,7 @@ table City
 		dataType: double
 		lineageTag: 66433577-f11b-45f8-8ba5-5d2c3082c22d
 		summarizeBy: sum
-		sourceColumn: [Profit]
+		sourceColumn: Profit
 
 		annotation SummarizationSetBy = Automatic
 
@@ -69,9 +69,16 @@ table City
 
 		annotation SummarizationSetBy = Automatic
 
-	partition City = calculated
+	partition City = m
 		mode: import
-		source = ADDCOLUMNS(DISTINCT(Orders[City]), "Sales", CALCULATE(SUM(Orders[Sales])), "Profit", CALCULATE(SUM(Orders[Profit])))
+		source =
+				let
+				    Source = Csv.Document(File.Contents(DataFolder & "ds.sample_superstore.csv"), [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+				    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+				    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers", {{"City", type text}, {"Sales", type number}, {"Profit", type number}}, "en-US"),
+				    #"Grouped Rows" = Table.Group(#"Changed Type", {"City"}, {{"Sales", each List.Sum([Sales]), type number}, {"Profit", each List.Sum([Profit]), type number}})
+				in
+				    #"Grouped Rows"
 
 	annotation PBI_ResultType = Table
 
