@@ -1,0 +1,87 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  "name": "narrative",
+  "position": {
+    "x": 20,
+    "y": 192,
+    "z": 211,
+    "height": 286,
+    "width": 300,
+    "tabOrder": 211
+  },
+  "visual": {
+    "visualType": "textbox",
+    "drillFilterOtherVisuals": true,
+    "objects": {
+      "general": [
+        {
+          "properties": {
+            "paragraphs": [
+              {
+                "textRuns": [
+                  {
+                    "value": "The pursuit of economic growth has historically correlated with the exploitation of natural resources. Countries with great wealth today often gained their fortune at an environmental cost, creating a world where for other countries to follow in their footsteps would result in environmental collapse. Wealthy nations have a moral obligation to aid developing countries in achieving economic progress without worsening environmental degradation.",
+                    "textStyle": {
+                      "fontSize": "8pt",
+                      "color": "#C2C2CE"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "",
+                    "textStyle": {
+                      "fontSize": "5pt",
+                      "color": "#C2C2CE"
+                    }
+                  }
+                ]
+              },
+              {
+                "textRuns": [
+                  {
+                    "value": "This visualization explores the relationship between CO2 emissions, GDP, population, and per capita metrics, highlighting the pressing need for affluent nations to balance prosperity with environmental stewardship and support global efforts to address climate change.",
+                    "textStyle": {
+                      "fontSize": "8pt",
+                      "color": "#C2C2CE"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "visualContainerObjects": {
+      "background": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "border": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

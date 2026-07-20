@@ -1,0 +1,81 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/powerbi-desktop-samples/main/Report%20Theme%20JSON%20Schema/reportThemeSchema-2.153.json",
+  "name": "theme.json",
+  "dataColors": [
+    "#45B7A8",
+    "#C77FC1",
+    "#9B93C9",
+    "#7EA9D6",
+    "#E9A25D",
+    "#E4C550",
+    "#8E8EA5",
+    "#B0B0C0"
+  ],
+  "good": "#45B7A8",
+  "neutral": "#E6E6E6",
+  "bad": "#C77FC1",
+  "foreground": "#333333",
+  "foregroundNeutralSecondary": "#666666",
+  "background": "#FFFFFF",
+  "backgroundLight": "#F5F5FA",
+  "tableAccent": "#7EA9D6",
+  "textClasses": {
+    "title": {
+      "fontSize": 14,
+      "fontFace": "Segoe UI Semibold, Segoe UI, sans-serif",
+      "color": "#333333"
+    },
+    "header": {
+      "fontSize": 11,
+      "fontFace": "Segoe UI, sans-serif",
+      "color": "#333333"
+    },
+    "label": {
+      "fontSize": 9,
+      "fontFace": "Segoe UI, sans-serif",
+      "color": "#404040"
+    }
+  },
+  "visualStyles": {
+    "*": {
+      "*": {
+        "border": [
+          {
+            "show": false
+          }
+        ],
+        "dropShadow": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "textbox": {
+      "*": {
+        "border": [
+          {
+            "show": false
+          }
+        ]
+      }
+    },
+    "slicer": {
+      "*": {
+        "items": [
+          {
+            "fontFamily": "Segoe UI, sans-serif",
+            "textSize": 10,
+            "fontColor": {
+              "solid": {
+                "color": "#333333"
+              }
+            },
+            "outlineStyle": 0,
+            "padding": 3
+          }
+        ]
+      }
+    }
+  }
+}

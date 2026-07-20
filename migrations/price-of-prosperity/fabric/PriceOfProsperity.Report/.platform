@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "PriceOfProsperity"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "8b2b3e0a-9f92-4779-abf6-d87f1f74952a"
+  }
+}
