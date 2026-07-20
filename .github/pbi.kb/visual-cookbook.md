@@ -72,8 +72,9 @@ Legend: 🟢 render-proven · 🟡 structural template (CLI) · 🔴 needs human
 | `tableEx` / `pivotTable` (matrix) | airline `ba1e195d` / tale-of-100 |
 | `azureMap` (choropleth reference-layer) | superstore prescriptive `9d3297e6` (render-verified, Desktop-built) |
 | `slicer` (list/dropdown, single/multi) | all migrations |
-| `pageNavigator`, `textbox`, `shape` | all migrations |
-| `actionButton` (static Web URL / link button) | interactive-resume (structural 🟡; social chips + 6 hardcoded links; Desktop click-through not captured) |
+| `pageNavigator`, `textbox` | all migrations |
+| `shape` (fill + tileShape + **`visualLink` WebUrl**) | interactive-resume `bg-dtc` (🟢 render-verified: hexagon/oval badges + clickable Web-URL buttons; **embedded `text` object does NOT render → use textbox overlay**; see `visuals/shape.md`) |
+| `actionButton` (static Web URL / link button) | interactive-resume — 🔴 **render-broken**: Desktop ignores `visual.objects`, draws a blank rectangle (validate still 0-errors). **Use `shape` instead** (same `visualLink`); see `visuals/actionButton.md` |
 
 ### 🎯 Research targets (Tableau-common, not yet proven) — being templated by cluster agents
 - **Cartesian family**: `areaChart`, `stackedAreaChart`, `hundredPercentStackedAreaChart`,

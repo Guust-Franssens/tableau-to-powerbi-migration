@@ -1,5 +1,16 @@
 # actionButton (static Web URL button)
 
+> ## 🔴 DO NOT USE for a *visible* button in Power BI Desktop (render-verified 2.156)
+> `actionButton` **silently ignores its entire `visual.objects` block on render** (fill / text /
+> tileShape) and draws as a **blank rectangle**, while `powerbi-report-author validate` still reports
+> 0-errors and the Format → Action pane still shows the URL. This is exactly the trap the 🟡 verdict
+> below warned might exist — it is now **confirmed real** (all 12 buttons in
+> `migrations\interactive-resume` rendered blank until converted). **Use the `shape` visual instead**
+> (`visuals/shape.md`, 🟢): it supports the *identical* container-level `visualLink` WebUrl action AND
+> actually renders `fill`/`outline`/`tileShape`. Keep this file only as the reference for the
+> `visualLink` encoding (which `shape` reuses verbatim) and as a cautionary example of a
+> validate-clean-but-render-broken visual.
+
 Use for a Tableau **URL / hyperlink dashboard action** whose target is a fixed/hardcoded URL
 (social icons, "click here" links, external references) — i.e. a link that is **not** carried in a
 `dataCategory: WebUrl` model column. When the URL *is* a model column, prefer binding that column
@@ -39,11 +50,12 @@ image), set `fill.show:false`, `outline.show:false`, and omit `text` — only th
 
 ## Tier verdict
 
-🟡 template-ready — the `visualContainerObjects.visualLink` WebUrl encoding **validates clean**
-(`powerbi-report-author validate`, 0 errors / 0 warnings) and is used for all 6 hardcoded links +
-social chips in `migrations\interactive-resume`. Desktop click-through was **not** render-captured
-(the shared Desktop Bridge was held by sibling parallel builds), so it is not yet 🟢. Promote to 🟢
-after a Desktop capture confirms the button navigates.
+🔴 **render-broken for visible buttons** — the `visualContainerObjects.visualLink` WebUrl encoding
+validates clean (`powerbi-report-author validate`, 0 errors / 0 warnings) but Desktop 2.156 **does not
+render `visual.objects`** (fill/text/tileShape), so the button appears as a blank rectangle. This was
+observed live in `migrations\interactive-resume` (all 12 buttons blank) and fixed by converting each
+to `shape` (see `visuals/shape.md`, 🟢). The `visualLink` block itself is correct and is reused
+verbatim by `shape`. Do **not** promote this to 🟢; use `shape` for anything that must be seen.
 
 ## Human Desktop capture instructions
 
