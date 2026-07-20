@@ -5,7 +5,7 @@
     "x": 12.176616915422885,
     "y": 42.06467661691542,
     "z": 8000,
-    "height": 47.599502487562184,
+    "height": 48.5,
     "width": 629.863184079602,
     "tabOrder": 2000
   },
@@ -38,51 +38,6 @@
       "general": [
         {
           "properties": {
-            "selfFilterEnabled": {
-              "expr": {
-                "Literal": {
-                  "Value": "true"
-                }
-              }
-            },
-            "selfFilter": {
-              "filter": {
-                "Version": 2,
-                "From": [
-                  {
-                    "Name": "u",
-                    "Entity": "UA Cities",
-                    "Type": 0
-                  }
-                ],
-                "Where": [
-                  {
-                    "Condition": {
-                      "Contains": {
-                        "Left": {
-                          "Column": {
-                            "Expression": {
-                              "SourceRef": {
-                                "Source": "u"
-                              }
-                            },
-                            "Property": "Name"
-                          }
-                        },
-                        "Right": {
-                          "Literal": {
-                            "Value": "'burgos'"
-                          }
-                        }
-                      }
-                    },
-                    "Annotations": {
-                      "PowerBI.MParameterBehavior": 1
-                    }
-                  }
-                ]
-              }
-            },
             "filter": {
               "filter": {
                 "Version": 2,
@@ -153,7 +108,7 @@
             "show": {
               "expr": {
                 "Literal": {
-                  "Value": "true"
+                  "Value": "false"
                 }
               }
             },

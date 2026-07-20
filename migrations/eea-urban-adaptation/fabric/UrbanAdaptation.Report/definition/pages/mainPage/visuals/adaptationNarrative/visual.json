@@ -28,7 +28,8 @@
               },
               "queryRef": "UA Cities.Adaptation Narrative",
               "nativeQueryRef": "Adaptation Narrative",
-              "active": true
+              "active": true,
+              "displayName": " "
             }
           ]
         }

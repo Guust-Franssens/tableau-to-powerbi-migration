@@ -76,6 +76,17 @@
         }
       }
     },
+    "objects": {
+      "valueAxis": [
+        { "properties": { "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "categoryAxis": [
+        { "properties": { "showAxisTitle": { "expr": { "Literal": { "Value": "false" } } } } }
+      ],
+      "legend": [
+        { "properties": { "showTitle": { "expr": { "Literal": { "Value": "false" } } } } }
+      ]
+    },
     "visualContainerObjects": {
       "title": [
         {

@@ -43,11 +43,40 @@
               },
               "queryRef": "Climate Indicators.Pivot Field Values",
               "nativeQueryRef": "Pivot Field Values",
-              "active": true
+              "active": true,
+              "displayName": "Value"
             }
           ]
         }
       }
+    },
+    "objects": {
+      "columnHeaders": [
+        {
+          "properties": {
+            "autoSizeColumnWidth": { "expr": { "Literal": { "Value": "false" } } },
+            "customColumnWidth": { "expr": { "Literal": { "Value": "true" } } },
+            "wordWrap": { "expr": { "Literal": { "Value": "true" } } }
+          }
+        }
+      ],
+      "values": [
+        {
+          "properties": {
+            "wordWrap": { "expr": { "Literal": { "Value": "true" } } }
+          }
+        }
+      ],
+      "columnWidth": [
+        {
+          "properties": { "value": { "expr": { "Literal": { "Value": "255D" } } } },
+          "selector": { "metadata": "Climate Indicators.Climate indicators" }
+        },
+        {
+          "properties": { "value": { "expr": { "Literal": { "Value": "115D" } } } },
+          "selector": { "metadata": "Climate Indicators.Pivot Field Values" }
+        }
+      ]
     },
     "visualContainerObjects": {
       "title": [
