@@ -312,13 +312,13 @@ table 'Orders'
 		displayFolder: Indicator Grid (random)
 
 	/// Column index (0-9) of the state's tile in the map tile-grid layout. Tableau [Map Columns] = INT(INDEX()-1)%10. INDEX() over State (alphabetical) -> RANKX. GROUND-TRUTH target.
-	measure 'Map Columns' = MOD(INT(RANKX(ALLSELECTED('Orders'[State]), MAX('Orders'[State]), , ASC, Dense) - 1), 10)
+	measure 'Map Columns' = MOD(INT(RANKX(ALLSELECTED('Orders'[State]), CALCULATE(MAX('Orders'[State])), , ASC, Dense) - 1), 10)
 		formatString: #,##0
 		lineageTag: 9d213361-5a4f-5129-9f24-eb25d12552fa
 		displayFolder: Map Tile Grid
 
 	/// Row index of the state's tile in the map tile-grid layout. Tableau [Map Rows] = INT((INDEX()-1)/10)*1.0. INDEX() over State -> RANKX. GROUND-TRUTH target.
-	measure 'Map Rows' = INT((RANKX(ALLSELECTED('Orders'[State]), MAX('Orders'[State]), , ASC, Dense) - 1) / 10) * 1.0
+	measure 'Map Rows' = INT((RANKX(ALLSELECTED('Orders'[State]), CALCULATE(MAX('Orders'[State])), , ASC, Dense) - 1) / 10) * 1.0
 		formatString: 0.0
 		lineageTag: af383a0b-2948-5b1f-aa64-d81948610e75
 		displayFolder: Map Tile Grid
