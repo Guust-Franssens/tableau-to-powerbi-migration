@@ -20,7 +20,7 @@
               {
                 "textRuns": [
                   {
-                    "value": "HIGH boundary: four synthetic mark layers on one axis -> one line chart with markers. Marks are real measures; N-layer geometry not reproduced. See Summary.",
+                    "value": "HIGH boundary: four synthetic mark layers on one axis -> one line chart with markers. The windowed Dot/Circle/Deep-Discount glyphs are text and can't plot on a value axis, so those overlays aren't reproduced; the Total Sales trend is exact. See Summary.",
                     "textStyle": {
                       "fontFamily": "Segoe UI",
                       "fontSize": "9pt",

@@ -132,7 +132,7 @@
               {
                 "textRuns": [
                   {
-                    "value": "  Ex.3 Triangles & Ex.5 Color+Size -> Sales-vs-Profit scatter (Ex.5 keeps size+color discount encoding);  Ex.10 Map Trellis -> INDEX tile-grid scatter (49-state layout preserved).",
+                    "value": "  Ex.3 Triangles & Ex.5 Color+Size -> Sales-vs-Profit scatter (Ex.5 keeps the discount Size encoding; the highlight measure is near-binary so color is not a separate gradient channel);  Ex.10 Map Trellis -> INDEX tile-grid scatter (49-state layout preserved).",
                     "textStyle": {
                       "fontFamily": "Segoe UI",
                       "fontSize": "10pt",

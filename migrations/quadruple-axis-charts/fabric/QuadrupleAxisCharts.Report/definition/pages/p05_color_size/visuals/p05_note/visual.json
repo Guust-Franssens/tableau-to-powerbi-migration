@@ -20,7 +20,7 @@
               {
                 "textRuns": [
                   {
-                    "value": "LOW boundary: Color+Size double-encoding preserved via bubble size + color saturation on Deep Discount depth. Faithful.",
+                    "value": "MEDIUM boundary: discount depth drives size + color in Tableau. The migrated highlight measure is near-binary, so bubble Size flags the two deep-discount Sub-Categories (Machines, Binders); a color gradient would only re-mark those same points. See Summary.",
                     "textStyle": {
                       "fontFamily": "Segoe UI",
                       "fontSize": "9pt",

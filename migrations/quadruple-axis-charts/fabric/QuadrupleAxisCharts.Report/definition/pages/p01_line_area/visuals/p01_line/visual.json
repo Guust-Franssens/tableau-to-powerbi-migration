@@ -49,36 +49,6 @@
               "queryRef": "Orders.Total Sales",
               "nativeQueryRef": "Total Sales",
               "active": true
-            },
-            {
-              "field": {
-                "Measure": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Orders"
-                    }
-                  },
-                  "Property": "Dot Sales Window"
-                }
-              },
-              "queryRef": "Orders.Dot Sales Window",
-              "nativeQueryRef": "Dot Sales Window",
-              "active": true
-            },
-            {
-              "field": {
-                "Measure": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Orders"
-                    }
-                  },
-                  "Property": "Circle Sales Window"
-                }
-              },
-              "queryRef": "Orders.Circle Sales Window",
-              "nativeQueryRef": "Circle Sales Window",
-              "active": true
             }
           ]
         }
@@ -133,7 +103,7 @@
             "text": {
               "expr": {
                 "Literal": {
-                  "Value": "'South Sales over Ship Month  (Total Sales + windowed Dot/Circle marks)'"
+                  "Value": "'South Sales over Ship Month'"
                 }
               }
             },

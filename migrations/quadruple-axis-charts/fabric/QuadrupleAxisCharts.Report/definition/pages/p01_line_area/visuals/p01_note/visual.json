@@ -20,7 +20,7 @@
               {
                 "textRuns": [
                   {
-                    "value": "HIGH boundary: Tableau stacks Area+Dot+Line+Circle marks on one synthetic axis. Power BI = markers on a shared axis; windowed marks bound as real measures, layered area+4-mark geometry not reproduced. See Summary.",
+                    "value": "HIGH boundary: Tableau layers Area+Dot+Line+Circle marks on one synthetic axis. Power BI shows Total Sales as a line with markers; the windowed highlight glyphs (\u2b24/\u26aa) are text and can't plot on a value axis, so per-point highlighting isn't reproduced. See Summary.",
                     "textStyle": {
                       "fontFamily": "Segoe UI",
                       "fontSize": "9pt",
