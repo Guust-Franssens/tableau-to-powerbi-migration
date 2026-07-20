@@ -33,24 +33,6 @@
             }
           ]
         },
-        "Series": {
-          "projections": [
-            {
-              "field": {
-                "Column": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Fibre Production 1970-2018"
-                    }
-                  },
-                  "Property": "Fibre"
-                }
-              },
-              "queryRef": "Fibre Production 1970-2018.Fibre",
-              "nativeQueryRef": "Fibre"
-            }
-          ]
-        },
         "Y": {
           "projections": [
             {
@@ -72,13 +54,116 @@
               "queryRef": "Sum(Fibre Production 1970-2018.Production (m tons per year))",
               "nativeQueryRef": "Sum of Production (m tons per year)",
               "format": "#,##0.0",
-              "displayName": "Production (m tons/yr)"
+              "displayName": "Textile production"
+            }
+          ]
+        },
+        "Y2": {
+          "projections": [
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {
+                        "SourceRef": {
+                          "Entity": "Fibre Production 1970-2018"
+                        }
+                      },
+                      "Property": "Population (billions)"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Fibre Production 1970-2018.Population (billions))",
+              "nativeQueryRef": "Sum of Population (billions)",
+              "format": "#,##0.0",
+              "displayName": "Population (billions)"
             }
           ]
         }
       }
     },
     "objects": {
+      "dataPoint": [
+        {
+          "properties": {
+            "fill": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#E5A83C'"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": {
+            "metadata": "Sum(Fibre Production 1970-2018.Production (m tons per year))"
+          }
+        },
+        {
+          "properties": {
+            "fill": {
+              "solid": {
+                "color": {
+                  "expr": {
+                    "Literal": {
+                      "Value": "'#FFFFFF'"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selector": {
+            "metadata": "Sum(Fibre Production 1970-2018.Population (billions))"
+          }
+        }
+      ],
+      "y2Axis": [
+        {
+          "properties": {
+            "show": {
+              "expr": {
+                "Literal": {
+                  "Value": "false"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "lineStyles": [
+        {
+          "properties": {
+            "showSeries": {
+              "expr": {
+                "Literal": {
+                  "Value": "true"
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "lineStyle": {
+              "expr": {
+                "Literal": {
+                  "Value": "'dashed'"
+                }
+              }
+            }
+          },
+          "selector": {
+            "metadata": "Sum(Fibre Production 1970-2018.Population (billions))"
+          }
+        }
+      ],
       "categoryAxis": [
         {
           "properties": {
@@ -301,14 +386,14 @@
                     [
                       {
                         "Literal": {
-                          "Value": "'Cotton'"
+                          "Value": "'Total Fibres'"
                         }
                       }
                     ],
                     [
                       {
                         "Literal": {
-                          "Value": "'Polyester'"
+                          "Value": "'Population'"
                         }
                       }
                     ]
