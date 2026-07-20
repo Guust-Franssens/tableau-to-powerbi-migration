@@ -77,25 +77,37 @@ def _labeled_panel(img: Image.Image, label: str, accent: tuple[int, int, int]) -
     return panel
 
 
-def compose_pair(
-    tableau_path: Path, pbi_path: Path, pbi_crop: dict[str, float] | None, out_path: Path, layout: str
+def compose_pair(  # pylint: disable=too-many-arguments  # cohesive compositor: 2 image paths + crop + out + layout + order
+    tableau_path: Path,
+    pbi_path: Path,
+    pbi_crop: dict[str, float] | None,
+    out_path: Path,
+    layout: str,
+    *,
+    order: str = "before-after",
 ) -> None:
     """Compose one Tableau vs Power BI comparison PNG. layout='side-by-side' (wide, good for the README)
-    or 'stacked' (Tableau above Power BI - a taller aspect ratio that reads better on a LinkedIn feed)."""
-    left = _labeled_panel(_scaled(tableau_path, None), "Tableau  (source)", TABLEAU_ACCENT)
-    right = _labeled_panel(_scaled(pbi_path, pbi_crop), "Power BI  (migrated)", PBI_ACCENT)
+    or 'stacked' (taller aspect ratio that reads better on a LinkedIn feed). order='before-after' puts
+    Tableau first (the natural 'migration' reading for the repo); order='after-before' puts the Power BI
+    result first (a stronger scroll-stopper for LinkedIn: show the polished result, then reveal the
+    source it was auto-migrated from)."""
+    tab_label = "BEFORE  \u00b7  Tableau" if order == "after-before" else "Tableau  (source)"
+    pbi_label = "AFTER  \u00b7  Power BI" if order == "after-before" else "Power BI  (migrated)"
+    tableau_panel = _labeled_panel(_scaled(tableau_path, None), tab_label, TABLEAU_ACCENT)
+    pbi_panel = _labeled_panel(_scaled(pbi_path, pbi_crop), pbi_label, PBI_ACCENT)
+    first, second = (pbi_panel, tableau_panel) if order == "after-before" else (tableau_panel, pbi_panel)
     if layout == "stacked":
-        width = MARGIN * 2 + max(left.width, right.width)
-        height = MARGIN * 2 + left.height + GAP + right.height
+        width = MARGIN * 2 + max(first.width, second.width)
+        height = MARGIN * 2 + first.height + GAP + second.height
         canvas = Image.new("RGB", (width, height), BG)
-        canvas.paste(left, ((width - left.width) // 2, MARGIN))
-        canvas.paste(right, ((width - right.width) // 2, MARGIN + left.height + GAP))
+        canvas.paste(first, ((width - first.width) // 2, MARGIN))
+        canvas.paste(second, ((width - second.width) // 2, MARGIN + first.height + GAP))
     else:
-        width = MARGIN * 2 + left.width + GAP + right.width
-        height = MARGIN * 2 + max(left.height, right.height)
+        width = MARGIN * 2 + first.width + GAP + second.width
+        height = MARGIN * 2 + max(first.height, second.height)
         canvas = Image.new("RGB", (width, height), BG)
-        canvas.paste(left, (MARGIN, MARGIN))
-        canvas.paste(right, (MARGIN + left.width + GAP, MARGIN))
+        canvas.paste(first, (MARGIN, MARGIN))
+        canvas.paste(second, (MARGIN + first.width + GAP, MARGIN))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(out_path)
     logger.info("Wrote %s (%dx%d)", out_path.relative_to(REPO_ROOT), width, height)
@@ -140,10 +152,11 @@ def build_hero(featured: list[str], assets_dir: Path, out_path: Path, max_width:
     logger.info("Wrote %s (%dx%d)", out_path.relative_to(REPO_ROOT), canvas.width, canvas.height)
 
 
-def _render_entry(entry: dict[str, Any], assets_dir: Path, layout: str) -> list[str]:
+def _render_entry(entry: dict[str, Any], assets_dir: Path, layout: str, order: str = "before-after") -> list[str]:
     """Render every page-pair for one workbook; return the gallery markdown lines for it."""
     slug = entry["slug"]
     suffix = "-stacked" if layout == "stacked" else ""
+    suffix += "-afterbefore" if order == "after-before" else ""
     lines = [f"### {entry['title']}", "", entry.get("caption", ""), ""]
     for i, page in enumerate(entry["pages"], 1):
         tableau = REPO_ROOT / page["tableau"]
@@ -153,7 +166,7 @@ def _render_entry(entry: dict[str, Any], assets_dir: Path, layout: str) -> list[
             lines += [f"- **{page_name}** — Power BI screenshot pending Desktop capture.", ""]
             continue
         out = assets_dir / f"{slug}-{i}{suffix}.png"
-        compose_pair(tableau, REPO_ROOT / pbi, page.get("powerbi_crop"), out, layout)
+        compose_pair(tableau, REPO_ROOT / pbi, page.get("powerbi_crop"), out, layout, order=order)
         rel = out.relative_to(REPO_ROOT / "docs" / "showcase").as_posix()
         lines += [f"**{page_name}**", "", f"![{entry['title']} - {page_name}]({rel})", ""]
     return lines
@@ -169,27 +182,52 @@ def main() -> None:
         default="side-by-side",
         help="side-by-side (wide, for the README) or stacked (tall, better for a LinkedIn feed / mobile)",
     )
+    parser.add_argument(
+        "--order",
+        choices=["before-after", "after-before"],
+        default="before-after",
+        help="before-after: Tableau first (repo showcase). after-before: Power BI result first, a stronger "
+        "scroll-stopper for LinkedIn. Writes -afterbefore assets and README-afterbefore.md without "
+        "touching the repo's before/after showcase.",
+    )
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
     showcase_dir = args.config.parent
     assets_dir = showcase_dir / "assets"
-    md = [
-        "# Migration Showcase — Tableau → Power BI",
-        "",
-        "Each row shows the original **Tableau** dashboard (left) next to the **Power BI** report our "
-        "AI-assisted pipeline generated from it (right). Power BI screenshots are live Power BI Desktop "
-        "renders of the generated PBIR report over the migrated semantic model.",
-        "",
-        "> Generated by `scripts/make_showcase.py` from `docs/showcase/showcase.json`. Run with "
-        "`--layout stacked` for tall, LinkedIn/mobile-friendly versions.",
-        "",
-    ]
+    after_before = args.order == "after-before"
+    if after_before:
+        lead = (
+            "Each row leads with the **Power BI** report our AI-assisted pipeline generated (left), next to "
+            "the original **Tableau** dashboard it was migrated from (right). Power BI screenshots are live "
+            "Power BI Desktop renders of the generated PBIR report over the migrated semantic model."
+        )
+        title = "# Migration Showcase (after / before) — Power BI ← Tableau"
+        hint = "> After/before variant for social posts. Generated by `scripts/make_showcase.py --order after-before`."
+    else:
+        lead = (
+            "Each row shows the original **Tableau** dashboard (left) next to the **Power BI** report our "
+            "AI-assisted pipeline generated from it (right). Power BI screenshots are live Power BI Desktop "
+            "renders of the generated PBIR report over the migrated semantic model."
+        )
+        title = "# Migration Showcase — Tableau → Power BI"
+        hint = (
+            "> Generated by `scripts/make_showcase.py` from `docs/showcase/showcase.json`. Run with "
+            "`--layout stacked` for tall, LinkedIn/mobile-friendly versions, or `--order after-before` "
+            "to lead with the Power BI result."
+        )
+    md = [title, "", lead, "", hint, ""]
     for entry in config["workbooks"]:
-        md += _render_entry(entry, assets_dir, args.layout)
-    if args.layout == "side-by-side":
+        md += _render_entry(entry, assets_dir, args.layout, args.order)
+    if args.layout == "side-by-side" and not after_before:
         build_hero(config.get("hero", DEFAULT_HERO), assets_dir, showcase_dir / "hero-before-after.png")
-    readme = showcase_dir / ("README.md" if args.layout == "side-by-side" else "README-stacked.md")
+    if after_before:
+        readme_name = "README-afterbefore.md"
+    elif args.layout == "stacked":
+        readme_name = "README-stacked.md"
+    else:
+        readme_name = "README.md"
+    readme = showcase_dir / readme_name
     readme.write_text("\n".join(md).rstrip() + "\n", encoding="utf-8")
     logger.info("Wrote %s", readme.relative_to(REPO_ROOT))
 
