@@ -6130,6 +6130,18 @@
    "issue": "Live Desktop render verification deferred: the single shared Power BI Desktop bridge was held by two other concurrent builds (one with unsaved changes) and per policy a competing instance was not force-opened. Sign-off rests on structural validation (powerbi-report-author validate: 0 errors) plus an independent field-reference cross-check (32/32 refs resolve against TMDL). Spiral tracing and azureMap bubble rendering are structurally verified but not yet visually confirmed; PBIR_SCHEMA_UNREACHABLE (offline) means JSON-schema validation was skipped.",
    "severity": "medium",
    "stage": "report_build"
+  },
+  {
+   "item": "report.pbir_topn_sortdefinition_schema_fix",
+   "issue": "3 overview turbine visuals had PBIR schema violations that made Power BI Desktop reject the report at load: (1) sortDefinition placed at /visual instead of visual.query.sortDefinition (all 3: 3bdceaf129d1ab1aba9f main table, 64c0f75a1870381d6921 Highest Performers, 67dd4fba891479079b25 Lowest Performers); (2) the highest/lowest-3 TopN visual-level filters used an invalid container-level 'itemCount' property and a bare 'TopN' as the Where[0].Condition (not a valid QueryExpressionContainer member). Fix: moved sortDefinition under visual.query (isDefaultSort retained); rebuilt the TopN into the canonical type:'TopN' + howCreated:'User' + a Subquery Semantic Query (From subquery+base entity; inner Select/OrderBy/Top:3; OrderBy on measure [CM Total Output] with Direction 2=top for Highest / 1=bottom for Lowest) + an 'In' condition referencing the subquery alias. Report layer only; semantic model untouched.",
+   "severity": "info",
+   "stage": "report_build"
+  },
+  {
+   "item": "tooling.pbir_schema_unreachable_validation_gap",
+   "issue": "powerbi-report-author validate cannot fetch the visualContainer/2.11.0 JSON schema (developer.microsoft.com returns 404) -> it emits a PBIR_SCHEMA_UNREACHABLE warning and SILENTLY SKIPS JSON-schema validation, reporting '0 errors' even for structurally invalid visuals. This is why the 3 broken visuals passed CLI validation yet Desktop rejected them. Mitigation used here: offline ajv validation against the real published 2.9.0-family schemas (structurally identical for query/sortDefinition and filterConfig TopN); the harness was proven to flag the exact three original errors on the pre-fix backups and to pass the fixed files. Structural validation is necessary-but-not-sufficient: a live Desktop open remains the final acceptance test.",
+   "severity": "medium",
+   "stage": "report_build"
   }
  ]
 }
