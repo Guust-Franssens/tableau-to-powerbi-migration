@@ -5171,14 +5171,14 @@
       "stage": "report_build"
     },
     {
-      "item": "report_build.bullet_rendered_as_gauge",
-      "issue": "Tableau horizontal bullet graphs (value bar + region-average reference line) are rendered as Power BI radial gauge visuals. Decisive reason: only the gauge exposes a measure-bound TargetValue role for the dynamic region-average reference; barChart/columnChart y1AxisReferenceLine.value is a static numeric and cannot bind a measure. Deltas: radial vs horizontal shape, and the arc color is static per default state (Sales teal, Profit Ratio red, Days to Ship red) because gauge is not in the conditional-formatting supported-visual list.",
+      "item": "report_build.bullet_target_static_literal",
+      "issue": "The 3 Descriptive KPI bullets (Sales / Profit Ratio / Avg Days to Ship) are rendered as Power BI clusteredBarChart visuals with a horizontal value bar plus a y1AxisReferenceLine target tick - a faithful bullet-graph shape matching the Tableau original (blue Sales bar, red Profit Ratio and Days bars). Limitation: barChart y1AxisReferenceLine.value is typed as a static numeric and cannot bind a measure, so the region-average target is a computed literal (Sales 108163.41, Profit Ratio 0.165, Days 3.97) replicating the 'Sales/Profit Ratio/Days to Ship Region Average' DAX at the default date window [2016-09-01..2017-03-31]. It renders exactly for the default view but does not re-compute if the date-window slicers change. A dynamic measure-bound reference line is a real PBI feature but its PBIR encoding is unproven/render-uncertain and was rejected for a showcase build.",
       "severity": "low",
       "stage": "report_build"
     },
     {
-      "item": "report_build.filledmap_deprecation_accepted",
-      "issue": "All 6 measure-driven choropleth maps use the deprecated filledMap visual because azureMap (the recommended replacement) has no measure-driven fill-color role - only Category/Size/Series. The authoring validator emits PBIR_VISUAL_TYPE_DEPRECATED (warning, accepted). filledMap also requires the Bing Maps visual setting enabled in Power BI Desktop/service to render tiles.",
+      "item": "report_build.map_basemap_grayscale_approximation",
+      "issue": "All 6 choropleth maps use azureMap with a data-bound reference-layer (Category='Sample Superstore'[State], a hosted US-states GeoJSON boundary layer, and a measure-bound polygonFillColor). The basemap is set to defaultStyle='grayscale_light' - the closest Azure Maps built-in style to Tableau's no-basemap plain-grey background; a true blank basemap ('blank') rendered empty/tiny for these small fixed-view multiples and was rejected. A faint grey basemap therefore remains behind the filled regions where Tableau shows none.",
       "severity": "low",
       "stage": "report_build"
     },
@@ -5190,7 +5190,7 @@
     },
     {
       "item": "report_build.region_comparison_dotplot_simplified",
-      "issue": "The 3 Descriptive 'Region Comparison' dot plots are rendered as scatter charts (Category=Region, X=CP <KPI> (All Regions), Y=Region). Simplified vs the Tableau original: uniform accent color (the selected-region highlight is not dynamically colored, to avoid unreliable boolean-measure gradient coercion), and the reference line is omitted (its value is static-only; the adjacent gauge already conveys the region average dynamically).",
+      "issue": "The 3 Descriptive 'Region Comparison' dot plots are rendered as scatter charts (Category=Region, X=CP <KPI> (All Regions), Y=Region). Simplified vs the Tableau original: uniform accent color (the selected-region highlight is not dynamically colored, to avoid unreliable boolean-measure gradient coercion), and the reference line is omitted (its value is static-only; the adjacent KPI bullet already conveys the region average via its target tick).",
       "severity": "low",
       "stage": "report_build"
     },
@@ -5214,7 +5214,7 @@
     },
     {
       "item": "report_build.desktop_render_unverified",
-      "issue": "No live Power BI Desktop was available in the build environment (Desktop Bridge status=not_connected). The report passed full structural validation (powerbi-report-author validate: 0 errors), a positions/overlap space-audit (0 unintended overlaps across all 3 pages), a slicer-default audit (13/13 slicers defaulted to the reference state), and a field-reference cross-check (30/30 Entity.Property refs resolve against the semantic model). Pixel/numeric rendering - Bing map tiles, gauge radial sizing/scale, scatter/filledMap diverging gradients - is not visually confirmed and should be screenshot-verified when a Desktop is available.",
+      "issue": "Live Power BI Desktop render-verification is deferred: the Desktop Bridge was contended by other concurrent migration builds and must not be hijacked. The report passed full structural validation (powerbi-report-author validate: 0 errors, only the benign offline PBIR_SCHEMA_UNREACHABLE warning) after every change, plus a positions/overlap space-audit (0 unintended overlaps - the bullet and trend visuals kept the exact positions of the gauges/lines they replaced) and a field-reference cross-check (all Entity.Property refs resolve against the semantic model). Pixel/numeric rendering - azureMap grayscale basemap + choropleth fill, the 3 bullet bars and their target ticks, and the windowed CP/PP trend lines - is not visually confirmed and should be screenshot-verified when a Desktop is free.",
       "severity": "medium",
       "stage": "report_build"
     },
@@ -5222,6 +5222,12 @@
       "item": "report_build.offline_schema_validation_skipped",
       "issue": "The visualContainer 2.11.0 JSON-schema URL could not be fetched in the offline build environment (PBIR_SCHEMA_UNREACHABLE warning), so deep JSON-schema validation was skipped. The authoring CLI's own structural, cross-reference, role-binding and theme rules all ran and passed with 0 errors.",
       "severity": "low",
+      "stage": "report_build"
+    },
+    {
+      "item": "report_build.trend_window_via_measure_filter",
+      "issue": "The 3 Descriptive trend line charts must show only the selected date window (default ~Sep 2016 - Mar 2017) with a prior-period comparison line, matching Tableau. The bound 'CP <KPI> (Trend)' / 'PP <KPI> (Trend)' measures use ALL('Date') internally so they return a value for every month across the full 2010-2018 range (fixing that is a semantic-model change, out of report-layer scope). The report-layer fix is a visual-level Advanced measure filter 'CP Sales > 0' on each trend, which is blank outside the window and so trims the axis to the in-window months without altering the plotted CP/PP (Trend) values. CP is colored dark teal-blue (#34657F) and PP light grey (#BFBFBF) via per-series dataPoint selectors. Note: per-series lineChart color and the measure-filter/field-parameter-axis interaction are structurally valid but not render-verified (Desktop deferred).",
+      "severity": "medium",
       "stage": "report_build"
     }
   ]

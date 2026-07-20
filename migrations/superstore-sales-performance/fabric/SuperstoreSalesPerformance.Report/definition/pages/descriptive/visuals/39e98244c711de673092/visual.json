@@ -1,29 +1,33 @@
 {
   "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
   "name": "39e98244c711de673092",
-  "position": {
-    "x": 1305.6,
-    "y": 572.4,
-    "z": 28000,
-    "width": 576,
-    "height": 75.6,
-    "tabOrder": 28000
-  },
+  "position": { "x": 1305.6, "y": 572.4, "z": 28000, "width": 576, "height": 75.6, "tabOrder": 28000 },
   "visual": {
-    "visualType": "gauge",
+    "visualType": "clusteredBarChart",
     "drillFilterOtherVisuals": true,
     "query": {
       "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": { "SourceRef": { "Entity": "Region Parameter" } },
+                  "Property": "Region"
+                }
+              },
+              "queryRef": "Region Parameter.Region",
+              "nativeQueryRef": "Region",
+              "active": true
+            }
+          ]
+        },
         "Y": {
           "projections": [
             {
               "field": {
                 "Measure": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Sample Superstore"
-                    }
-                  },
+                  "Expression": { "SourceRef": { "Entity": "Sample Superstore" } },
                   "Property": "CP Days To Ship"
                 }
               },
@@ -31,171 +35,49 @@
               "nativeQueryRef": "CP Days To Ship"
             }
           ]
-        },
-        "TargetValue": {
-          "projections": [
-            {
-              "field": {
-                "Measure": {
-                  "Expression": {
-                    "SourceRef": {
-                      "Entity": "Sample Superstore"
-                    }
-                  },
-                  "Property": "Days to Ship Region Average"
-                }
-              },
-              "queryRef": "Sample Superstore.Days to Ship Region Average",
-              "nativeQueryRef": "Days to Ship Region Average"
-            }
-          ]
         }
       }
     },
     "objects": {
-      "axis": [
-        {
-          "properties": {
-            "min": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            },
-            "max": {
-              "expr": {
-                "Literal": {
-                  "Value": "6D"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "dataPoint": [
-        {
-          "properties": {
-            "fill": {
-              "solid": {
-                "color": {
-                  "expr": {
-                    "Literal": {
-                      "Value": "'#FC4237'"
-                    }
-                  }
-                }
-              }
-            },
-            "target": {
-              "solid": {
-                "color": {
-                  "expr": {
-                    "Literal": {
-                      "Value": "'#252423'"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      ],
-      "calloutValue": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            }
-          }
-        }
-      ]
+      "categoryAxis": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "valueAxis": [ { "properties": {
+        "show": { "expr": { "Literal": { "Value": "false" } } },
+        "start": { "expr": { "Literal": { "Value": "0D" } } },
+        "end": { "expr": { "Literal": { "Value": "6D" } } }
+      } } ],
+      "legend": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "labels": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "dataPoint": [ {
+        "properties": { "fill": { "solid": { "color": { "expr": { "Literal": { "Value": "'#FC4237'" } } } } } },
+        "selector": { "data": [ { "dataViewWildcard": { "matchingOption": 0 } } ] }
+      } ],
+      "y1AxisReferenceLine": [ {
+        "properties": {
+          "show": { "expr": { "Literal": { "Value": "true" } } },
+          "value": { "expr": { "Literal": { "Value": "3.9673D" } } },
+          "style": { "expr": { "Literal": { "Value": "'solid'" } } },
+          "width": { "expr": { "Literal": { "Value": "3D" } } },
+          "lineColor": { "solid": { "color": { "expr": { "Literal": { "Value": "'#252423'" } } } } },
+          "position": { "expr": { "Literal": { "Value": "'front'" } } },
+          "displayName": { "expr": { "Literal": { "Value": "'Region average'" } } },
+          "dataLabelShow": { "expr": { "Literal": { "Value": "false" } } }
+        },
+        "selector": { "id": "target" }
+      } ]
     },
     "visualContainerObjects": {
-      "title": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            },
-            "text": {
-              "expr": {
-                "Literal": {
-                  "Value": "'AVG DAYS TO SHIP'"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "background": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "border": [
-        {
-          "properties": {
-            "show": {
-              "expr": {
-                "Literal": {
-                  "Value": "false"
-                }
-              }
-            }
-          }
-        }
-      ],
-      "padding": [
-        {
-          "properties": {
-            "top": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            },
-            "bottom": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            },
-            "left": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            },
-            "right": {
-              "expr": {
-                "Literal": {
-                  "Value": "0D"
-                }
-              }
-            }
-          }
-        }
-      ]
+      "title": [ { "properties": {
+        "show": { "expr": { "Literal": { "Value": "false" } } },
+        "text": { "expr": { "Literal": { "Value": "'AVG DAYS TO SHIP'" } } }
+      } } ],
+      "background": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "border": [ { "properties": { "show": { "expr": { "Literal": { "Value": "false" } } } } } ],
+      "padding": [ { "properties": {
+        "top": { "expr": { "Literal": { "Value": "0D" } } },
+        "bottom": { "expr": { "Literal": { "Value": "0D" } } },
+        "left": { "expr": { "Literal": { "Value": "0D" } } },
+        "right": { "expr": { "Literal": { "Value": "0D" } } }
+      } } ]
     }
   }
 }
