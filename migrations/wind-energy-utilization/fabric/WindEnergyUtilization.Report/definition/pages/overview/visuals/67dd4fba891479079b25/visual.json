@@ -48,25 +48,25 @@
             }
           ]
         }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "Daily Performance"
+                  }
+                },
+                "Property": "CM Total Output"
+              }
+            },
+            "direction": "Ascending"
+          }
+        ],
+        "isDefaultSort": true
       }
-    },
-    "sortDefinition": {
-      "sort": [
-        {
-          "field": {
-            "Measure": {
-              "Expression": {
-                "SourceRef": {
-                  "Entity": "Daily Performance"
-                }
-              },
-              "Property": "CM Total Output"
-            }
-          },
-          "direction": "Ascending"
-        }
-      ],
-      "isDefaultSort": true
     },
     "objects": {
       "values": [
@@ -309,20 +309,67 @@
           "Version": 2,
           "From": [
             {
-              "Name": "t",
-              "Entity": "Turbine",
-              "Type": 0
+              "Name": "subquery",
+              "Expression": {
+                "Subquery": {
+                  "Query": {
+                    "Version": 2,
+                    "From": [
+                      {
+                        "Name": "t",
+                        "Entity": "Turbine",
+                        "Type": 0
+                      },
+                      {
+                        "Name": "d",
+                        "Entity": "Daily Performance",
+                        "Type": 0
+                      }
+                    ],
+                    "Select": [
+                      {
+                        "Column": {
+                          "Expression": {
+                            "SourceRef": {
+                              "Source": "t"
+                            }
+                          },
+                          "Property": "Upd Turbine Name"
+                        },
+                        "Name": "field"
+                      }
+                    ],
+                    "OrderBy": [
+                      {
+                        "Direction": 1,
+                        "Expression": {
+                          "Measure": {
+                            "Expression": {
+                              "SourceRef": {
+                                "Source": "d"
+                              }
+                            },
+                            "Property": "CM Total Output"
+                          }
+                        }
+                      }
+                    ],
+                    "Top": 3
+                  }
+                }
+              },
+              "Type": 2
             },
             {
-              "Name": "d",
-              "Entity": "Daily Performance",
+              "Name": "t",
+              "Entity": "Turbine",
               "Type": 0
             }
           ],
           "Where": [
             {
               "Condition": {
-                "TopN": {
+                "In": {
                   "Expressions": [
                     {
                       "Column": {
@@ -335,28 +382,17 @@
                       }
                     }
                   ],
-                  "OrderBy": [
-                    {
-                      "Direction": 1,
-                      "Expression": {
-                        "Measure": {
-                          "Expression": {
-                            "SourceRef": {
-                              "Source": "d"
-                            }
-                          },
-                          "Property": "CM Total Output"
-                        }
-                      }
+                  "Table": {
+                    "SourceRef": {
+                      "Source": "subquery"
                     }
-                  ]
+                  }
                 }
               }
             }
           ]
         },
-        "howCreated": "User",
-        "itemCount": 3
+        "howCreated": "User"
       }
     ]
   }

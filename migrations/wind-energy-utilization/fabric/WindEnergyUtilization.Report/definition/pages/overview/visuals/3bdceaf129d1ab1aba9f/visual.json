@@ -48,25 +48,25 @@
             }
           ]
         }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "Daily Performance"
+                  }
+                },
+                "Property": "CM Total Output"
+              }
+            },
+            "direction": "Descending"
+          }
+        ],
+        "isDefaultSort": true
       }
-    },
-    "sortDefinition": {
-      "sort": [
-        {
-          "field": {
-            "Measure": {
-              "Expression": {
-                "SourceRef": {
-                  "Entity": "Daily Performance"
-                }
-              },
-              "Property": "CM Total Output"
-            }
-          },
-          "direction": "Descending"
-        }
-      ],
-      "isDefaultSort": true
     },
     "objects": {
       "values": [
