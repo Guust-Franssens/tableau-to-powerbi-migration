@@ -104,7 +104,12 @@ cloning to confirm the machine is configured.
 - **Structural validation is necessary, not sufficient.** `powerbi-report-author validate` and TMDL
   deserialization pass many defects that only surface in Desktop (field-parameter `sourceColumn`
   brackets, the `'Table'[Col]=[Measure]` PLACEHOLDER error, flat-lined trend measures). Verify in
-  Desktop with data before declaring a page done.
+  Desktop with data before declaring a page done. **Worse: `validate` SILENTLY SKIPS all JSON-schema
+  checks when it can't fetch the visualContainer schema** — it prints `PBIR_SCHEMA_UNREACHABLE` and
+  still reports "0 errors" even for structurally broken PBIR (the declared `2.11.0` schema 404s; `2.9.0`
+  is the newest published). Treat that warning as "schema validation did NOT run" and confirm with a
+  Desktop open-test (a schema violation shows an error dialog on open) or an offline `ajv` harness
+  against the real 2.9.0-family schemas.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -115,3 +120,13 @@ cloning to confirm the machine is configured.
 - **Durable learnings go in committed files** (the agent `Gotchas` sections and
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
   real migration permanently improves the toolkit.
+- **Clean up after yourself when you finish.** (a) **Close any Power BI Desktop instance you opened.**
+  In a parallel batch, orphaned Desktop instances (+ their child `msmdsrv`) cause Desktop-bridge
+  contention that blocks later agents from opening/rendering — a real bottleneck. Close the instance
+  you pinned your screenshots to: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
+  by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
+  automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
+  mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
+  scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
+  scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
+  scratch leaked into git before reporting done.

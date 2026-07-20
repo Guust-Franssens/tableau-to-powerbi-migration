@@ -116,6 +116,17 @@ environment, tell the user to run `/agent pbi-semantic-builder`, `/agent pbi-rep
 
 ## Gotchas
 
+- **Clean up the Desktop batch (yours and orphans').** Your build/validator subagents each open a Power
+  BI Desktop instance to refresh/render, and in a parallel batch these pile up: orphaned instances left
+  by *finished* subagents (+ their child `msmdsrv`) hold the Desktop bridge and block later agents from
+  opening/rendering (a real, recurring bottleneck — you'll see `BRIDGE_ERROR "Host is not ready"`). The
+  shared convention tells each subagent to close its own instance when done, but in practice some don't,
+  so **as the orchestrator, sweep orphaned instances between parallel waves and again before you
+  summarize**: `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"` → map each PID to a
+  migration by `MainWindowTitle`, and `Stop-Process -Id <literal pid> -Force` the ones whose owning
+  subagent has finished (never one an agent still needs, e.g. mid validator↔builder handoff). Use literal
+  PIDs — the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only automatic variable.
+  Also confirm no subagent left scratch (ajv harnesses, backups, probe scripts) staged in git.
 - **Don't re-parse unnecessarily.** If `migration-spec.json` already exists and is newer than the
   source file, ask before re-running the parser (it's cheap but not free, and hand-authored edits to
   the spec would be lost).
