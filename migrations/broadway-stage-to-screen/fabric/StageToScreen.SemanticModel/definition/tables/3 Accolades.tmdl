@@ -2,8 +2,8 @@
 table '3 Accolades'
 	lineageTag: c8cb4017-152d-5116-9717-f76d070b5562
 
-	/// Tableau [Record Count] = COUNTD([Award]+[Category]+[Nominee]). The Nominee-not-blank filter reproduces Tableau + null-propagation (4 blank-Nominee rows excluded), avoiding a phantom BLANK distinct.
-	measure 'Record Count' = CALCULATE(DISTINCTCOUNT('3 Accolades'[Record Key]), NOT ISBLANK('3 Accolades'[Nominee]))
+	/// Tableau [Record Count] = COUNTD([Award]+[Category]+[Nominee]): distinct Award+Category+Nominee keys, excluding both null AND empty-string Nominee. The empty-string guard ([Nominee] <> "") is required because DAX ISBLANK("")=FALSE, so the 4 blank The Producers 2005 Golden Globe rows would otherwise slip through and over-count by +4 (346 vs the correct 342).
+	measure 'Record Count' = CALCULATE(DISTINCTCOUNT('3 Accolades'[Record Key]), NOT ISBLANK('3 Accolades'[Nominee]) && '3 Accolades'[Nominee] <> "")
 		formatString: #,##0
 		lineageTag: 851c2c27-2362-5e42-a4ad-2048b8924e39
 

@@ -7,6 +7,16 @@ table '2 Chronology'
 		formatString: General Date
 		lineageTag: ed3213bb-e5da-5472-923f-50a5fa329bb1
 
+	/// Numeric 4-digit year of the show's earliest Broadway/stage opening = YEAR(MIN('2 Chronology'[Date])). Added so the "From Stage to Screen" timeline scatter can plot it on a continuous X-axis (Power BI scatter axes reject DATE-typed fields; the dateTime [Date] and award-year '3 Accolades'[Year] cannot bind). MIN(Date) equals the earliest Theater-type date for all 21 shows. Sample: West Side Story = 1957.
+	measure 'Broadway Opening Year' = YEAR(MIN('2 Chronology'[Date]))
+		formatString: 0
+		lineageTag: ea00e14e-fa4f-43d2-ba8d-7e73e69ce9b2
+
+	/// Numeric 4-digit year of the show's film premiere = YEAR([Latest Movie Premiere]). Added so the "From Stage to Screen" timeline scatter can plot it on a continuous Y-axis (Power BI scatter axes reject DATE-typed fields). Sample: West Side Story = 2021.
+	measure 'Film Premiere Year' = YEAR([Latest Movie Premiere])
+		formatString: 0
+		lineageTag: 9c58013a-1230-4b70-9c35-ac1771e220f8
+
 	column 'Broadway Show'
 		dataType: string
 		lineageTag: 81ea144c-4abf-5d6b-a72f-e091e1e19653
