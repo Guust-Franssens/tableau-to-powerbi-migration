@@ -36,22 +36,17 @@
           "projections": [
             {
               "field": {
-                "Aggregation": {
+                "Measure": {
                   "Expression": {
-                    "Column": {
-                      "Expression": {
-                        "SourceRef": {
-                          "Entity": "2 Chronology"
-                        }
-                      },
-                      "Property": "Date"
+                    "SourceRef": {
+                      "Entity": "2 Chronology"
                     }
                   },
-                  "Function": 3
+                  "Property": "Broadway Opening Year"
                 }
               },
-              "queryRef": "Min(2 Chronology.Date)",
-              "nativeQueryRef": "Min of Date",
+              "queryRef": "2 Chronology.Broadway Opening Year",
+              "nativeQueryRef": "Broadway Opening Year",
               "active": true
             }
           ]
@@ -66,11 +61,11 @@
                       "Entity": "2 Chronology"
                     }
                   },
-                  "Property": "Latest Movie Premiere"
+                  "Property": "Film Premiere Year"
                 }
               },
-              "queryRef": "2 Chronology.Latest Movie Premiere",
-              "nativeQueryRef": "Latest Movie Premiere"
+              "queryRef": "2 Chronology.Film Premiere Year",
+              "nativeQueryRef": "Film Premiere Year"
             }
           ]
         }
