@@ -158,14 +158,18 @@ decides page splits, chart types, layout, colour — not just field binding); th
 removed from the validator's responsibilities** — it consumes an immutable artifact, it does not
 produce one.
 
-## Governance (customer-data safety)
+## Governance (source-data safety)
 
-A reference screenshot is a **picture of (potentially customer) data** — as sensitive as the `.twbx`
-already git-ignored, and can be large (a 19 MB IronViz full-scroll capture).
+A reference screenshot is a picture of the source dashboard's data. **In this repo the sources are
+public Tableau Public workbooks, so reference images are committed** as showcase material (kept
+reasonably sized — downscale big infographic captures). The caution below applies when you **fork the
+toolkit to migrate real customer dashboards**:
 
-- ✅ `migrations/*/reference/*.png|jpg` is git-ignored (kept local by default). Curated,
-  customer-agnostic before/after images for the showcase go under `docs/showcase/` instead.
+- In a customer fork, add `migrations/*/reference/` back to `.gitignore` so customer screenshots stay
+  local; commit only curated, customer-agnostic before/after images.
 - Never embed image bytes (base64) in the shareable spec — paths/metadata only.
+- The capture bundle's scratch (`reference/_thumbnails/`, `reference/manifest.json`) is git-ignored
+  here regardless.
 - Confirm that sending screenshots to a configured vision model is permitted before doing so; protect
   any CI reference artifacts with access controls + short retention.
 

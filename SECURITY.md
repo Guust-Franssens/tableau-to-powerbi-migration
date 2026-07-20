@@ -15,18 +15,22 @@ contain **customer or otherwise sensitive data**. The most important "security" 
 is therefore **not leaking that data into version control**. The rules below are enforced by
 `.gitignore` and are non-negotiable when contributing.
 
-### Never commit source data
+### Source data — commit only what's safe
 
-| Artifact | Why | How it's protected |
+This repository's own migrations are built from **public Tableau Public workbooks**, so their reference
+screenshots **are committed** as showcase material (the before/after images are the whole point). The
+rules below matter when you **fork this toolkit to migrate real customer dashboards** — at that point
+the source, its data, and its screenshots are yours to protect.
+
+| Artifact | Why it can be sensitive | Default here |
 |---|---|---|
-| Source workbooks (`migrations/*/source/*.twb`, `*.twbx`, `*.hyper`) | Can embed live/extracted customer data | git-ignored |
+| Source workbooks (`migrations/*/source/*.twb`, `*.twbx`, `*.hyper`) | Can embed live/extracted data | git-ignored |
 | Extracted data (`migrations/*/data/`) | Materialized rows from the workbook | git-ignored |
-| **Reference screenshots** (`migrations/*/reference/`) | A screenshot **is a picture of the source data** — customer names, metrics, branding | git-ignored (whole bundle: images + `manifest.json` + thumbnails) |
+| Reference screenshots (`migrations/*/reference/*.png`) | A screenshot is a picture of the source data | **committed** (public sources); re-ignore in a customer fork |
 
-The **shareable** artifact of a migration is its `migration-spec.json` (structure only) and the
-generated TMDL/PBIR — never the raw workbook, its data, or a screenshot of it. Curated,
-**customer-agnostic** before/after images for the public showcase go under `docs/showcase/` only, and
-must not contain identifiable customer content.
+The **shareable** artifact of a migration is always its `migration-spec.json` (structure only) plus the
+generated TMDL/PBIR. If you adapt this for customer work, add `migrations/*/reference/` back to
+`.gitignore` in your fork and keep only curated, customer-agnostic before/after images.
 
 ### Never commit secrets or credentials
 

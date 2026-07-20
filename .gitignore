@@ -13,13 +13,20 @@ migrations/*/source/*.twbx
 migrations/*/source/*.hyper
 migrations/*/data/
 
-# Reference screenshots of the SOURCE Tableau dashboards are pictures of (potentially
-# customer) data - as sensitive as the .twbx itself, and can be large. The whole reference
-# BUNDLE (images + manifest.json + extracted thumbnails) is kept LOCAL by default so an
-# enterprise migration never commits customer screenshots. Commit only curated,
-# customer-agnostic before/after images under docs/showcase/ instead.
-# (Pre-existing tracked reference PNGs are grandfathered; gitignore does not untrack them.)
-migrations/*/reference/
+# Source Tableau workbooks may contain customer data - never commit
+migrations/*/source/*.twb
+migrations/*/source/*.twbx
+migrations/*/source/*.hyper
+migrations/*/data/
+
+# Reference screenshots of the SOURCE Tableau dashboards ARE committed in this repo - the
+# sources here are public Tableau Public workbooks, and the before/after images are the whole
+# point of the showcase. Keep them reasonably sized (downscale big infographic captures).
+# If you adapt this toolkit to migrate real customer dashboards, that's your fork - apply your
+# own data-handling policy there (e.g. re-add `migrations/*/reference/` here). We keep the
+# capture bundle's local-only scratch out of git though:
+migrations/*/reference/_thumbnails/
+migrations/*/reference/manifest.json
 
 # Fabric/PBI build output can be regenerated - keep repo lean (comment out if you want to version it)
 # migrations/*/fabric/
