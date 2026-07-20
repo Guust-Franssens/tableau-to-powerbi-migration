@@ -433,8 +433,8 @@ table 'Health Data'
 
 		annotation SummarizationSetBy = Automatic
 
-	/// Tableau boolean 'Latest Week' - last COMPLETE Sunday-start week before maxDate+1. maxDate 2023-12-31 is a Sunday so this is Dec 24-30 (excludes Dec 31), faithful to Tableau's DATETRUNC('week') last-complete-week logic.
-	column 'Latest Week' = VAR _max = MAXX(ALL('Health Data'), 'Health Data'[Date]) VAR _target = (_max + 1) - (WEEKDAY(_max + 1, 1) - 1) - 7 VAR _ws = 'Health Data'[Date] - (WEEKDAY('Health Data'[Date], 1) - 1) RETURN _ws = _target
+	/// Tableau boolean 'Latest Week' - the trailing 7 days ending AT maxDate (inclusive). For maxDate 2023-12-31 that is Dec 25-31, so the max date IS included and the week-page 'Highlight Latest' (which targets the max date via Latest Day) resolves to a visible bar.
+	column 'Latest Week' = VAR _max = MAXX(ALL('Health Data'), 'Health Data'[Date]) RETURN 'Health Data'[Date] > _max - 7 && 'Health Data'[Date] <= _max
 		dataType: boolean
 		lineageTag: 81f35b08-e466-4ce9-a734-0e631efec8c3
 		summarizeBy: none
