@@ -13,12 +13,6 @@ migrations/*/source/*.twbx
 migrations/*/source/*.hyper
 migrations/*/data/
 
-# Source Tableau workbooks may contain customer data - never commit
-migrations/*/source/*.twb
-migrations/*/source/*.twbx
-migrations/*/source/*.hyper
-migrations/*/data/
-
 # Reference screenshots of the SOURCE Tableau dashboards ARE committed in this repo - the
 # sources here are public Tableau Public workbooks, and the before/after images are the whole
 # point of the showcase. Keep them reasonably sized (downscale big infographic captures).
@@ -59,6 +53,9 @@ candidates.json
 .env
 .env.local
 *.log
+
+# Copilot CLI feedback bundles - session scratch, can be huge (1.5GB+); never commit
+copilot-feedback-*.tgz
 
 # Compiled/binary Power BI files - always commit the unpacked PBIP/TMDL/PBIR instead
 *.pbix
