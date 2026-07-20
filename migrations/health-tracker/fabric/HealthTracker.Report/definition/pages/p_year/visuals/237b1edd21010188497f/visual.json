@@ -23,11 +23,11 @@
                       "Entity": "Health Data"
                     }
                   },
-                  "Property": "Month Name"
+                  "Property": "Month Number"
                 }
               },
-              "queryRef": "Health Data.Month Name",
-              "nativeQueryRef": "Month Name",
+              "queryRef": "Health Data.Month Number",
+              "nativeQueryRef": "Month Number",
               "active": true
             }
           ]
@@ -85,7 +85,7 @@
                     "Entity": "Health Data"
                   }
                 },
-                "Property": "Month Name"
+                "Property": "Month Number"
               }
             },
             "direction": "Ascending"
