@@ -1,6 +1,22 @@
 {
   "workbooks": [
     {
+      "slug": "price-of-prosperity",
+      "title": "The Price of Prosperity",
+      "caption": "Global CO2 emissions, GDP, and population trends. Produced end to end by the tableau-migrator orchestrator (a dogfood run) and signed off by the fidelity validator: a continent-colored world choropleth, a GDP-vs-CO2 region scatter, six per-continent small multiples, and sidebar trend sparklines. Numeric fidelity confirmed exact.",
+      "pages": [
+        {
+          "name": "Price of Prosperity",
+          "tableau": "migrations/price-of-prosperity/reference/tableau-dashboard.png",
+          "powerbi": "migrations/price-of-prosperity/reference/powerbi-dashboard.png",
+          "powerbi_crop": {
+            "top": 0.05,
+            "right": 0.13
+          }
+        }
+      ]
+    },
+    {
       "slug": "shipping-kpis",
       "title": "Shipping KPIs",
       "caption": "Logistics profitability & delay KPIs. GOOD/OK/BAD conditional coloring on scatter points and table rows; per-shipment profit-ratio FIXED LOD; faithful preservation of the source's Expected-minus-Actual delay quirk. Live Power BI Desktop render with data.",
@@ -9,13 +25,19 @@
           "name": "Profitability KPI",
           "tableau": "migrations/shipping-kpis/reference/tableau-profitability-kpi.png",
           "powerbi": "migrations/shipping-kpis/reference/powerbi-profitability-kpi.png",
-          "powerbi_crop": { "top": 0.085, "right": 0.13 }
+          "powerbi_crop": {
+            "top": 0.092,
+            "right": 0.155
+          }
         },
         {
           "name": "Shipping KPI",
           "tableau": "migrations/shipping-kpis/reference/tableau-shipping-kpi.png",
           "powerbi": "migrations/shipping-kpis/reference/powerbi-shipping-kpi.png",
-          "powerbi_crop": { "top": 0.085, "right": 0.13 }
+          "powerbi_crop": {
+            "top": 0.092,
+            "right": 0.155
+          }
         }
       ]
     },
@@ -28,7 +50,10 @@
           "name": "Radio Towers Dashboard",
           "tableau": "migrations/telecommunications-analytics/reference/tableau-dashboard.png",
           "powerbi": "migrations/telecommunications-analytics/reference/powerbi-dashboard.png",
-          "powerbi_crop": { "top": 0.08, "right": 0.13 }
+          "powerbi_crop": {
+            "top": 0.092,
+            "right": 0.15
+          }
         }
       ]
     },
@@ -41,7 +66,10 @@
           "name": "Commission Model",
           "tableau": "migrations/sales-commission-model/reference/tableau-commission-model.png",
           "powerbi": "migrations/sales-commission-model/reference/powerbi-commission-model.png",
-          "powerbi_crop": { "top": 0.08, "right": 0.13 }
+          "powerbi_crop": {
+            "top": 0.092,
+            "right": 0.135
+          }
         }
       ]
     },
@@ -54,7 +82,9 @@
           "name": "Tale of 100 Entrepreneurs",
           "tableau": "migrations/tale-of-100-entrepreneurs/reference/tableau-tale-of-100.png",
           "powerbi": "migrations/tale-of-100-entrepreneurs/reference/powerbi-tale-of-100.png",
-          "powerbi_crop": { "right": 0.13 }
+          "powerbi_crop": {
+            "right": 0.145
+          }
         }
       ]
     },
@@ -67,13 +97,17 @@
           "name": "Prescriptive",
           "tableau": "migrations/superstore-sales-performance/reference/tableau-prescriptive.png",
           "powerbi": "migrations/superstore-sales-performance/reference/powerbi-prescriptive.png",
-          "powerbi_crop": { "right": 0.035 }
+          "powerbi_crop": {
+            "right": 0.035
+          }
         },
         {
           "name": "Descriptive",
           "tableau": "migrations/superstore-sales-performance/reference/tableau-descriptive.png",
           "powerbi": "migrations/superstore-sales-performance/reference/powerbi-descriptive.png",
-          "powerbi_crop": { "right": 0.04 }
+          "powerbi_crop": {
+            "right": 0.04
+          }
         }
       ]
     },
@@ -86,13 +120,17 @@
           "name": "Alliance Overview",
           "tableau": "migrations/airline-alliance-activity/reference/tableau-alliance-page.png",
           "powerbi": "migrations/airline-alliance-activity/reference/powerbi-alliance-page.png",
-          "powerbi_crop": { "right": 0.03 }
+          "powerbi_crop": {
+            "right": 0.045
+          }
         },
         {
           "name": "Flights Map",
           "tableau": "migrations/airline-alliance-activity/reference/tableau-flight-page.png",
           "powerbi": "migrations/airline-alliance-activity/reference/powerbi-flight-page.png",
-          "powerbi_crop": { "right": 0.03 }
+          "powerbi_crop": {
+            "right": 0.045
+          }
         }
       ]
     }
