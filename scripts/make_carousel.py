@@ -294,7 +294,7 @@ PROOFS = [
             "tableau": "migrations/health-tracker/reference/tableau-metrics.png",
             "powerbi_crop": {"right": 0.03},
         },
-        ("The bug from slide 6, fixed", "9 of 9 cards highlight the latest day  \u00b7  every KPI exact"),
+        ("The validator's off-by-one fix", "9 of 9 cards highlight the latest day  \u00b7  every KPI exact"),
     ),
     (
         "NL Wind Energy Utilization",
@@ -309,14 +309,18 @@ PROOFS = [
 ]
 
 
-def build(output: Path) -> None:
-    """Render every slide, save a swipeable multi-page PDF and per-slide PNGs."""
-    slides = [slide_cover()]
+def build(output: Path, *, cover: bool = False) -> None:
+    """Render every slide, save a swipeable multi-page PDF and per-slide PNGs. By default the deck opens
+    straight on the first after/before example (the post caption is the intro); pass cover=True to
+    prepend a title slide."""
+    slides = [slide_cover()] if cover else []
     slides += [slide_pair(t, f, s, c) for t, f, s, c in PROOFS]
     slides += [slide_pipeline(), slide_money(), slide_close()]
     output.parent.mkdir(parents=True, exist_ok=True)
     png_dir = output.parent / "slides"
     png_dir.mkdir(parents=True, exist_ok=True)
+    for old in png_dir.glob("slide-*.png"):
+        old.unlink()
     for i, s in enumerate(slides, 1):
         s.save(png_dir / f"slide-{i:02d}.png")
     slides[0].save(output, "PDF", save_all=True, append_images=slides[1:], resolution=96.0)
@@ -331,7 +335,11 @@ def main() -> None:
     parser.add_argument(
         "--output", type=Path, default=REPO_ROOT / "docs" / "showcase" / "carousel" / "linkedin-carousel.pdf"
     )
-    build(parser.parse_args().output)
+    parser.add_argument(
+        "--cover", action="store_true", help="prepend a title slide (default: open on the first example)"
+    )
+    args = parser.parse_args()
+    build(args.output, cover=args.cover)
 
 
 if __name__ == "__main__":
