@@ -24,11 +24,11 @@
                       "Entity": "Daily Performance"
                     }
                   },
-                  "Property": "Max Monthly Output"
+                  "Property": "CM Total Output"
                 }
               },
-              "queryRef": "Daily Performance.Max Monthly Output",
-              "nativeQueryRef": "Max Monthly Output"
+              "queryRef": "Daily Performance.CM Total Output",
+              "nativeQueryRef": "CM Total Output"
             }
           ]
         }
@@ -89,7 +89,7 @@
             "text": {
               "expr": {
                 "Literal": {
-                  "Value": "'BEST MONTH (MWh)'"
+                  "Value": "'HIGHEST OUTPUT (MWh)'"
                 }
               }
             },
@@ -245,5 +245,111 @@
         }
       ]
     }
+  },
+  "filterConfig": {
+    "filters": [
+      {
+        "name": "5c0bd52d520648b2a9bb",
+        "field": {
+          "Column": {
+            "Expression": {
+              "SourceRef": {
+                "Entity": "Turbine"
+              }
+            },
+            "Property": "Upd Turbine Name"
+          }
+        },
+        "type": "TopN",
+        "filter": {
+          "Version": 2,
+          "From": [
+            {
+              "Name": "subquery",
+              "Expression": {
+                "Subquery": {
+                  "Query": {
+                    "Version": 2,
+                    "From": [
+                      {
+                        "Name": "t",
+                        "Entity": "Turbine",
+                        "Type": 0
+                      },
+                      {
+                        "Name": "d",
+                        "Entity": "Daily Performance",
+                        "Type": 0
+                      }
+                    ],
+                    "Select": [
+                      {
+                        "Column": {
+                          "Expression": {
+                            "SourceRef": {
+                              "Source": "t"
+                            }
+                          },
+                          "Property": "Upd Turbine Name"
+                        },
+                        "Name": "field"
+                      }
+                    ],
+                    "OrderBy": [
+                      {
+                        "Direction": 2,
+                        "Expression": {
+                          "Measure": {
+                            "Expression": {
+                              "SourceRef": {
+                                "Source": "d"
+                              }
+                            },
+                            "Property": "CM Total Output"
+                          }
+                        }
+                      }
+                    ],
+                    "Top": 1
+                  }
+                }
+              },
+              "Type": 2
+            },
+            {
+              "Name": "t",
+              "Entity": "Turbine",
+              "Type": 0
+            }
+          ],
+          "Where": [
+            {
+              "Condition": {
+                "In": {
+                  "Expressions": [
+                    {
+                      "Column": {
+                        "Expression": {
+                          "SourceRef": {
+                            "Source": "t"
+                          }
+                        },
+                        "Property": "Upd Turbine Name"
+                      }
+                    }
+                  ],
+                  "Table": {
+                    "SourceRef": {
+                      "Source": "subquery"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "howCreated": "User"
+      }
+    ]
   }
 }
