@@ -20,8 +20,17 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("make_carousel")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-W, H = 1080, 1350
+W, H = 1080, 1350  # default portrait 4:5; set per deck by _set_canvas()
 MARGIN = 56
+
+
+def _set_canvas(shape: str) -> None:
+    """Set the slide dimensions for the deck about to be rendered: square 1:1 (best for the reveal
+    layout, where one wide dashboard fills the frame) or portrait 4:5 (best for the stacked compare
+    layout, and grabs the most vertical space in the LinkedIn feed)."""
+    global W, H  # pylint: disable=global-statement
+    W, H = (1080, 1080) if shape == "square" else (1080, 1350)
+
 
 # Dark theme (matches the showcase accent colours).
 BG = (12, 23, 37)
@@ -143,13 +152,13 @@ def slide_cover() -> Image.Image:
     return img
 
 
-def slide_pair(title: str, faithful: str, spec: dict, callout: tuple[str, str]) -> Image.Image:
-    """A migration proof slide: AFTER (Power BI) on top, BEFORE (Tableau) below, plus an exact number."""
+def slide_pair(title: str, faithful: str, spec: dict, note: str) -> Image.Image:
+    """Compare layout: AFTER (Power BI) on top, BEFORE (Tableau) below, on one slide."""
     img, d = _slide()
     d.text((MARGIN, 70), title, font=font(_B, 52), fill=FG)
     d.text((MARGIN, 138), faithful, font=font(_SANS, 30), fill=MUTED)
     box_w = W - 2 * MARGIN
-    box_h = 448
+    box_h = 452
     top = 200
     after = _panel(
         REPO_ROOT / spec["powerbi"],
@@ -164,12 +173,27 @@ def slide_pair(title: str, faithful: str, spec: dict, callout: tuple[str, str]) 
     )
     img.paste(after, (MARGIN, top))
     img.paste(before, (MARGIN, top + box_h + 20))
-    cy = top + box_h * 2 + 20 + 44
-    d.rounded_rectangle((MARGIN, cy, W - MARGIN, cy + 92), radius=16, fill=CARD, outline=GREEN, width=3)
-    d.ellipse((MARGIN + 26, cy + 30, MARGIN + 58, cy + 62), fill=GREEN)
-    d.line([(MARGIN + 33, cy + 46), (MARGIN + 41, cy + 55), (MARGIN + 52, cy + 37)], fill=CARD, width=5, joint="curve")
-    d.text((MARGIN + 82, cy + 30), callout[0], font=font(_SANS, 24), fill=MUTED)
-    d.text((MARGIN + 82, cy + 56), callout[1], font=font(_B, 30), fill=GREEN)
+    d.text((MARGIN, top + box_h * 2 + 20 + 26), note, font=font(_SANS, 28), fill=MUTED)
+    return img
+
+
+def slide_single(  # pylint: disable=too-many-arguments,too-many-locals  # cohesive full-slide panel
+    title: str, sub: str, path: Path, crop: dict[str, float] | None, *, label: str, accent: tuple[int, int, int]
+) -> Image.Image:
+    """Reveal layout: one full-size panel per slide (Power BI on its own slide, Tableau on the next).
+    The card is sized to the screenshot (no white letterbox) and centred on the dark background."""
+    img, d = _slide()
+    d.text((MARGIN, 70), title, font=font(_B, 52), fill=FG)
+    d.text((MARGIN, 138), sub, font=font(_SANS, 30), fill=MUTED)
+    box_w = W - 2 * MARGIN
+    strip_h = 46
+    area_top, area_bottom = 200, H - 96
+    with Image.open(path) as raw:
+        shot = _crop(raw.convert("RGB"), crop)
+    scale = min(box_w / shot.width, (area_bottom - area_top - strip_h) / shot.height)
+    panel_h = strip_h + round(shot.height * scale)
+    panel = _panel(path, crop, label, accent, box_w=box_w, box_h=panel_h)
+    img.paste(panel, (MARGIN, area_top + (area_bottom - area_top - panel_h) // 2))
     return img
 
 
@@ -276,48 +300,78 @@ def slide_close() -> Image.Image:
 
 
 PROOFS = [
-    (
-        "The Price of Prosperity",
-        "Global CO2, GDP, and population. Migrated end to end and validated.",
-        {
-            "powerbi": "migrations/price-of-prosperity/reference/powerbi-dashboard.png",
-            "tableau": "migrations/price-of-prosperity/reference/tableau-dashboard.png",
-            "powerbi_crop": None,
-        },
-        ("2018 world population", "7,636,740,830  \u00b7  matches the source exactly"),
-    ),
-    (
-        "Health Tracker",
-        "Nine KPI cards, each with a 7-day trend that highlights the latest day.",
-        {
-            "powerbi": "migrations/health-tracker/reference/powerbi-health-tracker.png",
-            "tableau": "migrations/health-tracker/reference/tableau-metrics.png",
-            "powerbi_crop": {"right": 0.03},
-        },
-        ("The validator's off-by-one fix", "9 of 9 cards highlight the latest day  \u00b7  every KPI exact"),
-    ),
-    (
-        "NL Wind Energy Utilization",
-        "A wind fleet dashboard; Tableau's polar spiral rebuilt as DAX X/Y measures.",
-        {
-            "powerbi": "migrations/wind-energy-utilization/reference/powerbi-wind-energy.png",
-            "tableau": "migrations/wind-energy-utilization/reference/tableau-dashboard.png",
-            "powerbi_crop": {"right": 0.025},
-        },
-        ("Total actual output", "453,167.284 MWh  \u00b7  169,031.37 t CO2 saved"),
-    ),
+    {
+        "title": "The Price of Prosperity",
+        "faithful": "Global CO2, GDP, and population. Migrated end to end.",
+        "powerbi": "migrations/price-of-prosperity/reference/powerbi-dashboard.png",
+        "tableau": "migrations/price-of-prosperity/reference/tableau-dashboard.png",
+        "powerbi_crop": None,
+        "note": "2018 world population: 7,636,740,830, the same figure as the source.",
+    },
+    {
+        "title": "Health Tracker",
+        "faithful": "Nine KPI cards, each with a 7-day trend that highlights the latest day.",
+        "powerbi": "migrations/health-tracker/reference/powerbi-health-tracker.png",
+        "tableau": "migrations/health-tracker/reference/tableau-metrics.png",
+        "powerbi_crop": {"right": 0.03},
+        "note": "All nine cards highlight the latest day, every KPI to the same value.",
+    },
+    {
+        "title": "NL Wind Energy Utilization",
+        "faithful": "A wind fleet dashboard; Tableau's polar spiral rebuilt as DAX X/Y measures.",
+        "powerbi": "migrations/wind-energy-utilization/reference/powerbi-wind-energy.png",
+        "tableau": "migrations/wind-energy-utilization/reference/tableau-dashboard.png",
+        "powerbi_crop": {"right": 0.025},
+        "note": "Total actual output 453,167.284 MWh, CO2 saved 169,031.37 t.",
+    },
 ]
 
 
-def build(output: Path, *, cover: bool = False) -> None:
-    """Render every slide, save a swipeable multi-page PDF and per-slide PNGs. By default the deck opens
-    straight on the first after/before example (the post caption is the intro); pass cover=True to
-    prepend a title slide."""
+def _compare_slides() -> list[Image.Image]:
+    """The examples in compare layout (Power BI + Tableau on one slide each)."""
+    return [slide_pair(p["title"], p["faithful"], p, p["note"]) for p in PROOFS]
+
+
+def _reveal_slides() -> list[Image.Image]:
+    """The examples in reveal layout (full Power BI slide, then full Tableau slide)."""
+    out: list[Image.Image] = []
+    for p in PROOFS:
+        out.append(
+            slide_single(
+                p["title"],
+                p["note"],
+                REPO_ROOT / p["powerbi"],
+                p["powerbi_crop"],
+                label="AFTER  \u00b7  Power BI (migrated)",
+                accent=PBI,
+            )
+        )
+        out.append(
+            slide_single(
+                p["title"],
+                "the original this was migrated from",
+                REPO_ROOT / p["tableau"],
+                None,
+                label="BEFORE  \u00b7  Tableau (source)",
+                accent=TABLEAU,
+            )
+        )
+    return out
+
+
+def build(output: Path, *, layout: str = "compare", shape: str | None = None, cover: bool = False) -> None:
+    """Render the deck for `layout` ('compare' = both panels per slide, 'reveal' = full Power BI slide
+    then full Tableau slide) and save a swipeable multi-page PDF + per-slide PNGs. `shape` overrides the
+    canvas (square / portrait); by default reveal is square and compare is portrait. The deck opens on
+    the first example (the post caption is the intro); pass cover=True to prepend a title slide."""
+    _set_canvas(shape or ("square" if layout == "reveal" else "portrait"))
     slides = [slide_cover()] if cover else []
-    slides += [slide_pair(t, f, s, c) for t, f, s, c in PROOFS]
-    slides += [slide_pipeline(), slide_money(), slide_close()]
+    slides += _reveal_slides() if layout == "reveal" else _compare_slides()
+    if H >= 1350:  # portrait has the vertical room for the context slides
+        slides += [slide_pipeline(), slide_money()]
+    slides.append(slide_close())
     output.parent.mkdir(parents=True, exist_ok=True)
-    png_dir = output.parent / "slides"
+    png_dir = output.parent / f"slides-{layout}"
     png_dir.mkdir(parents=True, exist_ok=True)
     for old in png_dir.glob("slide-*.png"):
         old.unlink()
@@ -330,16 +384,31 @@ def build(output: Path, *, cover: bool = False) -> None:
 
 
 def main() -> None:
-    """CLI entry point."""
+    """CLI entry point. By default builds BOTH layout variants so they can be compared side by side."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--output", type=Path, default=REPO_ROOT / "docs" / "showcase" / "carousel" / "linkedin-carousel.pdf"
+        "--out-dir", type=Path, default=REPO_ROOT / "docs" / "showcase" / "carousel", help="output directory"
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["compare", "reveal", "both"],
+        default="both",
+        help="compare (both panels per slide), reveal (full Power BI then full Tableau), or both",
+    )
+    parser.add_argument(
+        "--shape",
+        choices=["auto", "square", "portrait"],
+        default="auto",
+        help="canvas shape (default auto: reveal=square, compare=portrait)",
     )
     parser.add_argument(
         "--cover", action="store_true", help="prepend a title slide (default: open on the first example)"
     )
     args = parser.parse_args()
-    build(args.output, cover=args.cover)
+    shape = None if args.shape == "auto" else args.shape
+    layouts = ["compare", "reveal"] if args.layout == "both" else [args.layout]
+    for layout in layouts:
+        build(args.out_dir / f"linkedin-carousel-{layout}.pdf", layout=layout, shape=shape, cover=args.cover)
 
 
 if __name__ == "__main__":
