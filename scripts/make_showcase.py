@@ -30,9 +30,9 @@ TABLEAU_ACCENT = (78, 121, 167)
 PBI_ACCENT = (225, 119, 66)
 DEFAULT_HERO = [
     "price-of-prosperity",
-    "airline-alliance-activity",
+    "health-tracker",
+    "wind-energy-utilization",
     "shipping-kpis",
-    "tale-of-100-entrepreneurs",
 ]
 
 

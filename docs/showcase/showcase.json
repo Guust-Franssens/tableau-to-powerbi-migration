@@ -9,9 +9,36 @@
           "name": "Price of Prosperity",
           "tableau": "migrations/price-of-prosperity/reference/tableau-dashboard.png",
           "powerbi": "migrations/price-of-prosperity/reference/powerbi-dashboard.png",
+          "powerbi_crop": {}
+        }
+      ]
+    },
+    {
+      "slug": "health-tracker",
+      "title": "Health Tracker",
+      "caption": "Personal health metrics dashboard. Nine KPI cards each pair a today value and week-over-week delta with a 7-day trend bar chart that highlights the latest day, at exact numeric fidelity across every metric (blood pressure, heart rate, BMI, calories burned/intake, steps, water, sleep, mood). The Tableau date-period switcher (Last Week / Month / Year) migrates to Power BI button navigation. The latest-day bar highlight surfaced a real off-by-one in the date-window calc that the fidelity validator caught and the model builder fixed.",
+      "pages": [
+        {
+          "name": "Track Metrics",
+          "tableau": "migrations/health-tracker/reference/tableau-metrics.png",
+          "powerbi": "migrations/health-tracker/reference/powerbi-health-tracker.png",
           "powerbi_crop": {
-            "top": 0.05,
-            "right": 0.13
+            "right": 0.03
+          }
+        }
+      ]
+    },
+    {
+      "slug": "wind-energy-utilization",
+      "title": "NL Wind Energy Utilization",
+      "caption": "Netherlands wind-fleet performance dashboard (30 turbines, 2024 daily output). A star schema drives ranked turbine tables with data bars, an azureMap turbine-bubble layer over the Netherlands, a weekday-by-month output heatmap, TopN highest/lowest performer tables, and a wind-speed-vs-power scatter. Tableau's polar performance spiral is reproduced as DAX-computed X/Y measures. Numeric fidelity confirmed exact (total actual output 453,167.284 MWh, CO2 saved 169,031.370 t).",
+      "pages": [
+        {
+          "name": "Fleet Performance",
+          "tableau": "migrations/wind-energy-utilization/reference/tableau-dashboard.png",
+          "powerbi": "migrations/wind-energy-utilization/reference/powerbi-wind-energy.png",
+          "powerbi_crop": {
+            "right": 0.025
           }
         }
       ]

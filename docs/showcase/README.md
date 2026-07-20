@@ -12,6 +12,22 @@ Global CO2 emissions, GDP, and population trends. Produced end to end by the tab
 
 ![The Price of Prosperity - Price of Prosperity](assets/price-of-prosperity-1.png)
 
+### Health Tracker
+
+Personal health metrics dashboard. Nine KPI cards each pair a today value and week-over-week delta with a 7-day trend bar chart that highlights the latest day, at exact numeric fidelity across every metric (blood pressure, heart rate, BMI, calories burned/intake, steps, water, sleep, mood). The Tableau date-period switcher (Last Week / Month / Year) migrates to Power BI button navigation. The latest-day bar highlight surfaced a real off-by-one in the date-window calc that the fidelity validator caught and the model builder fixed.
+
+**Track Metrics**
+
+![Health Tracker - Track Metrics](assets/health-tracker-1.png)
+
+### NL Wind Energy Utilization
+
+Netherlands wind-fleet performance dashboard (30 turbines, 2024 daily output). A star schema drives ranked turbine tables with data bars, an azureMap turbine-bubble layer over the Netherlands, a weekday-by-month output heatmap, TopN highest/lowest performer tables, and a wind-speed-vs-power scatter. Tableau's polar performance spiral is reproduced as DAX-computed X/Y measures. Numeric fidelity confirmed exact (total actual output 453,167.284 MWh, CO2 saved 169,031.370 t).
+
+**Fleet Performance**
+
+![NL Wind Energy Utilization - Fleet Performance](assets/wind-energy-utilization-1.png)
+
 ### Shipping KPIs
 
 Logistics profitability & delay KPIs. GOOD/OK/BAD conditional coloring on scatter points and table rows; per-shipment profit-ratio FIXED LOD; faithful preservation of the source's Expected-minus-Actual delay quirk. Live Power BI Desktop render with data.
