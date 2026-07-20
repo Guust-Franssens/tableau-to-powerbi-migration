@@ -17,7 +17,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/showcase/hero-before-after.png" alt="Before/after collage: four original Tableau Public dashboards on the left next to the Power BI reports the pipeline generated on the right (Price of Prosperity, Airline Alliance Activity, Shipping KPIs, Tale of 100 Entrepreneurs)">
+  <img src="docs/showcase/hero-before-after.png" alt="Before/after collage: four original Tableau Public dashboards on the left next to the Power BI reports the pipeline generated on the right (Price of Prosperity, Health Tracker, NL Wind Energy Utilization, Shipping KPIs)">
 </p>
 
 <p align="center">
@@ -42,8 +42,8 @@ different workbooks, with the bugs found along the way documented honestly.
 
 <table>
   <tr>
-    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/airline-alliance-activity-1.png" alt="Airline Alliance Activity, Tableau vs Power BI"></a><br/><b>Airline Alliance Activity</b><br/>91-worksheet CY/PY navigation app; caught a systematic 58-measure DAX bug.</td>
-    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/shipping-kpis-1.png" alt="Shipping KPIs, Tableau vs Power BI"></a><br/><b>Shipping KPIs</b><br/>FIXED-LOD per-shipment profitability with GOOD/OK/BAD conditional coloring.</td>
+    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/health-tracker-1.png" alt="Health Tracker, Tableau vs Power BI"></a><br/><b>Health Tracker</b><br/>Nine KPI cards with 7-day trend bars that highlight the latest day, at exact numeric fidelity.</td>
+    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/wind-energy-utilization-1.png" alt="NL Wind Energy Utilization, Tableau vs Power BI"></a><br/><b>NL Wind Energy Utilization</b><br/>Star-schema wind fleet; Tableau's polar performance spiral rebuilt as DAX X/Y measures.</td>
   </tr>
   <tr>
     <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/tale-of-100-entrepreneurs-1.png" alt="Tale of 100 Entrepreneurs, Tableau vs Power BI"></a><br/><b>Tale of 100 Entrepreneurs</b><br/>LOOKUP first/last and running INDEX table calculations translated to DAX.</td>
