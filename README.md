@@ -1,29 +1,59 @@
-# Tableau → Power BI / Fabric Migration Toolkit
+<div align="center">
 
-AI-assisted migration of Tableau workbooks (`.twb` / `.twbx`) to Microsoft Fabric Power BI
-(semantic model + report), built as [GitHub Copilot CLI](https://github.com/github/copilot-cli)
-custom agents on top of the official
-[`powerbi-authoring`](https://github.com/microsoft/skills-for-fabric) Fabric skills. **16 real,
-publicly available Tableau Public dashboards** have been run through it end to end, spanning KPI
-dashboards, IronViz infographics, network and origin-destination maps, a what-if calculator, and a
-91-worksheet enterprise workbook.
+# Tableau&nbsp;→&nbsp;Power BI / Fabric Migration Toolkit
 
-![Before/after collage: four original Tableau Public dashboards on the left next to the Power BI reports the pipeline generated on the right (Price of Prosperity, Airline Alliance Activity, Shipping KPIs, Tale of 100 Entrepreneurs)](docs/showcase/hero-before-after.png)
+### AI-assisted migration of Tableau workbooks to Microsoft Fabric Power BI, built as GitHub Copilot CLI agents
 
-*Left: the original Tableau Public dashboard. Right: the Power BI report this pipeline generated from
-it (a live Power BI Desktop render over the migrated semantic model). More pairs are in the showcase.*
+[![License: MIT](https://img.shields.io/badge/License-MIT-A31F34.svg)](LICENSE)
+&nbsp;![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+&nbsp;![Power BI](https://img.shields.io/badge/Power_BI-F2C811?logo=powerbi&logoColor=black)
+&nbsp;![Microsoft Fabric](https://img.shields.io/badge/Microsoft_Fabric-117865)
+&nbsp;![GitHub Copilot](https://img.shields.io/badge/GitHub_Copilot-000000?logo=githubcopilot&logoColor=white)
+&nbsp;![Migrations](https://img.shields.io/badge/migrations-16-2ea44f)
+&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-20%2F20-2ea44f)
 
-`16 migrations` · `4 Copilot CLI agents` · `26-entry PBIR visual cookbook` · `parser 20/20 tests` · `MIT licensed`
+**[Showcase](docs/showcase/README.md)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
 
-**[See the full migration showcase →](docs/showcase/README.md)**: original Tableau dashboards side by
-side with the Power BI reports the pipeline generated from them.
+</div>
+
+<p align="center">
+  <img src="docs/showcase/hero-before-after.png" alt="Before/after collage: four original Tableau Public dashboards on the left next to the Power BI reports the pipeline generated on the right (Price of Prosperity, Airline Alliance Activity, Shipping KPIs, Tale of 100 Entrepreneurs)">
+</p>
+
+<p align="center">
+  <i>Left: the original Tableau Public dashboard. Right: the Power BI report this pipeline generated from it, a live Power BI Desktop render over the migrated semantic model. More pairs are in the <a href="docs/showcase/README.md">showcase</a>.</i>
+</p>
+
+---
+
+Point it at a Tableau `.twb` / `.twbx` and it produces a working **Fabric Power BI semantic model + report**. **16 real, publicly available Tableau Public dashboards** have been run through it end to end, spanning KPI dashboards, IronViz infographics, network and origin-destination maps, a what-if calculator, and a 91-worksheet enterprise workbook.
+
+- 🧩 &nbsp;**Deterministic parser, not a black box.** Tableau's `.twb` XML is extracted by code into a schema-validated `migration-spec.json` contract (20/20 `pytest`), so the fuzzy LLM work is scoped to only what needs judgment.
+- 🤖 &nbsp;**Four Copilot CLI agents.** An orchestrator coordinates a semantic-model builder, a report builder, and an independent read-only fidelity validator.
+- 📊 &nbsp;**DAX + visual translation.** LOD expressions and table calculations become DAX; Tableau worksheets become native Power BI visuals via a 26-entry, render-verified PBIR cookbook.
+- 🔍 &nbsp;**Figure-by-figure validation.** The validator compares each built visual against the Tableau original, on both layout and numbers, and routes discrepancies back, catching bugs that would otherwise ship silently.
+- ✅ &nbsp;**AI (Copilot) ready.** Every model gets a descriptions + enum-domain pass so it works with Power BI Copilot and natural-language Q&A.
+- 📝 &nbsp;**Honest about limits.** Every bug and capability gap found along the way is documented, not hidden (see [capabilities &amp; limitations](docs/capabilities-and-limitations.md)).
 
 This is not a generic "AI can do anything" claim. It is a working pipeline, run end to end against 16
-different workbooks, with the bugs found along the way documented honestly. See
-[`docs/capabilities-and-limitations.md`](docs/capabilities-and-limitations.md) for the full,
-evidence-based writeup of what works automatically and what needs human validation.
+different workbooks, with the bugs found along the way documented honestly.
 
-## What's in the repo
+## 🖼️ Showcase
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/airline-alliance-activity-1.png" alt="Airline Alliance Activity, Tableau vs Power BI"></a><br/><b>Airline Alliance Activity</b><br/>91-worksheet CY/PY navigation app; caught a systematic 58-measure DAX bug.</td>
+    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/shipping-kpis-1.png" alt="Shipping KPIs, Tableau vs Power BI"></a><br/><b>Shipping KPIs</b><br/>FIXED-LOD per-shipment profitability with GOOD/OK/BAD conditional coloring.</td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/tale-of-100-entrepreneurs-1.png" alt="Tale of 100 Entrepreneurs, Tableau vs Power BI"></a><br/><b>Tale of 100 Entrepreneurs</b><br/>LOOKUP first/last and running INDEX table calculations translated to DAX.</td>
+    <td width="50%" valign="top"><a href="docs/showcase/README.md"><img src="docs/showcase/assets/sales-commission-model-1.png" alt="Sales Commission Model, Tableau vs Power BI"></a><br/><b>Sales Commission Model</b><br/>Three What-If parameters driving a live commission calculator.</td>
+  </tr>
+</table>
+
+**[See the full migration showcase →](docs/showcase/README.md)** for every before/after pair, each captioned with what translated faithfully and what needed a workaround.
+
+## 🧰 What's in the repo
 
 - **Deterministic Tableau parser + spec schema** (`scripts/parse_tableau.py`): extracts every data
   source, field, calculated-field formula, worksheet encoding, dashboard layout, reference line, and
@@ -52,7 +82,7 @@ evidence-based writeup of what works automatically and what needs human validati
   Power BI Desktop and its Bridge CLI, `npx`, and the TOM DLL, printing an install hint for anything
   missing.
 
-## Why a separate parser instead of an LLM doing everything
+## 🧩 Why a separate parser, not an all-LLM pipeline
 
 Tableau's `.twb` XML (datasources, shelves, zones) is exact and structural, so a deterministic parser
 is more reliable and reproducible than LLM reasoning for extraction. LLM reasoning is reserved for the
@@ -87,7 +117,10 @@ The three subagents are orchestrated by `tableau-migrator`, a custom Copilot CLI
 
 ![Architecture: a deterministic parser extracts a schema-validated migration-spec.json contract, then LLM agents translate it to a Fabric Power BI semantic model + report](docs/architecture.png)
 
-## Setup: Copilot plugins & MCP (self-configuring)
+<details>
+<summary><strong>⚡ Setup: Copilot plugins &amp; MCP (self-configuring)</strong></summary>
+
+<br>
 
 This toolkit's agents build on Microsoft's official Fabric/Power BI **skill plugin** and talk to Power
 BI through **MCP servers**. Those dependencies are declared in the repo so a clone is self-configuring:
@@ -103,6 +136,8 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
 In Copilot CLI, install the plugin once with `/plugin` (add marketplace `microsoft/skills-for-fabric`,
 enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run
 `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
+
+</details>
 
 ## Quickstart
 
@@ -128,7 +163,7 @@ Then, in [GitHub Copilot CLI](https://github.com/github/copilot-cli), run the or
 
 and point it at `migrations\<name>\migration-spec.json`.
 
-## Try a worked example
+## 🧪 Try a worked example
 
 Every folder under `migrations/<name>/` is a complete run: the parsed `migration-spec.json` plus the
 generated `fabric/<Name>.SemanticModel` and `fabric/<Name>.Report` PBIP project, ready to open in Power
@@ -146,7 +181,10 @@ workbook (16 worksheets, 7 data sources, 152 fields).
    `migrations/<name>/data/` path. It ships with a placeholder because M parameters cannot be relative
    to the project file. The helper `scripts\set_data_folder.py` can set this for you.
 
-## Repo layout
+<details>
+<summary><strong>📁 Repo layout</strong></summary>
+
+<br>
 
 ```
 .github/agents/          Four custom Copilot CLI agents (orchestrator + 3 subagents)
@@ -157,7 +195,9 @@ migrations/<name>/       Per-workbook working folder: source (gitignored), spec,
 tests/                   pytest suite + XML fixtures for the parser
 ```
 
-## Development
+</details>
+
+## 🛠️ Development
 
 ```powershell
 uv sync --extra dev
@@ -166,7 +206,7 @@ pylint scripts
 pytest -q            # 20 parser tests
 ```
 
-## Status
+## 📊 Status: what's covered
 
 **Working end to end across 16 real Tableau Public workbooks.** Every folder under `migrations/`
 carries a generated `.SemanticModel` and `.Report`. Highlights of the range covered:
@@ -192,7 +232,7 @@ Render-verified pairs (committed before/after screenshots) currently cover `pric
 LOD expressions and table calculations, previously only documented, are now exercised by real
 workbooks; the patterns live in `docs/tableau-dax-translation-guide.md`.
 
-### Roadmap
+### 🗺️ Roadmap
 
 - **In progress:** re-rendering the origin-destination line map (`telecommunications-analytics`,
   `superstore-sales-performance`) and the Azure Maps choropleths, whose Desktop renders are being
@@ -202,6 +242,6 @@ workbooks; the patterns live in `docs/tableau-dax-translation-guide.md`.
 
 Contributions, especially additional worked examples against different Tableau workbooks, are welcome.
 
-## License
+## 📄 License
 
 [MIT](LICENSE).
