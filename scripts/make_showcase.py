@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("make_showcase")
@@ -22,12 +22,19 @@ logger = logging.getLogger("make_showcase")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PANEL_HEIGHT = 720
 GAP = 40
-MARGIN = 24
-LABEL_H = 44
+MARGIN = 34
+LABEL_H = 52
 BG = (255, 255, 255)
-LABEL_BG = (243, 243, 243)
-TABLEAU_ACCENT = (78, 121, 167)
-PBI_ACCENT = (225, 119, 66)
+# Brand-coloured label strips (match the LinkedIn carousel), tuned to read on the README's white canvas.
+TABLEAU_STRIP = (31, 78, 130)  # Tableau navy strip, white label text
+PBI_STRIP = (242, 200, 17)  # Power BI gold strip, dark label text
+TABLEAU_ACCENT = (78, 121, 167)  # lighter Tableau blue, accent text for the hero / social strip titles
+PBI_ACCENT = (225, 119, 66)  # Power BI orange, accent text for the hero / social strip titles
+STRIP_TEXT_LIGHT = (255, 255, 255)
+STRIP_TEXT_DARK = (18, 28, 44)
+CORNER_RADIUS = 14
+LOGO_TABLEAU = REPO_ROOT / "docs" / "showcase" / "assets" / "logo-tableau.png"
+LOGO_PBI = REPO_ROOT / "docs" / "showcase" / "assets" / "logo-powerbi.png"
 DEFAULT_HERO = [
     "price-of-prosperity",
     "health-tracker",
@@ -70,16 +77,62 @@ def _scaled(path: Path, crop: dict[str, float] | None) -> Image.Image:
     return img.resize((max(1, int(img.width * scale)), PANEL_HEIGHT), Image.Resampling.LANCZOS)
 
 
-def _labeled_panel(img: Image.Image, label: str, accent: tuple[int, int, int]) -> Image.Image:
-    """Stack a colored label strip above an image panel."""
-    panel = Image.new("RGB", (img.width, img.height + LABEL_H), BG)
-    strip = Image.new("RGB", (img.width, LABEL_H), LABEL_BG)
+_CHIPS: dict[tuple[str, int], Image.Image] = {}
+
+
+def _logo_chip(path: Path, height: int) -> Image.Image:
+    """A small white rounded chip holding a product logo, trimmed to its content, so the logo reads
+    cleanly on any brand-coloured strip."""
+    key = (str(path), height)
+    if key in _CHIPS:
+        return _CHIPS[key]
+    logo = Image.open(path).convert("RGBA")
+    bbox = logo.split()[3].getbbox()
+    if bbox:
+        logo = logo.crop(bbox)
+    pad_y, pad_x = 6, 18
+    inner_h = height - 2 * pad_y
+    logo = logo.resize((max(1, round(logo.width * inner_h / logo.height)), inner_h), Image.Resampling.LANCZOS)
+    chip_w = logo.width + 2 * pad_x
+    chip = Image.new("RGBA", (chip_w, height), (0, 0, 0, 0))
+    mask = Image.new("L", (chip_w, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, chip_w - 1, height - 1), radius=height // 2, fill=255)
+    chip.paste(Image.new("RGBA", (chip_w, height), (255, 255, 255, 255)), (0, 0), mask)
+    chip.paste(logo, (pad_x, pad_y), logo)
+    _CHIPS[key] = chip
+    return chip
+
+
+def _labeled_panel(
+    img: Image.Image, label: str, strip_color: tuple[int, int, int], text_color: tuple[int, int, int], logo: Path
+) -> Image.Image:
+    """A rounded, branded card: a brand-coloured label strip (role text on the left, product-logo chip on
+    the right) above the screenshot, with rounded corners so it sits as a card on the white README canvas."""
+    width, height = img.width, img.height + LABEL_H
+    panel = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    strip = Image.new("RGBA", (width, LABEL_H), strip_color + (255,))
     draw = ImageDraw.Draw(strip)
-    draw.rectangle((0, 0, 6, LABEL_H), fill=accent)
-    draw.text((18, LABEL_H // 2), label, fill=(40, 40, 40), font=_font(20), anchor="lm")
+    draw.text((20, LABEL_H // 2), label, fill=text_color, font=_font(22), anchor="lm")
+    chip = _logo_chip(logo, LABEL_H - 18)
+    strip.alpha_composite(chip, (width - 16 - chip.width, (LABEL_H - chip.height) // 2))
     panel.paste(strip, (0, 0))
-    panel.paste(img, (0, LABEL_H))
+    panel.paste(img.convert("RGBA"), (0, LABEL_H))
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=CORNER_RADIUS, fill=255)
+    panel.putalpha(mask)
     return panel
+
+
+def _paste_with_shadow(canvas: Image.Image, panel: Image.Image, pos: tuple[int, int]) -> None:
+    """Composite a rounded RGBA panel onto the canvas with a soft drop shadow, for depth on white."""
+    x, y = pos
+    shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    tint = Image.new("RGBA", panel.size, (30, 41, 59, 255))
+    tint.putalpha(panel.split()[3].point(lambda v: int(v * 0.28)))
+    shadow.paste(tint, (x, y + 8), tint)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(14))
+    canvas.alpha_composite(shadow)
+    canvas.alpha_composite(panel, (x, y))
 
 
 def compose_pair(  # pylint: disable=too-many-arguments  # cohesive compositor: 2 image paths + crop + out + layout + order
@@ -95,26 +148,29 @@ def compose_pair(  # pylint: disable=too-many-arguments  # cohesive compositor: 
     or 'stacked' (taller aspect ratio that reads better on a LinkedIn feed). order='before-after' puts
     Tableau first (the natural 'migration' reading for the repo); order='after-before' puts the Power BI
     result first (a stronger scroll-stopper for LinkedIn: show the polished result, then reveal the
-    source it was auto-migrated from)."""
-    tab_label = "BEFORE  \u00b7  Tableau" if order == "after-before" else "Tableau  (source)"
-    pbi_label = "AFTER  \u00b7  Power BI" if order == "after-before" else "Power BI  (migrated)"
-    tableau_panel = _labeled_panel(_scaled(tableau_path, None), tab_label, TABLEAU_ACCENT)
-    pbi_panel = _labeled_panel(_scaled(pbi_path, pbi_crop), pbi_label, PBI_ACCENT)
+    source it was auto-migrated from). Each panel is a branded, rounded card (Tableau navy / Power BI
+    gold strip with the product logo) with a soft drop shadow on the white canvas."""
+    tab_label = "BEFORE" if order == "after-before" else "SOURCE"
+    pbi_label = "AFTER" if order == "after-before" else "MIGRATED"
+    tableau_panel = _labeled_panel(
+        _scaled(tableau_path, None), tab_label, TABLEAU_STRIP, STRIP_TEXT_LIGHT, LOGO_TABLEAU
+    )
+    pbi_panel = _labeled_panel(_scaled(pbi_path, pbi_crop), pbi_label, PBI_STRIP, STRIP_TEXT_DARK, LOGO_PBI)
     first, second = (pbi_panel, tableau_panel) if order == "after-before" else (tableau_panel, pbi_panel)
     if layout == "stacked":
         width = MARGIN * 2 + max(first.width, second.width)
         height = MARGIN * 2 + first.height + GAP + second.height
-        canvas = Image.new("RGB", (width, height), BG)
-        canvas.paste(first, ((width - first.width) // 2, MARGIN))
-        canvas.paste(second, ((width - second.width) // 2, MARGIN + first.height + GAP))
+        canvas = Image.new("RGBA", (width, height), BG + (255,))
+        _paste_with_shadow(canvas, first, ((width - first.width) // 2, MARGIN))
+        _paste_with_shadow(canvas, second, ((width - second.width) // 2, MARGIN + first.height + GAP))
     else:
         width = MARGIN * 2 + first.width + GAP + second.width
         height = MARGIN * 2 + max(first.height, second.height)
-        canvas = Image.new("RGB", (width, height), BG)
-        canvas.paste(first, (MARGIN, MARGIN))
-        canvas.paste(second, (MARGIN + first.width + GAP, MARGIN))
+        canvas = Image.new("RGBA", (width, height), BG + (255,))
+        _paste_with_shadow(canvas, first, (MARGIN, MARGIN))
+        _paste_with_shadow(canvas, second, (MARGIN + first.width + GAP, MARGIN))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(out_path)
+    canvas.convert("RGB").save(out_path)
     logger.info("Wrote %s (%dx%d)", out_path.relative_to(REPO_ROOT), width, height)
 
 
