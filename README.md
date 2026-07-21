@@ -30,7 +30,7 @@ Point it at a Tableau `.twb` / `.twbx` and it produces a working **Fabric Power 
 
 - 🧩 &nbsp;**Deterministic parser, not a black box.** Tableau's `.twb` XML is extracted by code into a schema-validated `migration-spec.json` contract (20/20 `pytest`), so the fuzzy LLM work is scoped to only what needs judgment.
 - 🤖 &nbsp;**Four Copilot CLI agents.** An orchestrator coordinates a semantic-model builder, a report builder, and an independent read-only fidelity validator.
-- 📊 &nbsp;**DAX + visual translation.** LOD expressions and table calculations become DAX; Tableau worksheets become native Power BI visuals via a 26-entry, render-verified PBIR cookbook.
+- 📊 &nbsp;**DAX + visual translation.** LOD expressions and table calculations become DAX; Tableau worksheets become native Power BI visuals via a 27-entry, render-verified PBIR cookbook.
 - 🔍 &nbsp;**Figure-by-figure validation.** The validator compares each built visual against the Tableau original, on both layout and numbers, and routes discrepancies back, catching bugs that would otherwise ship silently.
 - ✅ &nbsp;**AI (Copilot) ready.** Every model gets a descriptions + enum-domain pass so it works with Power BI Copilot and natural-language Q&A.
 - 📝 &nbsp;**Honest about limits.** Every bug and capability gap found along the way is documented, not hidden (see [capabilities &amp; limitations](docs/capabilities-and-limitations.md)).
@@ -70,7 +70,7 @@ different workbooks, with the bugs found along the way documented honestly.
   - `pbi-migration-validator`: a read-only critic that compares the built report against the Tableau
     original figure by figure, on both visuals and numbers, and reports discrepancies back to the
     orchestrator (it never edits files itself).
-- **PBIR visual cookbook** (`.github/pbi.kb/`): a `visual-cookbook.md` plus 26 known-good
+- **PBIR visual cookbook** (`.github/pbi.kb/`): a `visual-cookbook.md` plus 27 known-good
   `visuals/*.visual.json` templates harvested from real migrations, so the report builder reuses
   verified PBIR JSON instead of guessing undocumented visual encodings.
 - **AI (Copilot) readiness pass** (`scripts/check_ai_readiness.py`): reports the share of tables,
@@ -188,7 +188,7 @@ workbook (16 worksheets, 7 data sources, 152 fields).
 
 ```
 .github/agents/          Four custom Copilot CLI agents (orchestrator + 3 subagents)
-.github/pbi.kb/          PBIR visual cookbook (visual-cookbook.md + 26 visual.json templates)
+.github/pbi.kb/          PBIR visual cookbook (visual-cookbook.md + 27 visual.json templates)
 scripts/                 Python automation (parser, .hyper extractor, AI-readiness, showcase) + preflight.ps1
 docs/                    migration-spec schema, Tableau->DAX guide, capabilities & limitations, showcase
 migrations/<name>/       Per-workbook working folder: source (gitignored), spec, Fabric output, reference PNGs
@@ -223,12 +223,13 @@ carries a generated `.SemanticModel` and `.Report`. Highlights of the range cove
 
 What is genuinely hard and the pipeline handled: dense IronViz-style infographics and custom-geometry
 charts. `broadway-stage-to-screen` (an IronViz infographic), `spiraling-satellites` (custom spiral
-geometry), `fast-fashion-impact` (34 worksheets, 11 data sources), and `wind-energy-utilization`
-(35 worksheets) all parse and build. Their Power BI Desktop render capture is still pending, so they
-are marked as built-but-not-yet-render-verified in the showcase.
+geometry), and `fast-fashion-impact` (34 worksheets, 11 data sources) all parse and build. Their Power
+BI Desktop render capture is still pending, so they are marked as built-but-not-yet-render-verified in
+the showcase.
 
 Render-verified pairs (committed before/after screenshots) currently cover `price-of-prosperity`,
-`airline-alliance-activity`, `shipping-kpis`, `tale-of-100-entrepreneurs`, and `sales-commission-model`.
+`health-tracker`, `wind-energy-utilization`, `shipping-kpis`, `airline-alliance-activity`,
+`tale-of-100-entrepreneurs`, and `sales-commission-model`.
 LOD expressions and table calculations, previously only documented, are now exercised by real
 workbooks; the patterns live in `docs/tableau-dax-translation-guide.md`.
 
