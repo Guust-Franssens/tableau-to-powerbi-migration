@@ -1,10 +1,10 @@
 """
 purpose: Build a swipeable LinkedIn carousel (a multi-page PDF, one slide per swipe) that tells the
-         Tableau -> Power BI migration story: a hook, three after/before proof slides (the Power BI
-         result on top, the original Tableau below, each with an exact repo-verified number), a
-         how-it-works slide, a "one agent caught another's bug" slide, and a close with the repo link
-         and acknowledgments. Also writes each slide as a PNG. Every number traces to this repo's
-         ground truth. Portrait 4:5 (1080x1350) reads best in the LinkedIn feed.
+         Tableau -> Power BI migration story as clean before/after proof. Each real dashboard is floated
+         as a rounded, soft-shadowed card on a brand-tinted background (Power BI gold, then Tableau
+         blue), with a compact top bar (brand eyebrow + example name + product logo) and a subtle
+         "swipe to see the original" hint. A close slide carries the repo link and acknowledgments.
+         Also writes each slide as a PNG. Square 1:1 reads best in the LinkedIn feed.
 usage:   python scripts/make_carousel.py [--output docs/showcase/carousel/linkedin-carousel.pdf]
 """
 
@@ -14,35 +14,28 @@ import argparse
 import logging
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("make_carousel")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-W, H = 1080, 1350  # default portrait 4:5; set per deck by _set_canvas()
+W, H = 1080, 1080  # square 1:1: a wide dashboard fills the frame, the report title sits in the padding above
 MARGIN = 56
 
 
-def _set_canvas(shape: str) -> None:
-    """Set the slide dimensions for the deck about to be rendered: square 1:1 (best for the reveal
-    layout, where one wide dashboard fills the frame) or portrait 4:5 (best for the stacked compare
-    layout, and grabs the most vertical space in the LinkedIn feed)."""
-    global W, H  # pylint: disable=global-statement
-    W, H = (1080, 1080) if shape == "square" else (1080, 1350)
-
-
-# Dark theme (matches the showcase accent colours).
+# Dark theme, with each tool's brand identity carried on its own slide.
 BG = (12, 23, 37)
-PANEL_BG = (247, 248, 250)
 FG = (233, 238, 244)
 MUTED = (156, 171, 188)
-TABLEAU = (98, 150, 200)
-PBI = (233, 131, 79)
-GREEN = (94, 205, 148)
-AMBER = (243, 197, 102)
+TABLEAU = (98, 150, 200)  # Tableau blue: the "before" brand accent (glow + eyebrow), readable on dark
+PBI = (242, 200, 17)  # Power BI gold: the "after" brand accent (glow + eyebrow), readable on dark
 CARD = (19, 32, 49)
 LINE = (44, 62, 84)
+
+REPO_TAG = "github.com/Guust-Franssens/tableau-to-powerbi-migration"
+LOGO_PBI = REPO_ROOT / "docs" / "showcase" / "assets" / "logo-powerbi.png"
+LOGO_TABLEAU = REPO_ROOT / "docs" / "showcase" / "assets" / "logo-tableau.png"
 
 _FONTS: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 _SANS = ["segoeui.ttf"]
@@ -65,13 +58,16 @@ def font(kind: list[str], size: int) -> ImageFont.FreeTypeFont:
     return _FONTS[key]
 
 
+def _footer(d: ImageDraw.ImageDraw) -> None:
+    """The repo tag, centred along the bottom of every slide (aligns with the centred swipe hint)."""
+    d.text((W // 2, H - 46), REPO_TAG, font=font(_SANS, 22), fill=MUTED, anchor="mm")
+
+
 def _slide() -> tuple[Image.Image, ImageDraw.ImageDraw]:
     """A blank dark slide with the repo tag in the footer."""
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    d.text(
-        (MARGIN, H - 48), "github.com/Guust-Franssens/tableau-to-powerbi-migration", font=font(_SANS, 22), fill=MUTED
-    )
+    _footer(d)
     return img, d
 
 
@@ -105,26 +101,74 @@ def _crop(img: Image.Image, crop: dict[str, float] | None) -> Image.Image:
     )
 
 
-def _panel(  # pylint: disable=too-many-arguments  # cohesive panel builder: path + crop + label + accent + box dims
-    path: Path, crop: dict[str, float] | None, label: str, accent: tuple[int, int, int], *, box_w: int, box_h: int
-) -> Image.Image:
-    """A labelled screenshot panel that fits within (box_w, box_h): a coloured label strip above a
-    white card holding the (letterboxed) screenshot."""
-    strip_h = 46
-    inner_h = box_h - strip_h
+_CHIPS: dict[tuple[str, int], Image.Image] = {}
+
+
+def _logo_chip(path: Path, height: int) -> Image.Image:
+    """A small white rounded 'chip' holding a product logo, trimmed to its content and centred. Both
+    logos read cleanly on white, whatever the brand-coloured strip behind them."""
+    key = (str(path), height)
+    if key in _CHIPS:
+        return _CHIPS[key]
+    logo = Image.open(path).convert("RGBA")
+    alpha = logo.split()[3]
+    if alpha.getextrema()[0] == 0:  # transparent border: trim by the alpha channel
+        bbox = alpha.getbbox()
+    else:  # opaque (white) border: trim by difference from white
+        bbox = ImageChops.difference(logo.convert("RGB"), Image.new("RGB", logo.size, (255, 255, 255))).getbbox()
+    if bbox:
+        logo = logo.crop(bbox)
+    pad_y, pad_x = 7, 24  # more horizontal room so the wordmark clears the pill's rounded ends
+    inner_h = height - 2 * pad_y
+    logo = logo.resize((max(1, round(logo.width * inner_h / logo.height)), inner_h), Image.Resampling.LANCZOS)
+    chip_w = logo.width + 2 * pad_x
+    chip = Image.new("RGBA", (chip_w, height), (0, 0, 0, 0))
+    mask = Image.new("L", (chip_w, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, chip_w - 1, height - 1), radius=height // 2, fill=255)
+    chip.paste(Image.new("RGBA", (chip_w, height), (255, 255, 255, 255)), (0, 0), mask)
+    chip.paste(logo, (pad_x, pad_y), logo)
+    _CHIPS[key] = chip
+    return chip
+
+
+def _fit_shot(path: Path, crop: dict[str, float] | None, box_w: int, box_h: int) -> Image.Image:
+    """Load, crop, and resize a screenshot to fit within (box_w, box_h), preserving aspect."""
     shot = _crop(Image.open(path).convert("RGB"), crop)
-    scale = min(box_w / shot.width, inner_h / shot.height)
-    shot = shot.resize(
+    scale = min(box_w / shot.width, box_h / shot.height)
+    return shot.resize(
         (max(1, round(shot.width * scale)), max(1, round(shot.height * scale))), Image.Resampling.LANCZOS
     )
-    panel = Image.new("RGB", (box_w, box_h), CARD)
-    d = ImageDraw.Draw(panel)
-    d.rectangle((0, 0, box_w, strip_h), fill=accent)
-    d.text((16, strip_h // 2), label, font=font(_B, 25), fill=(255, 255, 255), anchor="lm")
-    card = Image.new("RGB", (box_w, inner_h), PANEL_BG)
-    card.paste(shot, ((box_w - shot.width) // 2, (inner_h - shot.height) // 2))
-    panel.paste(card, (0, strip_h))
-    return panel
+
+
+def _add_glow(
+    img: Image.Image, accent: tuple[int, int, int], box: tuple[float, float, float, float], strength: float
+) -> Image.Image:
+    """Composite a soft radial glow of `accent` (an elliptical `box`, heavily blurred) onto `img`."""
+    glow = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(glow).ellipse((int(box[0]), int(box[1]), int(box[2]), int(box[3])), fill=255)
+    glow = glow.filter(ImageFilter.GaussianBlur(200)).point(lambda v: int(v * strength))
+    return Image.composite(Image.new("RGB", (W, H), accent), img, glow)
+
+
+def _brand_bg(accent: tuple[int, int, int]) -> Image.Image:
+    """The dark slide background with a soft brand-coloured glow behind the card, so the whole slide
+    carries the tool's colour rather than a saturated bar."""
+    return _add_glow(Image.new("RGB", (W, H), BG), accent, (-W * 0.10, H * 0.02, W * 1.10, H * 0.92), 0.18)
+
+
+def _place_card(bg: Image.Image, shot: Image.Image, top: int, bottom: int) -> Image.Image:
+    """Paste `shot` onto `bg` as a rounded card with a soft drop shadow, centred in [top, bottom]."""
+    radius, cw, ch = 16, shot.width, shot.height
+    x, y = (W - cw) // 2, top + (bottom - top - ch) // 2
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle(
+        (x - 4, y + 14, x + cw + 4, y + ch + 30), radius=radius + 6, fill=(0, 0, 0, 150)
+    )
+    base = Image.alpha_composite(bg.convert("RGBA"), shadow.filter(ImageFilter.GaussianBlur(30)))
+    mask = Image.new("L", (cw, ch), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, cw - 1, ch - 1), radius=radius, fill=255)
+    base.paste(shot, (x, y), mask)
+    return base.convert("RGB")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -152,226 +196,131 @@ def slide_cover() -> Image.Image:
     return img
 
 
-def slide_pair(title: str, faithful: str, spec: dict, note: str) -> Image.Image:
-    """Compare layout: AFTER (Power BI) on top, BEFORE (Tableau) below, on one slide."""
-    img, d = _slide()
-    d.text((MARGIN, 70), title, font=font(_B, 52), fill=FG)
-    d.text((MARGIN, 138), faithful, font=font(_SANS, 30), fill=MUTED)
-    box_w = W - 2 * MARGIN
-    box_h = 452
-    top = 200
-    after = _panel(
-        REPO_ROOT / spec["powerbi"],
-        spec.get("powerbi_crop"),
-        "AFTER  \u00b7  Power BI (migrated)",
-        PBI,
-        box_w=box_w,
-        box_h=box_h,
-    )
-    before = _panel(
-        REPO_ROOT / spec["tableau"], None, "BEFORE  \u00b7  Tableau (source)", TABLEAU, box_w=box_w, box_h=box_h
-    )
-    img.paste(after, (MARGIN, top))
-    img.paste(before, (MARGIN, top + box_h + 20))
-    d.text((MARGIN, top + box_h * 2 + 20 + 26), note, font=font(_SANS, 28), fill=MUTED)
-    return img
-
-
-def slide_single(  # pylint: disable=too-many-arguments,too-many-locals  # cohesive full-slide panel
-    title: str, sub: str, path: Path, crop: dict[str, float] | None, *, label: str, accent: tuple[int, int, int]
+def slide_single(  # pylint: disable=too-many-arguments  # cohesive full-slide builder
+    title: str,
+    path: Path,
+    crop: dict[str, float] | None,
+    *,
+    label: str,
+    accent: tuple[int, int, int],
+    swipe_hint: bool = False,
+    logo: Path | None = None,
 ) -> Image.Image:
-    """Reveal layout: one full-size panel per slide (Power BI on its own slide, Tableau on the next).
-    The card is sized to the screenshot (no white letterbox) and centred on the dark background."""
-    img, d = _slide()
-    d.text((MARGIN, 70), title, font=font(_B, 52), fill=FG)
-    d.text((MARGIN, 138), sub, font=font(_SANS, 30), fill=MUTED)
-    box_w = W - 2 * MARGIN
-    strip_h = 46
-    area_top, area_bottom = 200, H - 96
-    with Image.open(path) as raw:
-        shot = _crop(raw.convert("RGB"), crop)
-    scale = min(box_w / shot.width, (area_bottom - area_top - strip_h) / shot.height)
-    panel_h = strip_h + round(shot.height * scale)
-    panel = _panel(path, crop, label, accent, box_w=box_w, box_h=panel_h)
-    img.paste(panel, (MARGIN, area_top + (area_bottom - area_top - panel_h) // 2))
-    return img
-
-
-def slide_pipeline() -> Image.Image:
-    """How it reasons: the four agents."""
-    img, d = _slide()
-    d.text((MARGIN, 90), "How it works", font=font(_B, 60), fill=FG)
-    d.text((MARGIN, 176), "A deterministic parser feeds four Copilot CLI agents.", font=font(_SANS, 34), fill=MUTED)
-    steps = [
-        (
-            "1  Deterministic parser",
-            "Tableau .twb XML \u2192 a schema-validated migration spec. No LLM guesswork here.",
-            TABLEAU,
-        ),
-        ("2  Semantic-model builder", "Tables, relationships, and DAX (LOD expressions, table calculations).", GREEN),
-        ("3  Report builder", "Native Power BI pages and visuals, laid out from the Tableau worksheets.", PBI),
-        (
-            "4  Fidelity validator",
-            "Independent and read-only. Compares every figure against the Tableau original.",
-            AMBER,
-        ),
-    ]
-    y = 290
-    for head, body, accent in steps:
-        d.rounded_rectangle((MARGIN, y, W - MARGIN, y + 190), radius=18, fill=CARD, outline=LINE, width=2)
-        d.rounded_rectangle((MARGIN, y, MARGIN + 12, y + 190), radius=6, fill=accent)
-        d.text((MARGIN + 44, y + 42), head, font=font(_B, 40), fill=FG)
-        for i, line in enumerate(_wrap(d, body, font(_SANS, 30), W - 2 * MARGIN - 88)):
-            d.text((MARGIN + 44, y + 100 + i * 40), line, font=font(_SANS, 30), fill=MUTED)
-        y += 216
-    return img
-
-
-def slide_money() -> Image.Image:
-    """The differentiator: one agent caught another's bug."""
-    img, d = _slide()
-    d.text((MARGIN, 100), "One agent caught", font=font(_B, 62), fill=FG)
-    d.text((MARGIN, 176), "another agent's bug", font=font(_B, 62), fill=AMBER)
-    rows = [
-        (
-            "The validator flagged it",
-            "On one dashboard, a \u201clatest day\u201d highlight was wrong: the Tableau source "
-            "highlighted 9 of 9 cards, the Power BI render highlighted 0.",
-            AMBER,
-        ),
-        (
-            "It found the root cause",
-            "An off-by-one in a date window: the \u201clast week\u201d range excluded the "
-            "maximum date, so the highlighted day was filtered out.",
-            TABLEAU,
-        ),
-        (
-            "It routed the fix, then re-verified",
-            "The model builder corrected the calc column; the fix was checked "
-            "against ground truth and re-rendered. 9 of 9, matching Tableau.",
-            GREEN,
-        ),
-    ]
-    y = 320
-    for head, body, accent in rows:
-        d.rounded_rectangle((MARGIN, y, W - MARGIN, y + 226), radius=18, fill=CARD, outline=LINE, width=2)
-        d.rounded_rectangle((MARGIN, y, MARGIN + 12, y + 226), radius=6, fill=accent)
-        d.text((MARGIN + 44, y + 34), head, font=font(_B, 36), fill=FG)
-        for i, line in enumerate(_wrap(d, body, font(_SANS, 30), W - 2 * MARGIN - 88)):
-            d.text((MARGIN + 44, y + 92 + i * 40), line, font=font(_SANS, 30), fill=MUTED)
-        y += 250
-    d.text((MARGIN, y + 6), "That bug would have shipped silently.", font=font(_SB, 34), fill=FG)
+    """One wide dashboard per slide, floated as a rounded card with a soft shadow on a brand-tinted
+    background: the migrated Power BI result on its own slide, then the Tableau original to swipe to. A
+    compact top bar (brand eyebrow + example name on the left, product logo on the right) replaces a
+    redundant big title, since each dashboard already shows its own name."""
+    band_top = 164  # just below the title block
+    band_bottom = H - (128 if swipe_hint else 66)  # centre the card between the title and the hint / footer
+    shot = _fit_shot(path, crop, W - 32, band_bottom - band_top)  # near full-bleed width: minimal side margin
+    img = _place_card(_brand_bg(accent), shot, band_top, band_bottom)
+    d = ImageDraw.Draw(img)
+    _footer(d)
+    d.text((MARGIN, 70), label, font=font(_SB, 24), fill=accent)
+    d.text((MARGIN, 102), title, font=font(_B, 44), fill=FG)
+    if logo is not None:
+        chip = _logo_chip(logo, 56)
+        img.paste(chip, (W - MARGIN - chip.width, 90), chip)
+    if swipe_hint:
+        d.text((W // 2, H - 106), "swipe to see the original  \u2192", font=font(_SB, 27), fill=accent, anchor="mm")
     return img
 
 
 def slide_close() -> Image.Image:
-    """Close: honesty, repo, acknowledgments."""
-    img, d = _slide()
-    d.text((MARGIN, 110), "AI-assisted.", font=font(_B, 66), fill=FG)
-    d.text((MARGIN, 188), "And honest about it.", font=font(_B, 66), fill=PBI)
+    """Close: the repo and acknowledgments, on a Tableau-blue -> Power BI-gold wash."""
+    img = _add_glow(Image.new("RGB", (W, H), BG), TABLEAU, (-W * 0.45, H * 0.42, W * 0.72, H * 1.35), 0.16)
+    img = _add_glow(img, PBI, (W * 0.30, -H * 0.32, W * 1.45, H * 0.58), 0.16)
+    d = ImageDraw.Draw(img)
+    d.text((MARGIN, 118), "It's all open source.", font=font(_B, 60), fill=FG)
     for i, line in enumerate(
         _wrap(
             d,
-            "Numbers match the source exactly. Models come out Copilot and Q&A ready. Every bug and "
-            "capability gap found along the way is documented in the repo, not hidden.",
-            font(_SANS, 36),
+            "The semantic model, the report, and the migration notes for every example are in the "
+            "repo, including the bugs found and fixed along the way.",
+            font(_SANS, 32),
             W - 2 * MARGIN,
         )
     ):
-        d.text((MARGIN, 320 + i * 50), line, font=font(_SANS, 36), fill=MUTED)
-    d.rounded_rectangle((MARGIN, 560, W - MARGIN, 690), radius=18, fill=CARD, outline=LINE, width=2)
-    d.text((MARGIN + 34, 596), "Open source, 16 before/after examples", font=font(_SB, 34), fill=FG)
-    d.text(
-        (MARGIN + 34, 640), "github.com/Guust-Franssens/tableau-to-powerbi-migration", font=font(_SB, 30), fill=TABLEAU
-    )
-    d.text((MARGIN, 760), "Made possible by recent Microsoft work", font=font(_B, 34), fill=FG)
+        d.text((MARGIN, 214 + i * 44), line, font=font(_SANS, 32), fill=MUTED)
+    d.rounded_rectangle((MARGIN, 402, W - MARGIN, 512), radius=16, fill=CARD, outline=LINE, width=2)
+    d.text((MARGIN + 34, 428), "GITHUB", font=font(_SB, 22), fill=MUTED)
+    d.text((MARGIN + 34, 462), REPO_TAG, font=font(_SB, 32), fill=TABLEAU)
+    d.text((MARGIN, 616), "Made possible by recent Microsoft work", font=font(_B, 32), fill=FG)
     acks = [
-        "Rui Romano and team: the Power BI Modeling MCP, TMDL, and PBIR (authoring a model and report as code).",
-        "The Power BI Desktop Bridge team (Emily Lisa, Harleen Kaur, Sara Lammini Rodriguez): the iterative "
-        "open / refresh / screenshot loop this toolkit runs on.",
+        "Rui Romano and team, for the Power BI Modeling MCP, TMDL, and PBIR: a model and report as code.",
+        "The Power BI Desktop Bridge team (Emily Lisa, Harleen Kaur, Sara Lammini Rodriguez), for the "
+        "iterative open / refresh / screenshot loop this toolkit runs on.",
     ]
-    y = 812
+    y = 668
     for a in acks:
-        for line in _wrap(d, a, font(_SANS, 28), W - 2 * MARGIN - 24):
-            d.text((MARGIN + 24, y), line, font=font(_SANS, 28), fill=MUTED)
-            y += 38
-        y += 14
+        for line in _wrap(d, a, font(_SANS, 27), W - 2 * MARGIN - 24):
+            d.text((MARGIN + 24, y), line, font=font(_SANS, 27), fill=MUTED)
+            y += 37
+        y += 16
     return img
 
 
 PROOFS = [
     {
         "title": "The Price of Prosperity",
-        "faithful": "Global CO2, GDP, and population. Migrated end to end.",
         "powerbi": "migrations/price-of-prosperity/reference/powerbi-dashboard.png",
         "tableau": "migrations/price-of-prosperity/reference/tableau-dashboard.png",
         "powerbi_crop": None,
-        "note": "2018 world population: 7,636,740,830, the same figure as the source.",
     },
     {
         "title": "Health Tracker",
-        "faithful": "Nine KPI cards, each with a 7-day trend that highlights the latest day.",
         "powerbi": "migrations/health-tracker/reference/powerbi-health-tracker.png",
         "tableau": "migrations/health-tracker/reference/tableau-metrics.png",
-        "powerbi_crop": {"right": 0.03},
-        "note": "All nine cards highlight the latest day, every KPI to the same value.",
+        "powerbi_crop": {"left": 0.018, "right": 0.042},
     },
     {
         "title": "NL Wind Energy Utilization",
-        "faithful": "A wind fleet dashboard; Tableau's polar spiral rebuilt as DAX X/Y measures.",
         "powerbi": "migrations/wind-energy-utilization/reference/powerbi-wind-energy.png",
         "tableau": "migrations/wind-energy-utilization/reference/tableau-dashboard.png",
-        "powerbi_crop": {"right": 0.025},
-        "note": "Total actual output 453,167.284 MWh, CO2 saved 169,031.37 t.",
+        "powerbi_crop": {"left": 0.095, "right": 0.125},
     },
 ]
 
 
-def _compare_slides() -> list[Image.Image]:
-    """The examples in compare layout (Power BI + Tableau on one slide each)."""
-    return [slide_pair(p["title"], p["faithful"], p, p["note"]) for p in PROOFS]
-
-
-def _reveal_slides() -> list[Image.Image]:
-    """The examples in reveal layout (full Power BI slide, then full Tableau slide)."""
+def _example_slides() -> list[Image.Image]:
+    """The examples: for each proof, a full Power BI slide (with the swipe hint), then the full Tableau
+    original to swipe to."""
     out: list[Image.Image] = []
     for p in PROOFS:
         out.append(
             slide_single(
                 p["title"],
-                p["note"],
                 REPO_ROOT / p["powerbi"],
                 p["powerbi_crop"],
-                label="AFTER  \u00b7  Power BI (migrated)",
+                label="AFTER  \u00b7  MIGRATED",
                 accent=PBI,
+                swipe_hint=True,
+                logo=LOGO_PBI,
             )
         )
         out.append(
             slide_single(
                 p["title"],
-                "the original this was migrated from",
                 REPO_ROOT / p["tableau"],
                 None,
-                label="BEFORE  \u00b7  Tableau (source)",
+                label="BEFORE  \u00b7  ORIGINAL",
                 accent=TABLEAU,
+                logo=LOGO_TABLEAU,
             )
         )
     return out
 
 
-def build(output: Path, *, layout: str = "compare", shape: str | None = None, cover: bool = False) -> None:
-    """Render the deck for `layout` ('compare' = both panels per slide, 'reveal' = full Power BI slide
-    then full Tableau slide) and save a swipeable multi-page PDF + per-slide PNGs. `shape` overrides the
-    canvas (square / portrait); by default reveal is square and compare is portrait. The deck opens on
-    the first example (the post caption is the intro); pass cover=True to prepend a title slide."""
-    _set_canvas(shape or ("square" if layout == "reveal" else "portrait"))
+def build(output: Path, *, cover: bool = False) -> None:
+    """Render the square swipeable carousel and save a multi-page PDF + per-slide PNGs. Each proof is a
+    Power BI slide followed by its Tableau original (swipe to reveal); a close slide carries the repo
+    link and acknowledgments. The deck opens on the first example (the post caption is the intro); pass
+    cover=True to prepend a title slide."""
     slides = [slide_cover()] if cover else []
-    slides += _reveal_slides() if layout == "reveal" else _compare_slides()
-    if H >= 1350:  # portrait has the vertical room for the context slides
-        slides += [slide_pipeline(), slide_money()]
+    slides += _example_slides()
     slides.append(slide_close())
     output.parent.mkdir(parents=True, exist_ok=True)
-    png_dir = output.parent / f"slides-{layout}"
+    png_dir = output.parent / "slides"
     png_dir.mkdir(parents=True, exist_ok=True)
     for old in png_dir.glob("slide-*.png"):
         old.unlink()
@@ -384,31 +333,19 @@ def build(output: Path, *, layout: str = "compare", shape: str | None = None, co
 
 
 def main() -> None:
-    """CLI entry point. By default builds BOTH layout variants so they can be compared side by side."""
+    """CLI entry point: build the square swipeable LinkedIn carousel."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--out-dir", type=Path, default=REPO_ROOT / "docs" / "showcase" / "carousel", help="output directory"
-    )
-    parser.add_argument(
-        "--layout",
-        choices=["compare", "reveal", "both"],
-        default="both",
-        help="compare (both panels per slide), reveal (full Power BI then full Tableau), or both",
-    )
-    parser.add_argument(
-        "--shape",
-        choices=["auto", "square", "portrait"],
-        default="auto",
-        help="canvas shape (default auto: reveal=square, compare=portrait)",
+        "--output",
+        type=Path,
+        default=REPO_ROOT / "docs" / "showcase" / "carousel" / "linkedin-carousel.pdf",
+        help="output PDF path",
     )
     parser.add_argument(
         "--cover", action="store_true", help="prepend a title slide (default: open on the first example)"
     )
     args = parser.parse_args()
-    shape = None if args.shape == "auto" else args.shape
-    layouts = ["compare", "reveal"] if args.layout == "both" else [args.layout]
-    for layout in layouts:
-        build(args.out_dir / f"linkedin-carousel-{layout}.pdf", layout=layout, shape=shape, cover=args.cover)
+    build(args.output, cover=args.cover)
 
 
 if __name__ == "__main__":
