@@ -1,15 +1,17 @@
-# Sources & attribution
+# Migrations — sources & attribution
 
-Every migration in this repo starts from a **public [Tableau Public](https://public.tableau.com) workbook
-built by its original author**. This table is the provenance record: it links each migration folder
-(`migrations/<slug>/`) back to the exact dashboard it was migrated from.
+This folder holds one subfolder per migration (`migrations/<slug>/`). Each contains the parsed
+`migration-spec.json`, the generated Fabric Power BI project (`fabric/<Name>.SemanticModel` +
+`fabric/<Name>.Report` PBIP), and reference **screenshots** under `reference/`. The table below is the
+provenance record: it links each folder back to the exact **public [Tableau Public](https://public.tableau.com)
+dashboard**, built by its original author, that it was migrated from.
 
 **What is and isn't committed.** This repo does **not** redistribute the source `.twb` / `.twbx` files or
 their extracted data (they are gitignored). To reproduce a migration, download the workbook from its
 Tableau Public link below and re-run `scripts/parse_tableau.py`. What *is* committed is the generated
 Power BI output (the `fabric/` PBIP project) plus reference **screenshots** of the original dashboard,
-which are what the [before/after showcase](README.md) is built from. Credit for the original dashboards
-belongs to their respective Tableau Public authors; follow each link for attribution.
+which are what the [before/after showcase](../docs/showcase/README.md) is built from. Credit for the
+original dashboards belongs to their respective Tableau Public authors; follow each link for attribution.
 
 | # | Migration (`migrations/<slug>/`) | Original Tableau Public dashboard |
 |---:|---|---|
@@ -31,4 +33,4 @@ belongs to their respective Tableau Public authors; follow each link for attribu
 | 16 | wind-energy-utilization | https://public.tableau.com/views/WindEnergyUtilizationDashboard/WindEnergyOverview |
 
 > Screenshots are committed under `migrations/<slug>/reference/` (`tableau-*` = source reference,
-> `powerbi-*` = the Power BI Desktop render). The [showcase](README.md) features the render-verified pairs.
+> `powerbi-*` = the Power BI Desktop render). The [showcase](../docs/showcase/README.md) features the render-verified pairs.

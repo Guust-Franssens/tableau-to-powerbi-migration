@@ -62,7 +62,7 @@ a migration, download the workbook from its Tableau Public link and re-run `scri
 which are what the before/after showcase is built from.
 
 The Tableau Public source URL for all 16 workbooks is listed in
-**[`docs/showcase/reference-inventory.md`](docs/showcase/reference-inventory.md)**, and every
+**[`migrations/README.md`](migrations/README.md)**, and every
 [showcase](docs/showcase/README.md) entry links back to the dashboard it was migrated from. Credit for the
 original dashboards belongs to their respective Tableau Public authors.
 
