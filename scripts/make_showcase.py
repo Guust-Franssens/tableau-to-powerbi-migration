@@ -257,6 +257,8 @@ def _render_entry(entry: dict[str, Any], assets_dir: Path, layout: str, order: s
     suffix = "-stacked" if layout == "stacked" else ""
     suffix += "-afterbefore" if order == "after-before" else ""
     lines = [f"### {entry['title']}", "", entry.get("caption", ""), ""]
+    if entry.get("source_url"):
+        lines += [f"**Source:** [original Tableau Public dashboard \u2197]({entry['source_url']})", ""]
     for i, page in enumerate(entry["pages"], 1):
         tableau = REPO_ROOT / page["tableau"]
         pbi = page.get("powerbi")
@@ -316,6 +318,12 @@ def main() -> None:
             "to lead with the Power BI result."
         )
     md = [title, "", lead, "", hint, ""]
+    md += [
+        "Every example is a public Tableau Public workbook by its original author; each entry links back to "
+        "the source it was migrated from. Full provenance for all 16 migrations is in "
+        "[`reference-inventory.md`](reference-inventory.md).",
+        "",
+    ]
     for entry in config["workbooks"]:
         md += _render_entry(entry, assets_dir, args.layout, args.order)
     if args.layout == "side-by-side" and not after_before:

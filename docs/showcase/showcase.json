@@ -4,6 +4,7 @@
       "slug": "price-of-prosperity",
       "title": "The Price of Prosperity",
       "caption": "Global CO2 emissions, GDP, and population trends. Produced end to end by the tableau-migrator orchestrator (a dogfood run) and signed off by the fidelity validator: a continent-colored world choropleth, a GDP-vs-CO2 region scatter, six per-continent small multiples, and sidebar trend sparklines. Numeric fidelity confirmed exact.",
+      "source_url": "https://public.tableau.com/views/ThePriceofProsperity-C02emissionsGDPandPopulationtrendsGlobally/PriceofProsperity",
       "pages": [
         {
           "name": "Price of Prosperity",
@@ -17,6 +18,7 @@
       "slug": "health-tracker",
       "title": "Health Tracker",
       "caption": "Personal health metrics dashboard. Nine KPI cards each pair a today value and week-over-week delta with a 7-day trend bar chart that highlights the latest day, at exact numeric fidelity across every metric (blood pressure, heart rate, BMI, calories burned/intake, steps, water, sleep, mood). The Tableau date-period switcher (Last Week / Month / Year) migrates to Power BI button navigation. The latest-day bar highlight surfaced a real off-by-one in the date-window calc that the fidelity validator caught and the model builder fixed.",
+      "source_url": "https://public.tableau.com/views/HealthTracker_17222296039800/HealthTrackerMetrics",
       "pages": [
         {
           "name": "Track Metrics",
@@ -32,6 +34,7 @@
       "slug": "wind-energy-utilization",
       "title": "NL Wind Energy Utilization",
       "caption": "Netherlands wind-fleet performance dashboard (30 turbines, 2024 daily output). A star schema drives ranked turbine tables with data bars, an azureMap turbine-bubble layer over the Netherlands, a weekday-by-month output heatmap, TopN highest/lowest performer tables, and a wind-speed-vs-power scatter. Tableau's polar performance spiral is reproduced as DAX-computed X/Y measures. Numeric fidelity confirmed exact (total actual output 453,167.284 MWh, CO2 saved 169,031.370 t).",
+      "source_url": "https://public.tableau.com/views/WindEnergyUtilizationDashboard/WindEnergyOverview",
       "pages": [
         {
           "name": "Fleet Performance",
@@ -47,6 +50,7 @@
       "slug": "shipping-kpis",
       "title": "Shipping KPIs",
       "caption": "Logistics profitability & delay KPIs. GOOD/OK/BAD conditional coloring on scatter points and table rows; per-shipment profit-ratio FIXED LOD; faithful preservation of the source's Expected-minus-Actual delay quirk. Live Power BI Desktop render with data.",
+      "source_url": "https://public.tableau.com/views/ShippingIndustryExample_10_0/ProfitabilityKPI",
       "pages": [
         {
           "name": "Profitability KPI",
@@ -72,6 +76,7 @@
       "slug": "telecommunications-analytics",
       "title": "Telecommunications Analytics",
       "caption": "Radio-tower network dashboard. Tableau's MAKELINE link-lines between towers have no native Power BI equivalent, so they render as an azureMap point layer (a documented capability gap); the per-region stacked capacity bars and the link-detail table migrate faithfully.",
+      "source_url": "https://public.tableau.com/views/Telecommunications_2/Dashboard",
       "pages": [
         {
           "name": "Radio Towers Dashboard",
@@ -88,6 +93,7 @@
       "slug": "sales-commission-model",
       "title": "Sales Commission Model",
       "caption": "Interactive what-if commission calculator. Three What-If parameters (New Quota / Commission Rate / Base Salary) drive a dual-panel Sales-vs-Compensation bar chart with 4-bucket quota-attainment conditional coloring.",
+      "source_url": "https://public.tableau.com/views/SalesCommissionModel_10_0/CommissionModel",
       "pages": [
         {
           "name": "Commission Model",
@@ -104,6 +110,7 @@
       "slug": "tale-of-100-entrepreneurs",
       "title": "Tale of 100 Entrepreneurs",
       "caption": "Company revenue-growth analysis. Exercised the pipeline's first real Tableau table calculations (LOOKUP first/last, running INDEX) translated to verified DAX.",
+      "source_url": "https://public.tableau.com/views/Tale-of-100-Entrepreneurs_10_0_0/Taleof100Entrepreneurs",
       "pages": [
         {
           "name": "Tale of 100 Entrepreneurs",
@@ -119,6 +126,7 @@
       "slug": "superstore-sales-performance",
       "title": "Superstore Sales Performance",
       "caption": "Three-dashboard analytics suite (Ryan Sleeper's Super Sample Superstore). Field Parameters for parameter-driven measure/dimension switching, current/prior-period comparison, azureMap region small-multiples, and region-comparison plots. (Basemap styling and KPI-card encodings are being re-rendered for higher fidelity.)",
+      "source_url": "https://public.tableau.com/views/VGContest_SuperSampleSuperstore_RyanSleeper/SuperAnnotations",
       "pages": [
         {
           "name": "Prescriptive",
@@ -142,6 +150,7 @@
       "slug": "airline-alliance-activity",
       "title": "Airline Alliance Activity",
       "caption": "Largest workbook (91 worksheets, 4 pages, 108 measures). A CY/PY navigation app with an azureMap origin-destination map (the MAKELINE great-circle arc has no native PBI equivalent, so destination bubbles are used). Surfaced a systematic DAX bug: 58 comparison measures used the illegal compact filter `'Table'[Col]=[Measure]`, fixed by hoisting to VARs.",
+      "source_url": "https://public.tableau.com/views/AirlineAllianceActivityDashboard/AirlinesPage",
       "pages": [
         {
           "name": "Alliance Overview",
