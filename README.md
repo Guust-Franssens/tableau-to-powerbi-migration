@@ -53,6 +53,19 @@ different workbooks, with the bugs found along the way documented honestly.
 
 **[See the full migration showcase →](docs/showcase/README.md)** for every before/after pair, each captioned with what translated faithfully and what needed a workaround.
 
+## 🔗 Sources & attribution
+
+Every example is a **public Tableau Public workbook built by its original author**. This repo does **not**
+redistribute the source `.twb` / `.twbx` files or their extracted data (they are gitignored): to reproduce
+a migration, download the workbook from its Tableau Public link and re-run `scripts/parse_tableau.py`. What
+*is* committed is the generated Power BI output plus reference **screenshots** of the original dashboard,
+which are what the before/after showcase is built from.
+
+The Tableau Public source URL for all 16 workbooks is listed in
+**[`docs/showcase/reference-inventory.md`](docs/showcase/reference-inventory.md)**, and every
+[showcase](docs/showcase/README.md) entry links back to the dashboard it was migrated from. Credit for the
+original dashboards belongs to their respective Tableau Public authors.
+
 ## 🧰 What's in the repo
 
 - **Deterministic Tableau parser + spec schema** (`scripts/parse_tableau.py`): extracts every data
