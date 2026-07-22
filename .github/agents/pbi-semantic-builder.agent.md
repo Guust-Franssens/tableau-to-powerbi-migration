@@ -98,11 +98,23 @@ model-builder owning its own layer, so no other agent edits these TMDL files.
   Skip high-cardinality keys / free-text (describe those by role).
 - ✅ **Synonyms** where the display name isn't natural language (Tableau captions like `Cdd 0 1`, `RPK`
   → `cooling degree days`, `revenue passenger kilometers`) via the model's culture linguistic schema.
-- ⏸️ **Defer (not reliably committable today, per research):** the service "AI data schema" and "AI
-  instructions" live in **LSDL** with no stable file-authoring contract yet; **verified answers** are
-  explicitly **not Git-supported** and require report visuals; "Approved for Copilot" + indexing are
-  tenant/runtime settings. Note these as post-deploy service steps in `limitations_encountered`, don't
-  fake them in files.
+- ✅ **Model-level AI instructions (MANDATORY — a migrated model is not done without them).** Free-form
+  markdown that Copilot / Fabric data agents read before querying. Per
+  [Microsoft Learn](https://learn.microsoft.com/en-us/fabric/data-science/semantic-model-best-practices),
+  the DAX-generation tool relies **solely on model metadata + Prep-for-AI** and **ignores** any
+  data-agent-level notes, so `CustomInstructions` is the *only* free-text lever that reaches it — every
+  model MUST ship them. **This IS file-committable** (ground-truthed 2026-07, and verified round-trip via
+  the remote Power BI MCP `GetSemanticModelSchema` after publish): it lives in the culture object as
+  `cultureInfo <lcid>` → `linguisticMetadata` JSON → top-level **`CustomInstructions`** key (sibling of
+  `Entities`/`Agents`), and TOM deserializes it cleanly (compatibilityLevel 1702). It is NOT reachable
+  through the MCP culture Update surface (name/annotations/extendedProperties only), so edit the TMDL
+  directly via the script — which also avoids an XMLA refresh. **How to author + stamp: see step 6 below
+  and [`docs/ai-instructions-authoring-guide.md`](../../docs/ai-instructions-authoring-guide.md).**
+- ⏸️ **Defer (not reliably committable today, per research):** the service "AI data schema" lives in
+  **LSDL** with no stable file-authoring contract yet; **verified answers** are explicitly **not
+  Git-supported** and require report visuals; "Approved for Copilot" + indexing are tenant/runtime
+  settings. Note these as post-deploy service steps in `limitations_encountered`, don't fake them in
+  files.
 
 **Mechanism — use the Power BI Modeling MCP (validated), not regex-editing of `///`:**
 
@@ -121,6 +133,35 @@ model-builder owning its own layer, so no other agent edits these TMDL files.
    preserved) — expect a one-time reformat diff; that's fine.
 5. Verify with `python scripts/check_ai_readiness.py migrations/<slug>` — ~100% description coverage,
    no categorical column missing its domain values — before reporting done.
+6. **Model-level AI instructions (MANDATORY, file-committable, validated). HOW:**
+   a. **Author** `migrations/<slug>/ai-instructions.md`. It is a *writing* task, not engineering — do
+      NOT mass-generate it; ground every line in the real model (read the TMDL, the extracted CSV, the
+      ground-truth totals). Keep it high-signal (aim ~1–3 KB; the 10,000-char cap is a ceiling, not a
+      target — beware "context rot"). **Say nothing the schema already shows** (no column/type
+      catalogs). Use short sections:
+      - `# <Model>` + one-line purpose and grain.
+      - **Grain and tables** — fact grain; and flag every disconnected / parameter-proxy table a
+        migration produces as "not a dimension, not a calendar".
+      - **Business terminology and defaults** (the core value): map fuzzy terms to a specific measure
+        ("'sales' = `[Net Sales]`"), state the default table/filter/period, and clarification triggers.
+      - **Measure-naming conventions** — explain PATTERNS the migration introduced (e.g. `CM`=current
+        month, `T `=turbine-filtered), don't enumerate every measure.
+      - **For Copilot (style + visuals)** — concise answers (lead with the number), preferred/avoided
+        charts (part-to-whole = bar, not pie).
+      - **Things to avoid** — prefer explicit measures over implicit `SUM`/`AVERAGE` of raw columns
+        (that's where migrated DAX lives); don't re-aggregate `Latest*`/`CM*` snapshots; "latest" = max
+        date, not today; IronViz geometry measures are helpers, not metrics.
+      See [`docs/ai-instructions-authoring-guide.md`](../../docs/ai-instructions-authoring-guide.md) for
+      the full recipe, MS Learn/Anthropic grounding, and worked instruction patterns.
+   b. **Stamp** it: `python scripts/set_ai_instructions.py --model migrations/<slug>/fabric/<Name>.SemanticModel`.
+      The script creates the `cultureInfo` + `ref cultureInfo` if the model has none, injects/normalizes
+      the `CustomInstructions` key (single-line canonical form), **sets `settings.qnaEnabled = true` in
+      `definition.pbism`** (CRUCIAL — migrated models default to `false`, which makes Q&A/Copilot silently
+      ignore the instructions), round-trip-guards the JSON, and prints advisory quality warnings
+      (context-rot length, missing headings/field-refs/avoid-section, qnaEnabled not true).
+   c. **Verify**: `python scripts/set_ai_instructions.py --check` shows the model OK with no `[!]`
+      warnings, and an offline `tmdl_validate` deserialize still passes. (Post-publish, the remote MCP
+      `GetSemanticModelSchema` returns this text to Copilot/data agents — proven.)
 
 ## Gotchas
 
@@ -338,3 +379,8 @@ throwing an error" is necessary but not sufficient:
    display name isn't natural language (see "Prep the model for AI" above). `python
    scripts/check_ai_readiness.py migrations/<slug>` reports ~100% description coverage with no
    categorical column missing its domain values.
+9. **Model-level AI instructions are stamped (MANDATORY — not optional).** A grounded, high-signal
+   `migrations/<slug>/ai-instructions.md` exists and has been written into the culture
+   `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
+   model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
+   deserialize. A migrated model without AI instructions is not done.

@@ -12,3 +12,5 @@ annotation __PBI_TimeIntelligenceEnabled = 0
 
 ref table 'Health Data'
 ref table 'Date Period'
+
+ref cultureInfo en-US
