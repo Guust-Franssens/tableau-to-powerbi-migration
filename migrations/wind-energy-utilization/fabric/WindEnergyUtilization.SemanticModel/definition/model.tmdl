@@ -23,3 +23,4 @@ ref table 'Region Parameter'
 ref table 'Turbine Id Parameter'
 ref table 'Upd Turbine Name Parameter'
 
+ref cultureInfo en-US
