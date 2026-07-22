@@ -156,6 +156,20 @@ enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run
 
 ## Quickstart
 
+**Clone.** The 16 worked examples under `migrations/` are ~91% of the repo's files. If you're mainly
+here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
+the example blobs:
+
+```bash
+git clone --filter=blob:none --sparse https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
+cd tableau-to-powerbi-migration
+git sparse-checkout set .github .vscode docs scripts tests
+# want one example to look at? pull just that folder:
+git sparse-checkout add migrations/health-tracker
+```
+
+For the full repo (all examples + showcase), use a normal `git clone …`. Then set up the Python env:
+
 ```powershell
 uv venv
 .venv\Scripts\Activate.ps1
