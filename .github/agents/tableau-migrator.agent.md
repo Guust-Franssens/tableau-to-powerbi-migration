@@ -70,37 +70,56 @@ it must show up in `limitations_encountered`, not be silently dropped.
    (unresolved shelf references, narrow parser gaps like ad-hoc worksheet-scoped calculations or
    Tableau Groups — see `docs/tableau-dax-translation-guide.md` §6). Don't proceed silently past
    high-severity items without flagging them.
-4. **Delegate to `pbi-semantic-builder`** with: the path to `migration-spec.json`, the target Fabric
+4. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
+   `python scripts/preflight_source_credentials.py --spec migrations/<name>/migration-spec.json`. If it
+   reports **only** extract/flat sources, there is no credential gate (data comes from CSV + a
+   `DataFolder`); proceed. If it flags any **live database** source (`needs-credential`), STOP and tell
+   the user up front: Power BI needs a credential for that source (name the host/database), which is
+   **not in the model files** and which **you cannot supply** — it is cached per-machine in Desktop
+   (a modal Sign-in/PAT prompt the Desktop Bridge cannot fill) and stored server-side in the service.
+   The migration can be *built*, but it cannot *refresh or be validated against data* until the user
+   configures the credential. See `docs/data-source-credentials.md` for the exact local (Desktop) and
+   cloud (service `ModelRefreshFailed_CredentialsNotSpecified`) gates and remediation. Get the user's
+   acknowledgement (and, if publishing, their plan to enter creds) before delegating the build. For the
+   local Desktop loop you can check whether a credential is already cached (so you only prompt when
+   needed) with `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` (`CREDENTIAL_PRESENT` vs
+   `CREDENTIAL_MISSING`), then confirm data actually flows with `python scripts/probe_desktop_query.py
+   --pid <pid>` (a 1-row DAX probe against the Desktop local Analysis Services -> `PREFLIGHT: DATA_OK`).
+   **The 1-row data probe is the gate of record** — trust it over the modal probe, which can return a
+   false `CREDENTIAL_PRESENT` for a *serverless* source that cold-starts and shows the sign-in modal only
+   after the probe's timeout (confirmed 2026-07). It proves credentials + source reachability + valid M
+   in one shot, entirely locally (no publish needed).
+5. **Delegate to `pbi-semantic-builder`** with: the path to `migration-spec.json`, the target Fabric
    workspace/workspace-to-be, and any user preference on extract data materialization. Wait for it to
    report back the semantic model location and any new limitations it appended.
-5. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json` and the semantic model
-   location from step 4. Wait for it to report back the report location and any new limitations.
-6. **Delegate to `pbi-migration-validator`** with: `migration-spec.json`, Tableau reference screenshots
+6. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json` and the semantic model
+   location from step 5. Wait for it to report back the report location and any new limitations.
+7. **Delegate to `pbi-migration-validator`** with: `migration-spec.json`, Tableau reference screenshots
    (capture them first via Playwright if none exist yet — see that agent's Gotchas for the proven
    technique), and the deployed model/report locations. Use **spot-check mode** for a single
    page/visual you're actively iterating on, and **full-migration sign-off mode** (optionally
-   multi-model) as the final gate before step 7. This is not optional or "nice to have" — it's the
+   multi-model) as the final gate before sign-off (step 9). This is not optional or "nice to have" — it's the
    step that actually closes the loop between "the subagents reported success" and "it's verifiably
    faithful to the source."
-7. **Route every discrepancy the validator reports back to its owning subagent** — numeric/DAX issues
+8. **Route every discrepancy the validator reports back to its owning subagent** — numeric/DAX issues
    to `pbi-semantic-builder`, visual/layout issues to `pbi-report-builder`, genuine capability gaps to
    `limitations_encountered` (not a fix request to anyone). **Never fix a validator finding yourself**
    — same rule as the ad hoc-edit Gotcha below, now applying to the validator's output too. Re-run the
    validator (spot-check mode is enough) after each fix round; cap at 2-3 rounds per its own Gotchas —
    anything still open after that is logged as an accepted limitation, not endlessly re-litigated.
-8. **Validate before declaring done.** Structural/mechanical validation is part of the default flow,
+9. **Validate before declaring done.** Structural/mechanical validation is part of the default flow,
    not a phase-2 nice-to-have — confirm both build subagents ran their own "Mandatory validation"
    steps (see each subagent's own agent file) *and* that `pbi-migration-validator` has run a full
    sign-off pass with no open high-severity discrepancies, before you summarize anything to the user.
    "The parser ran and the subagents reported success" is not the same thing as "it was validated" —
    don't let it substitute for an actual validation pass.
-9. **Summarize the migration** for the user: what was built (tables/measures/pages/visuals counts),
-   what was *simplified* rather than transliterated (parameter-equality filters → slicers, pivot
-   string-parsing → Power Query unpivot — these are positive findings, present them as such), what the
-   validator's sign-off pass found and how it was resolved, and the final consolidated
-   `limitations_encountered` as a "what needs your review" list. This is the answer to "what are the
-   limitations of AI-assisted migration" — be concrete and honest, not hand-wavy.
-10. **(Phase 2 / on request)** Delegate to `pbi-deployer` to publish to a Fabric workspace and run
+10. **Summarize the migration** for the user: what was built (tables/measures/pages/visuals counts),
+    what was *simplified* rather than transliterated (parameter-equality filters → slicers, pivot
+    string-parsing → Power Query unpivot — these are positive findings, present them as such), what the
+    validator's sign-off pass found and how it was resolved, and the final consolidated
+    `limitations_encountered` as a "what needs your review" list. This is the answer to "what are the
+    limitations of AI-assisted migration" — be concrete and honest, not hand-wavy.
+11. **(Phase 2 / on request)** Delegate to `pbi-deployer` to publish to a Fabric workspace and run
     validation. Not part of the default flow until that agent exists.
 
 ## Delegating to subagents
