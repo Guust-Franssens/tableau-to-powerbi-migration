@@ -4,6 +4,8 @@
 
 ### AI-assisted migration of Tableau workbooks to Microsoft Fabric Power BI, built as GitHub Copilot CLI agents
 
+> **Unofficial project disclaimer.** This repository is an unofficial personal/community project. It is not an official Microsoft, Microsoft Fabric, Power BI, GitHub, GitHub Copilot, or Tableau product, and it is not sponsored, endorsed, or maintained by those organizations. Contributor activity here is in a personal capacity and does not imply employer representation or endorsement.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-A31F34.svg)](LICENSE)
 &nbsp;![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 &nbsp;![Power BI](https://img.shields.io/badge/Power_BI-F2C811?logo=powerbi&logoColor=black)
