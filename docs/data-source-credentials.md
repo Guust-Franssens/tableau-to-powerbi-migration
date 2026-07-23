@@ -70,7 +70,12 @@ agent-driven opens/reloads then refresh without prompting.
 
 **Detecting present vs missing (so the agent only prompts when needed).** The credential is cached
 per-Windows-user (DPAPI), so it persists across Desktop restarts and even across different `.pbip`
-files that hit the same host.
+files — **but it is keyed by the full data-source path (host *and* `httpPath`/warehouse), not the host
+alone.** Verified 2026-07 first-hand: re-pointing the same model from one Databricks warehouse to a
+freshly-created warehouse on the *same host* re-triggered the sign-in modal, because the new
+`…/warehouses/<id>` path had no cached credential. So a prior sign-in only counts as "present" when the
+host **and** warehouse/`httpPath` match; changing the warehouse opens a new local credential gate even
+on an already-authenticated host.
 
 **The one-row data probe is the AUTHORITATIVE local gate; the modal probe is a secondary signal.**
 Verified 2026-07 (agent-run): against a *serverless* warehouse that cold-starts, the modal-watch
@@ -158,7 +163,9 @@ The parser records `data_sources[].connection.{class,mode,server}` in `migration
 3. **Local:** build the model, then ask the user to open the `.pbip` in Desktop and authenticate the
    source once (the modal above). Use `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` to check
    whether a credential is already cached (`CREDENTIAL_PRESENT`) before prompting — the cache is
-   machine-wide, so a prior sign-in to the same host counts. Only prompt on `CREDENTIAL_MISSING`. Then
+   machine-wide but keyed by host **+ warehouse/`httpPath`**, so a prior sign-in to the *same host and
+   warehouse* counts (a different warehouse on the same host does not). Only prompt on
+   `CREDENTIAL_MISSING`. Then
    confirm data actually flows with `scripts/probe_desktop_query.py --pid <pid>` (one-row DAX probe
    against the Desktop local AS -> `PREFLIGHT: DATA_OK`). This one-row query is the definitive local
    gate: it proves creds + reachability + valid M together, without publishing anything.
