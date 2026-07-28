@@ -5,14 +5,49 @@ repository. It has two jobs: (1) tell you (or a fresh contributor) exactly which
 MCP servers** this toolkit needs so the repo is self-configuring, and (2) hold the **conventions every
 agent inherits**, so the individual `.github/agents/*.agent.md` files stay lean and don't restate them.
 
+> **VS Code users:** VS Code Copilot auto-loads `.github/copilot-instructions.md`, *not* this file.
+> That pointer file duplicates only the session-start step below and defers everything else here, so
+> the two cannot drift.
+
+---
+
+## Session start, do this first (before any other work)
+
+```
+powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update
+```
+
+`-Update` repairs the npm bridge CLIs **only when they are below the correctness floor** — it is a
+floor check, not a blind `@latest`, so at or above the floor it costs nothing.
+
+**Why a floor:** `powerbi-report-author` **>= 0.1.4** is a *correctness* floor. Older builds returned
+`errorCount: 0` for PBIR that Power BI Desktop cannot open (e.g. a `report.json` missing the
+schema-required `reportVersionAtImport`) — a stale CLI silently green-lights a broken report.
+
+**Above the known-good matrix is a WARN, not an error.** It means the version-specific Gotchas in
+`.github/agents/` were verified against an older build and may be stale — re-verify the prose; never
+"fix" it by downgrading.
+
+**The timing rule is what makes this safe:**
+
+| When | Run | Why |
+|---|---|---|
+| Session start (nothing in flight) | `preflight.ps1 -Update` | Safe; the CLI floor is a correctness floor |
+| Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without swapping tooling mid-flow |
+| Mid-migration | **never** | Swapping the validator under a half-built report is worse than a slightly old one |
+
+It cannot update the **skill bundles**: `copilot plugin update` hits a file lock while any Copilot
+session is running, so plugin updates remain a manual, between-sessions step.
+
 ---
 
 ## Required Copilot setup (self-configuring dependencies)
 
 This toolkit is not self-contained: its agents build on Microsoft's official **Fabric / Power BI
 skills** (published as a Copilot *plugin*) and talk to Power BI through **MCP servers**. A clone needs
-all three layers below. The agent files under `.github/agents/` and the repo-local skills under
-`.github/skills/` are already committed and load automatically.
+all three layers below. The agent files under `.github/agents/` are already committed and load
+automatically; `.github/skills/` is an enabled skill location (see `.vscode/settings.json`) that is
+currently empty — repo-local skills dropped there load automatically too.
 
 ### 1. Skill plugin — `powerbi-authoring@fabric-collection`
 
@@ -63,16 +98,50 @@ Copilot CLI users register the same servers with `/mcp`, or copy them into
   `.vscode/settings.json`).
 - **Visual cookbook: [`.github/pbi.kb/visual-cookbook.md`](.github/pbi.kb/visual-cookbook.md) +
   [`.github/pbi.kb/visuals/`](.github/pbi.kb/visuals/)** — a committed library of worked,
-  `validate`-passing PBIR `visual.json` encodings (one per visual type/idiom), each with roles, the
-  Tableau idiom it maps to, and a confidence tier. `pbi-report-builder` copies these instead of
-  guessing visual JSON; new ground-truth encodings are added back here so every migration compounds.
+  `validate`-passing PBIR `visual.json` encodings, each with roles, the Tableau idiom it maps to, and a
+  confidence tier. **Coverage note:** the `visuals/` folder holds the *harder/rarer* encodings (combo,
+  waterfall, ribbon, treemap, small multiples, azureMap, shape…); the common core types
+  (`columnChart`/`barChart`/`lineChart`/`cardVisual`/`tableEx`/`slicer`/`textbox`) are proven **in situ**
+  and are copied from the migration paths cited in the cookbook's 🟢 table, not from a local file.
+  `pbi-report-builder` copies these instead of guessing visual JSON; new ground-truth encodings are
+  added back here so every migration compounds.
 
-### 4. Python tooling
+### 4. Node.js + the Power BI CLIs
 
-`uv venv && uv sync` — the deterministic parser (`scripts/parse_tableau.py`), harvester, showcase, and
-validation scripts. Lint/format with `ruff`; the parser has a `pytest` regression suite in `tests/`.
+Two npm CLIs do real work in the loop and are **not** bundled with the plugin — install them globally
+(needs **Node >= 20**):
 
-### 5. Preflight — verify everything above in one command
+```
+npm install -g @microsoft/powerbi-report-authoring-cli @microsoft/powerbi-desktop-bridge-cli
+```
+
+- `powerbi-report-author` — `validate`, `catalog`, `formatting`, `expr`, `theme`, plus
+  `preview-visuals` / `preview-pages` / `preview-filters` / `preview-themes` and `doctor`.
+- `powerbi-desktop` — the Desktop Bridge: `status`, `manifest`, `open`, `reload`, `screenshot`,
+  `screenshot-all`.
+
+**Known-good version matrix** (verified 2026-07-27). These are *unpinned global* installs, so they can
+change under you with no repo diff — and several agent Gotchas encode version-specific tool behaviour.
+`scripts/preflight.ps1` prints the installed versions and WARNs on drift:
+
+| Component | Known-good |
+|---|---|
+| `@microsoft/powerbi-report-authoring-cli` | 0.1.4 |
+| `@microsoft/powerbi-desktop-bridge-cli` | 0.1.2 |
+| `powerbi-authoring@fabric-collection` | 0.3.9 |
+| Node.js | >= 20 (26.2.0 tested) |
+| Python | >= 3.11 (3.11.9 tested) |
+
+If a version differs, re-verify the version-specific Gotchas in `.github/agents/` before trusting them.
+
+### 5. Python tooling
+
+`uv venv && uv sync --all-extras` — the deterministic parser (`scripts/parse_tableau.py`), harvester,
+showcase, and validation scripts (`--all-extras` pulls `tableauhyperapi`/`playwright`/`pillow`, which
+several documented scripts import). Lint/format with `ruff`; the parser has a `pytest` regression suite
+in `tests/`. **`uv.lock` is deliberately gitignored** — see the note in `.gitignore`.
+
+### 6. Preflight — verify everything above in one command
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
@@ -81,7 +150,8 @@ powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
 The `tableau-migrator` agent runs this first on every invocation. It is a PowerShell bootstrap (not
 Python) so it works even before Python is installed — checking FOR Python is one of its jobs. It checks
 the parser deps, the `powerbi-authoring` plugin, the MCP servers, Power BI Desktop + Bridge CLI, `npx`,
-and the TOM DLL, printing an install hint for anything missing (exit 0 = ready). Run it yourself after
+the .NET SDK, and the CLI version matrix (plus `powerbi-report-author doctor`), printing an install hint
+for anything missing (exit 0 = ready). Run it yourself after
 cloning to confirm the machine is configured.
 
 ---
