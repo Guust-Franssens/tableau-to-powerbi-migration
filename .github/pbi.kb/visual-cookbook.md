@@ -46,7 +46,7 @@ current instead of freezing. See `.github/agents/pbi-report-builder.agent.md` ("
 ## The CLI is the research tool (deterministic, no guessing)
 
 ```
-powerbi-report-author catalog list                      # all 58 built-in types + deprecations
+powerbi-report-author catalog list                      # all built-in types + deprecations (57 on CLI 0.1.4)
 powerbi-report-author catalog describe <type>           # field-well roles, required/optional, formatting objects
 powerbi-report-author formatting effective-properties <type>   # every formatting surface for the type
 powerbi-report-author formatting describe-object <type> <object>
@@ -55,11 +55,40 @@ powerbi-report-author validate <path-to-.Report-dir>    # structural validation 
 
 Deprecated (do not emit): `filledMap` -> `azureMap`, `map` -> `azureMap`, `qnaVisual` (unsupported in PBIR).
 
+## What's actually in here (measured against CLI 0.1.4, 2026-07-28)
+
+An empirical sweep of all 28 `visuals/*.md` entries against `catalog describe` gives the honest
+breakdown — **use it to decide whether opening an entry is even worth a lookup**:
+
+| Category | Count | Do you need the cookbook? |
+|---|---|---|
+| **Typed entries whose role tables exactly match the CLI** (zero drift found) | **19** | ❌ **No.** Their Roles / formatting-object sections are literally transcribed `catalog describe` output. Call the CLI instead — it's live and can't go stale. Their only residual value is the Tableau-idiom mapping + tier verdict. |
+| **Idiom entries** — `error-bars`, `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars` | **6** | ✅ **Yes.** These are *not visual types*: `catalog describe error-bars` → `VISUAL_TYPE_UNKNOWN`. They document a technique applied to a host visual, which the CLI has no concept of. |
+| **Render-truth entries** — `actionButton`, `shape`, `azureMap` | **3** | ✅ **Yes, critically.** These carry behaviour the CLI cannot know and in one case gets actively wrong. |
+
+**The canonical proof that CLI vocabulary ≠ render truth:** `catalog describe actionButton` reports
+`"deprecated": false` and a `text` formatting object — i.e. perfectly usable. In reality Desktop
+**ignores `visual.objects` and draws a blank rectangle**, while `validate` still returns 0 errors. Only
+`visuals/actionButton.md` tells you to use `shape` instead. Rule of thumb: **the CLI is authoritative
+for what you may *declare*; only a render-verified entry is authoritative for what actually *draws*.**
+
+**When adding a new entry:** if all you would write is the roles/formatting tables, **don't** — that's a
+cache of a command that already exists. Add an entry only for an idiom, a render-verified composition,
+or a behavioural trap.
+
 ## Confidence map (Tableau-relevant types + idioms)
 
 Legend: 🟢 render-proven · 🟡 structural template (CLI) · 🔴 needs human Desktop capture · ⛔ no native visual (marketplace `.pbiviz` / capability gap)
 
 ### 🟢 Proven in our migrations (copy from the cited migration)
+
+> **These rows have NO local `visuals/<type>.visual.json` file** — unlike the 🟡/🔴 entries below, the
+> 🟢 core types are proven *in situ*. To copy one, resolve it from the cited migration's PBIR, e.g.:
+> `Select-String -Path migrations\*\fabric\*.Report\definition\pages\*\visuals\*\visual.json -Pattern '"visualType": "columnChart"'`
+> then open that `visual.json` and rebind fields. If a row's location is vague ("all migrations"), any
+> hit from that glob is a valid, render-proven starting point. Do **not** treat a missing
+> `visuals/<type>.md` as "unproven" for these types.
+
 | Type | Example location |
 |---|---|
 | `columnChart` / `clusteredColumnChart` | airline `9f2607ea` pages |

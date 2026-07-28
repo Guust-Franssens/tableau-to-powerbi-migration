@@ -63,3 +63,10 @@ copilot-feedback-*.tgz
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# uv lockfile - NOT committed on purpose. Running "uv lock" on a Microsoft-corp machine resolves against
+# internal feeds (packagefeedproxy.microsoft.io / ms-feed-*.pkgs.visualstudio.com), which would leak
+# internal infrastructure URLs and break "uv sync --frozen" for any external clone. The ">=" floors in
+# pyproject.toml are the contract instead. To commit a lock, regenerate it against public PyPI first
+# (UV_INDEX_URL=https://pypi.org/simple uv lock).
+uv.lock

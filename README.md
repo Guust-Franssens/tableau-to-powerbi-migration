@@ -94,8 +94,8 @@ original dashboards belongs to their respective Tableau Public authors.
   natural-language Q&A. It is a required final phase in `pbi-semantic-builder`.
 - **Preflight** (`scripts/preflight.ps1`): a dependency-free PowerShell bootstrap the orchestrator
   runs first. It checks Python and parser deps, the `powerbi-authoring` plugin, the MCP servers,
-  Power BI Desktop and its Bridge CLI, `npx`, and the TOM DLL, printing an install hint for anything
-  missing.
+  Power BI Desktop and its Bridge CLI, `npx`, the .NET SDK, and the known-good CLI version matrix
+  (plus `powerbi-report-author doctor`), printing an install hint for anything missing.
 
 ## 🧩 Why a separate parser, not an all-LLM pipeline
 
@@ -145,8 +145,9 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
   conventions every agent inherits. **Read this first.**
 - [`.vscode/mcp.json`](.vscode/mcp.json): MCP server definitions (auto-read by VS Code Copilot; CLI
   users add the same with `/mcp`).
-- Repo-local agents (`.github/agents/`) and skills (`.github/skills/`) are committed and load
-  automatically.
+- Repo-local agents (`.github/agents/`) are committed and load automatically. `.github/skills/` is
+  enabled as a skill location (see `.vscode/settings.json`) but is currently empty — drop repo-local
+  skills there and they load automatically too.
 
 In Copilot CLI, install the plugin once with `/plugin` (add marketplace `microsoft/skills-for-fabric`,
 enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run
@@ -173,7 +174,7 @@ For the full repo (all examples + showcase), use a normal `git clone …`. Then 
 ```powershell
 uv venv
 .venv\Scripts\Activate.ps1
-uv sync
+uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
 
 # Parse a workbook into the intermediate spec
 python scripts\parse_tableau.py migrations\<name>\source\<workbook>.twbx `

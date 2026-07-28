@@ -33,9 +33,10 @@ agent-writable API**:
   Desktop / Mashup credential store on that machine. The connector shows a **modal** auth dialog the
   first time. Microsoft's own doc: *"Once you enter your credentials for a particular Databricks SQL
   Warehouse, Power BI Desktop caches and reuses those same credentials in subsequent connection
-  attempts."* The **Desktop Bridge exposes only `application.state.get`, `report.snapshot.capture`, and
-  `file.reload`** — there is **no method to fill the credential modal**. So the agent's build/render/
-  screenshot loop is blocked on live data until the user authenticates once.
+  attempts."* The **Desktop Bridge has no method to fill the credential modal** (its surface is
+  `application.state.get` / `report.snapshot.capture` / `file.reload`; CLI 0.1.2 verbs are `status`,
+  `manifest`, `open`, `reload`, `screenshot`, `screenshot-all` — none of them authenticate). So the
+  agent's build/render/screenshot loop is blocked on live data until the user authenticates once.
 - **Power BI service (cloud):** credentials live server-side in a **gateway datasource / Fabric
   connection**, set via the UI (*Semantic model > Settings > Data source credentials*) or the
   Connections API. Publishing via `fab import` binds **no** credential, so a refresh fails immediately.

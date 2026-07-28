@@ -28,17 +28,32 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
    types, encodings, reference lines, filters, parameters). This is what makes your review
    structurally grounded instead of just "vibes-based pixel comparison."
 2. **Tableau reference screenshots**, one whole-dashboard capture per dashboard at minimum, ideally
-   per-worksheet crops too. If none exist yet, capture them yourself with Playwright against the live
-   public workbook (see Gotchas below for the proven technique) before doing anything else — a
-   fidelity review without ground-truth imagery is just guessing.
-3. **The deployed semantic model + PBIP report location** — for your own PBI-side screenshots
-   (Desktop Bridge `screenshot` command if that skill version is available, otherwise ask the
-   orchestrator/user for a fresh one) and for `semantic-model-consumption` `EVALUATE` queries.
+   per-worksheet crops too. **Ground truth lives at `migrations/<slug>/reference/` (with a
+   `manifest.json`) — look there FIRST; all existing migrations already have one.** If it's empty, use
+   the repo's purpose-built, provenance-stamped capture subsystem rather than hand-rolling Playwright:
+   ```
+   python scripts/capture_tableau_reference.py migrations/<slug> [--public-url <url> --view <view>]
+   ```
+   It has a **`manual` provider** for workbooks that are *not* on Tableau Public (the enterprise case):
+   the user drops screenshots into `reference/` and they become the immutable ground truth. See
+   `docs/reference-capture.md`. Only fall back to raw Playwright (Gotchas below) if that script can't
+   serve the case. A fidelity review without ground-truth imagery is guessing — but **"not on Tableau
+   Public" is NOT a reason to refuse**; ask for a manual capture instead.
+3. **The semantic model + PBIP report location** — for your own PBI-side screenshots (Desktop Bridge
+   `screenshot`/`screenshot-all`, otherwise ask the orchestrator/user for a fresh one) and for the
+   numeric `EVALUATE` pass (see *Skills you use* for the offline path that works on a local PBIP).
 
 ## Skills you use
 
-- **`semantic-model-consumption`** — your primary tool for the numeric-fidelity pass. Every numeric
-  claim you make must be backed by an actual `EVALUATE` result, not an assumption.
+- **Numeric pass — DAX `EVALUATE`.** Every numeric claim must be backed by a real query result, not an
+  assumption. The default flow produces a **local PBIP that is never published**, so use the offline
+  path: `powerbi-modeling-mcp` → `connection_operations` **ConnectFolder** on the
+  `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**. For a model already open in
+  Desktop, `python scripts/probe_desktop_query.py --pid <pid>` runs a one-row probe. Use
+  `powerbi-remote` (`GetSemanticModelSchema` / `ExecuteQuery`) **only** if the model really was
+  published to a workspace. (`semantic-model-consumption` is an optional convenience that ships in the
+  `fabric-skills` plugin — it is *not* required by this repo's setup and is being deprecated upstream;
+  never make it your only path.)
 - **`powerbi-report-authoring`**'s Desktop Bridge screenshot/reload commands, if the newer skill copy
   is active (check with `check-updates` first — this repo has hit real skill-version drift before).
 - Playwright (via the shell), only if Tableau reference screenshots don't already exist.
@@ -47,10 +62,18 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
 
 Run these passes **in order** — cheap structural checks first, expensive judgment calls last:
 
-1. **Inventory/completeness pass** (cheap, mechanical, do first). For every `dashboards[]` entry in
-   `migration-spec.json`, confirm a corresponding PBI page exists and every non-hidden `worksheets[]`
-   entry has a corresponding visual somewhere on it. A silently-dropped worksheet is a total-fidelity
-   failure, not a nuance — catch it before spending time on aesthetic judgment.
+1. **Inventory/completeness pass** (cheap, mechanical, do first). Scope each dashboard to **its own**
+   worksheets: from that `dashboards[]` entry's zone tree, derive the worksheets *it actually
+   references*, and confirm a corresponding PBI page exists with a visual for each of them. **Do NOT
+   require every workbook worksheet on every dashboard** — a workbook whose Dashboard A uses sheets 1-3
+   and Dashboard B uses sheets 4-6 is correct, and a global check would false-fail both. Separately,
+   list workbook worksheets referenced by *no* dashboard as workbook-level inventory (not a per-dashboard
+   defect). If the report builder split one Tableau dashboard across several PBI pages, validate against
+   its dashboard→pages mapping and give both per-page verdicts and one composite dashboard verdict.
+   A silently-dropped worksheet is a total-fidelity failure, not a nuance — catch it before spending
+   time on aesthetic judgment.
+   `powerbi-report-author preview-pages <report>` and `preview-visuals <report>` emit this inventory as
+   structured JSON — use them instead of reading every `visual.json` by hand.
 2. **Whole-dashboard pass** (do this *before* drilling into individual visuals, not after). Compare
    the full-page PBI screenshot against the full Tableau dashboard screenshot as a gestalt: overall
    layout density/proportions, visual hierarchy (what draws the eye first), color usage, spacing,
@@ -123,7 +146,12 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
 1. Every dashboard has an explicit whole-dashboard verdict, not just per-visual notes.
 2. Every visual has either an explicit "no discrepancy found" or a specific, actionable entry in the
    discrepancy table — no vague "looks mostly fine."
-3. Every numeric claim in the report is backed by a cited `EVALUATE` result, not an assumption.
+3. Every numeric claim in the report is backed by a **pair** of cited evidence: (a) the PBI-side DAX
+   query + its result, and (b) the Tableau-side number it is compared against (an exported row/cell, or
+   a clearly legible location in a reference screenshot). Proving only what Power BI returned proves
+   nothing about fidelity. If no Tableau-side number can be obtained, record the check as
+   `numeric_status: unverified` and say so explicitly — never issue an unqualified "faithful" verdict
+   on the strength of a PBI value alone.
 4. The inventory/completeness pass ran and is reported first — structural gaps found before aesthetic
    critique.
 5. Every discrepancy is routed to an owner (a subagent, or `accepted-limitation`) — nothing left

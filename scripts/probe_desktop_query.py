@@ -50,6 +50,7 @@ def _load_adomd():
             # treated as a name and fails), so add the dir first, then reference by simple name.
             if str(dll.parent) not in sys.path:
                 sys.path.append(str(dll.parent))
+            # pylint: disable-next=no-member  # clr's members are generated at runtime by pythonnet
             clr.AddReference(dll.stem)
             from Microsoft.AnalysisServices.AdomdClient import AdomdConnection
 

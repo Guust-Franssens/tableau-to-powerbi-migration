@@ -17,6 +17,15 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
    workflow) — point it at the model `pbi-semantic-builder` deployed.
 3. **`powerbi-report-authoring`** — implements the actual PBIR files (pages, visuals, bookmarks, theme)
    from the design brief, and validates in Desktop.
+4. **Read-only DAX (you need this — several of your own rules require it).** DoD #5 and the
+   `formatString` gotcha require sampling a *real* value before choosing e.g. `0.00%` vs `0.00"%"`;
+   you cannot infer that from a field name. Use `powerbi-modeling-mcp` → `connection_operations`
+   **ConnectFolder** on the `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**.
+   This is **read-only inspection**, so it does not violate layer ownership — you still never edit
+   TMDL; anything needing a model change goes back to `pbi-semantic-builder`.
+5. **`powerbi-report-author` CLI previews** — `preview-visuals` / `preview-pages` / `preview-filters`
+   / `preview-themes` summarise the whole report as structured JSON. Use them to self-check your own
+   output (especially filter placement) instead of re-reading every `visual.json`.
 
 Do not skip straight to authoring — these three skills are explicitly designed as a chained handoff
 (planning → design → authoring), each with its own scope boundary; follow that boundary.
@@ -67,11 +76,24 @@ year ago may be superseded.
      property names, enum values, selector requirements.
    - `expr encode --kind <t> <v>` — generate a correct value encoding instead of hand-writing the
      `expr`/`Literal` wrapper.
+   - `preview-visuals --with-derived` / `preview-pages` / `preview-filters` / `preview-themes <path>` —
+     summarise your *own* output as structured JSON (use these to self-check filter placement and page
+     inventory instead of re-reading every `visual.json`); `doctor` self-checks the toolchain.
+   - **Hard limit — the CLI describes what you may *declare*, never what actually *renders*.**
+     `catalog describe actionButton` reports `"deprecated": false` with a `text` formatting object, yet
+     Desktop **ignores `visual.objects` and draws a blank rectangle** while `validate` returns 0 errors.
+     So a green CLI/`validate` result is *never* evidence that a visual draws — only a render-verified
+     cookbook entry or your own Desktop screenshot is.
 2. **Cookbook composition — but trust it by tier, because the cookbook is a *cache*, not the authority.**
    `.github/pbi.kb/visual-cookbook.md` + `visuals/<type>.visual.json`/`.md`. The CLI gives you the
    vocabulary; the cookbook gives you a *worked composition* (the nested JSON that actually holds
-   together for a real idiom — which the CLI cannot compose and `validate` cannot render-check). Trust
-   it **by tier**:
+   together for a real idiom — which the CLI cannot compose and `validate` cannot render-check).
+   **Don't open an entry reflexively.** Measured against CLI 0.1.4 (see the cookbook's "What's actually
+   in here"), **19 of 28 entries are pure transcribed `catalog describe` output with zero drift** — for
+   those, step 1 already gave you everything and the lookup is wasted. The entries worth opening are the
+   **6 idioms** (`error-bars`, `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`,
+   `table-databars` — not visual types at all, so the CLI returns `VISUAL_TYPE_UNKNOWN`) and the
+   **3 render-truth entries** (`actionButton`, `shape`, `azureMap`). Trust it **by tier**:
    - **🟢 render-verified** (proven by an actual render / human Desktop capture) → *more* trustworthy
      than composing yourself, because it truly rendered. **Copy it and rebind fields**, then reconcile
      its property names against step 1's CLI output to catch version drift.
@@ -150,7 +172,10 @@ wrong encoding. Instead:
 3. For each planned page, hand `powerbi-report-design` the relevant `worksheets[]` entries (mark type,
    encodings, reference lines) and the zone layout — let it produce a `Design Brief:` per the chart
    mapping table above. Don't override its archetype/chart-selection judgment except where this file's
-   mapping table gives a hard signal (e.g. reference-lines → Gauge).
+   mapping table gives a hard signal — noting that **reference-lines → Gauge is a *soft* signal, not a
+   hard one**: it only holds for a single KPI vs a target. If the worksheet compares multiple
+   categories/regions, keep it a dot plot/scatter (see the mark-type table's `Circle` + `reference_lines`
+   row, which governs).
 4. **Build an empty layout skeleton before authoring any real visual.** Place a blank/placeholder
    shape (a rectangle, or the target visual type with no field wells bound yet) for *every* zone in
    the `layout_contract` at its correct region — position and size only. Screenshot or render this
@@ -323,7 +348,8 @@ only a live Desktop screenshot catches them, so treat structural validation as n
   **no-op on initial render** (matrix still shows collapsed); don't burn cycles chasing it, document a
   collapsed default or use a flat `tableEx` when the grain is one row per leaf.
 
-**Data colors / conditional formatting (see `conditional-formatting.md`):**
+**Data colors / conditional formatting (see the `powerbi-report-authoring` skill →
+`references/conditional-formatting.md`; for table-specific idioms see `.github/pbi.kb/visuals/table-cond-format.md`):**
 - **Discrete/banded data colors use `dataPoint.fill.solid.color.expr.Conditional.Cases[]`, NOT
   `fillRule.cases`** (`fillRule` is gradient/`linearGradient` only). Each case = a `Comparison`
   (`Left = SelectRef.ExpressionName` of a projection's `queryRef`, cascading first-match) plus a
@@ -407,8 +433,10 @@ Superstore build.
   visuals.
 
 **Desktop verification mechanics (when a live check is possible):**
-- **The `powerbi-desktop` bridge has NO refresh command** (only `application.state.get` /
-  `report.snapshot.capture` / `file.reload`), and PBIP stores no data cache, so a freshly-opened import
+- **The `powerbi-desktop` bridge has NO refresh verb** (verbs as of bridge CLI 0.1.2: `status`,
+  `manifest`, `open`, `reload`, `screenshot`, `screenshot-all` — the underlying bridge methods are
+  `application.state.get` / `report.snapshot.capture` / `file.reload`), and PBIP stores no data cache,
+  so a freshly-opened import
   report renders **empty** ("tables have incomplete or no data"). A clean screenshot with empty visuals
   is an unrefreshed-model artifact, not a binding defect. **Workaround (proven):** refresh via TOM/XMLA
   against the child `msmdsrv` port — load `Microsoft.AnalysisServices.AdomdClient` (copy the DLL out of

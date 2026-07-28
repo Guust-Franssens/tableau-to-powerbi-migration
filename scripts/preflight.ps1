@@ -12,14 +12,27 @@
   is the correct, dependency-free bootstrap.
 
   Verifies: Python + the parser's Python deps, the powerbi-authoring@fabric-collection skill plugin,
-  the MCP servers, Power BI Desktop + its Bridge CLI, npx, and the TOM refresh DLL. Prints a per-item
-  status (OK / WARN / MISS) with an install hint for anything absent.
+  the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, and the npm CLI version
+  matrix. Prints a per-item status (OK / WARN / MISS) with an install hint for anything absent.
+
+.PARAMETER Update
+  Session-start only. Upgrades the npm bridge CLIs, but ONLY when they are below the correctness
+  FLOOR (see $cliFloor) -- a floor check, not a blind `@latest`. Being above the floor is fine and is
+  left alone; being above the recorded known-good matrix raises a WARN instead, because that is when
+  the version-specific Gotchas in .github/agents/ need re-verification.
+
+  TIMING RULE (the `when` is what makes this safe):
+    - Session start, nothing in flight -> `-Update` is safe. The floor is a correctness floor.
+    - Migration start (orchestrator step 0) -> plain preflight, NEVER `-Update`.
+    - Mid-migration -> never. Swapping the validator under a half-built report is worse than a
+      slightly old CLI.
 
 .NOTES
-  Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+  Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 [-Update]
   Exit: 0 if every CRITICAL + RECOMMENDED item is present; 1 if any is missing.
 #>
 #Requires -Version 5.1
+param([switch]$Update)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $copilot = Join-Path $HOME '.copilot'
@@ -50,9 +63,17 @@ function Add-Cli([string]$Cmd, [string]$Tier, [string]$Hint) {
 $py = Get-Command python -ErrorAction SilentlyContinue
 if ($py) {
     $ver = (& python --version 2>&1) -replace 'Python\s*', ''
-    Add-Check 'Python >= 3.11' 'critical' $true $ver
+    # Actually compare - a bare $true here let Python 3.9 (or the Store alias stub, which prints nothing)
+    # report OK while pyproject.toml requires >=3.11.
+    $pyOk = $false
+    try { $pyOk = [version](($ver -split '\s')[0]) -ge [version]'3.11' } catch { $pyOk = $false }
+    Add-Check 'Python >= 3.11' 'critical' $pyOk `
+        $(if ($ver) { $ver } else { 'no version reported (Microsoft Store alias stub?)' }) `
+        'Install Python 3.11+ (pyproject requires >=3.11); ensure it precedes the Store alias on PATH.'
     foreach ($m in @(
+            @('lxml', 'critical', 'uv sync - the deterministic parser imports lxml.etree.'),
             @('jsonschema', 'critical', 'uv add jsonschema (validates migration-spec.json against the schema).'),
+            @('tableauhyperapi', 'optional', 'uv sync --extra extract (materializes .hyper extracts to CSV).'),
             @('playwright', 'optional', 'uv add playwright (harvester + validator screenshots).'),
             @('PIL', 'optional', 'uv add pillow (showcase gallery composition).'))) {
         & python -c "import $($m[0])" 2>$null
@@ -63,7 +84,63 @@ else {
     Add-Check 'Python >= 3.11' 'critical' $false 'not on PATH' 'Install Python 3.11+ (the deterministic parser and all scripts/ need it).'
 }
 
-Add-Cli 'powerbi-report-author' 'critical' 'Ships with the powerbi-authoring plugin; provides validate + catalog/formatting describe.'
+Add-Cli 'powerbi-report-author' 'critical' 'npm install -g @microsoft/powerbi-report-authoring-cli (needs Node >= 20); provides validate + catalog/formatting/preview-*.'
+
+# --- npm CLI versions: correctness FLOOR + known-good matrix (see AGENTS.md) ---
+# These CLIs are unpinned GLOBAL installs (the official skill installs them with @latest), so they can
+# change under you without any repo diff. Two distinct thresholds:
+#   * FLOOR      - below this is a CORRECTNESS bug, not a nicety. powerbi-report-author < 0.1.4 returns
+#                  errorCount:0 for PBIR that Desktop cannot open (e.g. report.json missing the
+#                  schema-required `reportVersionAtImport`) -- a stale CLI silently green-lights a
+#                  broken report. `-Update` repairs this, and only this.
+#   * KNOWN-GOOD - the version the agent Gotchas were verified against. ABOVE it is not an error, but
+#                  it does mean version-specific prose may be stale -> WARN, don't "fix" it.
+$cliFloor     = @{ 'powerbi-report-author' = '0.1.4'; 'powerbi-desktop' = '0.1.2' }
+$cliKnownGood = @{ 'powerbi-report-author' = '0.1.4'; 'powerbi-desktop' = '0.1.2' }
+$cliPackage   = @{ 'powerbi-report-author' = '@microsoft/powerbi-report-authoring-cli'
+                   'powerbi-desktop'       = '@microsoft/powerbi-desktop-bridge-cli' }
+
+function Get-CliVersion([string]$Cmd) {
+    if (-not (Get-Command $Cmd -ErrorAction SilentlyContinue)) { return $null }
+    $raw = (& $Cmd --version 2>&1 | Select-Object -First 1) -replace '[^0-9.]', ''
+    if ($raw -match '^\d+(\.\d+)+$') { return $raw } else { return $null }
+}
+
+foreach ($cliName in $cliFloor.Keys) {
+    $actual = Get-CliVersion $cliName
+    if (-not $actual) { continue }
+
+    # -Update: repair ONLY a below-floor install. Never a blind upgrade to @latest.
+    if ($Update -and ([version]$actual -lt [version]$cliFloor[$cliName])) {
+        Write-Host ("  [..  ] $cliName $actual is below the {0} correctness floor - upgrading ..." -f $cliFloor[$cliName])
+        & npm install -g "$($cliPackage[$cliName])@latest" 2>&1 | Out-Null
+        $actual = (Get-CliVersion $cliName), $actual | Where-Object { $_ } | Select-Object -First 1
+    }
+
+    $floorOk = [version]$actual -ge [version]$cliFloor[$cliName]
+    $drifted = $floorOk -and ([version]$actual -ne [version]$cliKnownGood[$cliName])
+    $detail = if (-not $floorOk) { "$actual is BELOW the $($cliFloor[$cliName]) correctness floor" }
+              elseif ($drifted)  { "$actual (above known-good $($cliKnownGood[$cliName]))" }
+              else               { "$actual (known-good)" }
+    $hint = if (-not $floorOk) {
+        "Run this script with -Update at SESSION START, or: npm install -g $($cliPackage[$cliName])@latest"
+    } else {
+        "Version moved past the matrix in AGENTS.md - re-verify the version-specific Gotchas in .github/agents/ before trusting them."
+    }
+    # Below the floor is a real (recommended-tier) failure; above known-good is only an advisory.
+    Add-Check "version: $cliName" $(if ($floorOk) { 'optional' } else { 'recommended' }) $(-not $drifted -and $floorOk) $detail $hint
+}
+
+# --- PBIR JSON-schema reachability (does `validate` actually run its schema layer this session?) ---
+# `validate` reports 0 errors even when it could NOT fetch the visualContainer schema (PBIR_SCHEMA_UNREACHABLE),
+# so this answers mechanically whether a green validate means "schema-checked" or only "structure-checked".
+if (Get-Command 'powerbi-report-author' -ErrorAction SilentlyContinue) {
+    $doc = & powerbi-report-author doctor 2>&1 | Out-String
+    $docOk = $doc -match '"ok"\s*:\s*true'
+    Add-Check 'powerbi-report-author doctor' 'optional' $docOk `
+        $(if ($docOk) { 'self-checks OK (node, ajv, metadata provider)' } else { 'doctor reported a problem' }) `
+        'Run `powerbi-report-author doctor` for detail. If schema fetch fails, treat a 0-error `validate` as STRUCTURE-ONLY (see AGENTS.md).'
+}
 
 # --- Fabric/Power BI skill plugin ---
 $cfg = Read-CopilotJson 'config.json'
@@ -86,7 +163,7 @@ foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote',
 }
 
 Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
-Add-Cli 'powerbi-desktop' 'recommended' 'Desktop Bridge CLI (@microsoft/powerbi-desktop-bridge-cli) for open/reload/screenshot verification.'
+Add-Cli 'powerbi-desktop' 'recommended' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
 # --- Power BI Desktop (Windows-only; this is why the bootstrap is PowerShell) ---
 $desktop = $null
@@ -103,11 +180,12 @@ Add-Check 'Power BI Desktop' 'recommended' ([bool]$desktop) `
     $(if ($desktop) { $desktop } else { 'not found' }) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
 
-# --- TOM refresh DLL ---
-$tom = Get-ChildItem (Join-Path $copilot 'installed-plugins') -Recurse -Filter 'Microsoft.AnalysisServices.Tabular.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
-Add-Check 'TOM DLL (Tabular)' 'recommended' ($null -ne $tom) `
-    $(if ($tom) { $tom.FullName } else { 'not found under ~/.copilot/installed-plugins' }) `
-    'Ships with the semantic-model-authoring skill (TabularEditor bundle); used for the local Desktop refresh workaround.'
+# --- .NET SDK (builds scripts/tmdl_validate for offline TMDL deserialization) ---
+# NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
+# ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
+# check could never pass. TOM now comes from the NuGet package Microsoft.AnalysisServices.NetCore.retail.amd64,
+# restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
+Add-Cli 'dotnet' 'recommended' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'

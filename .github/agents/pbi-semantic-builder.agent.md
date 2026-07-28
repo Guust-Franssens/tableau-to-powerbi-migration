@@ -1,6 +1,6 @@
 ---
 name: pbi-semantic-builder
-description: Builds a Fabric Power BI semantic model (TMDL) from a Tableau migration-spec.json - tables, relationships, and DAX measures translated from Tableau calculated fields. Uses the semantic-model-authoring and semantic-model-consumption skills.
+description: Builds a Fabric Power BI semantic model (TMDL) from a Tableau migration-spec.json - tables, relationships, and DAX measures translated from Tableau calculated fields. Uses the semantic-model-authoring skill plus the Power BI modeling MCP for read-only DAX validation.
 ---
 
 # PBI Semantic Builder — Subagent
@@ -17,8 +17,14 @@ examples, not hypothetical ones.
 
 - **`semantic-model-authoring`** — for everything TMDL: creating tables/columns, relationships,
   measures, and deploying to Fabric. This is your primary tool for all file/deployment mechanics.
-- **`semantic-model-consumption`** — read-only DAX (`EVALUATE`) and metadata queries, used to validate
-  translated measures against expected behavior once deployed.
+- **Read-only DAX (`EVALUATE`) + metadata — your validation surface.** Primary path, works on the local
+  PBIP with nothing published: `powerbi-modeling-mcp` → `connection_operations` **ConnectFolder** on the
+  `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**. For a model open in Desktop,
+  `python scripts/probe_desktop_query.py --pid <pid>` gives a one-row probe. `powerbi-remote`
+  (`GetSemanticModelSchema` / `ExecuteQuery`) applies only to a *published* model.
+  (`semantic-model-consumption` is an optional convenience that ships in the `fabric-skills` plugin —
+  which this repo's setup marks optional, and which is being deprecated upstream in favour of folding
+  metadata discovery into `semantic-model-authoring`. Never make it your only path.)
 
 ## Mental model — mapping migration-spec.json to a semantic model
 
@@ -55,25 +61,37 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    `caption` as the TMDL display name (never ship raw internal names like `Calculation_5871029` to the
    model).
 4. **Translate calculated fields to DAX**, field by field, using `docs/tableau-dax-translation-guide.md`:
-   - Check `is_lod` / `is_table_calc` first — route to §3/§4 of the guide; these need grain
-     verification, budget extra validation time.
+   - Check `is_lod` / `is_table_calc` first — route to **§5 (LOD)** / **§6 (table calculations)** of the
+     guide; these need grain verification, budget extra validation time.
    - Check `reshape_hint == "pivot_derived"` — do the reshape in Power Query (`Table.UnpivotOtherColumns`
      + conditional columns), not as a DAX calculated column replicating `CONTAINS`/`LEFT`/`RIGHT`
      string parsing. This is cleaner and belongs at the load layer.
    - Otherwise, use the direct expression translation table (guide §1) and worked examples.
-   - Respect `referenced_fields` ordering — a calculation referencing another calculated field needs
-     its dependency created first (or inlined).
+   - **Respect dependency order, but do NOT infer operand order from `referenced_fields`** — it records
+     which fields a formula references (identity), not the order they appear in the expression. Build the
+     dependency graph from the raw formula text so a calculation referencing another calculated field is
+     created first (or inlined); never reconstruct a non-commutative expression (`a - b`, `a / b`) from
+     `referenced_fields` order. See the matching Gotcha later in this file.
    - **Recognize the parameter-equality idiom** (guide §2): if a field's formula matches
      `IF [Parameters].[X] = [Dim] THEN [Dim] END` and it's only ever used as an exclude-null filter
      (check `worksheets[].filters[].note` in the spec — the parser already flags this), **do not**
      create the calculated column. Note in your output that `pbi-report-builder` should use a native
      slicer on the underlying dimension instead.
 5. **Create relationships** from `data_sources[].joins[]`.
-6. **Deploy** the model via `semantic-model-authoring`'s Fabric deployment workflow.
-7. **Validate a sample.** For at least the non-trivial translated measures (anything that wasn't a
-   pure passthrough), use `semantic-model-consumption`'s `EVALUATE` to sanity-check output shape and
-   spot values. Flag anything that can't be verified against a known Tableau value.
-8. **Report back to the orchestrator**: semantic model location (workspace + item), a table→field
+6. **Materialize the model locally.** The default deliverable is a **local PBIP**
+   (`migrations/<slug>/fabric/<Name>.SemanticModel` + `<Name>.pbip`) — **publishing to Fabric is NOT part
+   of the default flow** (it's phase-2 `pbi-deployer`; see `tableau-migrator.agent.md`). Only run
+   `semantic-model-authoring`'s Fabric deployment workflow if the orchestrator explicitly gave you a
+   target workspace. Never treat "not deployed" as a reason to skip step 7.
+7. **Validate a sample — this is mandatory and works offline.** For at least the non-trivial translated
+   measures (anything that wasn't a pure passthrough), run a real `EVALUATE` and sanity-check output
+   shape and spot values. On a local PBIP use `powerbi-modeling-mcp` → `connection_operations`
+   **ConnectFolder** on the `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**
+   (`semantic-model-consumption` is an optional convenience from the `fabric-skills` plugin and requires
+   a published model — never depend on it). Flag anything that can't be verified against a known
+   Tableau value.
+8. **Report back to the orchestrator**: semantic model location (local PBIP path, plus workspace + item
+   only if actually deployed), a table→field
    count summary, which calculated fields became measures vs. columns, which idioms were simplified
    away (parameter-equality, pivot reshape) and why, and any new `limitations_encountered` entries
    (append them to `migration-spec.json` so the report builder and final summary see them).
