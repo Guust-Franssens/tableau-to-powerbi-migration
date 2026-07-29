@@ -156,10 +156,11 @@ def _published_ds_name(repo: etree._Element, connection: dict[str, Any]) -> tupl
       1. the last path segment of `derived-from` (the authoritative publish URL);
       2. the sqlproxy connection's `dbname`;
       3. the `repository-location@id` attribute -- LAST, because it can go stale.
-    Real-world evidence: a Tableau Cloud workbook published against datasource `dandan003` carried
-    `id='new'` (a leftover from a rename) while `derived-from`, `dbname` and `caption` all agreed on
-    `dandan003`. Keying on `id` would have given two workbooks that share ONE datasource two different
-    keys -- defeating the de-duplication this key exists for.
+    Real-world evidence (github.com/vimosh0812/ai-bi-assistant, `new-ds.twb`): a Tableau Cloud
+    workbook published against datasource `dandan003` carried `id='new'` (a leftover from a rename)
+    while `derived-from`, `dbname` and `caption` all agreed on `dandan003`. Keying on `id` would have
+    given two workbooks that share ONE datasource two different keys -- defeating the de-duplication
+    this key exists for.
     """
     derived = repo.get("derived-from")
     if derived:

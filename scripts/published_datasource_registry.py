@@ -26,9 +26,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("published_datasource_registry")
@@ -237,6 +239,26 @@ def cmd_scan(migrations_dir: Path, datasources_dir: Path) -> int:
     return 0
 
 
+def _near_misses(key: str, candidates: list[str]) -> list[str]:
+    """Registered keys that are 'almost' `key` - i.e. a probable key-derivation mismatch.
+
+    This exists because the one path we CANNOT test without a live Tableau tenant is the round trip
+    (workbook flags a published DS -> export its .tds -> parse -> same key). If those two keys ever
+    disagree, the plain lookup degrades *silently* to NOT YET MIGRATED and a duplicate model gets
+    built - the exact failure this registry prevents. So rather than leave an untestable path failing
+    quietly, compare on a squashed form (case, spaces, separators, percent-encoding, punctuation) and
+    shout when something is clearly the same data source under a slightly different key.
+    """
+
+    def squash(value: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", unquote(value).lower())
+
+    target = squash(key)
+    if not target:
+        return []
+    return sorted({c for c in candidates if c != key and squash(c) == target})
+
+
 def _report_key(key: str, migrations_dir: Path, datasources_dir: Path, exclude_slug: str | None = None) -> int:
     """Look up one dedup key; tell the caller whether to reuse an existing model or build it."""
     key = _normalize_key(key)
@@ -266,6 +288,22 @@ def _report_key(key: str, migrations_dir: Path, datasources_dir: Path, exclude_s
         return 1
 
     consumers = ", ".join(e["slug"] for e in entries) if entries else "<none parsed yet>"
+    shared = find_shared_models(datasources_dir)
+    near = _near_misses(key, list(shared))
+    if near:
+        log.warning("PROBABLE KEY MISMATCH - do NOT build a second model for '%s'", key)
+        for candidate in near:
+            log.warning("  a registered data source has the near-identical key : '%s'", candidate)
+            log.warning("    owned by : migrations/datasources/%s", shared[candidate]["slug"])
+        log.warning(
+            "\n  These differ only by case/spacing/encoding, so they are almost certainly the SAME\n"
+            "  published data source keyed two ways - one derived from the workbook, one registered\n"
+            "  from the .tds. Building now would create the duplicate model this check exists to\n"
+            "  prevent. Reconcile the key first (re-register the data source under the key the\n"
+            "  workbook actually derives), then re-run this command.\n"
+        )
+        return 1
+
     log.info("NOT YET MIGRATED: published data source '%s'", key)
     log.info("  consumed by : %s", consumers)
     log.info("  ACTION: migrate the DATA SOURCE once, in its own tree, before the reports that use it:")

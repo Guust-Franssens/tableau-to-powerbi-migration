@@ -124,6 +124,16 @@ it must show up in `limitations_encountered`, not be silently dropped.
      `pbi-semantic-builder` to add only genuinely-new measures; exit **1** = not yet built → build it
      **once** under `migrations/datasources/<ds-slug>/` and `--register` it, so later workbooks reuse it.
      Rebuilding a duplicate model that then drifts from the shared one is the failure this prevents.
+   - **(c) VERIFY THE KEY MATCH on first contact with a real server — this path is ⚠️ not fully
+     verified.** The detection and name-precedence rules were tested against real public Tableau
+     files, but the *round trip* never could be: no public `.tds` carries a populated
+     `repository-location`, because that metadata only exists in server-downloaded files. So after
+     registering a data source, run `--scan` and confirm the key derived from the **workbook** equals
+     the key registered from the **data source**. The tool now backstops you: a near-identical key
+     (differing only by case/spacing/separators/encoding) reports **`PROBABLE KEY MISMATCH`** and
+     exits 1 rather than silently saying "not yet migrated". Treat that as a STOP — reconcile the key
+     first; do not build, and do not paper over it. Record any real mismatch (with both keys) in
+     `limitations_encountered`, since it is evidence about a live tenant that we cannot reproduce here.
 5. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
    `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`. If it
    reports **only** extract/flat sources, there is no credential gate (data comes from CSV + a
