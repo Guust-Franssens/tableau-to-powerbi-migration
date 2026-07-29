@@ -118,9 +118,18 @@ def _report_key(key: str, migrations_dir: Path, exclude_slug: str | None = None)
             log.info("  semantic model     : %s", model)
         log.info(
             "\n  ACTION: do NOT rebuild this model. Bind this migration's report to the existing\n"
-            "  semantic model above (report definition.pbir -> byPath/byConnection), and only add\n"
-            "  measures the new workbook genuinely needs. Rebuilding creates a duplicate model that\n"
-            "  will drift from the shared one."
+            "  semantic model above, and only add measures the new workbook genuinely needs.\n"
+            "  Rebuilding creates a duplicate model that will drift from the shared one.\n"
+            "\n  HOW TO BIND (no copying needed in either target - verified 2026-07):\n"
+            "    LOCAL  .Report/definition.pbir -> datasetReference.byPath.path with a RELATIVE path\n"
+            "           that may point OUTSIDE this migration folder, e.g.\n"
+            '             {"byPath": {"path": "../../<other-slug>/fabric/<Name>.SemanticModel"}}\n'
+            "           Power BI Desktop resolves cross-folder byPath (confirmed by opening such a\n"
+            "           .pbip: the shared model's tables/columns loaded), so ONE model on disk can\n"
+            "           serve many reports. Do not copy the .SemanticModel folder per migration.\n"
+            "    CLOUD  publish the model ONCE, then each report uses\n"
+            '             {"byConnection": {"connectionString": "semanticmodelid=<model guid>"}}\n'
+            "           which references the published model directly."
         )
         return 0
     if entries:

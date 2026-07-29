@@ -59,6 +59,12 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    - **exit 0 (already migrated):** do **NOT** rebuild. Reuse the semantic model it names; add only
      measures this workbook genuinely needs that the shared model lacks, and report back that you
      reused it. A duplicate model will drift from the shared one — that is the whole failure mode.
+     **Neither target requires copying the model** (verified 2026-07): **locally**, the report's
+     `definition.pbir` takes a *relative* `byPath` that may point **outside** its own migration folder
+     (`{"byPath": {"path": "../../<other-slug>/fabric/<Name>.SemanticModel"}}`) — Power BI Desktop
+     resolves it and loads the shared model's tables; **in the cloud**, publish the model once and each
+     report uses `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`. Copying the
+     `.SemanticModel` folder per migration re-creates the duplication this check exists to prevent.
    - **exit 1 (not yet built):** build it **once**, here, so later workbooks reuse it.
    Also note the workbook does **not** contain that datasource's own calculated-field formulas (they
    live server-side). If the orchestrator supplied a parsed `.tds`/`.tdsx` spec, treat **it** as the
