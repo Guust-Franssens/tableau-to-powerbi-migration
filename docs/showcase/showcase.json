@@ -8,8 +8,8 @@
       "pages": [
         {
           "name": "Price of Prosperity",
-          "tableau": "migrations/price-of-prosperity/reference/tableau-dashboard.png",
-          "powerbi": "migrations/price-of-prosperity/reference/powerbi-dashboard.png",
+          "tableau": "examples/price-of-prosperity/reference/tableau-dashboard.png",
+          "powerbi": "examples/price-of-prosperity/reference/powerbi-dashboard.png",
           "powerbi_crop": {}
         }
       ]
@@ -22,8 +22,8 @@
       "pages": [
         {
           "name": "Track Metrics",
-          "tableau": "migrations/health-tracker/reference/tableau-metrics.png",
-          "powerbi": "migrations/health-tracker/reference/powerbi-health-tracker.png",
+          "tableau": "examples/health-tracker/reference/tableau-metrics.png",
+          "powerbi": "examples/health-tracker/reference/powerbi-health-tracker.png",
           "powerbi_crop": {
             "right": 0.03
           }
@@ -38,8 +38,8 @@
       "pages": [
         {
           "name": "Fleet Performance",
-          "tableau": "migrations/wind-energy-utilization/reference/tableau-dashboard.png",
-          "powerbi": "migrations/wind-energy-utilization/reference/powerbi-wind-energy.png",
+          "tableau": "examples/wind-energy-utilization/reference/tableau-dashboard.png",
+          "powerbi": "examples/wind-energy-utilization/reference/powerbi-wind-energy.png",
           "powerbi_crop": {
             "right": 0.025
           }
@@ -54,8 +54,8 @@
       "pages": [
         {
           "name": "Profitability KPI",
-          "tableau": "migrations/shipping-kpis/reference/tableau-profitability-kpi.png",
-          "powerbi": "migrations/shipping-kpis/reference/powerbi-profitability-kpi.png",
+          "tableau": "examples/shipping-kpis/reference/tableau-profitability-kpi.png",
+          "powerbi": "examples/shipping-kpis/reference/powerbi-profitability-kpi.png",
           "powerbi_crop": {
             "top": 0.092,
             "right": 0.155
@@ -63,8 +63,8 @@
         },
         {
           "name": "Shipping KPI",
-          "tableau": "migrations/shipping-kpis/reference/tableau-shipping-kpi.png",
-          "powerbi": "migrations/shipping-kpis/reference/powerbi-shipping-kpi.png",
+          "tableau": "examples/shipping-kpis/reference/tableau-shipping-kpi.png",
+          "powerbi": "examples/shipping-kpis/reference/powerbi-shipping-kpi.png",
           "powerbi_crop": {
             "top": 0.092,
             "right": 0.155
@@ -80,8 +80,8 @@
       "pages": [
         {
           "name": "Radio Towers Dashboard",
-          "tableau": "migrations/telecommunications-analytics/reference/tableau-dashboard.png",
-          "powerbi": "migrations/telecommunications-analytics/reference/powerbi-dashboard.png",
+          "tableau": "examples/telecommunications-analytics/reference/tableau-dashboard.png",
+          "powerbi": "examples/telecommunications-analytics/reference/powerbi-dashboard.png",
           "powerbi_crop": {
             "top": 0.092,
             "right": 0.15
@@ -97,8 +97,8 @@
       "pages": [
         {
           "name": "Commission Model",
-          "tableau": "migrations/sales-commission-model/reference/tableau-commission-model.png",
-          "powerbi": "migrations/sales-commission-model/reference/powerbi-commission-model.png",
+          "tableau": "examples/sales-commission-model/reference/tableau-commission-model.png",
+          "powerbi": "examples/sales-commission-model/reference/powerbi-commission-model.png",
           "powerbi_crop": {
             "top": 0.092,
             "right": 0.135
@@ -114,8 +114,8 @@
       "pages": [
         {
           "name": "Tale of 100 Entrepreneurs",
-          "tableau": "migrations/tale-of-100-entrepreneurs/reference/tableau-tale-of-100.png",
-          "powerbi": "migrations/tale-of-100-entrepreneurs/reference/powerbi-tale-of-100.png",
+          "tableau": "examples/tale-of-100-entrepreneurs/reference/tableau-tale-of-100.png",
+          "powerbi": "examples/tale-of-100-entrepreneurs/reference/powerbi-tale-of-100.png",
           "powerbi_crop": {
             "right": 0.145
           }
@@ -130,16 +130,16 @@
       "pages": [
         {
           "name": "Prescriptive",
-          "tableau": "migrations/superstore-sales-performance/reference/tableau-prescriptive.png",
-          "powerbi": "migrations/superstore-sales-performance/reference/powerbi-prescriptive.png",
+          "tableau": "examples/superstore-sales-performance/reference/tableau-prescriptive.png",
+          "powerbi": "examples/superstore-sales-performance/reference/powerbi-prescriptive.png",
           "powerbi_crop": {
             "right": 0.035
           }
         },
         {
           "name": "Descriptive",
-          "tableau": "migrations/superstore-sales-performance/reference/tableau-descriptive.png",
-          "powerbi": "migrations/superstore-sales-performance/reference/powerbi-descriptive.png",
+          "tableau": "examples/superstore-sales-performance/reference/tableau-descriptive.png",
+          "powerbi": "examples/superstore-sales-performance/reference/powerbi-descriptive.png",
           "powerbi_crop": {
             "right": 0.04
           }
@@ -154,16 +154,16 @@
       "pages": [
         {
           "name": "Alliance Overview",
-          "tableau": "migrations/airline-alliance-activity/reference/tableau-alliance-page.png",
-          "powerbi": "migrations/airline-alliance-activity/reference/powerbi-alliance-page.png",
+          "tableau": "examples/airline-alliance-activity/reference/tableau-alliance-page.png",
+          "powerbi": "examples/airline-alliance-activity/reference/powerbi-alliance-page.png",
           "powerbi_crop": {
             "right": 0.045
           }
         },
         {
           "name": "Flights Map",
-          "tableau": "migrations/airline-alliance-activity/reference/tableau-flight-page.png",
-          "powerbi": "migrations/airline-alliance-activity/reference/powerbi-flight-page.png",
+          "tableau": "examples/airline-alliance-activity/reference/tableau-flight-page.png",
+          "powerbi": "examples/airline-alliance-activity/reference/powerbi-flight-page.png",
           "powerbi_crop": {
             "right": 0.045
           }

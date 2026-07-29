@@ -321,7 +321,7 @@ def main() -> None:
     md += [
         "Every example is a public Tableau Public workbook by its original author; each entry links back to "
         "the source it was migrated from. Full provenance for all 16 migrations is in "
-        "[`migrations/README.md`](../../migrations/README.md).",
+        "[`examples/README.md`](../../examples/README.md).",
         "",
     ]
     for entry in config["workbooks"]:

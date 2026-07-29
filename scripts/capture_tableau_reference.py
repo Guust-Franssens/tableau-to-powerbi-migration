@@ -2,7 +2,7 @@
 purpose: Acquire a provenance-stamped reference image of the SOURCE Tableau dashboard(s) for a
          migration, so pbi-report-builder can mimic the original and pbi-migration-validator can grade
          fidelity against immutable ground truth. See docs/reference-capture.md for the full design.
-usage:   python scripts/capture_tableau_reference.py migrations/<slug> [--public-url URL --view NAME]
+usage:   python scripts/capture_tableau_reference.py <tree>/<slug> [--public-url URL --view NAME]
                                                        [--structural-only] [--force]
 
 Providers, resolved by FITNESS (not availability):
@@ -317,7 +317,7 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Acquire a provenance-stamped Tableau reference image.")
-    parser.add_argument("slug_dir", help="path to migrations/<slug>")
+    parser.add_argument("slug_dir", help="path to <tree>/<slug> (e.g. migrations/workbooks/my-dash)")
     parser.add_argument("--public-url", help="Tableau Public workbookRepoUrl (demo provider)")
     parser.add_argument("--view", help="Tableau Public view name (with --public-url)")
     parser.add_argument(

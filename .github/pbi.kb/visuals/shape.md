@@ -13,7 +13,7 @@ container-level `visualContainerObjects.visualLink[0]` WebUrl action **and** act
 `fill` / `outline` / `tileShape` — so it is clickable *and* visible. Convert every static-URL
 `actionButton` to `shape`, keeping the identical `visualLink`.
 
-Verified: all 12 hardcoded links in `migrations\interactive-resume` (6 hexagon badges, 3 social
+Verified: all 12 hardcoded links in `examples\interactive-resume` (6 hexagon badges, 3 social
 chips, ~3 hobby hotspots) render as filled shapes **and** navigate on Ctrl+click. Desktop
 2.156.879.0, PID-pinned screenshot capture.
 
@@ -81,4 +81,4 @@ the data while the hotspot carries the link. Mind the faint-border caveat above.
 🟢 render-verified — shape fill + tileShape (hexagon/oval/rectangleRounded) + `visualLink` WebUrl all
 render and click in Desktop 2.156. The one hard gotcha (embedded `text` doesn't render → use a textbox
 overlay) is baked into this note. Exemplar: `shape.visual.json` (a pink hexagon badge from
-`migrations\interactive-resume`, `bg-dtc`).
+`examples\interactive-resume`, `bg-dtc`).

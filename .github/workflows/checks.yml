@@ -1,0 +1,44 @@
+name: checks
+
+# Runs the same gates CONTRIBUTING.md tells you to run locally. Without this, the
+# `set_data_folder.py --check` privacy gate was *documented* as a CI gate but never actually ran -
+# and a real username leaked into committed build artifacts unnoticed.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # uv.lock is deliberately gitignored (it resolves to internal package-feed URLs), so this
+        # resolves fresh rather than restoring a committed lockfile.
+        run: uv sync --all-extras
+
+      - name: Lint (ruff)
+        run: |
+          uv run ruff format --check scripts tests
+          uv run ruff check scripts tests
+
+      - name: Static analysis (pylint)
+        # scripts/ only - the toolkit code is held at 10.00/10; tests are not.
+        run: uv run pylint scripts
+
+      - name: Tests
+        run: uv run pytest -q
+
+      - name: Privacy gate - no absolute user paths in tracked files
+        run: uv run python scripts/set_data_folder.py --check

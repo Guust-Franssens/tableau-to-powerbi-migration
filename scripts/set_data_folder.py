@@ -1,7 +1,7 @@
 """
 purpose: Manage the per-model `DataFolder` M-parameter that each generated Fabric semantic model
          uses to locate its imported CSV data. The value committed to git is a portable placeholder
-         (`<REPO_ROOT>\\migrations\\<slug>\\data\\`) so no contributor's absolute machine path (and
+         (`<REPO_ROOT>\\<tree>\\<slug>\\data\\`) so no contributor's absolute machine path (and
          username) ever ships in the repo. Run this once after cloning to point every model at your
          local checkout so Power BI Desktop can refresh with real data.
 usage:   python scripts/set_data_folder.py            # localize: set every model to THIS checkout's absolute path
@@ -19,25 +19,49 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = "<REPO_ROOT>"
 # Matches:  expression DataFolder = "....."   (captures the quoted value)
-DATAFOLDER_RE = re.compile(r'(expression\s+DataFolder\s*=\s*")([^"]*)(")')
-# A Windows absolute path under a user profile, i.e. a leaked machine path.
-ABSOLUTE_USER_PATH_RE = re.compile(r"[A-Za-z]:\\Users\\[^\\\"']+", re.IGNORECASE)
+# Also accepts SourceFolder: most models use DataFolder, but at least one (shipping-kpis) was authored
+# with SourceFolder. Matching both stops a model silently drifting out of localize/sanitize coverage.
+DATAFOLDER_RE = re.compile(r'(expression\s+(?:DataFolder|SourceFolder)\s*=\s*")([^"]*)(")')
+# A leaked absolute path under a user profile. Covers the forms that actually show up in this repo's
+# artifacts: `C:\Users\x`, `C:/Users/x` (M/Power Query), `C:\\Users\\x` (JSON-escaped), `\\host\Users\x`
+# (UNC), plus POSIX `/Users/x` and `/home/x`.
+# Only *syntactically unambiguous* placeholders are exempt - `...`, `<anything>`, `%ANY_VAR%` - because
+# SECURITY.md and the READMEs have to show the pattern they warn about. Bare words like `user`, `you`
+# or `username` are NOT exempt: they are all real, registrable account names.
+ABSOLUTE_USER_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/]{1,2}Users|\\\\[^\\/\"']+[\\/]{1,2}Users|(?<![\w.])/Users|(?<![\w.])/home)"
+    r"[\\/]{1,2}(?!\.\.\.|<|%)[^\\/\"'\s]+",
+    re.IGNORECASE,
+)
 
 
 def _model_expression_files() -> list[Path]:
-    return sorted(REPO_ROOT.glob("migrations/*/fabric/*.SemanticModel/definition/expressions.tmdl"))
+    """expressions.tmdl across all three migration trees (examples/, migrations/workbooks/, migrations/datasources/)."""
+    return sorted(
+        p
+        for tree in ("examples", "migrations/workbooks", "migrations/datasources")
+        for p in REPO_ROOT.glob(f"{tree}/*/fabric/*.SemanticModel/definition/expressions.tmdl")
+    )
 
 
-def _slug_for(expr_file: Path) -> str:
-    """migrations/<slug>/fabric/<Model>.SemanticModel/definition/expressions.tmdl -> <slug>."""
-    return expr_file.relative_to(REPO_ROOT).parts[1]
+def _tree_and_slug_for(expr_file: Path) -> tuple[str, str]:
+    """<tree...>/<slug>/fabric/<Model>.SemanticModel/definition/expressions.tmdl -> (<tree...>, <slug>).
+
+    Derived from the END, not the start: the trees have different depths (`examples/<slug>/` is one
+    level, `migrations/workbooks/<slug>/` is two). Indexing `parts[0], parts[1]` silently returned
+    ("migrations", "workbooks") for every user migration - dropping the slug and pointing every model
+    at the same non-existent data folder.
+    """
+    parts = expr_file.relative_to(REPO_ROOT).parts
+    slug_idx = len(parts) - 5  # fabric / <X>.SemanticModel / definition / expressions.tmdl
+    return "\\".join(parts[:slug_idx]), parts[slug_idx]
 
 
 def _rewrite(expr_file: Path, sanitize: bool) -> bool:
     text = expr_file.read_text(encoding="utf-8")
-    slug = _slug_for(expr_file)
+    tree, slug = _tree_and_slug_for(expr_file)
     base = PLACEHOLDER if sanitize else str(REPO_ROOT)
-    new_value = f"{base}\\migrations\\{slug}\\data\\"
+    new_value = f"{base}\\{tree}\\{slug}\\data\\"
 
     def _sub(match: re.Match[str]) -> str:
         return f"{match.group(1)}{new_value}{match.group(3)}"
@@ -73,8 +97,9 @@ def _check() -> int:
             continue
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".pbix", ".hyper", ".twbx", ".twb", ".abf"}:
             continue
-        # Ignore this script itself (it necessarily documents the pattern).
-        if path.name == "set_data_folder.py":
+        # Files that necessarily CONTAIN the pattern to define or test it. Kept to an explicit,
+        # tiny allowlist so it can never be widened by accident into a real blind spot.
+        if path.name in {"set_data_folder.py", "test_repo_layout.py"}:
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -105,7 +130,10 @@ def main() -> None:
 
     files = _model_expression_files()
     if not files:
-        print("no semantic-model expressions.tmdl files found under migrations/*/fabric/")
+        print(
+            "no semantic-model expressions.tmdl files found under "
+            "examples|migrations/workbooks|migrations/datasources /*/fabric/"
+        )
         return
     mode = "sanitize (placeholder)" if args.sanitize else "localize (this checkout)"
     print(f"{mode}: {len(files)} model(s)")

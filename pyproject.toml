@@ -24,6 +24,13 @@ dev = [
     "pylint>=3.2",
 ]
 
+# This is a SCRIPT toolkit, not an importable library: everything runs as `python scripts/<x>.py`.
+# Without this, setuptools' flat-layout auto-discovery tries to package the top-level content folders
+# (examples/, migrations/) and fails with "Multiple top-level packages discovered in a
+# flat-layout", which breaks `uv sync` and therefore pytest for everyone.
+[tool.setuptools]
+py-modules = []
+
 [tool.ruff]
 exclude = [
     ".bzr", ".direnv", ".eggs", ".git", ".git-rewrite", ".hg",
@@ -32,7 +39,9 @@ exclude = [
     ".tox", ".venv", ".vscode", "__pypackages__", "_build",
     "buck-out", "build", "dist", "node_modules", "site-packages", "venv",
     # Per-migration generated validation scripts are committed ARTIFACTS, not source. Linting them made
-    # the documented `ruff check .` rewrite ~77 lines across committed examples.
+    # the documented `ruff check .` rewrite ~77 lines across committed examples. `migrations` covers
+    # both nested trees (the user's own workbook and data-source migrations).
+    "examples",
     "migrations",
 ]
 line-length = 120

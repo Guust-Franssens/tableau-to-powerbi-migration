@@ -27,12 +27,12 @@ below dissolves once it is modelled that way.
 
 ## The reference bundle
 
-A migration's reference lives at `migrations/<slug>/reference/` (git-ignored — see *Governance*) and is
+A migration's reference lives at `migrations/workbooks/<slug>/reference/` (git-ignored — see *Governance*) and is
 described by a `manifest.json` so consumers never treat a 200px thumbnail and a full-res Server render
 as interchangeable ground truth.
 
 ```jsonc
-// migrations/<slug>/reference/manifest.json   (⚠️ schema implemented; some fields still TODO)
+// migrations/workbooks/<slug>/reference/manifest.json   (⚠️ schema implemented; some fields still TODO)
 {
   "captured_at": "2026-07-19T20:43:01Z",
   "source_workbook_sha256": "…",          // ties the image to an exact .twbx
@@ -165,7 +165,7 @@ public Tableau Public workbooks, so reference images are committed** as showcase
 reasonably sized — downscale big infographic captures). The caution below applies when you **fork the
 toolkit to migrate real customer dashboards**:
 
-- In a customer fork, add `migrations/*/reference/` back to `.gitignore` so customer screenshots stay
+- In a customer fork, add `**/reference/` back to `.gitignore` so customer screenshots stay
   local; commit only curated, customer-agnostic before/after images.
 - Never embed image bytes (base64) in the shareable spec — paths/metadata only.
 - The capture bundle's scratch (`reference/_thumbnails/`, `reference/manifest.json`) is git-ignored

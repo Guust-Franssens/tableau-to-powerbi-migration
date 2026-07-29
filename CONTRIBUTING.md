@@ -53,10 +53,10 @@ If you change `scripts/parse_tableau.py` or `docs/migration-spec.schema.json`, a
 
 ## Anatomy of a migration
 
-Each migration lives under `migrations/<slug>/`:
+Each workbook migration lives under `migrations/workbooks/<slug>/` (data-source migrations under `migrations/datasources/<slug>/`; our worked examples under `examples/<slug>/` — all three share this shape):
 
 ```
-migrations/<slug>/
+migrations/workbooks/<slug>/
 ├── source/              # .twb/.twbx  (git-ignored — may contain customer data)
 ├── data/                # extracted CSVs  (git-ignored)
 ├── reference/           # Tableau screenshots + manifest  (git-ignored — see SECURITY.md)
@@ -83,7 +83,7 @@ Keep every capability/mapping/number claim backed by evidence (a spec field, a T
   python scripts/set_data_folder.py --check
   ```
 - Confirm no source workbook, extracted data, secret, or customer-identifiable screenshot is staged.
-- Keep shared tooling customer-agnostic (customer context stays inside `migrations/<slug>/`).
+- Keep shared tooling customer-agnostic (customer context stays inside `migrations/workbooks/<slug>/` or `migrations/datasources/<slug>/`).
 
 ## Commits & branches
 

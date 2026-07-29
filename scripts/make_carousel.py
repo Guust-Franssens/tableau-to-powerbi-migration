@@ -263,20 +263,20 @@ def slide_close() -> Image.Image:
 PROOFS = [
     {
         "title": "The Price of Prosperity",
-        "powerbi": "migrations/price-of-prosperity/reference/powerbi-dashboard.png",
-        "tableau": "migrations/price-of-prosperity/reference/tableau-dashboard.png",
+        "powerbi": "examples/price-of-prosperity/reference/powerbi-dashboard.png",
+        "tableau": "examples/price-of-prosperity/reference/tableau-dashboard.png",
         "powerbi_crop": None,
     },
     {
         "title": "Health Tracker",
-        "powerbi": "migrations/health-tracker/reference/powerbi-health-tracker.png",
-        "tableau": "migrations/health-tracker/reference/tableau-metrics.png",
+        "powerbi": "examples/health-tracker/reference/powerbi-health-tracker.png",
+        "tableau": "examples/health-tracker/reference/tableau-metrics.png",
         "powerbi_crop": {"left": 0.018, "right": 0.042},
     },
     {
         "title": "NL Wind Energy Utilization",
-        "powerbi": "migrations/wind-energy-utilization/reference/powerbi-wind-energy.png",
-        "tableau": "migrations/wind-energy-utilization/reference/tableau-dashboard.png",
+        "powerbi": "examples/wind-energy-utilization/reference/powerbi-wind-energy.png",
+        "tableau": "examples/wind-energy-utilization/reference/tableau-dashboard.png",
         "powerbi_crop": {"left": 0.095, "right": 0.125},
     },
 ]

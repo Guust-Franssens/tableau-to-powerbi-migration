@@ -5,9 +5,9 @@ purpose: Report AI/Copilot-readiness of a migrated semantic model: the share of 
          enumerated categoricals is what lets Power BI Copilot resolve natural-language questions -
          see https://learn.microsoft.com/en-us/power-bi/create-reports/copilot-evaluate-data (DAX
          Copilot reads the first 200 chars of each description).
-usage:   python scripts/check_ai_readiness.py migrations/<slug>        # one migration
+usage:   python scripts/check_ai_readiness.py <tree>/<slug>        # one migration
          python scripts/check_ai_readiness.py --all                    # every migration, summary
-         python scripts/check_ai_readiness.py migrations/<slug> --strict # exit 1 if <100% coverage
+         python scripts/check_ai_readiness.py <tree>/<slug> --strict # exit 1 if <100% coverage
 """
 
 import argparse
@@ -79,17 +79,24 @@ def _print_model(slug: str, model_dir: Path, result: dict) -> bool:
 def main() -> None:
     """Audit one migration or all migrations for AI-readiness."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("migration", nargs="?", help="path to migrations/<slug> (omit with --all)")
+    parser.add_argument("migration", nargs="?", help="path to <tree>/<slug> (omit with --all)")
     parser.add_argument("--all", action="store_true", help="audit every migration")
     parser.add_argument("--strict", action="store_true", help="exit 1 if any model is below 100%% coverage")
     args = parser.parse_args()
 
     if args.all:
-        targets = sorted(p for p in (REPO_ROOT / "migrations").glob("*") if (p / "fabric").is_dir())
+        # All three migration trees: examples/ (this repo's worked examples) plus the user's own
+        # migrations/workbooks/ and migrations/datasources/.
+        targets = sorted(
+            p
+            for tree in ("examples", "migrations/workbooks", "migrations/datasources")
+            for p in (REPO_ROOT / tree).glob("*")
+            if (p / "fabric").is_dir()
+        )
     elif args.migration:
         targets = [REPO_ROOT / args.migration] if not Path(args.migration).is_absolute() else [Path(args.migration)]
     else:
-        parser.error("provide a migrations/<slug> path or --all")
+        parser.error("provide a <tree>/<slug> path or --all")
         return
 
     all_ok = True

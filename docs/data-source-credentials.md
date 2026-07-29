@@ -11,7 +11,7 @@ missing, and what to do. It is grounded in a first-hand Databricks test (2026-07
 ## TL;DR for the migrator
 
 1. After parsing, **classify the data sources**:
-   `python scripts/preflight_source_credentials.py --spec migrations/<slug>/migration-spec.json`.
+   `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<slug>/migration-spec.json`.
 2. If every source is extract/flat -> no credential gate, proceed normally.
 3. If any source is a **live database**, the migration cannot refresh/validate against data until a
    credential is configured. **You (the agent) cannot supply it.** Prompt the user, then verify:

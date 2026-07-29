@@ -22,7 +22,7 @@ usage:   # credentials come from the environment, never argv (which leaks to the
          #   TABLEAU_PAT_NAME=<personal access token name>
          #   TABLEAU_PAT_SECRET=<personal access token secret>
          python scripts/tableau_lineage.py --plan
-         python scripts/tableau_lineage.py --plan --download migrations/_datasources
+         python scripts/tableau_lineage.py --plan --download migrations/datasources/_downloads
 
          # offline: re-plan from a previously saved API response, no server needed
          python scripts/tableau_lineage.py --plan --from-json lineage.json
