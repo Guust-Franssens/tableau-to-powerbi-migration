@@ -1,7 +1,7 @@
 """
 purpose: Manage the per-model `DataFolder` M-parameter that each generated Fabric semantic model
          uses to locate its imported CSV data. The value committed to git is a portable placeholder
-         (`<REPO_ROOT>\\migrations\\<slug>\\data\\`) so no contributor's absolute machine path (and
+         (`<REPO_ROOT>\\<tree>\\<slug>\\data\\`) so no contributor's absolute machine path (and
          username) ever ships in the repo. Run this once after cloning to point every model at your
          local checkout so Power BI Desktop can refresh with real data.
 usage:   python scripts/set_data_folder.py            # localize: set every model to THIS checkout's absolute path
@@ -19,25 +19,33 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = "<REPO_ROOT>"
 # Matches:  expression DataFolder = "....."   (captures the quoted value)
-DATAFOLDER_RE = re.compile(r'(expression\s+DataFolder\s*=\s*")([^"]*)(")')
+# Also accepts SourceFolder: most models use DataFolder, but at least one (shipping-kpis) was authored
+# with SourceFolder. Matching both stops a model silently drifting out of localize/sanitize coverage.
+DATAFOLDER_RE = re.compile(r'(expression\s+(?:DataFolder|SourceFolder)\s*=\s*")([^"]*)(")')
 # A Windows absolute path under a user profile, i.e. a leaked machine path.
 ABSOLUTE_USER_PATH_RE = re.compile(r"[A-Za-z]:\\Users\\[^\\\"']+", re.IGNORECASE)
 
 
 def _model_expression_files() -> list[Path]:
-    return sorted(REPO_ROOT.glob("migrations/*/fabric/*.SemanticModel/definition/expressions.tmdl"))
+    """expressions.tmdl across all three migration trees (examples/, migrations/, datasources/)."""
+    return sorted(
+        p
+        for tree in ("examples", "migrations", "datasources")
+        for p in REPO_ROOT.glob(f"{tree}/*/fabric/*.SemanticModel/definition/expressions.tmdl")
+    )
 
 
-def _slug_for(expr_file: Path) -> str:
-    """migrations/<slug>/fabric/<Model>.SemanticModel/definition/expressions.tmdl -> <slug>."""
-    return expr_file.relative_to(REPO_ROOT).parts[1]
+def _tree_and_slug_for(expr_file: Path) -> tuple[str, str]:
+    """<tree>/<slug>/fabric/<Model>.SemanticModel/definition/expressions.tmdl -> (<tree>, <slug>)."""
+    parts = expr_file.relative_to(REPO_ROOT).parts
+    return parts[0], parts[1]
 
 
 def _rewrite(expr_file: Path, sanitize: bool) -> bool:
     text = expr_file.read_text(encoding="utf-8")
-    slug = _slug_for(expr_file)
+    tree, slug = _tree_and_slug_for(expr_file)
     base = PLACEHOLDER if sanitize else str(REPO_ROOT)
-    new_value = f"{base}\\migrations\\{slug}\\data\\"
+    new_value = f"{base}\\{tree}\\{slug}\\data\\"
 
     def _sub(match: re.Match[str]) -> str:
         return f"{match.group(1)}{new_value}{match.group(3)}"
@@ -105,7 +113,7 @@ def main() -> None:
 
     files = _model_expression_files()
     if not files:
-        print("no semantic-model expressions.tmdl files found under migrations/*/fabric/")
+        print("no semantic-model expressions.tmdl files found under examples|migrations|datasources /*/fabric/")
         return
     mode = "sanitize (placeholder)" if args.sanitize else "localize (this checkout)"
     print(f"{mode}: {len(files)} model(s)")

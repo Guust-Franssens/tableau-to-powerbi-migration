@@ -165,7 +165,7 @@ public Tableau Public workbooks, so reference images are committed** as showcase
 reasonably sized — downscale big infographic captures). The caution below applies when you **fork the
 toolkit to migrate real customer dashboards**:
 
-- In a customer fork, add `migrations/*/reference/` back to `.gitignore` so customer screenshots stay
+- In a customer fork, add `**/reference/` back to `.gitignore` so customer screenshots stay
   local; commit only curated, customer-agnostic before/after images.
 - Never embed image bytes (base64) in the shareable spec — paths/metadata only.
 - The capture bundle's scratch (`reference/_thumbnails/`, `reference/manifest.json`) is git-ignored

@@ -67,7 +67,7 @@ it must show up in `limitations_encountered`, not be silently dropped.
    migrating anything.** Ask Tableau itself who depends on what:
    ```
    python scripts/tableau_lineage.py --plan            # needs TABLEAU_SERVER/_SITE/_PAT_NAME/_PAT_SECRET
-   python scripts/tableau_lineage.py --plan --download migrations/_datasources
+   python scripts/tableau_lineage.py --plan --download datasources/_downloads
    ```
    It queries the Metadata API for `publishedDatasources { downstreamWorkbooks }` and prints a
    two-phase plan ordered by leverage: **phase 1** migrate each published data source once (the one
@@ -98,13 +98,18 @@ it must show up in `limitations_encountered`, not be silently dropped.
 4. **Published data source check (MANDATORY when the parser flags one).** If any high-severity
    limitation says **PUBLISHED Tableau data source** (connection class `sqlproxy`), the workbook only
    *points at* a server-side datasource. Two consequences, both must be handled before building:
-   - **(a) The workbook is missing metadata.** That datasource's connection details, custom SQL and
-     calculated-field formulas live on the server, **not** in this `.twb` — so the spec you just parsed
-     under-reports them. (Calcs the author added *on top of* the published source DO appear, which
-     makes the gap partial and easy to miss.) **Ask the user to export the published data source
-     (`.tds`/`.tdsx`) from Tableau Server/Cloud** — *Server > Open Data Source*, or download it from
-     the datasource's page — then parse it too:
-     `python scripts/parse_tableau.py <exported>.tds -o migrations/<name>/datasource-spec.json`.
+   - **(a) The workbook is missing metadata, and the data source is its own migration.** That
+     datasource's connection details, custom SQL and calculated-field formulas live on the server,
+     **not** in this `.twb` — so the spec you just parsed under-reports them. (Calcs the author added
+     *on top of* the published source DO appear, which makes the gap partial and easy to miss.) **Ask
+     the user to export the published data source (`.tds`/`.tdsx`)** — *Server > Open Data Source*, or
+     download it from the datasource's page (or `scripts/tableau_lineage.py --download`). It becomes a
+     **data-source migration in its own tree**, not part of this workbook's folder:
+     ```
+     datasources/<ds-slug>/source/<name>.tdsx
+     python scripts/parse_tableau.py datasources/<ds-slug>/source/<name>.tdsx \
+         -o datasources/<ds-slug>/migration-spec.json
+     ```
      Treat that spec's fields/calculations as the authoritative model definition.
    - **(b) One datasource is usually shared by MANY workbooks.** That maps onto **one Power BI semantic
      model with many reports bound to it** — never one near-identical model per workbook. Before
@@ -113,11 +118,12 @@ it must show up in `limitations_encountered`, not be silently dropped.
      python scripts/published_datasource_registry.py --spec migrations/<name>/migration-spec.json
      ```
      It matches the parser's stable dedup key (`published_datasource.key`, e.g. `finance/salesmaster`)
-     across every migration in the repo. Exit **0** = already built elsewhere → tell
-     `pbi-report-builder` to **bind to that existing semantic model** and tell `pbi-semantic-builder`
-     to add only genuinely-new measures; exit **1** = not yet built → build it **once** here, so later
-     workbooks reuse it. Rebuilding a duplicate model that then drifts from the shared one is the
-     failure this check exists to prevent.
+     against the data-source migrations under `datasources/`. Exit **0** = already built → tell
+     `pbi-report-builder` to **bind to that existing semantic model**
+     (`byPath: "../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"`) and tell
+     `pbi-semantic-builder` to add only genuinely-new measures; exit **1** = not yet built → build it
+     **once** under `datasources/<ds-slug>/` and `--register` it, so later workbooks reuse it.
+     Rebuilding a duplicate model that then drifts from the shared one is the failure this prevents.
 5. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
    `python scripts/preflight_source_credentials.py --spec migrations/<name>/migration-spec.json`. If it
    reports **only** extract/flat sources, there is no credential gate (data comes from CSV + a

@@ -1,0 +1,4 @@
+expression DataFolder = "<REPO_ROOT>\examples\telecommunications-analytics\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+	annotation PBI_ResultType = Text
+

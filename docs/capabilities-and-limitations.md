@@ -5,7 +5,7 @@ Power BI, and what are their limitations?"
 
 This is a grounded, evidence-based answer, not a generic claim. Everything below comes from actual
 end-to-end runs of this toolkit against **16 real, publicly available Tableau Public workbooks** (every
-folder under `migrations/`), ranging from a 7-worksheet KPI dashboard to a 91-worksheet enterprise
+folder under `examples/`), ranging from a 7-worksheet KPI dashboard to a 91-worksheet enterprise
 navigation app, plus IronViz infographics and custom-geometry charts. Where a specific behavior was
 observed on a specific workbook, that workbook's slug is cited so the claim is checkable.
 

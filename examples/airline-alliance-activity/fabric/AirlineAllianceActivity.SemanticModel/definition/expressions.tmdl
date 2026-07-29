@@ -1,0 +1,3 @@
+expression DataFolder = "<REPO_ROOT>\examples\airline-alliance-activity\data\" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+	annotation PBI_ResultType = Text

@@ -64,7 +64,7 @@ a migration, download the workbook from its Tableau Public link and re-run `scri
 which are what the before/after showcase is built from.
 
 The Tableau Public source URL for all 16 workbooks is listed in
-**[`migrations/README.md`](migrations/README.md)**, and every
+**[`examples/README.md`](examples/README.md)**, and every
 [showcase](docs/showcase/README.md) entry links back to the dashboard it was migrated from. Credit for the
 original dashboards belongs to their respective Tableau Public authors.
 
@@ -164,16 +164,16 @@ enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run
 
 ## Quickstart
 
-**Clone.** The 16 worked examples under `migrations/` are ~91% of the repo's files. If you're mainly
+**Clone.** The 16 worked examples under `examples/` are ~91% of the repo's files. If you're mainly
 here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
 the example blobs:
 
 ```bash
 git clone --filter=blob:none --sparse https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
 cd tableau-to-powerbi-migration
-git sparse-checkout set .github .vscode docs scripts tests
+git sparse-checkout set .github .vscode docs scripts tests migrations datasources
 # want one example to look at? pull just that folder:
-git sparse-checkout add migrations/health-tracker
+git sparse-checkout add examples/health-tracker
 ```
 
 For the full repo (all examples + showcase), use a normal `git clone …`. Then set up the Python env:
@@ -202,9 +202,9 @@ and point it at `migrations\<name>\migration-spec.json`.
 
 ## 🧪 Try a worked example
 
-Every folder under `migrations/<name>/` is a complete run: the parsed `migration-spec.json` plus the
+Every folder under `examples/<name>/` is a complete run: the parsed `migration-spec.json` plus the
 generated `fabric/<Name>.SemanticModel` and `fabric/<Name>.Report` PBIP project, ready to open in Power
-BI Desktop. A good first read is `migrations/eea-urban-adaptation/`, a run against the European
+BI Desktop. A good first read is `examples/eea-urban-adaptation/`, a run against the European
 Environment Agency's public
 ["Urban Audit city factsheets, Urban Adaptation Map Viewer"](https://public.tableau.com/app/profile/european.environment.agency/viz/test_20190116Urban_vulnerability_ideasFR_0/mainpage)
 workbook (16 worksheets, 7 data sources, 152 fields).
@@ -215,7 +215,7 @@ workbook (16 worksheets, 7 data sources, 152 fields).
    gitignored, not redistributed here) and re-run the two scripts above, **or** just open the report to
    inspect the already-built semantic model/report structure without live data.
 2. Point the `DataFolder` Power Query parameter (Transform data → Manage Parameters) at your local
-   `migrations/<name>/data/` path. It ships with a placeholder because M parameters cannot be relative
+   `examples/<name>/data/` path. It ships with a placeholder because M parameters cannot be relative
    to the project file. The helper `scripts\set_data_folder.py` can set this for you.
 
 <details>
@@ -223,14 +223,22 @@ workbook (16 worksheets, 7 data sources, 152 fields).
 
 <br>
 
+Three migration trees, split by **what they produce** — so our examples never mix with your work:
+
 ```
 .github/agents/          Four custom Copilot CLI agents (orchestrator + 3 subagents)
 .github/pbi.kb/          PBIR visual cookbook (visual-cookbook.md + 27 visual.json templates)
 scripts/                 Python automation (parser, .hyper extractor, AI-readiness, showcase) + preflight.ps1
 docs/                    migration-spec schema, Tableau->DAX guide, capabilities & limitations, showcase
-migrations/<name>/       Per-workbook working folder: source (gitignored), spec, Fabric output, reference PNGs
+examples/<name>/         OUR 16 worked examples - reference material, read-only
+migrations/<name>/       YOUR workbook migrations (.twbx -> report). Starts empty.
+datasources/<name>/      YOUR published-data-source migrations (.tds -> shared semantic model). Starts empty.
 tests/                   pytest suite + XML fixtures for the parser
 ```
+
+All three share the same shape (`source/`, `migration-spec.json`, `fabric/`); a data-source migration
+simply has no `.Report`. See [`migrations/README.md`](migrations/README.md) and
+[`datasources/README.md`](datasources/README.md) for how to start your own.
 
 </details>
 
@@ -245,7 +253,7 @@ pytest -q            # 20 parser tests
 
 ## 📊 Status: what's covered
 
-**Working end to end across 16 real Tableau Public workbooks.** Every folder under `migrations/`
+**Working end to end across 16 real Tableau Public workbooks.** Every folder under `examples/`
 carries a generated `.SemanticModel` and `.Report`. Highlights of the range covered:
 
 - **`airline-alliance-activity`**: the largest, at 91 worksheets across a 4-page CY/PY navigation app.

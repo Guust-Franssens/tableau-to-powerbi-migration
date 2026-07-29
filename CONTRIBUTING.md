@@ -53,7 +53,7 @@ If you change `scripts/parse_tableau.py` or `docs/migration-spec.schema.json`, a
 
 ## Anatomy of a migration
 
-Each migration lives under `migrations/<slug>/`:
+Each workbook migration lives under `migrations/<slug>/` (data-source migrations under `datasources/<slug>/`; our worked examples under `examples/<slug>/` — all three share this shape):
 
 ```
 migrations/<slug>/
@@ -83,7 +83,7 @@ Keep every capability/mapping/number claim backed by evidence (a spec field, a T
   python scripts/set_data_folder.py --check
   ```
 - Confirm no source workbook, extracted data, secret, or customer-identifiable screenshot is staged.
-- Keep shared tooling customer-agnostic (customer context stays inside `migrations/<slug>/`).
+- Keep shared tooling customer-agnostic (customer context stays inside `migrations/<slug>/` or `datasources/<slug>/`).
 
 ## Commits & branches
 

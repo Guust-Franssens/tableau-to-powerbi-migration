@@ -24,12 +24,12 @@ the source, its data, and its screenshots are yours to protect.
 
 | Artifact | Why it can be sensitive | Default here |
 |---|---|---|
-| Source workbooks (`migrations/*/source/*.twb`, `*.twbx`, `*.hyper`) | Can embed live/extracted data | git-ignored |
-| Extracted data (`migrations/*/data/`) | Materialized rows from the workbook | git-ignored |
-| Reference screenshots (`migrations/*/reference/*.png`) | A screenshot is a picture of the source data | **committed** (public sources); re-ignore in a customer fork |
+| Source workbooks (`**/source/*.twb`, `*.twbx`, `*.hyper`) | Can embed live/extracted data | git-ignored |
+| Extracted data (`**/data/`) | Materialized rows from the workbook | git-ignored |
+| Reference screenshots (`**/reference/*.png`) | A screenshot is a picture of the source data | **committed** (public sources); re-ignore in a customer fork |
 
 The **shareable** artifact of a migration is always its `migration-spec.json` (structure only) plus the
-generated TMDL/PBIR. If you adapt this for customer work, add `migrations/*/reference/` back to
+generated TMDL/PBIR. If you adapt this for customer work, add `**/reference/` back to
 `.gitignore` in your fork and keep only curated, customer-agnostic before/after images.
 
 ### Never commit secrets or credentials
@@ -55,7 +55,7 @@ python scripts/set_data_folder.py --check        # CI gate: exits non-zero if an
 
 ### Keep shared tooling customer-agnostic
 
-Customer names and context belong only inside a specific `migrations/<name>/` working folder — never in
+Customer names and context belong only inside a specific `migrations/<name>/` or `datasources/<name>/` working folder — never in
 shared tooling, agent files, script identifiers, or commit messages.
 
 ## Supported versions

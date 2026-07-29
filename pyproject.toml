@@ -32,8 +32,11 @@ exclude = [
     ".tox", ".venv", ".vscode", "__pypackages__", "_build",
     "buck-out", "build", "dist", "node_modules", "site-packages", "venv",
     # Per-migration generated validation scripts are committed ARTIFACTS, not source. Linting them made
-    # the documented `ruff check .` rewrite ~77 lines across committed examples.
+    # the documented `ruff check .` rewrite ~77 lines across committed examples. Covers all three
+    # migration trees (our examples plus the user's own workbook/data-source migrations).
+    "examples",
     "migrations",
+    "datasources",
 ]
 line-length = 120
 indent-width = 4
