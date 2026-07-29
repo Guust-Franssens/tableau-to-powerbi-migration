@@ -24,6 +24,13 @@ dev = [
     "pylint>=3.2",
 ]
 
+# This is a SCRIPT toolkit, not an importable library: everything runs as `python scripts/<x>.py`.
+# Without this, setuptools' flat-layout auto-discovery tries to package the top-level content folders
+# (examples/, migrations/, datasources/) and fails with "Multiple top-level packages discovered in a
+# flat-layout", which breaks `uv sync` and therefore pytest for everyone.
+[tool.setuptools]
+py-modules = []
+
 [tool.ruff]
 exclude = [
     ".bzr", ".direnv", ".eggs", ".git", ".git-rewrite", ".hg",
