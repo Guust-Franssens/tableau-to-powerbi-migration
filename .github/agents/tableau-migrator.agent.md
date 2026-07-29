@@ -63,6 +63,20 @@ it must show up in `limitations_encountered`, not be silently dropped.
    `migrations/<name>/` (create `source/`, and the spec will live at
    `migrations/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
    from the workbook's title.
+   **If this workbook is one of SEVERAL from a Tableau Server/Cloud estate, plan model-first before
+   migrating anything.** Ask Tableau itself who depends on what:
+   ```
+   python scripts/tableau_lineage.py --plan            # needs TABLEAU_SERVER/_SITE/_PAT_NAME/_PAT_SECRET
+   python scripts/tableau_lineage.py --plan --download migrations/_datasources
+   ```
+   It queries the Metadata API for `publishedDatasources { downstreamWorkbooks }` and prints a
+   two-phase plan ordered by leverage: **phase 1** migrate each published data source once (the one
+   feeding 12 workbooks is the highest-value unit of work in the estate), **phase 2** migrate each
+   workbook into a report bound to the model from phase 1. `--download` pulls each `.tdsx` so the model
+   layer can actually be parsed (`parse_tableau.py` accepts `.tds`/`.tdsx` directly). The keys it
+   prints are the same `published_datasource.key` the parser stamps on workbooks, so the two line up.
+   **The agent cannot create Tableau credentials** — a Tableau user must supply a Personal Access
+   Token. Without server access, fall back to the per-workbook flag in step 4.
 2. **Parse — but only if the spec doesn't already exist.** **PRECONDITION (hard):** if
    `migrations/<name>/migration-spec.json` already exists, **do not re-run the parser** without asking.
    Re-parsing **overwrites the file in place** and destroys every `semantic_build` / `report_build` /

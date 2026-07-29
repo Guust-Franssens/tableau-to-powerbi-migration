@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from lxml import etree
 
@@ -164,7 +165,10 @@ def _published_ds_name(repo: etree._Element, connection: dict[str, Any]) -> tupl
     if derived:
         segment = derived.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
         if segment:
-            return segment, "derived-from"
+            # The publish URL percent-encodes the name, so a datasource called "Sales Master" appears
+            # as "Sales%20Master". Decode it so the key matches the plain name the Tableau REST /
+            # Metadata API returns for the same datasource.
+            return unquote(segment), "derived-from"
     dbname = connection.get("database")
     if dbname:
         return dbname, "connection.dbname"

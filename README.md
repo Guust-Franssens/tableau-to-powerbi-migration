@@ -12,7 +12,7 @@
 &nbsp;![Microsoft Fabric](https://img.shields.io/badge/Microsoft_Fabric-117865)
 &nbsp;![GitHub Copilot](https://img.shields.io/badge/GitHub_Copilot-000000?logo=githubcopilot&logoColor=white)
 &nbsp;![Migrations](https://img.shields.io/badge/migrations-16-2ea44f)
-&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-26%2F26-2ea44f)
+&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-27%2F27-2ea44f)
 
 **[Showcase](docs/showcase/README.md)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
 
@@ -76,7 +76,11 @@ original dashboards belongs to their respective Tableau Public authors.
   (see [`docs/migration-spec.md`](docs/migration-spec.md)). Also accepts a standalone `.tds`/`.tdsx`
   data source, and flags Tableau **published** data sources (`sqlproxy`) with a stable dedup key so one
   shared datasource becomes **one** semantic model instead of a duplicate per workbook
-  (`scripts/published_datasource_registry.py`). Covered by a 26-test `pytest` suite.
+  (`scripts/published_datasource_registry.py`). Covered by a 27-test `pytest` suite.
+- **Estate lineage discovery** (`scripts/tableau_lineage.py`): for a whole Tableau Server/Cloud estate,
+  queries the **Metadata API** (`publishedDatasources { downstreamWorkbooks }`) and prints a
+  **model-first migration plan** ordered by leverage — migrate each published data source once, then
+  bind every downstream workbook's report to it — and can `--download` each `.tdsx` for parsing.
 - **Four Copilot CLI agents** (`.github/agents/`):
   - `tableau-migrator`: the orchestrator. Runs preflight, then coordinates the three subagents.
   - `pbi-semantic-builder`: translates the spec's calculated fields to DAX and builds the Fabric TMDL
