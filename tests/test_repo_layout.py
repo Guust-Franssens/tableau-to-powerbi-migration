@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import check_ai_readiness
 import set_ai_instructions
 import set_data_folder
-from published_datasource_registry import _by_path_from_report, _normalize_key
+from published_datasource_registry import _by_path_from_report, _near_misses, _normalize_key
 from set_data_folder import ABSOLUTE_USER_PATH_RE, _tree_and_slug_for
 from tableau_lineage import dedup_key
 
@@ -130,6 +130,38 @@ def test_dedup_key_is_case_normalized_end_to_end() -> None:
     """
     assert _normalize_key("  Finance/Sales Master  ") == dedup_key("Finance", "Sales Master")
     assert _normalize_key("FINANCE/SALES MASTER") == "finance/sales master"
+
+
+@pytest.mark.parametrize(
+    ("workbook_key", "registered_key"),
+    [
+        ("finance/sales master", "finance/salesmaster"),  # space vs none
+        ("finance/sales master", "finance/sales%20master"),  # percent-encoded survived
+        ("finance/sales master", "Finance/Sales Master"),  # casing
+        ("finance/sales-master", "finance/sales_master"),  # separator style
+        ("finance/salesmaster", "finance/sales.master"),  # punctuation
+    ],
+)
+def test_near_miss_keys_are_shouted_about_not_silently_ignored(workbook_key: str, registered_key: str) -> None:
+    """The round trip cannot be tested without a live Tableau tenant - so it must fail LOUDLY.
+
+    If the key derived from the workbook ever disagrees with the key registered from the .tds, a
+    plain dict lookup reports "not yet migrated" and a duplicate model gets built with no error at
+    all. Detecting the near-miss converts that silent, expensive failure into a visible one.
+    """
+    assert _near_misses(workbook_key, [registered_key]) == [registered_key]
+
+
+@pytest.mark.parametrize(
+    ("workbook_key", "registered_key"),
+    [
+        ("finance/sales master", "finance/orders"),  # genuinely different data source
+        ("finance/sales master", "hr/sales master"),  # same name, DIFFERENT site
+    ],
+)
+def test_near_miss_does_not_fire_for_genuinely_different_keys(workbook_key: str, registered_key: str) -> None:
+    """It must not cry wolf: a different site or a different name is a real 'not yet migrated'."""
+    assert _near_misses(workbook_key, [registered_key]) == []
 
 
 def test_by_path_refuses_to_guess_for_a_model_outside_the_default_tree() -> None:

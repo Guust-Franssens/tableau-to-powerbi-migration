@@ -66,8 +66,14 @@ against **real** public Tableau files, but one path could not be:
 
 The two ⚠️ rows are the ones to sanity-check on first contact with a real server: after registering,
 run `--scan` and confirm the key derived from the **workbook** matches the key you registered from
-the **data source**. If they differ, the dedup silently degrades to "not yet migrated" and you get a
-duplicate model — so it is worth the one-minute check.
+the **data source**.
+
+You get a safety net here, because that check is easy to forget. If a workbook's key doesn't match
+any registered key but is *near-identical* to one — differing only by case, spaces, separators,
+punctuation or percent-encoding — the lookup reports **`PROBABLE KEY MISMATCH`** and exits 1 instead
+of quietly saying "not yet migrated". That turns the one failure we cannot test without a live
+Tableau tenant into a loud one rather than a duplicate model discovered weeks later. A genuinely
+different name, or the same name on a different site, still reports a normal "not yet migrated".
 
 The committed test fixtures are **synthetic** (`contoso.com`) on purpose — third-party workbooks
 aren't ours to redistribute — so they encode the rules above rather than being captured artifacts.
