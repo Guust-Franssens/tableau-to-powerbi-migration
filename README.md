@@ -12,7 +12,7 @@
 &nbsp;![Microsoft Fabric](https://img.shields.io/badge/Microsoft_Fabric-117865)
 &nbsp;![GitHub Copilot](https://img.shields.io/badge/GitHub_Copilot-000000?logo=githubcopilot&logoColor=white)
 &nbsp;![Migrations](https://img.shields.io/badge/migrations-16-2ea44f)
-&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-20%2F20-2ea44f)
+&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-26%2F26-2ea44f)
 
 **[Showcase](docs/showcase/README.md)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
 
@@ -73,7 +73,10 @@ original dashboards belongs to their respective Tableau Public authors.
 - **Deterministic Tableau parser + spec schema** (`scripts/parse_tableau.py`): extracts every data
   source, field, calculated-field formula, worksheet encoding, dashboard layout, reference line, and
   theme from the raw `.twb` XML into a normalized, schema-defined `migration-spec.json`
-  (see [`docs/migration-spec.md`](docs/migration-spec.md)). Covered by a 20-test `pytest` suite.
+  (see [`docs/migration-spec.md`](docs/migration-spec.md)). Also accepts a standalone `.tds`/`.tdsx`
+  data source, and flags Tableau **published** data sources (`sqlproxy`) with a stable dedup key so one
+  shared datasource becomes **one** semantic model instead of a duplicate per workbook
+  (`scripts/published_datasource_registry.py`). Covered by a 26-test `pytest` suite.
 - **Four Copilot CLI agents** (`.github/agents/`):
   - `tableau-migrator`: the orchestrator. Runs preflight, then coordinates the three subagents.
   - `pbi-semantic-builder`: translates the spec's calculated fields to DAX and builds the Fabric TMDL

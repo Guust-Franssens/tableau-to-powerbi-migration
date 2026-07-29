@@ -55,6 +55,20 @@
               "note": { "type": ["string", "null"] }
             }
           },
+          "published_datasource": {
+            "type": "object",
+            "description": "Present only when this datasource is a Tableau PUBLISHED (server-side) data source that the workbook merely points at (connection class 'sqlproxy'). Its calculated fields / custom SQL live server-side, so the exported .tds/.tdsx is required for complete coverage. Several workbooks commonly share one published datasource - migrate it once to a single semantic model and rebind downstream reports.",
+            "properties": {
+              "id": { "type": ["string", "null"], "description": "Published data source name on the server" },
+              "site": { "type": ["string", "null"], "description": "Tableau site the datasource lives on" },
+              "path": { "type": ["string", "null"] },
+              "derived_from": { "type": ["string", "null"], "description": "Full server URL it was derived from" },
+              "revision": { "type": ["string", "null"] },
+              "name_source": { "type": ["string", "null"], "description": "Which attribute the name was resolved from: derived-from | connection.dbname | repository-location.id (in precedence order)" },
+              "id_attribute": { "type": ["string", "null"], "description": "Raw repository-location@id. When it differs from `id`, the server-side datasource was renamed after this workbook was published and this value is stale." },
+              "key": { "type": ["string", "null"], "description": "Stable dedup identity '<site>/<name>' (lowercased, excludes revision + host) - the key to match the SAME published datasource across multiple workbooks so it is migrated to ONE shared semantic model" }
+            }
+          },
           "tables": {
             "type": "array",
             "items": {

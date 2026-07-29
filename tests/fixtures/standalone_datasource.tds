@@ -1,0 +1,17 @@
+<?xml version='1.0' encoding='utf-8' ?>
+
+<datasource caption='Standalone Sales' formatted-name='postgres.1of3kl00aoax5d1a1ejma1397430' inline='true' source-platform='win' version='10.0' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <repository-location />
+  <connection authentication='username-password' class='postgres' dbname='SalesDW' odbc-native-protocol='yes' one-time-sql='' port='5432' server='db.contoso.local' username='reader'>
+    <relation name='orders' table='[public].[orders]' type='table' />
+  </connection>
+  <aliases enabled='yes' />
+  <column datatype='integer' name='[Number of Records]' role='measure' type='quantitative' user:auto-column='numrec'>
+    <calculation class='tableau' formula='1' />
+  </column>
+  <column caption='Amount' datatype='real' name='[amount]' role='measure' type='quantitative' />
+  <column caption='Region' datatype='string' name='[region]' role='dimension' type='nominal' />
+  <column caption='Amount Scaled' datatype='real' name='[Calculation_357754699576291328]' role='measure' type='quantitative'>
+    <calculation class='tableau' formula='[amount] * 100' />
+  </column>
+</datasource>

@@ -1,8 +1,9 @@
 """
-purpose: Parse a Tableau workbook (.twb / .twbx) into migration-spec.json, the normalized
+purpose: Parse a Tableau workbook (.twb / .twbx) or standalone data source (.tds / .tdsx) into
+         migration-spec.json, the normalized
          intermediate representation consumed by the pbi-semantic-builder and pbi-report-builder
          subagents. See docs/migration-spec.md for the schema and design rationale.
-usage:   python scripts/parse_tableau.py <workbook.twb|workbook.twbx> -o <migration-spec.json>
+usage:   python scripts/parse_tableau.py <workbook.twb|.twbx|datasource.tds|.tdsx> -o <migration-spec.json>
 """
 
 from __future__ import annotations
@@ -51,20 +52,38 @@ class IdRegistry:
         return base if count == 0 else f"{base}_{count}"
 
 
+def _wrap_datasource_as_workbook(ds_el: etree._Element) -> etree._Element:
+    """Wrap a standalone `<datasource>` root (a .tds/.tdsx) in a synthetic `<workbook><datasources>`
+    shell so every downstream `datasources/datasource` lookup works unchanged. A .tds legitimately has
+    no worksheets or dashboards, so those parse to empty lists."""
+    workbook = etree.Element("workbook")
+    datasources = etree.SubElement(workbook, "datasources")
+    datasources.append(ds_el)
+    return workbook
+
+
 def load_twb_root(path: Path) -> tuple[etree._Element, dict[str, str]]:
-    """Return the parsed .twb XML root, plus a map of hyper-file relative paths found in the archive
-    (empty if the input is a plain .twb with no packaged extracts)."""
+    """Return the parsed Tableau XML root, plus a map of hyper-file relative paths found in the archive
+    (empty for a plain .twb/.tds with no packaged extracts).
+
+    Accepts a workbook (.twb/.twbx) or a standalone data source (.tds/.tdsx). The latter matters for
+    PUBLISHED data sources: a workbook that points at one (connection class 'sqlproxy') does NOT carry
+    that datasource's calculated fields, so the exported .tds must be parsed to see them."""
+    suffix = path.suffix.lower()
     hyper_files: dict[str, str] = {}
-    if path.suffix.lower() == ".twbx":
+    if suffix in (".twbx", ".tdsx"):
+        inner_ext = ".twb" if suffix == ".twbx" else ".tds"
         with zipfile.ZipFile(path) as zf:
-            twb_names = [n for n in zf.namelist() if n.lower().endswith(".twb")]
-            if not twb_names:
-                raise ValueError(f"No .twb found inside {path}")
-            xml_bytes = zf.read(twb_names[0])
+            inner_names = [n for n in zf.namelist() if n.lower().endswith(inner_ext)]
+            if not inner_names:
+                raise ValueError(f"No {inner_ext} found inside {path}")
+            xml_bytes = zf.read(inner_names[0])
             hyper_files = {Path(n).name: n for n in zf.namelist() if n.lower().endswith(".hyper")}
     else:
         xml_bytes = path.read_bytes()
     root = etree.fromstring(xml_bytes)
+    if root.tag == "datasource":
+        root = _wrap_datasource_as_workbook(root)
     return root, hyper_files
 
 
@@ -127,6 +146,82 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
 
 
 _CONTAINER_RELATION_TYPES = {"collection", "join", "union"}
+
+
+def _published_ds_name(repo: etree._Element, connection: dict[str, Any]) -> tuple[str | None, str]:
+    """Resolve the published datasource's real name, and say which attribute it came from.
+
+    Precedence is deliberate, and was derived from real published workbooks:
+      1. the last path segment of `derived-from` (the authoritative publish URL);
+      2. the sqlproxy connection's `dbname`;
+      3. the `repository-location@id` attribute -- LAST, because it can go stale.
+    Real-world evidence: a Tableau Cloud workbook published against datasource `dandan003` carried
+    `id='new'` (a leftover from a rename) while `derived-from`, `dbname` and `caption` all agreed on
+    `dandan003`. Keying on `id` would have given two workbooks that share ONE datasource two different
+    keys -- defeating the de-duplication this key exists for.
+    """
+    derived = repo.get("derived-from")
+    if derived:
+        segment = derived.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+        if segment:
+            return segment, "derived-from"
+    dbname = connection.get("database")
+    if dbname:
+        return dbname, "connection.dbname"
+    return repo.get("id"), "repository-location.id"
+
+
+def _parse_published_datasource(ds_el: etree._Element, connection: dict[str, Any]) -> dict[str, Any] | None:
+    """Identify a Tableau *published* (server-side) datasource the workbook merely points at.
+
+    A workbook that connects to a Published Data Source carries `connection class='sqlproxy'` plus a
+    `<repository-location>` naming the server-side datasource. The datasource's own metadata -- its
+    connection details, custom SQL and (critically) its calculated-field formulas -- live centrally in
+    that published datasource, NOT in this .twb, so parsing the workbook alone silently under-reports
+    them. The exported `.tds`/`.tdsx` is required for complete coverage.
+
+    Returns None for ordinary embedded datasources.
+
+    The `key` is a STABLE identity (site + datasource name, lowercased) deliberately excluding
+    `revision` and the server host: it is what lets the orchestrator recognise that several workbooks
+    share ONE published datasource and bind them all to a single Power BI semantic model instead of
+    rebuilding an identical model per workbook.
+    """
+    conn_classes = {c.get("class") for c in ds_el.iter("connection")}
+    repo = ds_el.find("repository-location")
+    # A standalone .tds carries an EMPTY `<repository-location />` placeholder even when the datasource
+    # is not published at all (verified against tableau/document-api-python's datasource_test.tds), so
+    # an element alone proves nothing -- require real server identity, or a sqlproxy connection.
+    has_repo_identity = repo is not None and bool(repo.get("id") or repo.get("derived-from"))
+    if "sqlproxy" not in conn_classes and not has_repo_identity:
+        return None
+    if repo is None or not has_repo_identity:
+        return {
+            "id": None,
+            "site": None,
+            "path": None,
+            "derived_from": None,
+            "revision": None,
+            "key": None,
+            "name_source": None,
+            "id_attribute": None,
+        }
+
+    ds_name, name_source = _published_ds_name(repo, connection)
+    site = repo.get("site")
+    key_parts = [p for p in (site, ds_name) if p]
+    return {
+        "id": ds_name,
+        "site": site,
+        "path": repo.get("path"),
+        "derived_from": repo.get("derived-from"),
+        "revision": repo.get("revision"),
+        "key": "/".join(key_parts).lower() if key_parts else None,
+        "name_source": name_source,
+        # Kept for auditability: when this differs from `id`, the server-side datasource was renamed
+        # after this workbook was published, and `id` is the stale value.
+        "id_attribute": repo.get("id"),
+    }
 
 
 def _collect_leaf_relations(rel: etree._Element) -> list[etree._Element]:
@@ -333,15 +428,19 @@ def _parse_single_data_source(
         if ci.get("column", "") in name_to_id
     }
 
+    connection = _parse_connection(ds_el, hyper_files)
     data_source = {
         "id": ds_id,
         "caption": caption,
         "internal_name": internal_name,
-        "connection": _parse_connection(ds_el, hyper_files),
+        "connection": connection,
         "tables": tables,
         "joins": _parse_joins(ds_el),
         "fields": fields,
     }
+    published = _parse_published_datasource(ds_el, connection)
+    if published is not None:
+        data_source["published_datasource"] = published
     return data_source, internal_name, instance_map, name_to_id
 
 
@@ -883,6 +982,31 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
     limitations = []
     for ds in spec["data_sources"]:
+        published = ds.get("published_datasource")
+        if published:
+            name = published.get("id") or ds.get("caption") or ds["id"]
+            site = published.get("site") or "?"
+            key = published.get("key") or "unknown"
+            limitations.append(
+                {
+                    "item": ds["id"],
+                    "issue": (
+                        f"PUBLISHED Tableau data source ('{name}' on site '{site}', dedup key "
+                        f"'{key}'): this workbook only POINTS at a server-side datasource "
+                        "(connection class 'sqlproxy'). Its connection details, custom SQL and "
+                        "calculated-field formulas live in the published datasource, NOT in this "
+                        "workbook, so parsing the .twb alone under-reports them (workbook-local "
+                        "calcs built on top of it DO appear here, which makes the gap partial and "
+                        "easy to miss). ACTION: export the published data source (.tds/.tdsx) from "
+                        "Tableau Server/Cloud and parse it too. NOTE: several workbooks typically "
+                        "share ONE published datasource - migrate it ONCE to a single Power BI "
+                        "semantic model and bind every downstream report to that model; do not "
+                        "rebuild an identical model per workbook. Match on the dedup key above."
+                    ),
+                    "severity": "high",
+                    "stage": "parse",
+                }
+            )
         if ds["connection"]["mode"] == "extract":
             limitations.append(
                 {
@@ -982,7 +1106,7 @@ def validate_spec(spec: dict[str, Any], schema_path: Path) -> None:
 def main() -> None:
     """CLI entry point: parse the workbook given on the command line and write migration-spec.json."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("workbook", type=Path, help="Path to a .twb or .twbx file")
+    parser.add_argument("workbook", type=Path, help="Path to a .twb/.twbx workbook or .tds/.tdsx data source")
     parser.add_argument("-o", "--output", type=Path, required=True, help="Output migration-spec.json path")
     parser.add_argument(
         "--schema",

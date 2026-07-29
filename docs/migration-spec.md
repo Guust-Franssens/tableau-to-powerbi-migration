@@ -64,6 +64,23 @@ far more reliable than asking an LLM to re-derive this structure from raw XML on
   Y-axis field per measure on a clustered column chart) instead of trying to recreate a literal pivot
   column. `pivoted_field_ids` is empty when no resolvable filter was found (e.g. the idiom is used
   purely for text-table labeling) — that case needs a manual look at the worksheet's shelves/tooltip.
+- **`published_datasource` (Tableau PUBLISHED data sources).** Present only when a workbook merely
+  *points at* a server-side datasource (connection `class: sqlproxy` + a datasource-scoped
+  `<repository-location>`). Two things follow, and both are easy to get wrong:
+  - **The workbook is an incomplete source of truth.** That datasource's connection details, custom SQL
+    and calculated-field formulas live on Tableau Server/Cloud, *not* in the `.twb`. Calcs the author
+    added on top of it *do* appear, so the gap is partial and silent. Export the `.tds`/`.tdsx` and
+    parse it too — `parse_tableau.py` accepts both (a `.tds` has `<datasource>` as its root and simply
+    yields no worksheets/dashboards).
+  - **`key` is a stable dedup identity** (`<site>/<name>`, lowercased, excluding revision + host).
+    One published datasource usually feeds MANY workbooks, which should become **one Power BI semantic
+    model with many reports bound to it**, not a near-duplicate model each time.
+    `scripts/published_datasource_registry.py` indexes this key across all migrations so the
+    orchestrator can reuse an existing model. The name is resolved from `derived-from` → connection
+    `dbname` → `repository-location@id`, in that order, because `@id` can go stale: a real Tableau
+    Cloud workbook was found carrying `id='new'` after its datasource was renamed to `dandan003`, and
+    keying on `@id` would have split one shared datasource into two keys. `name_source` records which
+    attribute won and `id_attribute` preserves the raw (possibly stale) `@id` for audit.
 - **`connection.mode`.** The EEA workbook's 7 datasources are all `.hyper` extracts (`mode: extract`,
   no live DB) — real rows must be pulled from the embedded `.hyper` file via `tableauhyperapi` (see
   `scripts/extract_hyper_data.py`). Real-world workbooks may have `mode: live` connections instead;
