@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from parse_tableau import parse_workbook  # noqa: E402  (path insert must precede this import)
+from parse_tableau import _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
@@ -313,3 +313,27 @@ def test_published_datasource_raises_high_severity_limitation():
     assert ".tds" in issue  # tells the user which artifact to export
     assert "finance/salesmaster" in issue  # carries the dedup key
     assert "bind every downstream report" in issue  # states the shared-model rule
+
+
+def test_parser_and_server_lineage_agree_on_the_dedup_key():
+    """THE LINCHPIN: the key the parser derives from a workbook must equal the key
+    scripts/tableau_lineage.py derives from the Tableau Metadata API for the same data source.
+
+    If these two ever diverge, server-side lineage cannot be matched to locally parsed workbooks and
+    the shared-model de-duplication silently fails. The nasty case is a name containing a space: the
+    publish URL percent-encodes it ('Sales%20Master') while the API returns it plain."""
+    from lxml import etree
+
+    from tableau_lineage import dedup_key
+
+    ds_el = etree.fromstring(
+        "<datasource>"
+        "<repository-location derived-from='https://x/t/Finance/datasources/Sales%20Master?rev=1.0'"
+        " id='stale' path='/t/Finance/datasources' revision='1.0' site='Finance' />"
+        "<connection class='sqlproxy' dbname='Sales Master' />"
+        "</datasource>"
+    )
+    parsed = _parse_published_datasource(ds_el, {"database": "Sales Master"})
+    assert parsed["id"] == "Sales Master"  # percent-decoded, not 'Sales%20Master'
+    assert parsed["key"] == dedup_key("Finance", "Sales Master")
+    assert parsed["key"] == "finance/sales master"
