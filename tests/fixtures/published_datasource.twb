@@ -1,0 +1,45 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<workbook source-build='2023.1.0 (20231.23.0512.1georgia)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource caption='Sales Master' name='sqlproxy.1rfw7xb1xv29kt1cv7fne0cre0xx' version='18.1'>
+      <repository-location derived-from='https://tableau.contoso.com/t/Finance/datasources/SalesMaster?rev=1.0' id='SalesMaster_oldname' path='/t/Finance/datasources' revision='1.0' site='Finance' />
+      <connection class='sqlproxy' dbname='SalesMaster' server='https://tableau.contoso.com'>
+        <relation name='sqlproxy' table='[sqlproxy]' type='table' />
+      </connection>
+      <column caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+      <column caption='Region' datatype='string' name='[Region]' role='dimension' type='nominal' />
+      <column caption='Workbook Local Ratio' datatype='real' name='[Workbook Local Ratio]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='SUM([Sales]) / 100' />
+      </column>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Sales by Region'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Sales Master' name='sqlproxy.1rfw7xb1xv29kt1cv7fne0cre0xx' />
+          </datasources>
+          <datasource-dependencies datasource='sqlproxy.1rfw7xb1xv29kt1cv7fne0cre0xx'>
+            <column caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+            <column caption='Region' datatype='string' name='[Region]' role='dimension' type='nominal' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+          </pane>
+        </panes>
+        <rows>[sqlproxy.1rfw7xb1xv29kt1cv7fne0cre0xx].[sum:Sales:qk]</rows>
+        <cols>[sqlproxy.1rfw7xb1xv29kt1cv7fne0cre0xx].[none:Region:nk]</cols>
+      </table>
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Overview'>
+      <zones>
+        <zone h='100000' id='4' name='Sales by Region' w='100000' x='0' y='0' />
+      </zones>
+    </dashboard>
+  </dashboards>
+</workbook>

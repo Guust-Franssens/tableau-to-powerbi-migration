@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from parse_tableau import parse_workbook  # noqa: E402  (path insert must precede this import)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
+PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
+TDS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "standalone_datasource.tds"
 
 
 def test_parses_top_level_shape():
@@ -240,3 +242,74 @@ def test_floating_dashboard_paramctrl_and_bitmap_zone_types_resolved():
     assert set(children_by_type) == {"parameter", "worksheet", "image"}
     assert children_by_type["parameter"]["field_id"] == spec["parameters"][0]["id"]
     assert children_by_type["worksheet"]["worksheet_id"] == spec["worksheets"][0]["id"]
+
+
+def test_embedded_datasource_is_not_flagged_as_published():
+    """A workbook-level <repository-location> (Tableau Public workbooks always carry one) must NOT be
+    mistaken for a published *datasource*; only a datasource-scoped one counts."""
+    spec = parse_workbook(FIXTURE)
+    assert all("published_datasource" not in ds for ds in spec["data_sources"])
+
+
+def test_published_datasource_detected_with_stable_dedup_key():
+    spec = parse_workbook(PUBLISHED_FIXTURE)
+    ds = spec["data_sources"][0]
+    assert ds["connection"]["class"] == "sqlproxy"
+    published = ds["published_datasource"]
+    assert published["id"] == "SalesMaster"
+    assert published["site"] == "Finance"
+    assert published["derived_from"].endswith("/datasources/SalesMaster?rev=1.0")
+    # The dedup key deliberately excludes revision + server host so the SAME published datasource
+    # resolves identically across workbooks (and across republishes) -> one shared semantic model.
+    assert published["key"] == "finance/salesmaster"
+    assert published["revision"] not in published["key"]
+
+
+def test_published_datasource_name_survives_a_stale_id_attribute():
+    """Regression, found against a REAL Tableau Cloud workbook (vimosh0812/ai-bi-assistant new-ds.twb):
+    the datasource had been renamed, leaving repository-location@id='new' while derived-from, dbname
+    and caption all said 'dandan003'. Keying on @id would give two workbooks that share ONE published
+    datasource two different keys, defeating de-duplication."""
+    spec = parse_workbook(PUBLISHED_FIXTURE)
+    published = spec["data_sources"][0]["published_datasource"]
+    assert published["id_attribute"] == "SalesMaster_oldname"  # the stale value, kept for audit
+    assert published["name_source"] == "derived-from"  # authoritative source won
+    assert published["key"] == "finance/salesmaster"  # stale @id did NOT leak into the key
+
+
+def test_standalone_tds_parses_into_data_sources_and_calculations():
+    """A .tds has `<datasource>` as its ROOT (no <workbook><datasources> wrapper). Before this was
+    handled the parser returned ZERO data sources *without erroring* -- a silent failure for exactly
+    the artifact we tell users to export when a workbook points at a published data source."""
+    spec = parse_workbook(TDS_FIXTURE)
+    assert len(spec["data_sources"]) == 1
+    ds = spec["data_sources"][0]
+    assert ds["connection"]["class"] == "postgres"
+    formulas = {f["caption"]: f["tableau_formula"] for f in ds["fields"] if f.get("tableau_formula")}
+    assert formulas["Amount Scaled"] == "[amount] * 100"
+    # A .tds legitimately has no worksheets/dashboards.
+    assert spec["worksheets"] == []
+    assert spec["dashboards"] == []
+
+
+def test_empty_repository_location_in_tds_is_not_a_published_datasource():
+    """Standalone .tds files carry an EMPTY `<repository-location />` placeholder even when they are
+    not published (verified against tableau/document-api-python's datasource_test.tds). The element
+    alone must not trigger the published-datasource flag, or every .tds would false-positive."""
+    spec = parse_workbook(TDS_FIXTURE)
+    assert "published_datasource" not in spec["data_sources"][0]
+    assert not [limit for limit in spec["limitations_encountered"] if "PUBLISHED Tableau data source" in limit["issue"]]
+
+
+def test_published_datasource_raises_high_severity_limitation():
+    spec = parse_workbook(PUBLISHED_FIXTURE)
+    entries = [
+        limit
+        for limit in spec["limitations_encountered"]
+        if limit["severity"] == "high" and "PUBLISHED Tableau data source" in limit["issue"]
+    ]
+    assert len(entries) == 1
+    issue = entries[0]["issue"]
+    assert ".tds" in issue  # tells the user which artifact to export
+    assert "finance/salesmaster" in issue  # carries the dedup key
+    assert "bind every downstream report" in issue  # states the shared-model rule

@@ -48,6 +48,22 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
 
 ## Workflow
 
+0. **Published data source? Check for an existing shared model BEFORE building anything.** If the spec
+   has `data_sources[].published_datasource` (Tableau connection class `sqlproxy`), this workbook only
+   *points at* a server-side datasource that is typically shared by several workbooks. The correct
+   Power BI shape is **one semantic model, many reports bound to it** — not a near-duplicate model per
+   workbook. Run:
+   ```
+   python scripts/published_datasource_registry.py --spec migrations/<slug>/migration-spec.json
+   ```
+   - **exit 0 (already migrated):** do **NOT** rebuild. Reuse the semantic model it names; add only
+     measures this workbook genuinely needs that the shared model lacks, and report back that you
+     reused it. A duplicate model will drift from the shared one — that is the whole failure mode.
+   - **exit 1 (not yet built):** build it **once**, here, so later workbooks reuse it.
+   Also note the workbook does **not** contain that datasource's own calculated-field formulas (they
+   live server-side). If the orchestrator supplied a parsed `.tds`/`.tdsx` spec, treat **it** as the
+   authoritative field/calculation source; if it didn't, say so rather than silently modelling only the
+   partial set visible in the workbook.
 1. **Load and validate** `migration-spec.json` against `docs/migration-spec.schema.json` (the parser
    already did this, but re-validate if you're consuming a hand-edited spec).
 2. **Decide data materialization for extract-based sources.** Every `data_sources[].connection.mode ==

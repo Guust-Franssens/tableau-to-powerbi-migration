@@ -67,7 +67,7 @@ it must show up in `limitations_encountered`, not be silently dropped.
    `migrations/<name>/migration-spec.json` already exists, **do not re-run the parser** without asking.
    Re-parsing **overwrites the file in place** and destroys every `semantic_build` / `report_build` /
    `validate` limitation the subagents appended to it (routinely 20-50 entries) — i.e. exactly the raw
-   material step 10's summary depends on. On a re-run, fix round, or resumed session, skip to step 3.
+   material step 11's summary depends on. On a re-run, fix round, or resumed session, skip to step 3.
    Only when the spec is absent (or the user explicitly confirms a re-parse of a changed source) run:
    ```
    python scripts/parse_tableau.py migrations/<name>/source/<file>.twbx -o migrations/<name>/migration-spec.json
@@ -81,7 +81,30 @@ it must show up in `limitations_encountered`, not be silently dropped.
    Tableau Groups — see `docs/tableau-dax-translation-guide.md` §6 for table calcs; **Tableau Groups are
    not yet covered by the guide** — translate them as a mapped calculated column and log a limitation).
    Don't proceed silently past high-severity items without flagging them.
-4. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
+4. **Published data source check (MANDATORY when the parser flags one).** If any high-severity
+   limitation says **PUBLISHED Tableau data source** (connection class `sqlproxy`), the workbook only
+   *points at* a server-side datasource. Two consequences, both must be handled before building:
+   - **(a) The workbook is missing metadata.** That datasource's connection details, custom SQL and
+     calculated-field formulas live on the server, **not** in this `.twb` — so the spec you just parsed
+     under-reports them. (Calcs the author added *on top of* the published source DO appear, which
+     makes the gap partial and easy to miss.) **Ask the user to export the published data source
+     (`.tds`/`.tdsx`) from Tableau Server/Cloud** — *Server > Open Data Source*, or download it from
+     the datasource's page — then parse it too:
+     `python scripts/parse_tableau.py <exported>.tds -o migrations/<name>/datasource-spec.json`.
+     Treat that spec's fields/calculations as the authoritative model definition.
+   - **(b) One datasource is usually shared by MANY workbooks.** That maps onto **one Power BI semantic
+     model with many reports bound to it** — never one near-identical model per workbook. Before
+     delegating the build, run:
+     ```
+     python scripts/published_datasource_registry.py --spec migrations/<name>/migration-spec.json
+     ```
+     It matches the parser's stable dedup key (`published_datasource.key`, e.g. `finance/salesmaster`)
+     across every migration in the repo. Exit **0** = already built elsewhere → tell
+     `pbi-report-builder` to **bind to that existing semantic model** and tell `pbi-semantic-builder`
+     to add only genuinely-new measures; exit **1** = not yet built → build it **once** here, so later
+     workbooks reuse it. Rebuilding a duplicate model that then drifts from the shared one is the
+     failure this check exists to prevent.
+5. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
    `python scripts/preflight_source_credentials.py --spec migrations/<name>/migration-spec.json`. If it
    reports **only** extract/flat sources, there is no credential gate (data comes from CSV + a
    `DataFolder`); proceed. If it flags any **live database** source (`needs-credential`), STOP and tell
@@ -100,24 +123,24 @@ it must show up in `limitations_encountered`, not be silently dropped.
    false `CREDENTIAL_PRESENT` for a *serverless* source that cold-starts and shows the sign-in modal only
    after the probe's timeout (confirmed 2026-07). It proves credentials + source reachability + valid M
    in one shot, entirely locally (no publish needed).
-5. **Delegate to `pbi-semantic-builder`** with: the path to `migration-spec.json`, the target Fabric
+6. **Delegate to `pbi-semantic-builder`** with: the path to `migration-spec.json`, the target Fabric
    workspace/workspace-to-be, and any user preference on extract data materialization. Wait for it to
    report back the semantic model location and any new limitations it appended.
-6. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json`, the semantic model
-   location from step 5, **and the Tableau reference bundle** (`migrations/<name>/reference/` — its
+7. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json`, the semantic model
+   location from step 6, **and the Tableau reference bundle** (`migrations/<name>/reference/` — its
    step 4 skeleton gate compares against the source dashboard image, so it cannot run without this;
    capture it first with `python scripts/capture_tableau_reference.py migrations/<name> …` if the
    folder is empty). Wait for it to report back the report location and any new limitations.
-7. **Delegate to `pbi-migration-validator`** with: `migration-spec.json`, the Tableau reference bundle
+8. **Delegate to `pbi-migration-validator`** with: `migration-spec.json`, the Tableau reference bundle
    at `migrations/<name>/reference/` (capture it first with
    `python scripts/capture_tableau_reference.py migrations/<name> [--public-url … --view …]`; it has a
    **`manual` provider** for workbooks that are not on Tableau Public — see `docs/reference-capture.md`),
    and the model/report locations. Use **spot-check mode** for a single
    page/visual you're actively iterating on, and **full-migration sign-off mode** (optionally
-   multi-model) as the final gate before sign-off (step 9). This is not optional or "nice to have" — it's the
+   multi-model) as the final gate before sign-off (step 10). This is not optional or "nice to have" — it's the
    step that actually closes the loop between "the subagents reported success" and "it's verifiably
    faithful to the source."
-8. **Route every discrepancy the validator reports back to its owning subagent** — numeric/DAX issues
+9. **Route every discrepancy the validator reports back to its owning subagent** — numeric/DAX issues
    to `pbi-semantic-builder`, visual/layout issues to `pbi-report-builder`, genuine capability gaps to
    `limitations_encountered` (not a fix request to anyone). **Never fix a validator finding yourself**
    — same rule as the ad hoc-edit Gotcha below, now applying to the validator's output too. Re-run the
@@ -128,23 +151,23 @@ it must show up in `limitations_encountered`, not be silently dropped.
    Otherwise it stays **open/blocking** and you surface it to the user for an explicit decision.
    **You (the orchestrator) are the only writer of `stage:"validate"` entries** in
    `limitations_encountered` — the validator is read-only and must never edit the spec.
-9. **Validate before declaring done.** Structural/mechanical validation is part of the default flow,
+10. **Validate before declaring done.** Structural/mechanical validation is part of the default flow,
    not a phase-2 nice-to-have — confirm both build subagents ran their own "Mandatory validation"
    steps (see each subagent's own agent file) *and* that `pbi-migration-validator` has run a full
    sign-off pass. **Sign-off requires ALL of:** (a) every dashboard's whole-dashboard verdict is
    *faithful* — a "no" verdict blocks sign-off **even when every individual discrepancy is only
    low/medium**, since the validator explicitly allows an accumulation of small deviations to fail the
    gestalt; (b) no open high-severity discrepancies; (c) any remaining item is an *evidenced* accepted
-   limitation (see step 8), not merely an unresolved one. "The parser ran and the subagents reported
+   limitation (see step 9), not merely an unresolved one. "The parser ran and the subagents reported
    success" is not the same thing as "it was validated" — don't let it substitute for an actual
    validation pass.
-10. **Summarize the migration** for the user: what was built (tables/measures/pages/visuals counts),
+11. **Summarize the migration** for the user: what was built (tables/measures/pages/visuals counts),
     what was *simplified* rather than transliterated (parameter-equality filters → slicers, pivot
     string-parsing → Power Query unpivot — these are positive findings, present them as such), what the
     validator's sign-off pass found and how it was resolved, and the final consolidated
     `limitations_encountered` as a "what needs your review" list. This is the answer to "what are the
     limitations of AI-assisted migration" — be concrete and honest, not hand-wavy.
-11. **(Phase 2 / on request)** Delegate to `pbi-deployer` to publish to a Fabric workspace and run
+12. **(Phase 2 / on request)** Delegate to `pbi-deployer` to publish to a Fabric workspace and run
     validation. Not part of the default flow until that agent exists.
 
 ## Delegating to subagents

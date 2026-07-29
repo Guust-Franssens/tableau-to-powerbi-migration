@@ -14,7 +14,7 @@ observed on a specific workbook, that workbook's slug is cited so the claim is c
 1. **Structural extraction (deterministic, reliable).** `scripts/parse_tableau.py` captures every data
    source, field, calculated-field formula, worksheet encoding, dashboard layout element, and reference
    line from the raw `.twb` XML into a normalized `migration-spec.json`. This runs with zero manual
-   effort on all 16 workbooks and is covered by a 20-test `pytest` suite, so it is the reproducible
+   effort on all 16 workbooks and is covered by a 26-test `pytest` suite, so it is the reproducible
    foundation the fuzzy AI steps build on.
 2. **Real data extraction from `.hyper` extracts.** `scripts/extract_hyper_data.py` pulls actual row
    data out of packaged extracts via `tableauhyperapi`, so a migrated model shows real numbers rather
