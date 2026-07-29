@@ -49,3 +49,25 @@ rebuilding a copy that will drift.
 
 A standalone `.tds` carries an **empty** `<repository-location />`, so the dedup key
 (`<site>/<name>`) cannot be recovered from the file itself — `published-datasource.json` records it.
+
+## What is actually proven, and what isn't
+
+Be aware of this before you rely on it at a customer. The detection and key rules were tested
+against **real** public Tableau files, but one path could not be:
+
+| Behaviour | Status | Evidence |
+|---|---|---|
+| Parsing a `.tds` / `.tdsx` at all | ✅ verified | 7 real public files; testing found a bug where `.tds` silently yielded **0 data sources** |
+| Name precedence `derived-from` → `dbname` → `@id` | ✅ verified | a real Cloud workbook (`vimosh0812/ai-bi-assistant`) had a **stale `id='new'`** after a rename while everything else said `dandan003` — keying on `id` would split one shared source into two keys |
+| An empty `<repository-location />` does **not** mean "published" | ✅ verified | Tableau's own `document-api-python` fixture `datasource_test.tds` |
+| Percent-decoding the publish URL (`Sales%20Master` → `Sales Master`) | ✅ verified | regression test; the API returns the name plain, the URL encodes it |
+| Full round trip: workbook flags a published DS → export its `.tds` → parse → **same** dedup key | ⚠️ **not verified** | no public `.tds` has a *populated* `repository-location`; that metadata only exists in server-downloaded files |
+| The live Tableau REST / Metadata API lineage path (`tableau_lineage.py`) | ⚠️ **not verified** | needs a real Tableau Server/Cloud with a PAT |
+
+The two ⚠️ rows are the ones to sanity-check on first contact with a real server: after registering,
+run `--scan` and confirm the key derived from the **workbook** matches the key you registered from
+the **data source**. If they differ, the dedup silently degrades to "not yet migrated" and you get a
+duplicate model — so it is worth the one-minute check.
+
+The committed test fixtures are **synthetic** (`contoso.com`) on purpose — third-party workbooks
+aren't ours to redistribute — so they encode the rules above rather than being captured artifacts.
