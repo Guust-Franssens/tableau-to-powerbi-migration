@@ -82,7 +82,7 @@ def test_shared_model_by_path_hop_count() -> None:
 @pytest.mark.parametrize(
     "leaked",
     [
-        r"C:\Users\gfranssens\vscode-projects\x",
+        r"C:\Users\alice\vscode-projects\x",
         "C:/Users/Alice/repo",  # forward slashes, as Power Query M writes them
         r"C:\\Users\\Alice\\repo",  # JSON-escaped
         r"\\fileserver\Users\Alice\repo",  # UNC
@@ -140,6 +140,19 @@ def test_by_path_refuses_to_guess_for_a_model_outside_the_default_tree() -> None
     assert _by_path_from_report("migrations/datasources/x/fabric/X.SemanticModel").startswith("../../../../")
     assert _by_path_from_report("some/other/place/x/fabric/X.SemanticModel") == ""
     assert _by_path_from_report("C:/elsewhere/x/fabric/X.SemanticModel") == ""
+
+
+def test_privacy_gate_allowlist_stays_minimal() -> None:
+    """Only files that *define or test* the pattern may be exempt from the leak scan.
+
+    The exemption is a deliberate blind spot, so it must stay tiny: this test fails if someone
+    silences the gate for a real source file instead of fixing the leak.
+    """
+    source = (REPO_ROOT / "scripts" / "set_data_folder.py").read_text(encoding="utf-8")
+    exempt = re.search(r"if path\.name in \{([^}]*)\}", source)
+    assert exempt, "the allowlist changed shape - re-check that the gate is still scoped"
+    names = set(re.findall(r'"([^"]+)"', exempt.group(1)))
+    assert names == {"set_data_folder.py", "test_repo_layout.py"}, f"unexpected exemptions: {names}"
 
 
 def test_customer_data_is_gitignored_in_every_tree() -> None:

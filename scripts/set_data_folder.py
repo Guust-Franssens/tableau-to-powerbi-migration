@@ -97,8 +97,9 @@ def _check() -> int:
             continue
         if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".pbix", ".hyper", ".twbx", ".twb", ".abf"}:
             continue
-        # Ignore this script itself (it necessarily documents the pattern).
-        if path.name == "set_data_folder.py":
+        # Files that necessarily CONTAIN the pattern to define or test it. Kept to an explicit,
+        # tiny allowlist so it can never be widened by accident into a real blind spot.
+        if path.name in {"set_data_folder.py", "test_repo_layout.py"}:
             continue
         try:
             text = path.read_text(encoding="utf-8")
