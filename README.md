@@ -171,7 +171,7 @@ the example blobs:
 ```bash
 git clone --filter=blob:none --sparse https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
 cd tableau-to-powerbi-migration
-git sparse-checkout set .github .vscode docs scripts tests migrations datasources
+git sparse-checkout set .github .vscode docs scripts tests migrations
 # want one example to look at? pull just that folder:
 git sparse-checkout add examples/health-tracker
 ```
@@ -184,12 +184,12 @@ uv venv
 uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
 
 # Parse a workbook into the intermediate spec
-python scripts\parse_tableau.py migrations\<name>\source\<workbook>.twbx `
-    -o migrations\<name>\migration-spec.json
+python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.twbx `
+    -o migrations\workbooks\<name>\migration-spec.json
 
 # If the workbook uses .hyper extracts (no live DB), pull the real row data too:
-python scripts\extract_hyper_data.py migrations\<name>\source\<workbook>.twbx `
-    -o migrations\<name>\data
+python scripts\extract_hyper_data.py migrations\workbooks\<name>\source\<workbook>.twbx `
+    -o migrations\workbooks\<name>\data
 ```
 
 Then, in [GitHub Copilot CLI](https://github.com/github/copilot-cli), run the orchestrator agent:
@@ -198,7 +198,7 @@ Then, in [GitHub Copilot CLI](https://github.com/github/copilot-cli), run the or
 /agent tableau-migrator
 ```
 
-and point it at `migrations\<name>\migration-spec.json`.
+and point it at `migrations\workbooks\<name>\migration-spec.json`.
 
 ## 🧪 Try a worked example
 
@@ -230,15 +230,15 @@ Three migration trees, split by **what they produce** — so our examples never 
 .github/pbi.kb/          PBIR visual cookbook (visual-cookbook.md + 27 visual.json templates)
 scripts/                 Python automation (parser, .hyper extractor, AI-readiness, showcase) + preflight.ps1
 docs/                    migration-spec schema, Tableau->DAX guide, capabilities & limitations, showcase
-examples/<name>/         OUR 16 worked examples - reference material, read-only
-migrations/<name>/       YOUR workbook migrations (.twbx -> report). Starts empty.
-datasources/<name>/      YOUR published-data-source migrations (.tds -> shared semantic model). Starts empty.
+examples/<name>/              OUR 16 worked examples - reference material, read-only
+migrations/workbooks/<name>/  YOUR workbook migrations (.twbx -> semantic model + report). Starts empty.
+migrations/datasources/<name>/ YOUR published-data-source migrations (.tds -> shared semantic model). Starts empty.
 tests/                   pytest suite + XML fixtures for the parser
 ```
 
 All three share the same shape (`source/`, `migration-spec.json`, `fabric/`); a data-source migration
-simply has no `.Report`. See [`migrations/README.md`](migrations/README.md) and
-[`datasources/README.md`](datasources/README.md) for how to start your own.
+simply has no `.Report`. See [`migrations/workbooks/README.md`](migrations/workbooks/README.md) and
+[`migrations/datasources/README.md`](migrations/datasources/README.md) for how to start your own.
 
 </details>
 

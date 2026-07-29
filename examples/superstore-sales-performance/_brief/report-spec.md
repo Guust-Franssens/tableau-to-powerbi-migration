@@ -13,7 +13,7 @@ explicitly in the final report back to the orchestrator instead). Per explicit t
 - No live `powerbi-modeling-mcp` connection available in this environment — worked entirely from
   TMDL files, which is the documented fallback.
 - No existing `.pbip`/`.Report` — both created fresh this task, mirroring
-  `migrations/eea-urban-adaptation/fabric/UrbanAdaptation.pbip` + `.Report` folder shape exactly
+  `examples/eea-urban-adaptation/fabric/UrbanAdaptation.pbip` + `.Report` folder shape exactly
   (confirmed via direct inspection: `.platform`, `.pbi/localSettings.json`, `definition.pbir`,
   `definition/{report.json,version.json,pages/{pages.json,mainPage/{page.json,visuals/*}}}`,
   `StaticResources/RegisteredResources/theme.json`).
@@ -194,7 +194,7 @@ Design Brief:
     powerbi-report-design, skill-tool invocation unavailable in this environment — SKILL.md and all
     references/*.md read directly and followed manually in full)
   contract_version: "1.0"
-  source: migrations/superstore-sales-performance/migration-spec.json
+  source: examples/superstore-sales-performance/migration-spec.json
   semantic_model: SuperstoreSalesPerformance.SemanticModel
 
   design_identity:

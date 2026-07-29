@@ -7,7 +7,7 @@ purpose: Fix the systematic airline DAX bug where measures use the compact CALCU
          against the VAR (a constant scalar), which is legal. Kept single-line
          (VAR ... VAR ... RETURN ...). Covers Parameter Value, PM Year/Month Value, and any
          other measure used as a compact-filter RHS.
-usage:   python migrations/airline-alliance-activity/_work/fix_placeholder_filters.py
+usage:   python examples/airline-alliance-activity/_work/fix_placeholder_filters.py
 """
 
 from __future__ import annotations

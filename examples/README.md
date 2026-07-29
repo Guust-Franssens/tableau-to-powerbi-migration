@@ -1,6 +1,6 @@
-# Migrations — sources & attribution
+# Examples — sources & attribution
 
-This folder holds one subfolder per migration (`migrations/<slug>/`). Each contains the parsed
+This folder holds one subfolder per migration (`examples/<slug>/`). Each contains the parsed
 `migration-spec.json`, the generated Fabric Power BI project (`fabric/<Name>.SemanticModel` +
 `fabric/<Name>.Report` PBIP), and reference **screenshots** under `reference/`. The table below is the
 provenance record: it links each folder back to the exact **public [Tableau Public](https://public.tableau.com)
@@ -13,7 +13,7 @@ Power BI output (the `fabric/` PBIP project) plus reference **screenshots** of t
 which are what the [before/after showcase](../docs/showcase/README.md) is built from. Credit for the
 original dashboards belongs to their respective Tableau Public authors; follow each link for attribution.
 
-| # | Migration (`migrations/<slug>/`) | Original Tableau Public dashboard |
+| # | Migration (`examples/<slug>/`) | Original Tableau Public dashboard |
 |---:|---|---|
 | 1 | airline-alliance-activity | https://public.tableau.com/views/AirlineAllianceActivityDashboard/AirlinesPage |
 | 2 | broadway-stage-to-screen | https://public.tableau.com/views/StagetoScreenIronVizBroadwayMusicalsTurnedintoMovies/Infographic |
@@ -32,5 +32,5 @@ original dashboards belongs to their respective Tableau Public authors; follow e
 | 15 | telecommunications-analytics | https://public.tableau.com/views/Telecommunications_2/Dashboard |
 | 16 | wind-energy-utilization | https://public.tableau.com/views/WindEnergyUtilizationDashboard/WindEnergyOverview |
 
-> Screenshots are committed under `migrations/<slug>/reference/` (`tableau-*` = source reference,
+> Screenshots are committed under `examples/<slug>/reference/` (`tableau-*` = source reference,
 > `powerbi-*` = the Power BI Desktop render). The [showcase](../docs/showcase/README.md) features the render-verified pairs.

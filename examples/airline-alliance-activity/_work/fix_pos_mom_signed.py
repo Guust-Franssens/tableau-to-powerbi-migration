@@ -6,7 +6,7 @@ purpose: Fix the one-sided 'Pos MoM *' measures in Flight Activity.tmdl so they 
          finding). Rewrite the guard to `IF([PM X]<>0, DIVIDE([CM X],[PM X])-1)`: return the
          signed growth whenever a valid prior-month baseline exists, blank only when there is
          no prior month (avoids a spurious -100%).
-usage:   python migrations/airline-alliance-activity/_work/fix_pos_mom_signed.py
+usage:   python examples/airline-alliance-activity/_work/fix_pos_mom_signed.py
 """
 
 import re

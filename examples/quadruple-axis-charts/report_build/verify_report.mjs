@@ -2,11 +2,12 @@
 // slicer defaults, single-active-field table anti-pattern. Backs up the offline
 // validate run where JSON-schema fetch was skipped (PBIR_SCHEMA_UNREACHABLE).
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REPO = "C:/Users/gfranssens/vscode-projects/tableau-to-pbi-migration";
-const MODEL = join(REPO, "migrations/quadruple-axis-charts/fabric/QuadrupleAxisCharts.SemanticModel/definition/tables");
-const REPORT = join(REPO, "migrations/quadruple-axis-charts/fabric/QuadrupleAxisCharts.Report");
+const MIGRATION = dirname(dirname(fileURLToPath(import.meta.url)));
+const MODEL = join(MIGRATION, "fabric/QuadrupleAxisCharts.SemanticModel/definition/tables");
+const REPORT = join(MIGRATION, "fabric/QuadrupleAxisCharts.Report");
 const PAGES = join(REPORT, "definition/pages");
 
 // ---- build model name map from TMDL ----

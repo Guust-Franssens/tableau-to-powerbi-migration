@@ -55,7 +55,7 @@ python scripts/set_data_folder.py --check        # CI gate: exits non-zero if an
 
 ### Keep shared tooling customer-agnostic
 
-Customer names and context belong only inside a specific `migrations/<name>/` or `datasources/<name>/` working folder — never in
+Customer names and context belong only inside a specific `migrations/workbooks/<name>/` or `migrations/datasources/<name>/` working folder — never in
 shared tooling, agent files, script identifiers, or commit messages.
 
 ## Supported versions

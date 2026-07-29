@@ -60,14 +60,14 @@ it must show up in `limitations_encountered`, not be silently dropped.
    installing Python / Power BI Desktop) — do not attempt a migration against a half-configured
    machine. See `AGENTS.md` for the full setup. Only proceed once preflight reports "Ready to migrate."
 1. **Confirm inputs.** You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
-   `migrations/<name>/` (create `source/`, and the spec will live at
-   `migrations/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
+   `migrations/workbooks/<name>/` (create `source/`, and the spec will live at
+   `migrations/workbooks/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
    from the workbook's title.
    **If this workbook is one of SEVERAL from a Tableau Server/Cloud estate, plan model-first before
    migrating anything.** Ask Tableau itself who depends on what:
    ```
    python scripts/tableau_lineage.py --plan            # needs TABLEAU_SERVER/_SITE/_PAT_NAME/_PAT_SECRET
-   python scripts/tableau_lineage.py --plan --download datasources/_downloads
+   python scripts/tableau_lineage.py --plan --download migrations/datasources/_downloads
    ```
    It queries the Metadata API for `publishedDatasources { downstreamWorkbooks }` and prints a
    two-phase plan ordered by leverage: **phase 1** migrate each published data source once (the one
@@ -78,13 +78,13 @@ it must show up in `limitations_encountered`, not be silently dropped.
    **The agent cannot create Tableau credentials** — a Tableau user must supply a Personal Access
    Token. Without server access, fall back to the per-workbook flag in step 4.
 2. **Parse — but only if the spec doesn't already exist.** **PRECONDITION (hard):** if
-   `migrations/<name>/migration-spec.json` already exists, **do not re-run the parser** without asking.
+   `migrations/workbooks/<name>/migration-spec.json` already exists, **do not re-run the parser** without asking.
    Re-parsing **overwrites the file in place** and destroys every `semantic_build` / `report_build` /
    `validate` limitation the subagents appended to it (routinely 20-50 entries) — i.e. exactly the raw
    material step 11's summary depends on. On a re-run, fix round, or resumed session, skip to step 3.
    Only when the spec is absent (or the user explicitly confirms a re-parse of a changed source) run:
    ```
-   python scripts/parse_tableau.py migrations/<name>/source/<file>.twbx -o migrations/<name>/migration-spec.json
+   python scripts/parse_tableau.py migrations/workbooks/<name>/source/<file>.twbx -o migrations/workbooks/<name>/migration-spec.json
    ```
    This validates its own output against `docs/migration-spec.schema.json` and fails fast on schema
    violations. Read the console summary (counts of data sources/worksheets/dashboards/limitations).
@@ -106,26 +106,26 @@ it must show up in `limitations_encountered`, not be silently dropped.
      download it from the datasource's page (or `scripts/tableau_lineage.py --download`). It becomes a
      **data-source migration in its own tree**, not part of this workbook's folder:
      ```
-     datasources/<ds-slug>/source/<name>.tdsx
-     python scripts/parse_tableau.py datasources/<ds-slug>/source/<name>.tdsx \
-         -o datasources/<ds-slug>/migration-spec.json
+     migrations/datasources/<ds-slug>/source/<name>.tdsx
+     python scripts/parse_tableau.py migrations/datasources/<ds-slug>/source/<name>.tdsx \
+         -o migrations/datasources/<ds-slug>/migration-spec.json
      ```
      Treat that spec's fields/calculations as the authoritative model definition.
    - **(b) One datasource is usually shared by MANY workbooks.** That maps onto **one Power BI semantic
      model with many reports bound to it** — never one near-identical model per workbook. Before
      delegating the build, run:
      ```
-     python scripts/published_datasource_registry.py --spec migrations/<name>/migration-spec.json
+     python scripts/published_datasource_registry.py --spec migrations/workbooks/<name>/migration-spec.json
      ```
      It matches the parser's stable dedup key (`published_datasource.key`, e.g. `finance/salesmaster`)
-     against the data-source migrations under `datasources/`. Exit **0** = already built → tell
+     against the data-source migrations under `migrations/datasources/`. Exit **0** = already built → tell
      `pbi-report-builder` to **bind to that existing semantic model**
-     (`byPath: "../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"`) and tell
+     (`byPath: "../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"`) and tell
      `pbi-semantic-builder` to add only genuinely-new measures; exit **1** = not yet built → build it
-     **once** under `datasources/<ds-slug>/` and `--register` it, so later workbooks reuse it.
+     **once** under `migrations/datasources/<ds-slug>/` and `--register` it, so later workbooks reuse it.
      Rebuilding a duplicate model that then drifts from the shared one is the failure this prevents.
 5. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
-   `python scripts/preflight_source_credentials.py --spec migrations/<name>/migration-spec.json`. If it
+   `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`. If it
    reports **only** extract/flat sources, there is no credential gate (data comes from CSV + a
    `DataFolder`); proceed. If it flags any **live database** source (`needs-credential`), STOP and tell
    the user up front: Power BI needs a credential for that source (name the host/database), which is
@@ -147,13 +147,13 @@ it must show up in `limitations_encountered`, not be silently dropped.
    workspace/workspace-to-be, and any user preference on extract data materialization. Wait for it to
    report back the semantic model location and any new limitations it appended.
 7. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json`, the semantic model
-   location from step 6, **and the Tableau reference bundle** (`migrations/<name>/reference/` — its
+   location from step 6, **and the Tableau reference bundle** (`migrations/workbooks/<name>/reference/` — its
    step 4 skeleton gate compares against the source dashboard image, so it cannot run without this;
-   capture it first with `python scripts/capture_tableau_reference.py migrations/<name> …` if the
+   capture it first with `python scripts/capture_tableau_reference.py migrations/workbooks/<name> …` if the
    folder is empty). Wait for it to report back the report location and any new limitations.
 8. **Delegate to `pbi-migration-validator`** with: `migration-spec.json`, the Tableau reference bundle
-   at `migrations/<name>/reference/` (capture it first with
-   `python scripts/capture_tableau_reference.py migrations/<name> [--public-url … --view …]`; it has a
+   at `migrations/workbooks/<name>/reference/` (capture it first with
+   `python scripts/capture_tableau_reference.py migrations/workbooks/<name> [--public-url … --view …]`; it has a
    **`manual` provider** for workbooks that are not on Tableau Public — see `docs/reference-capture.md`),
    and the model/report locations. Use **spot-check mode** for a single
    page/visual you're actively iterating on, and **full-migration sign-off mode** (optionally
@@ -218,12 +218,12 @@ environment, tell the user to run `/agent pbi-semantic-builder`, `/agent pbi-rep
   source file, ask before re-running the parser (it's cheap but not free, and hand-authored edits to
   the spec would be lost).
 - **Keep this repo customer-agnostic.** Don't hardcode a customer name into generated code, agent
-  files, or script identifiers — customer context belongs in `migrations/<name>/` working notes only,
+  files, or script identifiers — customer context belongs in `migrations/workbooks/<name>/` working notes only,
   not in shared tooling.
 - **Never fabricate row data.** Extract-based (`.hyper`) sources have no live connection; don't invent
   plausible-looking numbers to fill gaps. Materializing real data (via `tableauhyperapi` or a true
   upstream connection) is a decision to surface to the user, not something to silently approximate.
-- **`.twbx` source files are gitignored** (`migrations/*/source/*.twbx`) — they can contain customer
+- **`.twbx` source files are gitignored** (`**/source/*.twbx`) — they can contain customer
   data. The `migration-spec.json` they produce is the shareable artifact.
 - **Route fixes through the owning subagent, not ad hoc.** When a bug turns up in an already-built
   model/report (wrong number, missing field, broken visual) — whether you noticed it yourself or

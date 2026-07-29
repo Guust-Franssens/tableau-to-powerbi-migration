@@ -27,12 +27,12 @@ below dissolves once it is modelled that way.
 
 ## The reference bundle
 
-A migration's reference lives at `migrations/<slug>/reference/` (git-ignored — see *Governance*) and is
+A migration's reference lives at `migrations/workbooks/<slug>/reference/` (git-ignored — see *Governance*) and is
 described by a `manifest.json` so consumers never treat a 200px thumbnail and a full-res Server render
 as interchangeable ground truth.
 
 ```jsonc
-// migrations/<slug>/reference/manifest.json   (⚠️ schema implemented; some fields still TODO)
+// migrations/workbooks/<slug>/reference/manifest.json   (⚠️ schema implemented; some fields still TODO)
 {
   "captured_at": "2026-07-19T20:43:01Z",
   "source_workbook_sha256": "…",          // ties the image to an exact .twbx

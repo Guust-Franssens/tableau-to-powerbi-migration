@@ -4,9 +4,10 @@
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REPO = "C:/Users/gfranssens/vscode-projects/tableau-to-pbi-migration";
-const REPORT = join(REPO, "migrations/quadruple-axis-charts/fabric/QuadrupleAxisCharts.Report");
+const MIGRATION = dirname(dirname(fileURLToPath(import.meta.url)));
+const REPORT = join(MIGRATION, "fabric/QuadrupleAxisCharts.Report");
 const ORD = "Orders";
 
 // ---------- schema URLs ----------

@@ -5273,7 +5273,7 @@
     },
     {
       "item": "semantic_build.datafolder_parameter",
-      "issue": "The M parameter 'DataFolder' is hardcoded to an absolute local path so the model only refreshes on the machine that built it. Every user must update this parameter (Transform data > Manage Parameters > DataFolder) to their own local migrations/eea-urban-adaptation/data/ path after cloning. Phase-2 fix: repoint to a Fabric Lakehouse/OneLake path (or a shared network/blob location) before handing the model to anyone else or deploying to a workspace.",
+      "issue": "The M parameter 'DataFolder' is hardcoded to an absolute local path so the model only refreshes on the machine that built it. Every user must update this parameter (Transform data > Manage Parameters > DataFolder) to their own local examples/eea-urban-adaptation/data/ path after cloning. Phase-2 fix: repoint to a Fabric Lakehouse/OneLake path (or a shared network/blob location) before handing the model to anyone else or deploying to a workspace.",
       "severity": "high",
       "stage": "semantic_build"
     },

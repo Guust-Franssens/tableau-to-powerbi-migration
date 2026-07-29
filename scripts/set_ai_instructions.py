@@ -176,12 +176,13 @@ def set_instructions(culture_path: Path, md_text: str) -> bool:
 def iter_models(root: Path) -> list[Path]:
     """All *.SemanticModel folders across the three migration trees.
 
-    `examples/` holds this repo's worked examples; `migrations/` and `datasources/` hold the user's own
-    workbook and published-data-source migrations. All three share the <tree>/<slug>/fabric/ shape.
+    `examples/` holds this repo's worked examples; `migrations/workbooks/` and
+    `migrations/datasources/` hold the user's own workbook and published-data-source migrations.
+    All three share the <tree>/<slug>/fabric/ shape.
     """
     return sorted(
         p
-        for tree in ("examples", "migrations", "datasources")
+        for tree in ("examples", "migrations/workbooks", "migrations/datasources")
         for p in root.glob(f"{tree}/*/fabric/*.SemanticModel")
         if p.is_dir()
     )
@@ -191,7 +192,7 @@ def cmd_check(root: Path) -> int:
     """Print a per-model report of which semantic models carry AI instructions."""
     models = iter_models(root)
     if not models:
-        log.info("No models found under %s (examples/, migrations/, datasources/)", root)
+        log.info("No models found under %s (examples/, migrations/workbooks/, migrations/datasources/)", root)
         return 0
     missing = 0
     for model in models:

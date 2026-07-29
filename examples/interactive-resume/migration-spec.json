@@ -3031,7 +3031,7 @@
     },
     {
       "item": "AI readiness tooling - shared verifier absent",
-      "issue": "The shared scripts/check_ai_readiness.py referenced by the agent instructions is not present in the repo; an equivalent scoped verifier was added at migrations/interactive-resume/build/check_ai_readiness.py. It confirms 100% description coverage (47/47 objects) and that all 14 categorical columns enumerate their domain. Consider promoting it to the shared scripts/ folder.",
+      "issue": "The shared scripts/check_ai_readiness.py referenced by the agent instructions is not present in the repo; an equivalent scoped verifier was added at examples/interactive-resume/build/check_ai_readiness.py. It confirms 100% description coverage (47/47 objects) and that all 14 categorical columns enumerate their domain. Consider promoting it to the shared scripts/ folder.",
       "severity": "low",
       "stage": "semantic_build"
     },

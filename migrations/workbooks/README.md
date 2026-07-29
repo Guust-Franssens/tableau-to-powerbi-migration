@@ -1,12 +1,12 @@
-# `migrations/` — your workbook migrations
+# `migrations/workbooks/` — your workbook migrations
 
 **This folder starts empty. It is where *your* work goes.** Our 16 worked examples live in
-[`../examples/`](../examples/) so they never mix with a real customer migration.
+[`../../examples/`](../../examples/) so they never mix with a real customer migration.
 
 One folder per Tableau **workbook** (`.twb`/`.twbx`), producing a Power BI **report**:
 
 ```
-migrations/<slug>/
+migrations/workbooks/<slug>/
 ├── source/<workbook>.twbx        # gitignored - may contain customer data
 ├── migration-spec.json           # produced by scripts/parse_tableau.py
 ├── data/                         # gitignored - rows extracted from .hyper
@@ -29,7 +29,7 @@ gets migrated **once** into its own folder under [`../datasources/`](../datasour
 report binds to that single semantic model. Check before building:
 
 ```
-python scripts/published_datasource_registry.py --spec migrations/<slug>/migration-spec.json
+python scripts/published_datasource_registry.py --spec migrations/workbooks/<slug>/migration-spec.json
 ```
 
 Exit `0` means it already exists — bind to it instead of rebuilding:
@@ -37,5 +37,5 @@ Exit `0` means it already exists — bind to it instead of rebuilding:
 ```jsonc
 // <Name>.Report/definition.pbir
 { "datasetReference": { "byPath": {
-    "path": "../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel" } } }
+    "path": "../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel" } } }
 ```

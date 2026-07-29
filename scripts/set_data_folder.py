@@ -22,23 +22,39 @@ PLACEHOLDER = "<REPO_ROOT>"
 # Also accepts SourceFolder: most models use DataFolder, but at least one (shipping-kpis) was authored
 # with SourceFolder. Matching both stops a model silently drifting out of localize/sanitize coverage.
 DATAFOLDER_RE = re.compile(r'(expression\s+(?:DataFolder|SourceFolder)\s*=\s*")([^"]*)(")')
-# A Windows absolute path under a user profile, i.e. a leaked machine path.
-ABSOLUTE_USER_PATH_RE = re.compile(r"[A-Za-z]:\\Users\\[^\\\"']+", re.IGNORECASE)
+# A leaked absolute path under a user profile. Covers the forms that actually show up in this repo's
+# artifacts: `C:\Users\x`, `C:/Users/x` (M/Power Query), `C:\\Users\\x` (JSON-escaped), `\\host\Users\x`
+# (UNC), plus POSIX `/Users/x` and `/home/x`.
+# Only *syntactically unambiguous* placeholders are exempt - `...`, `<anything>`, `%ANY_VAR%` - because
+# SECURITY.md and the READMEs have to show the pattern they warn about. Bare words like `user`, `you`
+# or `username` are NOT exempt: they are all real, registrable account names.
+ABSOLUTE_USER_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/]{1,2}Users|\\\\[^\\/\"']+[\\/]{1,2}Users|(?<![\w.])/Users|(?<![\w.])/home)"
+    r"[\\/]{1,2}(?!\.\.\.|<|%)[^\\/\"'\s]+",
+    re.IGNORECASE,
+)
 
 
 def _model_expression_files() -> list[Path]:
-    """expressions.tmdl across all three migration trees (examples/, migrations/, datasources/)."""
+    """expressions.tmdl across all three migration trees (examples/, migrations/workbooks/, migrations/datasources/)."""
     return sorted(
         p
-        for tree in ("examples", "migrations", "datasources")
+        for tree in ("examples", "migrations/workbooks", "migrations/datasources")
         for p in REPO_ROOT.glob(f"{tree}/*/fabric/*.SemanticModel/definition/expressions.tmdl")
     )
 
 
 def _tree_and_slug_for(expr_file: Path) -> tuple[str, str]:
-    """<tree>/<slug>/fabric/<Model>.SemanticModel/definition/expressions.tmdl -> (<tree>, <slug>)."""
+    """<tree...>/<slug>/fabric/<Model>.SemanticModel/definition/expressions.tmdl -> (<tree...>, <slug>).
+
+    Derived from the END, not the start: the trees have different depths (`examples/<slug>/` is one
+    level, `migrations/workbooks/<slug>/` is two). Indexing `parts[0], parts[1]` silently returned
+    ("migrations", "workbooks") for every user migration - dropping the slug and pointing every model
+    at the same non-existent data folder.
+    """
     parts = expr_file.relative_to(REPO_ROOT).parts
-    return parts[0], parts[1]
+    slug_idx = len(parts) - 5  # fabric / <X>.SemanticModel / definition / expressions.tmdl
+    return "\\".join(parts[:slug_idx]), parts[slug_idx]
 
 
 def _rewrite(expr_file: Path, sanitize: bool) -> bool:
@@ -113,7 +129,10 @@ def main() -> None:
 
     files = _model_expression_files()
     if not files:
-        print("no semantic-model expressions.tmdl files found under examples|migrations|datasources /*/fabric/")
+        print(
+            "no semantic-model expressions.tmdl files found under "
+            "examples|migrations/workbooks|migrations/datasources /*/fabric/"
+        )
         return
     mode = "sanitize (placeholder)" if args.sanitize else "localize (this checkout)"
     print(f"{mode}: {len(files)} model(s)")

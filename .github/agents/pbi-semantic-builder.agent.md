@@ -54,19 +54,19 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    Power BI shape is **one semantic model, many reports bound to it** — not a near-duplicate model per
    workbook. Run:
    ```
-   python scripts/published_datasource_registry.py --spec migrations/<slug>/migration-spec.json
+   python scripts/published_datasource_registry.py --spec migrations/workbooks/<slug>/migration-spec.json
    ```
    - **exit 0 (already migrated):** do **NOT** rebuild. Reuse the semantic model it names; add only
      measures this workbook genuinely needs that the shared model lacks, and report back that you
      reused it. A duplicate model will drift from the shared one — that is the whole failure mode.
      **Neither target requires copying the model** (verified 2026-07): **locally**, the report's
      `definition.pbir` takes a *relative* `byPath` that may point **outside** its own migration folder
-     (`{"byPath": {"path": "../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"}}`) — Power BI
+     (`{"byPath": {"path": "../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"}}`) — Power BI
      Desktop resolves it and loads the shared model's tables; **in the cloud**, publish the model once
      and each report uses `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`. Copying
      the `.SemanticModel` folder per migration re-creates the duplication this check exists to prevent.
    - **exit 1 (not yet built):** build it **once**, and build it in the **data-source tree**
-     (`datasources/<ds-slug>/fabric/<Name>.SemanticModel`) — *not* inside this workbook's migration
+     (`migrations/datasources/<ds-slug>/fabric/<Name>.SemanticModel`) — *not* inside this workbook's migration
      folder, where it would look owned by this one report and die with it. Then register it
      (`--register <key> --name '<Name>' --slug <ds-slug>`) so later workbooks discover it.
    Also note the workbook does **not** contain that datasource's own calculated-field formulas (they
@@ -104,7 +104,7 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
      slicer on the underlying dimension instead.
 5. **Create relationships** from `data_sources[].joins[]`.
 6. **Materialize the model locally.** The default deliverable is a **local PBIP**
-   (`migrations/<slug>/fabric/<Name>.SemanticModel` + `<Name>.pbip`) — **publishing to Fabric is NOT part
+   (`migrations/workbooks/<slug>/fabric/<Name>.SemanticModel` + `<Name>.pbip`) — **publishing to Fabric is NOT part
    of the default flow** (it's phase-2 `pbi-deployer`; see `tableau-migrator.agent.md`). Only run
    `semantic-model-authoring`'s Fabric deployment workflow if the orchestrator explicitly gave you a
    target workspace. Never treat "not deployed" as a reason to skip step 7.
@@ -174,10 +174,10 @@ model-builder owning its own layer, so no other agent edits these TMDL files.
    **`definition`** subfolder (NOT the SemanticModel root — that flattens the PBIP layout). The export
    normalizes identifier quoting/whitespace model-wide (cosmetic; content, lineageTags, and DAX are
    preserved) — expect a one-time reformat diff; that's fine.
-5. Verify with `python scripts/check_ai_readiness.py migrations/<slug>` — ~100% description coverage,
+5. Verify with `python scripts/check_ai_readiness.py migrations/workbooks/<slug>` — ~100% description coverage,
    no categorical column missing its domain values — before reporting done.
 6. **Model-level AI instructions (MANDATORY, file-committable, validated). HOW:**
-   a. **Author** `migrations/<slug>/ai-instructions.md`. It is a *writing* task, not engineering — do
+   a. **Author** `migrations/workbooks/<slug>/ai-instructions.md`. It is a *writing* task, not engineering — do
       NOT mass-generate it; ground every line in the real model (read the TMDL, the extracted CSV, the
       ground-truth totals). Keep it high-signal (aim ~1–3 KB; the 10,000-char cap is a ceiling, not a
       target — beware "context rot"). **Say nothing the schema already shows** (no column/type
@@ -196,7 +196,7 @@ model-builder owning its own layer, so no other agent edits these TMDL files.
         date, not today; IronViz geometry measures are helpers, not metrics.
       See [`docs/ai-instructions-authoring-guide.md`](../../docs/ai-instructions-authoring-guide.md) for
       the full recipe, MS Learn/Anthropic grounding, and worked instruction patterns.
-   b. **Stamp** it: `python scripts/set_ai_instructions.py --model migrations/<slug>/fabric/<Name>.SemanticModel`.
+   b. **Stamp** it: `python scripts/set_ai_instructions.py --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel`.
       The script creates the `cultureInfo` + `ref cultureInfo` if the model has none, injects/normalizes
       the `CustomInstructions` key (single-line canonical form), **sets `settings.qnaEnabled = true` in
       `definition.pbism`** (CRUCIAL — migrated models default to `false`, which makes Q&A/Copilot silently
@@ -420,10 +420,10 @@ throwing an error" is necessary but not sufficient:
 8. **The model is Copilot-ready** — every table, column, and measure has a business-meaning
    description; categorical/dimension columns enumerate their domain values; synonyms are set where the
    display name isn't natural language (see "Prep the model for AI" above). `python
-   scripts/check_ai_readiness.py migrations/<slug>` reports ~100% description coverage with no
+   scripts/check_ai_readiness.py migrations/workbooks/<slug>` reports ~100% description coverage with no
    categorical column missing its domain values.
 9. **Model-level AI instructions are stamped (MANDATORY — not optional).** A grounded, high-signal
-   `migrations/<slug>/ai-instructions.md` exists and has been written into the culture
+   `migrations/workbooks/<slug>/ai-instructions.md` exists and has been written into the culture
    `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
    model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
    deserialize. A migrated model without AI instructions is not done.

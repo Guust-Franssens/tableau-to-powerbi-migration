@@ -3,7 +3,7 @@ purpose: Convert deprecated Bing `filledMap` visuals to `azureMap` data-bound
          reference-layer choropleths in the Superstore PBIR report, reusing the
          ground-truth encoding hand-authored in Power BI Desktop (Category = key
          column, objects.referenceLayer = [url entry, polygonFillColor entry]).
-usage:   python migrations/superstore-sales-performance/_work/convert_filledmaps_to_azuremap.py
+usage:   python examples/superstore-sales-performance/_work/convert_filledmaps_to_azuremap.py
 """
 
 from __future__ import annotations

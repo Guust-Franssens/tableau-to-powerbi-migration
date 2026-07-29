@@ -1,8 +1,10 @@
 // Append report_build limitations to migration-spec.json. Idempotent: skips any
 // entry whose (stage, item) already exists. Uses JSON.parse/stringify (never regex).
 import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const SPEC = "C:/Users/gfranssens/vscode-projects/tableau-to-pbi-migration/migrations/quadruple-axis-charts/migration-spec.json";
+const SPEC = join(dirname(dirname(fileURLToPath(import.meta.url))), "migration-spec.json");
 const spec = JSON.parse(readFileSync(SPEC, "utf8"));
 spec.limitations_encountered ||= [];
 

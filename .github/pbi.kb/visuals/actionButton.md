@@ -5,7 +5,7 @@
 > tileShape) and draws as a **blank rectangle**, while `powerbi-report-author validate` still reports
 > 0-errors and the Format → Action pane still shows the URL. This is exactly the trap the 🟡 verdict
 > below warned might exist — it is now **confirmed real** (all 12 buttons in
-> `migrations\interactive-resume` rendered blank until converted). **Use the `shape` visual instead**
+> `examples\interactive-resume` rendered blank until converted). **Use the `shape` visual instead**
 > (`visuals/shape.md`, 🟢): it supports the *identical* container-level `visualLink` WebUrl action AND
 > actually renders `fill`/`outline`/`tileShape`. Keep this file only as the reference for the
 > `visualLink` encoding (which `shape` reuses verbatim) and as a cautionary example of a
@@ -53,7 +53,7 @@ image), set `fill.show:false`, `outline.show:false`, and omit `text` — only th
 🔴 **render-broken for visible buttons** — the `visualContainerObjects.visualLink` WebUrl encoding
 validates clean (`powerbi-report-author validate`, 0 errors / 0 warnings) but Desktop 2.156 **does not
 render `visual.objects`** (fill/text/tileShape), so the button appears as a blank rectangle. This was
-observed live in `migrations\interactive-resume` (all 12 buttons blank) and fixed by converting each
+observed live in `examples\interactive-resume` (all 12 buttons blank) and fixed by converting each
 to `shape` (see `visuals/shape.md`, 🟢). The `visualLink` block itself is correct and is reused
 verbatim by `shape`. Do **not** promote this to 🟢; use `shape` for anything that must be seen.
 

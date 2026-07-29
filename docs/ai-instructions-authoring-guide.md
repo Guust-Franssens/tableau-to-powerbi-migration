@@ -3,7 +3,7 @@
 Model-level **AI instructions** are the free-form guidance that Power BI Copilot and Fabric data
 agents read *before* they query a model. In this toolkit they are file-committable: they live in the
 culture object (`cultureInfo <lcid>` → `linguisticMetadata` JSON → top-level **`CustomInstructions`**)
-and are stamped from a per-migration `migrations/<slug>/ai-instructions.md` by
+and are stamped from a per-migration `migrations/workbooks/<slug>/ai-instructions.md` by
 `scripts/set_ai_instructions.py`. See the storage mechanism in
 [`.github/agents/pbi-semantic-builder.agent.md`](../.github/agents/pbi-semantic-builder.agent.md)
 ("Prep the model for AI"). This file is about **what to write**, not where it goes.

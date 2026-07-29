@@ -317,7 +317,7 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Acquire a provenance-stamped Tableau reference image.")
-    parser.add_argument("slug_dir", help="path to <tree>/<slug> (e.g. migrations/my-dash)")
+    parser.add_argument("slug_dir", help="path to <tree>/<slug> (e.g. migrations/workbooks/my-dash)")
     parser.add_argument("--public-url", help="Tableau Public workbookRepoUrl (demo provider)")
     parser.add_argument("--view", help="Tableau Public view name (with --public-url)")
     parser.add_argument(

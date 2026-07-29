@@ -218,8 +218,8 @@ every screenshot-based design review, on both the initial build and every later 
    screenshot review: every `visual.json` field reference resolves against the real TMDL; every page
    is listed in `pages/pages.json`; no two visuals overlap; `definition.pbir`'s model reference is
    correct — note it may legitimately point **outside** this migration folder when the model is shared
-   across workbooks (a Tableau *published* data source migrates once into `datasources/<ds-slug>/`). A
-   relative cross-tree `byPath` like `"../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"` is
+   across workbooks (a Tableau *published* data source migrates once into `migrations/datasources/<ds-slug>/`). A
+   relative cross-tree `byPath` like `"../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"` is
    verified to resolve in Desktop; do **not** "fix" it by copying the `.SemanticModel` folder in beside
    your report. Cloud equivalent: `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`. and every table/matrix `Values` well matches the shape called out in the Gotchas below
    (no suspicious single-active-field-with-inactive-siblings pattern).

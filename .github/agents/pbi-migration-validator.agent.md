@@ -28,11 +28,11 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
    types, encodings, reference lines, filters, parameters). This is what makes your review
    structurally grounded instead of just "vibes-based pixel comparison."
 2. **Tableau reference screenshots**, one whole-dashboard capture per dashboard at minimum, ideally
-   per-worksheet crops too. **Ground truth lives at `migrations/<slug>/reference/` (with a
+   per-worksheet crops too. **Ground truth lives at `migrations/workbooks/<slug>/reference/` (with a
    `manifest.json`) — look there FIRST; all existing migrations already have one.** If it's empty, use
    the repo's purpose-built, provenance-stamped capture subsystem rather than hand-rolling Playwright:
    ```
-   python scripts/capture_tableau_reference.py migrations/<slug> [--public-url <url> --view <view>]
+   python scripts/capture_tableau_reference.py migrations/workbooks/<slug> [--public-url <url> --view <view>]
    ```
    It has a **`manual` provider** for workbooks that are *not* on Tableau Public (the enterprise case):
    the user drops screenshots into `reference/` and they become the immutable ground truth. See

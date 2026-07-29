@@ -15,7 +15,7 @@ Public availability is not the same as public-domain status. Attribution alone d
 
 ## Provenance and source links
 
-For the authoritative list of Tableau Public source URLs used in this repository's migration examples, see [`migrations/README.md`](migrations/README.md).
+For the authoritative list of Tableau Public source URLs used in this repository's migration examples, see [`examples/README.md`](examples/README.md).
 
 This repository does not intentionally redistribute source `.twb` / `.twbx` files or extracted source data. Those artifacts are expected to remain local/ignored; committed examples focus on generated Power BI outputs and reference screenshots.
 

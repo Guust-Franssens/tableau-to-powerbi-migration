@@ -84,7 +84,7 @@ Legend: 🟢 render-proven · 🟡 structural template (CLI) · 🔴 needs human
 
 > **These rows have NO local `visuals/<type>.visual.json` file** — unlike the 🟡/🔴 entries below, the
 > 🟢 core types are proven *in situ*. To copy one, resolve it from the cited migration's PBIR, e.g.:
-> `Select-String -Path migrations\*\fabric\*.Report\definition\pages\*\visuals\*\visual.json -Pattern '"visualType": "columnChart"'`
+> `Select-String -Path examples\*\fabric\*.Report\definition\pages\*\visuals\*\visual.json -Pattern '"visualType": "columnChart"'`
 > then open that `visual.json` and rebind fields. If a row's location is vague ("all migrations"), any
 > hit from that glob is a valid, render-proven starting point. Do **not** treat a missing
 > `visuals/<type>.md` as "unproven" for these types.

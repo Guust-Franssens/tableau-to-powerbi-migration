@@ -4,7 +4,7 @@ purpose: Rebuild the 3 Region-Comp KPI dot-strips (SALES / PROFIT RATIO / AVG DA
          Region on a constant Y baseline, positioned + sized by the per-region value,
          coloured red->grey->blue by the signed performance-vs-prior-period diff.
          Fixes the invalid Y=[Region] binding that broke the visuals.
-usage:   python migrations/superstore-sales-performance/_work/fix_kpi_dotstrips.py
+usage:   python examples/superstore-sales-performance/_work/fix_kpi_dotstrips.py
 """
 
 from __future__ import annotations

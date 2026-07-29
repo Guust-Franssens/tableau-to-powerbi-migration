@@ -176,8 +176,8 @@ collision · every `sourceColumn` matches its CSV header exactly (no refresh "co
 risk). Power BI Desktop is not installed on this machine, so a live `EVALUATE` was not run; the model is
 trivial enough (`COUNTROWS`/`SUM`) that the CSV-derived numbers are authoritative.
 
-Regenerate: `python migrations/interactive-resume/build/generate_semantic_model.py`
-Validate: `pwsh -File migrations/interactive-resume/build/validate_tmdl.ps1`
+Regenerate: `python examples/interactive-resume/build/generate_semantic_model.py`
+Validate: `pwsh -File examples/interactive-resume/build/validate_tmdl.ps1`
 
 ---
 
@@ -221,7 +221,7 @@ integrity checks pass). Descriptions were then **back-ported into `generate_sema
 model: 0 diffs across all 47 objects** — so the generator remains the single re-runnable source
 of truth and will not silently drop descriptions on a future regenerate.
 
-Verify readiness: `python migrations/interactive-resume/build/check_ai_readiness.py`
+Verify readiness: `python examples/interactive-resume/build/check_ai_readiness.py`
 
 **Deferred to post-deploy / report layer (not reliably committable in TMDL today):**
 - **Synonyms** (linguistic schema / `LinguisticMetadata`): the available Modeling-MCP tools

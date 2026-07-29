@@ -3,7 +3,7 @@ Deterministic TMDL/PBIP generator for the FastFashionImpact semantic model.
 
 Migrates the Tableau workbook "Fast Fashion's Environmental Wake Up Call" (11 extract
 data sources, 34 worksheets, 1 infographic dashboard) into a Fabric PBIP semantic model,
-mirroring the conventions of migrations/electricity-per-capita (DataFolder M-parameter,
+mirroring the conventions of examples/electricity-per-capita (DataFolder M-parameter,
 per-source import table, disconnected parameter table, /// lineage comments).
 
 KEY MODELING FACTS (see DISPOSITIONS.md / RELATIONSHIPS.md for the full write-up):
@@ -15,7 +15,7 @@ KEY MODELING FACTS (see DISPOSITIONS.md / RELATIONSHIPS.md for the full write-up
     relationships (documented as composite-model enhancements, not Tableau joins).
   * __tableau_internal_object_id__ table-anchor pseudo-columns are excluded (guide s8).
 
-Run:  .venv\Scripts\python.exe migrations\fast-fashion-impact\fabric\_validation\generate_tmdl.py
+Run:  .venv\Scripts\python.exe examples\fast-fashion-impact\fabric\_validation\generate_tmdl.py
 """
 import os, uuid
 

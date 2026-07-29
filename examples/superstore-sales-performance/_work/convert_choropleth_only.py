@@ -5,7 +5,7 @@ purpose: Convert ONLY the prescriptive "State KPI Difference" filledMap to an
          The measure already restricts to the selected region, so the redundant
          Region Filter is dropped. The 5 small regional small-multiples are left
          as filledMap (azureMap does not suit 384px small-multiples well).
-usage:   python migrations/superstore-sales-performance/_work/convert_choropleth_only.py
+usage:   python examples/superstore-sales-performance/_work/convert_choropleth_only.py
 """
 
 from __future__ import annotations

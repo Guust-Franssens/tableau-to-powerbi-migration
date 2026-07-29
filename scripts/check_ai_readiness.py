@@ -86,10 +86,10 @@ def main() -> None:
 
     if args.all:
         # All three migration trees: examples/ (this repo's worked examples) plus the user's own
-        # migrations/ (workbooks) and datasources/ (published data sources).
+        # migrations/workbooks/ and migrations/datasources/.
         targets = sorted(
             p
-            for tree in ("examples", "migrations", "datasources")
+            for tree in ("examples", "migrations/workbooks", "migrations/datasources")
             for p in (REPO_ROOT / tree).glob("*")
             if (p / "fabric").is_dir()
         )
