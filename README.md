@@ -237,8 +237,8 @@ tests/                   pytest suite + XML fixtures for the parser
 ```
 
 All three share the same shape (`source/`, `migration-spec.json`, `fabric/`); a data-source migration
-simply has no `.Report`. See [`migrations/workbooks/README.md`](migrations/workbooks/README.md) and
-[`migrations/datasources/README.md`](migrations/datasources/README.md) for how to start your own.
+simply has no `.Report`. To start your own, see [`migrations/README.md`](migrations/README.md) — it
+routes you to the right tree and explains why data sources are migrated first.
 
 </details>
 
