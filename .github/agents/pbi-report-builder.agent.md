@@ -227,7 +227,8 @@ wrong encoding. Instead:
    `formatting search`) to confirm the visual supports the capability and to enumerate the real
    role/object/property names.
 2. **If the capability exists but the exact PBIR JSON is uncertain, surface it to the human with
-   click-by-click Desktop instructions** (via `ask_user`): name the visual to add, the fields to drop
+   click-by-click Desktop instructions** (ask in your normal reply — there is no `ask_user` tool):
+   name the visual to add, the fields to drop
    in each well, and the Format-pane toggles to set, then have them save. **Read the resulting
    `visual.json` and reuse it as ground truth** — one human round-trip beats many blind render cycles.
    (Exactly how the Superstore Azure Maps choropleth encoding below was captured; a research subagent

@@ -233,20 +233,28 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
     ```
     python scripts/refresh_pbip_model.py --pid <desktop-pid>
     ```
-    It refreshes over XMLA, saves via UI Automation, and only reports `REFRESH: DATA_OK + PERSISTED`
+    It refreshes over XMLA, persists via AMO `ImageSave` (no UI), and only reports
+   `REFRESH: DATA_OK + PERSISTED`
     when a real row came back **and** the cache file advanced. Anything else is a failure — do not
     hand over.
-    **Why a save is required, and why it kept being missed:** Desktop *does* persist a PBIP's data,
-    to `<Name>.SemanticModel/.pbi/cache.abf` (gitignored — it is data), but **only on save**. An XMLA
-    refresh populates the in-memory model and leaves the file dirty, and the Desktop Bridge CLI has
-    **no save verb** (`status`/`manifest`/`open`/`reload`/`screenshot`/`screenshot-all`) — so the
-    refresh was routinely lost. It is a missing capability, not carelessness. `SendKeys` does not
-    work either (`SetForegroundWindow` is refused, so Ctrl+S lands on the wrong window); the script
-    uses **UI Automation** — the Windows *accessibility* API that screen readers use to activate
-    controls — because its `InvokePattern` needs no foreground focus. Treat that as a workaround, not
-    a design: it depends on an element named "Save", so it breaks on ribbon changes and non-English
-    installs, and a modal dialog swallows it silently — which is why the script verifies the result
-    instead of assuming it. Verified end to end 2026-07-30:
+    **Why a save is required, and how it is done (no UI needed):** Desktop persists a PBIP's data to
+    `<Name>.SemanticModel/.pbi/cache.abf` (gitignored — it is data), and an XMLA refresh alone only
+    populates the *in-memory* model. The script persists it programmatically via AMO
+    **`Server.ImageSave(databaseId, stream)`**, which writes exactly that cache file.
+    **Proven end to end 2026-07-30**, including the control that rules out a silent re-refresh:
+    delete `cache.abf` → refresh in memory → `ImageSave` → **kill Desktop with `-Force`** (no save,
+    no prompt) → **rename the source data folder away** → reopen → `DATA_OK` with real rows. With the
+    source absent, the data can only have come from the cache.
+    Background worth knowing: a TMSL `backup` is refused because Desktop runs its Analysis Services
+    instance in **Diskless mode** (*"Backup/Restore … not supported"*), but that same mode sets
+    `EnableDisklessTMImageSave=1`, which is why `ImageSave` works. The Power BI product group's
+    guidance that *"only the Desktop UI performs"* the save describes the MCP/Bridge surface — the
+    engine itself does expose this. Note the AMO client throws *"The server sent an unrecognizable
+    response"* while writing correctly, so the script judges success by the FILE (exists, non-empty,
+    newly written), never by the absence of an exception.
+    A UI-Automation fallback remains (`--ui-save`) for the case where `ImageSave` is unavailable, but
+    it is no longer the default: it needed an interactive desktop, depended on an element named
+    "Save", and broke on non-English installs.
     refresh → save → `cache.abf` updated → close Desktop → reopen → `DATA_OK` **without refreshing**.
     **Order matters — the cache dies if the definition changes after it.** Desktop discards
     `cache.abf` when `definition/*.tmdl` is newer (verified: a model with a valid 113 KB cache opened
