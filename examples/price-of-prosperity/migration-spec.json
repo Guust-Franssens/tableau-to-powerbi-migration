@@ -64,7 +64,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_0d3wmxq1a9toyl1cnidh71.hyper"
+        "hyper_file": "Data/Extracts/federated_0d3wmxq1a9toyl1cnidh71.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'textscan' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {

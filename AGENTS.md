@@ -186,6 +186,22 @@ cloning to confirm the machine is configured.
 - **Surface complexity mismatches proactively.** If the parsed workbook implies more effort than the
   user assumes (many LOD/table-calc fields, extract-only data with no upstream, >20 floating-layout
   worksheets), say so before building rather than discovering it mid-migration.
+- **NEVER block silently on an external system — time-box it, then ASK.** This is a hard rule, from a
+  real user report: an agent sat on "Testing live Snowflake connectivity" for **129 minutes / 298 tool
+  calls**, retrying without ever surfacing the problem, until the user intervened and suggested taking
+  the credential from Power BI Desktop. Waiting is not progress, and a credential is something only a
+  human can supply — no number of retries will conjure one.
+  - **Cap it: ~2 minutes or 3 attempts, whichever comes first**, for any connect / refresh / sign-in /
+    connectivity test against a database, warehouse, gateway or tenant.
+  - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
+    the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
+    "give me a PAT/key"). Never re-run the same call hoping for a different result.
+  - **Report elapsed time in your progress updates** whenever an operation exceeds ~60s, so a stall is
+    visible rather than looking like work.
+  - If a credential is already cached in **Power BI Desktop**, prefer that path — it is usually the
+    fastest unblock, and `scripts/probe_desktop_query.py` tells you definitively whether it worked.
+  - The same cap applies to any tool call that has hung once: the second identical retry needs a
+    reason, and the third needs the user.
 - **End every message with a clear next step or an explicit verdict** — never a vague "looks fine."
 - **Durable learnings go in committed files** (the agent `Gotchas` sections and
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each

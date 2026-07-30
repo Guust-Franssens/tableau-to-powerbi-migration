@@ -53,7 +53,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/Facts _Named Range__ _Company Ma.hyper"
+        "hyper_file": "Data/Extracts/Facts _Named Range__ _Company Ma.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1257,7 +1259,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/Facts _Named Range__ _Company Ma_1.hyper"
+        "hyper_file": "Data/Extracts/Facts _Named Range__ _Company Ma_1.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -2142,7 +2146,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/Latest Tall SP Data.hyper"
+        "hyper_file": "Data/Extracts/Latest Tall SP Data.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -2503,7 +2509,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'csv'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/csv_40431_399510625000.hyper"
+        "hyper_file": "Data/Extracts/csv_40431_399510625000.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'csv' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {

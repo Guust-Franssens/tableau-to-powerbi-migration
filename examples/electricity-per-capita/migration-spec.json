@@ -55,7 +55,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/per-capita-electricity-fossil-nuclear-renewables.hyper"
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/per-capita-electricity-fossil-nuclear-renewables.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'textscan' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -247,7 +249,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/tree.hyper"
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/tree.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'textscan' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1329,7 +1333,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/Pivoted (Per capita electricity generation by source).hyper"
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/Pivoted (Per capita electricity generation by source).hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1751,7 +1757,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/By source.hyper"
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/By source.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -2033,7 +2041,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/Elec generation per capita + regions.hyper"
+        "hyper_file": "Data/Electricity generation per capita (2022).twb Files/Elec generation per capita + regions.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'textscan' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {

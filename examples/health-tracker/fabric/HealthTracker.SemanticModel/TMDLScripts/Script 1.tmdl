@@ -1,0 +1,6 @@
+createOrReplace
+
+	cultureInfo en-US
+		
+		linguisticMetadata = {"Version":"4.2.0","Language":"en-US"}
+			contentType: json

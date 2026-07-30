@@ -75,17 +75,37 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    partial set visible in the workbook.
 1. **Load and validate** `migration-spec.json` against `docs/migration-spec.schema.json` (the parser
    already did this, but re-validate if you're consuming a hand-edited spec).
-2. **Decide data materialization for extract-based sources.** Every `data_sources[].connection.mode ==
-   "extract"` has no live connection — actual rows live in a packaged `.hyper` file
-   (`connection.hyper_file`). Ask the user (via the orchestrator) how to proceed: (a) extract via
-   `tableauhyperapi` → Parquet/CSV → import-mode table, (b) repoint to a real upstream system if the
-   customer has one behind the extract, or (c) stub with a clearly-labeled sample for a structure-only
-   demo. Do not silently fabricate data. Record the decision in `limitations_encountered`
-   (`stage: "semantic_build"`).
-3. **Create tables and columns** via `semantic-model-authoring` for every non-hidden field. Preserve
+2. **Point the model at the RIGHT source — this is the most consequential decision you make.**
+   Read `data_sources[].connection.powerbi_target` (the parser decides it; `powerbi_target_reason`
+   says why). Do not infer it from `mode == "extract"`: a `.hyper` looks identical whether it caches
+   a CSV or a Snowflake warehouse, and getting this wrong is invisible until the customer's first
+   refresh.
+   - **`live_source`** (Snowflake, SQL Server, Databricks, Redshift, BigQuery, a REST/cloud app …) —
+     the semantic model **MUST connect to that system directly**, exactly as Tableau did. **Never
+     point it at extracted rows/CSVs.** Doing so silently freezes the data at export time and yields
+     a model that can never refresh — a broken migration that *looks* fine because the numbers match
+     on day one. The packaged `.hyper` is Tableau's cache: use it for **schema discovery**
+     (`python scripts/extract_hyper_data.py --schema <workbook.twbx>`) and as a **validation
+     baseline**, never as the model's source. You need a credential — see the rule below.
+   - **`flat_file`** (Excel, CSV/textscan, JSON, Parquet, Access …) — the source genuinely *is* a
+     file, so materialising the rows and pointing at them **is** the faithful migration. Extract via
+     `scripts/extract_hyper_data.py` and use the `DataFolder` parameter pattern.
+   - **`unknown`** — do not guess. Ask the orchestrator to confirm the real upstream before building.
+   Record the decision and its reason in `limitations_encountered` (`stage: "semantic_build"`).
+   Never silently fabricate data. A structure-only stub is acceptable ONLY if the user explicitly
+   chooses it, and must be labelled as such.
+3. **Credentials: time-box, then ask — never retry forever.** A live source needs a credential you
+   cannot supply. Run `python scripts/preflight_source_credentials.py --spec <spec>` first. If a
+   connection/refresh/connectivity test does not succeed within **~2 minutes or 3 attempts**, STOP
+   and ask the user, naming the system + server + what you tried + the options (sign in interactively
+   in Desktop, or provide a PAT/key). If Desktop already has the credential cached, that is usually
+   the fastest unblock — `python scripts/probe_desktop_query.py --pid <pid>` is the definitive check
+   (`DATA_OK`). Retrying a blocked connection is not progress: a real user lost **129 minutes** to
+   this exact loop.
+4. **Create tables and columns** via `semantic-model-authoring` for every non-hidden field. Preserve
    `caption` as the TMDL display name (never ship raw internal names like `Calculation_5871029` to the
    model).
-4. **Translate calculated fields to DAX**, field by field, using `docs/tableau-dax-translation-guide.md`:
+5. **Translate calculated fields to DAX**, field by field, using `docs/tableau-dax-translation-guide.md`:
    - Check `is_lod` / `is_table_calc` first — route to **§5 (LOD)** / **§6 (table calculations)** of the
      guide; these need grain verification, budget extra validation time.
    - Check `reshape_hint == "pivot_derived"` — do the reshape in Power Query (`Table.UnpivotOtherColumns`
@@ -102,20 +122,35 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
      (check `worksheets[].filters[].note` in the spec — the parser already flags this), **do not**
      create the calculated column. Note in your output that `pbi-report-builder` should use a native
      slicer on the underlying dimension instead.
-5. **Create relationships** from `data_sources[].joins[]`.
-6. **Materialize the model locally.** The default deliverable is a **local PBIP**
+6. **Create relationships** from `data_sources[].joins[]`.
+7. **Materialize the model locally.** The default deliverable is a **local PBIP**
    (`migrations/workbooks/<slug>/fabric/<Name>.SemanticModel` + `<Name>.pbip`) — **publishing to Fabric is NOT part
    of the default flow** (it's phase-2 `pbi-deployer`; see `tableau-migrator.agent.md`). Only run
    `semantic-model-authoring`'s Fabric deployment workflow if the orchestrator explicitly gave you a
    target workspace. Never treat "not deployed" as a reason to skip step 7.
-7. **Validate a sample — this is mandatory and works offline.** For at least the non-trivial translated
+8. **Check the M before Desktop sees it — `python scripts/check_m_syntax.py <Name>.SemanticModel`.**
+   Desktop reports a broken query only as `M Engine error: 'Microsoft.Data.Mashup.Preview; Token ','
+   expected.'` — with **no file, no line and no expression** — which a real user hit repeatedly and
+   could not act on. This gives you `file:line:col` and the offending text, and catches the shapes
+   that actually recur in generated M: a trailing comma before `}` (the usual culprit), unbalanced
+   `()`/`[]`/`{}`, a `let` with no `in`, an unterminated string, and a dropped comma in a list. It is
+   offline and instant, so run it after every M edit — never hand a model to Desktop unchecked.
+   **Nothing else in the local loop catches this** — measured 2026-07-30 against a model whose only
+   fault was a trailing comma: `connection_operations` **ConnectFolder** reported *"Successfully
+   loaded database"* with `tablesLoaded: 1`; `partition_operations` **RefreshWithXMLA** could not even
+   run (*"A disconnected object is read only and cannot be refreshed"*); and `dax_query_operations`
+   **Validate** returned *"DAX query operations are not supported on offline connections"*. TMDL
+   deserialization treats M as an opaque string, so the mashup engine never sees it until Desktop
+   opens the `.pbip`. This is the concrete instance of the repo-wide rule that structural validation
+   is necessary but not sufficient.
+9. **Validate a sample — this is mandatory and works offline.** For at least the non-trivial translated
    measures (anything that wasn't a pure passthrough), run a real `EVALUATE` and sanity-check output
    shape and spot values. On a local PBIP use `powerbi-modeling-mcp` → `connection_operations`
    **ConnectFolder** on the `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**
    (`semantic-model-consumption` is an optional convenience from the `fabric-skills` plugin and requires
    a published model — never depend on it). Flag anything that can't be verified against a known
    Tableau value.
-8. **Report back to the orchestrator**: semantic model location (local PBIP path, plus workspace + item
+10. **Report back to the orchestrator**: semantic model location (local PBIP path, plus workspace + item
    only if actually deployed), a table→field
    count summary, which calculated fields became measures vs. columns, which idioms were simplified
    away (parameter-equality, pivot reshape) and why, and any new `limitations_encountered` entries

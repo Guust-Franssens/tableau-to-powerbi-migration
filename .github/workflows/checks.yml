@@ -42,3 +42,6 @@ jobs:
 
       - name: Privacy gate - no absolute user paths in tracked files
         run: uv run python scripts/set_data_folder.py --check
+
+      - name: M syntax gate - catch Desktop's unlocalised "Token ',' expected" first
+        run: uv run python scripts/check_m_syntax.py --all

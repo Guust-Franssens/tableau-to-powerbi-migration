@@ -825,7 +825,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/TableauTemp 1/#TableauTemp_0bpez9u06rycis1h95ht61opcozb.hyper"
+        "hyper_file": "Data/TableauTemp 1/#TableauTemp_0bpez9u06rycis1h95ht61opcozb.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'textscan' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -6784,7 +6786,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'textscan'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/TableauTemp/#TableauTemp_12v5bxx1823z5v19eimgn1sxsoi3.hyper"
+        "hyper_file": "Data/TableauTemp/#TableauTemp_12v5bxx1823z5v19eimgn1sxsoi3.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'textscan' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {

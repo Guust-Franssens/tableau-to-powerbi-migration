@@ -1,0 +1,618 @@
+cultureInfo en-US
+
+	linguisticMetadata =
+			{
+			  "Version": "2.0.0",
+			  "Language": "en-US",
+			  "Entities": {
+			    "flight_activity.pos_mom_comp_flights": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Comp Flights"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        },
+			        {
+			          "vs. PM": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_ontime_perf": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM On-Time Perf%"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "On-Time Performance": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_no_of_comp_flights": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM No of Comp Flights"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Completed Flights": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_rpk": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM RPK"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Revenue Passenger Km (RPK)": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_avg__csat": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Avg. CSAT"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        },
+			        {
+			          "vs. PM": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_rpk": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM RPK"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_avg__csat": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Avg. CSAT"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Avg. Satisfaction Score": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        },
+			        {
+			          "Avg. CSAT Score": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_ontime_perf": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM On-Time Perf"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        },
+			        {
+			          "vs. PM": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm__of_mishandled_baggage": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM % of Mishandled Baggage"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Mishandled": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_cargo_load_factor": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Cargo Load Factor"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_freight_tonnes": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Freight Tonnes"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Freight Tonnes": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_ctk": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM CTK"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Cargo Tonnes\nKilometres (CTK)": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_ctk": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM CTK"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_load_factor": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Load Factor"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Passenger Load\nFactor (PLF)": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_op_profit": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Op Profit"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_op_profit": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Op Profit"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Total Operating\nProfit": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_costs": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Costs"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_rpk_a": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM RPK (A)"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Revenue Passenger\nKilometres (RPK)": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_load_factor": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Load Factor"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_passenger_count": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Passenger Count"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "All Passengers": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_costs": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Costs"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Total Operating\nCost": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_passenger_count": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Passenger Count"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_cargo_load_factor": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Cargo Load Factor"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Cargo Load Factor\n(CLF)": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_total_revenue": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Total Revenue"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_freight_tonnes": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM Freight Tonnes"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.cm_total_revenue": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "CM Total Revenue"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "Total Revenue": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    },
+			    "flight_activity.pos_mom_rpk_a": {
+			      "Definition": {
+			        "Binding": {
+			          "ConceptualEntity": "Flight Activity",
+			          "ConceptualProperty": "Pos MoM RPK (A)"
+			        }
+			      },
+			      "State": "Generated",
+			      "Terms": [
+			        {
+			          "vs. Prev. Month": {
+			            "State": "Suggested",
+			            "Source": {
+			              "Type": "External",
+			              "Agent": "PowerBI.VisualColumnRename"
+			            },
+			            "Weight": 0.9
+			          }
+			        }
+			      ]
+			    }
+			  }
+			}
+		contentType: json
+
