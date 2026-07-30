@@ -187,6 +187,39 @@ def test_privacy_gate_allowlist_stays_minimal() -> None:
     assert names == {"set_data_folder.py", "test_repo_layout.py"}, f"unexpected exemptions: {names}"
 
 
+def test_shared_conventions_come_after_the_agent_role() -> None:
+    """GitHub's documented ordering for an agent profile is role first, then constraints.
+
+    The block was originally inserted straight after the frontmatter, which pushed each agent's own
+    `# <Name> — Subagent` identity down ~70 lines: it read 6 KB of generic cross-cutting rules before
+    learning what it *is*. Identity should frame the rules, not the reverse.
+    """
+    for agent in sorted((REPO_ROOT / ".github" / "agents").glob("*.agent.md")):
+        lines = agent.read_text(encoding="utf-8").splitlines()
+        h1 = next(i for i, line in enumerate(lines) if line.startswith("# "))
+        block = next(i for i, line in enumerate(lines) if "BEGIN:shared-conventions" in line)
+        assert block > h1, f"{agent.name}: shared conventions precede the agent's own role statement"
+
+
+def test_every_agent_carries_the_shared_conventions() -> None:
+    """A subagent sees ONLY its persona, so a convention absent here simply does not apply to it."""
+    agents = sorted((REPO_ROOT / ".github" / "agents").glob("*.agent.md"))
+    assert agents
+    for agent in agents:
+        text = agent.read_text(encoding="utf-8")
+        assert "BEGIN:shared-conventions" in text and "END:shared-conventions" in text, agent.name
+        assert "NEVER block silently on an external system" in text, f"{agent.name} lacks the retry cap"
+
+
+def test_orchestrator_has_a_retrospective_step() -> None:
+    """Each migration must make the next one cheaper - that only happens if it is a gated step."""
+    text = (REPO_ROOT / ".github" / "agents" / "tableau-migrator.agent.md").read_text(encoding="utf-8")
+    assert "Retrospective — MANDATORY" in text
+    # It must route learnings somewhere a subagent will actually read them, and stay within budget.
+    for anchor in ("sync_agent_conventions.py", "visual-cookbook.md", "30,000-char", "net-zero growth"):
+        assert anchor in text, f"retrospective step is missing its {anchor!r} guidance"
+
+
 def test_customer_data_is_gitignored_in_every_tree() -> None:
     """Extracted data and downloaded sources must be ignored at BOTH tree depths.
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -84,11 +85,7 @@ def _rendered() -> str:
 
 
 def _split_frontmatter(text: str) -> tuple[str, str]:
-    """Return (frontmatter_including_fences, rest). The block goes right after the frontmatter.
-
-    Early context beats buried context: a 40 KB persona can push a late rule out of an agent's
-    effective attention, so the conventions sit immediately below the agent's own header.
-    """
+    """Return (frontmatter_including_fences, rest)."""
     if not text.startswith("---"):
         return "", text
     end = text.find("\n---", 3)
@@ -96,6 +93,25 @@ def _split_frontmatter(text: str) -> tuple[str, str]:
         return "", text
     cut = text.find("\n", end + 1) + 1
     return text[:cut], text[cut:]
+
+
+def _insertion_point(body: str) -> int:
+    """Index in `body` where the shared block belongs: AFTER the agent's own role statement.
+
+    GitHub's documented ordering for an agent profile is role/persona first, then responsibilities,
+    then scope constraints (see the example agents in the custom-agents docs). The block was
+    originally inserted straight after the frontmatter, which pushed the agent's own
+    `# <Name> — Subagent` identity down by ~70 lines: it read 6 KB of generic cross-cutting rules
+    before learning what it *is*. Identity should frame the rules, not the other way round.
+
+    So: insert after the first H1 and its intro prose, immediately before the first `##` section.
+    That keeps the conventions early enough to be well-attended while letting the role lead.
+    """
+    h1 = re.search(r"^#\s+.+$", body, re.MULTILINE)
+    if not h1:
+        return 0
+    section = re.search(r"^##\s+", body[h1.end() :], re.MULTILINE)
+    return h1.end() + section.start() if section else len(body)
 
 
 def apply_to(path: Path, write: bool) -> bool:
@@ -106,12 +122,16 @@ def apply_to(path: Path, write: bool) -> bool:
     if BEGIN in text and END in text:
         head, rest = text.split(BEGIN, 1)
         _, tail = rest.split(END, 1)
-        updated = f"{head}{block}{tail}"
-    else:
-        frontmatter, body = _split_frontmatter(text)
-        updated = f"{frontmatter}\n{block}\n{body.lstrip(chr(10))}"
+        text = f"{head.rstrip()}\n{tail.lstrip()}" if head.strip().endswith("---") is False else f"{head}{tail}"
+        # Re-place from scratch so an existing block also migrates to the correct position.
+        text = re.sub(r"\n{3,}", "\n\n", text)
 
-    if updated == text:
+    frontmatter, body = _split_frontmatter(text)
+    at = _insertion_point(body)
+    updated = f"{frontmatter}{body[:at].rstrip()}\n\n{block}\n\n{body[at:].lstrip()}"
+
+    original = path.read_text(encoding="utf-8")
+    if updated == original:
         return False
     if write:
         path.write_text(updated, encoding="utf-8")
