@@ -12,14 +12,34 @@ Two separate gaps kept biting real migrations:
    the catalog GUID, then send a TMSL `refresh`. Re-deriving that per migration is slow and easy to
    get subtly wrong.
 
-2. **The refresh was not persisted.** Power BI Desktop DOES cache a PBIP's data - in
-   `<Name>.SemanticModel/.pbi/cache.abf` (gitignored, it is data) - but only when the file is
-   **saved**. An XMLA refresh populates the in-memory model and leaves the file dirty, so if nobody
-   saves, the cache is never written and the next agent opens an empty model and has to refresh
-   again (hitting the credential prompt all over again). The Desktop Bridge CLI has **no save verb**
-   (`status`/`manifest`/`open`/`reload`/`screenshot`/`screenshot-all`), which is exactly why this
-   kept being missed - it was a missing capability, not carelessness. We send Ctrl+S via the Windows
-   UI and then VERIFY with the bridge's own `hasUnsavedChanges` flag plus the cache file's timestamp.
+2. **The refresh was not persisted.** Power BI Desktop caches a PBIP's data in
+   `<Name>.SemanticModel/.pbi/cache.abf` (gitignored, it is data), and an XMLA refresh alone only
+   populates the *in-memory* model - so if nothing writes that cache, the next agent opens an empty
+   model and has to refresh again (hitting the credential prompt all over again).
+
+   **There IS a programmatic save: AMO `Server.ImageSave(databaseId, stream)`.** This writes the
+   cache file directly, so no UI is involved and the flow works headless.
+
+   Finding it required disbelieving a plausible answer. The Power BI product group's guidance is
+   that the Modeling MCP never touches the Desktop Bridge - Desktop hosts a local Analysis Services
+   instance, the MCP matches it by open file name and connects to `localhost:<port>`, so every
+   modeling tool acts on the in-memory engine - and that *"writing that state back to the .pbip /
+   cache.abf file is a separate Save action that only the Desktop UI performs."* True of the
+   MCP/Bridge surface, but NOT of the engine: probing it showed a TMSL `backup` is refused only
+   because Desktop runs Analysis Services in **Diskless mode** (*"Backup/Restore ... not
+   supported"*), while that same configuration sets `EnableDisklessTMImageSave=1`. AMO exposes the
+   corresponding call, and it works.
+
+   **Proven end to end 2026-07-30, with the control that rules out a silent re-refresh:** delete
+   `cache.abf` -> refresh in memory -> `ImageSave` -> **kill Desktop with -Force** (no save prompt)
+   -> **rename the source data folder away** -> reopen -> `DATA_OK` with real rows. With the source
+   absent, that data can only have come from the cache. Output is ~113-114 KB, matching Desktop's
+   own save (114.8 KB).
+
+   Two implementation notes: the AMO client raises *"The server sent an unrecognizable response"*
+   while writing the file correctly, so success is judged by the FILE (exists, non-empty, newly
+   written), never by the absence of an exception; and `database_operations ExportToTmdlFolder`
+   persists model *definition* changes but carries no rows, so it cannot substitute for this.
 
 Cache invalidation (important)
 ------------------------------
@@ -34,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -108,10 +129,81 @@ def _instance(pid: int | None) -> dict | None:
     return None
 
 
+def _load_amo():
+    """Load AMO (Microsoft.AnalysisServices.Tabular) for the ImageSave path.
+
+    Same CoreCLR-hosting constraint as `_load_adomd`: pythonnet must host CoreCLR before `import clr`.
+    """
+    # pylint: disable=import-outside-toplevel,import-error
+    import glob
+
+    from pythonnet import load
+
+    load("coreclr")
+    import clr
+
+    base = os.path.expanduser(r"~\.nuget\packages")
+    for dll in glob.glob(os.path.join(base, "**", "netcoreapp*", "Microsoft.AnalysisServices*.dll"), recursive=True):
+        if "resources" in dll.lower():
+            continue
+        try:
+            # pylint: disable-next=no-member  # clr's members are generated at runtime by pythonnet
+            clr.AddReference(dll)
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            continue
+    from Microsoft.AnalysisServices.Tabular import Server  # noqa: PLC0415
+
+    return Server
+
+
+def image_save(port: int, cache_path: Path) -> tuple[bool, str]:
+    """Persist the in-memory model to `<Name>.SemanticModel/.pbi/cache.abf` via AMO `Server.ImageSave`.
+
+    This is the programmatic equivalent of Desktop's Save, and it removes the need to drive the UI.
+
+    Discovered 2026-07-30 by probing the engine rather than accepting "only the Desktop UI can do it":
+    a TMSL `backup` is refused because Desktop runs its Analysis Services instance in **Diskless mode**
+    ("Backup/Restore ... not supported"), but that same mode sets `EnableDisklessTMImageSave=1`, and
+    AMO exposes `Server.ImageSave(databaseId, Stream)`. Proven end to end: delete cache.abf → refresh
+    in memory → ImageSave → **kill Desktop with -Force (no save prompt)** → reopen → DATA_OK, no
+    refresh needed. The bytes match Desktop's own save closely (114.1 KB vs 114.8 KB).
+
+    Note the client throws "The server sent an unrecognizable response" while writing correctly, so
+    success is judged by the FILE (exists, non-empty, newly written), never by the absence of an
+    exception.
+    """
+    server_type = _load_amo()
+    from System.IO import FileAccess, FileMode, FileStream  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    before = cache_path.stat().st_mtime if cache_path.exists() else 0.0
+
+    server = server_type()
+    server.Connect(f"Data Source=localhost:{port}")
+    try:
+        database_id = server.Databases[0].ID
+        stream = FileStream(str(cache_path), FileMode.Create, FileAccess.Write)
+        try:
+            server.ImageSave(database_id, stream)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            # Expected: the response parser trips even on a successful write. Fall through to the
+            # file check, which is the real evidence.
+            del exc
+        finally:
+            stream.Close()
+    finally:
+        server.Disconnect()
+
+    if cache_path.exists() and cache_path.stat().st_size > 0 and cache_path.stat().st_mtime > before:
+        return True, f"persisted via AMO ImageSave ({cache_path.stat().st_size / 1024:.1f} KB)"
+    return False, "ImageSave did not produce a cache file"
+
+
 def save(pid: int) -> tuple[bool, str]:
     """Save the Desktop file, then verify the save actually happened.
 
-    The bridge has no save verb, so this drives the UI - but NOT with SendKeys. Verified 2026-07-30:
+    LEGACY FALLBACK - image_save() is the default path now. Kept for the case where ImageSave is
+    unavailable. Not SendKeys: verified 2026-07-30 that
     `SetForegroundWindow` (even with the `AttachThreadInput` workaround) is refused in this context,
     so the Ctrl+S keystroke silently lands on whatever window has focus and the model stays dirty.
 
@@ -164,13 +256,22 @@ Write-Output 'NO_INVOKABLE_SAVE'; exit 1
 
 
 def cache_file(pid: int) -> Path | None:
-    """`<Name>.SemanticModel/.pbi/cache.abf` for the model this Desktop instance has open."""
+    """Where `<Name>.SemanticModel/.pbi/cache.abf` belongs for the model this instance has open.
+
+    Resolves the DESTINATION, not an existing file: on a first build there is no cache yet, and
+    globbing for one returned None and silently sent the save down the UI-Automation fallback.
+    """
     inst = _instance(pid)
     if inst is None or not inst.get("currentFilePath"):
         return None
     pbip = Path(inst["currentFilePath"])
-    matches = sorted(pbip.parent.glob("*.SemanticModel/.pbi/cache.abf"))
-    return matches[0] if matches else None
+    models = sorted(pbip.parent.glob("*.SemanticModel"))
+    if not models:
+        return None
+    # Prefer the model matching the .pbip name when a folder holds several.
+    stem = pbip.stem.lower()
+    chosen = next((m for m in models if m.stem.lower() == stem), models[0])
+    return chosen / ".pbi" / "cache.abf"
 
 
 def row_count(port: int) -> tuple[int, str]:
@@ -206,12 +307,25 @@ def _refresh_and_save(pid: int, port: int, args: argparse.Namespace) -> int | No
         return 2
     print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
 
-    if not args.no_save:
-        saved, save_message = save(pid)
+    if args.no_save:
+        return None
+
+    # Preferred: a real API call. Falls back to driving the UI only if it fails, so a change in the
+    # engine can never leave the pipeline with no way to persist.
+    cache = cache_file(pid)
+    saved, save_message = (False, "no cache path resolved")
+    if cache is not None and not args.ui_save:
+        try:
+            saved, save_message = image_save(port, cache)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
+    if not saved:
         print(f"  save   : {save_message}")
-        if not saved:
-            print("REFRESH: NOT_PERSISTED (data is in memory only - the next open will be empty)")
-            return 1
+        saved, save_message = save(pid)
+    print(f"  save   : {save_message}")
+    if not saved:
+        print("REFRESH: NOT_PERSISTED (data is in memory only - the next open will be empty)")
+        return 1
     return None
 
 
@@ -223,6 +337,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tables", nargs="*", help="Tables to refresh (default: whole database)")
     parser.add_argument("--no-save", action="store_true", help="Refresh only; do NOT persist the cache")
     parser.add_argument("--verify-only", action="store_true", help="Skip refresh/save; just report the state")
+    parser.add_argument(
+        "--ui-save",
+        action="store_true",
+        help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
+    )
     args = parser.parse_args(argv)
 
     pid = args.pid
