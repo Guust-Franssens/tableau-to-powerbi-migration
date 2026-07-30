@@ -241,7 +241,11 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
     **no save verb** (`status`/`manifest`/`open`/`reload`/`screenshot`/`screenshot-all`) — so the
     refresh was routinely lost. It is a missing capability, not carelessness. `SendKeys` does not
     work either (`SetForegroundWindow` is refused, so Ctrl+S lands on the wrong window); the script
-    uses UI Automation's InvokePattern, which needs no focus. Verified end to end 2026-07-30:
+    uses **UI Automation** — the Windows *accessibility* API that screen readers use to activate
+    controls — because its `InvokePattern` needs no foreground focus. Treat that as a workaround, not
+    a design: it depends on an element named "Save", so it breaks on ribbon changes and non-English
+    installs, and a modal dialog swallows it silently — which is why the script verifies the result
+    instead of assuming it. Verified end to end 2026-07-30:
     refresh → save → `cache.abf` updated → close Desktop → reopen → `DATA_OK` **without refreshing**.
     **Order matters — the cache dies if the definition changes after it.** Desktop discards
     `cache.abf` when `definition/*.tmdl` is newer (verified: a model with a valid 113 KB cache opened

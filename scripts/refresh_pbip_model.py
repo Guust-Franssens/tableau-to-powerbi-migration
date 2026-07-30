@@ -114,10 +114,17 @@ def save(pid: int) -> tuple[bool, str]:
     The bridge has no save verb, so this drives the UI - but NOT with SendKeys. Verified 2026-07-30:
     `SetForegroundWindow` (even with the `AttachThreadInput` workaround) is refused in this context,
     so the Ctrl+S keystroke silently lands on whatever window has focus and the model stays dirty.
-    UI Automation's InvokePattern needs no foreground focus and works reliably - the same mechanism
-    `probe_desktop_credential.ps1` already uses against Desktop.
 
-    The result is never assumed: it is confirmed against the bridge's own `hasUnsavedChanges` flag.
+    Instead we use **UI Automation (UIA)** - the Windows *accessibility* framework, the API screen
+    readers use to enumerate and activate controls on behalf of users with disabilities. It exposes
+    the app as a tree of elements with invokable patterns, and `InvokePattern` needs no foreground
+    focus, which is why it works here. `probe_desktop_credential.ps1` already uses it against Desktop.
+
+    Be clear-eyed that this is a WORKAROUND, not a design: an accessibility surface is not an
+    automation contract. It depends on an element literally named "Save", so it breaks on ribbon
+    changes and on non-English installs, it cannot run headless, and a modal dialog swallows the
+    invoke silently. Hence the result is never assumed - it is confirmed against the bridge's own
+    `hasUnsavedChanges` flag. If a real `save` verb ever ships, delete this and call it.
     """
     before = _instance(pid)
     if before is None:
