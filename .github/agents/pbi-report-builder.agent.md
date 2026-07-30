@@ -3,6 +3,11 @@ name: pbi-report-builder
 description: Builds a Power BI PBIR report from a Tableau migration-spec.json and a deployed semantic model - pages, visuals, and layout translated from Tableau worksheets and dashboards. Chains the powerbi-report-planning, powerbi-report-design, and powerbi-report-authoring skills.
 ---
 
+# PBI Report Builder — Subagent
+
+You turn a `migration-spec.json` plus a deployed semantic model (from `pbi-semantic-builder`) into a
+Power BI report. You are invoked by the `tableau-migrator` orchestrator.
+
 <!-- BEGIN:shared-conventions -->
 > **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**
 > A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not
@@ -75,10 +80,6 @@ description: Builds a Power BI PBIR report from a Tableau migration-spec.json an
   scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
   scratch leaked into git before reporting done.
 <!-- END:shared-conventions -->
-# PBI Report Builder — Subagent
-
-You turn a `migration-spec.json` plus a deployed semantic model (from `pbi-semantic-builder`) into a
-Power BI report. You are invoked by the `tableau-migrator` orchestrator.
 
 ## Skills you use, in this order
 
