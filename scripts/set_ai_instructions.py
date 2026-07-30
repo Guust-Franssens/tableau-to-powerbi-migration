@@ -30,7 +30,44 @@ HARD_CHAR_LIMIT = 10_000  # Power BI's own cap
 CONTEXT_ROT_SOFT_LIMIT = 4_000  # above this, "informative yet tight" is at risk
 
 
-def lint_instructions(md_text: str) -> list[str]:
+def model_object_names(model_dir: Path) -> set[str]:
+    """Every table / column / measure name declared in a model's TMDL.
+
+    Used to catch instructions that reference something the model does not have. Two such errors
+    shipped in this repo, both found by review rather than by tooling: wind-energy's instructions
+    described a disconnected spiral scaffold as "geography for the map", and told Copilot to compare
+    by "ANSP" - a term from a completely different migration. Both would actively steer Copilot to
+    the wrong table or a nonexistent concept, which is worse than having no instructions at all.
+    """
+    names: set[str] = set()
+    definition = model_dir / "definition"
+    for tmdl in list(definition.glob("tables/*.tmdl")) + list(definition.glob("*.tmdl")):
+        text = tmdl.read_text(encoding="utf-8", errors="replace")
+        for match in re.finditer(r"^\s*(?:table|column|measure)\s+('([^']+)'|[^\s=]+)", text, re.MULTILINE):
+            names.add((match.group(2) or match.group(1)).strip("'"))
+    return names
+
+
+def unresolved_references(md_text: str, known: set[str]) -> list[str]:
+    """Names the instructions cite in `'quotes'` or [brackets] that the model does not declare.
+
+    Deliberately only checks *explicitly marked* references - a bare word in prose is not a claim
+    about the schema, but `'NL Densification'` and `[Total Revenue]` are.
+    """
+    cited: set[str] = set()
+    cited.update(re.findall(r"`'([^']+)'`", md_text))
+    cited.update(re.findall(r"\[([A-Za-z][^\[\]`]{1,60})\]", md_text))
+    missing = []
+    for name in sorted(cited):
+        # Placeholders are intentional templates, not claims about the schema: `<metric> Delta`,
+        # `'* Parameter'` (a glob over several tables), `[... Cars Offset]`.
+        if any(token in name for token in ("<", "...", "*")) or name in known:
+            continue
+        missing.append(name)
+    return missing
+
+
+def lint_instructions(md_text: str, known_names: set[str] | None = None) -> list[str]:
     """Return advisory warnings about instruction quality (context-rot, structure, metadata restating)."""
     warnings: list[str] = []
     n = len(md_text)
@@ -44,6 +81,13 @@ def lint_instructions(md_text: str) -> list[str]:
         warnings.append("no field references (no `backticks`/[brackets]); ground each line in real objects")
     if not re.search(r"(?im)^\s*#+\s*.*(avoid|do not|don't)", md_text) and "avoid" not in md_text.lower():
         warnings.append("no 'things to avoid' guidance; call out misuse (e.g. parameter tables, re-aggregation)")
+    if known_names:
+        missing = unresolved_references(md_text, known_names)
+        if missing:
+            warnings.append(
+                "references objects this model does NOT declare: " + ", ".join(missing[:6]) + " - "
+                "instructions that name the wrong object steer Copilot wrong; verify against the TMDL"
+            )
     return warnings
 
 
@@ -98,9 +142,17 @@ def ensure_culture(model_dir: Path) -> Path:
     culture_path = cultures_dir / f"{culture}.tmdl"
     if not culture_path.is_file():
         cultures_dir.mkdir(parents=True, exist_ok=True)
+        # "2.0.0" is the LINGUISTIC-SCHEMA version, matching this repo's own Power BI-generated
+        # culture files (AirlineAllianceActivity: 2.0.0 with 27 Entities; PriceOfProsperity: 1.0.0).
+        # It was previously "4.2.0", which is the `version` of definition.pbism - a different schema,
+        # so it was a copy-paste from the wrong file.
+        # Measured 2026-07-30, to avoid overstating the risk: a model published to Fabric with
+        # "4.2.0" round-tripped through `getDefinition` with its CustomInstructions fully intact, so
+        # the service does NOT drop the payload on an odd version. This is therefore a correctness
+        # tidy-up (say what Power BI itself says), not a fix for an observed failure.
         scaffold = (
             f"cultureInfo {culture}\n\n"
-            f'\tlinguisticMetadata = {{"Version": "4.2.0", "Language": "{culture}"}}\n'
+            f'\tlinguisticMetadata = {{"Version": "2.0.0", "Language": "{culture}"}}\n'
             f"\t\tcontentType: json\n"
         )
         culture_path.write_text(scaffold, encoding="utf-8")
@@ -188,31 +240,55 @@ def iter_models(root: Path) -> list[Path]:
     )
 
 
-def cmd_check(root: Path) -> int:
-    """Print a per-model report of which semantic models carry AI instructions."""
+def cmd_check(root: Path, strict: bool = False) -> int:
+    """Print a per-model report of which semantic models carry AI instructions.
+
+    Exit code matters: this was returning 0 unconditionally, so it printed "2/16 models have AI
+    instructions" and still exited GREEN - it could never be a CI gate or an agent handoff check,
+    which is precisely why the "MANDATORY" framing never produced the outcome. `--strict` makes it
+    fail-closed; the default stays advisory so the report can be read without blocking.
+    """
     models = iter_models(root)
     if not models:
         log.info("No models found under %s (examples/, migrations/workbooks/, migrations/datasources/)", root)
         return 0
     missing = 0
+    silent_no_op = 0
     for model in models:
         try:
             culture = find_culture_file(model)
             instr = get_instructions(culture)
         except (FileNotFoundError, ValueError) as exc:
-            log.info("  ??  %-40s %s", model.name, exc)
+            # A brand-new model legitimately has no cultures folder - that is "not stamped yet",
+            # not an error, and the message must not leak an absolute path on a repo with a
+            # privacy gate.
+            reason = "no culture file yet" if isinstance(exc, FileNotFoundError) else str(exc)
+            log.info("  --  %-40s (%s)", model.name, reason)
             missing += 1
             continue
         if instr:
-            flags = lint_instructions(instr)
+            flags = lint_instructions(instr, model_object_names(model))
             if read_qna_enabled(model) is not True:
                 flags.append("qnaEnabled is not true (Q&A/Copilot will ignore these instructions)")
+                silent_no_op += 1
             suffix = f"  [!] {'; '.join(flags)}" if flags else ""
             log.info("  OK  %-40s %d chars%s", model.name, len(instr), suffix)
         else:
             log.info("  --  %-40s (no CustomInstructions)", model.name)
             missing += 1
     log.info("%d/%d models have AI instructions", len(models) - missing, len(models))
+    if silent_no_op:
+        log.warning(
+            "%d model(s) are stamped but have qnaEnabled != true - the instructions are a SILENT NO-OP there.",
+            silent_no_op,
+        )
+    if strict and (missing or silent_no_op):
+        log.error(
+            "AI-READINESS FAILED (--strict): %d model(s) unstamped, %d stamped-but-disabled.",
+            missing,
+            silent_no_op,
+        )
+        return 1
     return 0
 
 
@@ -254,10 +330,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--all", action="store_true", help="Stamp every migration that has an ai-instructions.md")
     parser.add_argument("--check", action="store_true", help="Report which models have AI instructions")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="With --check: exit 1 if any model is unstamped or stamped-but-qnaEnabled-false (CI gate)",
+    )
     args = parser.parse_args(argv)
 
     if args.check:
-        return cmd_check(REPO_ROOT)
+        return cmd_check(REPO_ROOT, strict=args.strict)
     if args.all:
         return cmd_all(REPO_ROOT)
     if not args.model:

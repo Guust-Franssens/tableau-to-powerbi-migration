@@ -8,9 +8,18 @@ and are stamped from a per-migration `migrations/workbooks/<slug>/ai-instruction
 [`.github/agents/pbi-semantic-builder.agent.md`](../.github/agents/pbi-semantic-builder.agent.md)
 ("Prep the model for AI"). This file is about **what to write**, not where it goes.
 
-Verified end-to-end (2026-07): after `fab import`, the remote Power BI MCP server
-(`GetSemanticModelSchema`) returns the model schema **with** the `CustomInstructions` field, byte-for-byte
-what we stamped, so Copilot / data agents genuinely consume it.
+Verified end-to-end (2026-07-30, re-measured against Fabric): a semantic model published via the
+Fabric items API round-trips through `getDefinition` with its `definition/cultures/<lcid>.tmdl` part
+intact and the `CustomInstructions` payload byte-for-byte what was stamped — including the
+disambiguation and "never expose this column" rules. So the field **survives publish**; that is
+proven.
+
+What is *not* proven by that, and should not be claimed: that Copilot or a data agent then **obeys**
+it. Round-tripping shows the text reached the service, not that it changed an answer. Two things
+still gate real consumption — `qnaEnabled: true` (otherwise the natural-language surface ignores the
+metadata entirely) and, per Microsoft's guidance, a semantic-model refresh after a Git/deployment
+change so the linguistic layer re-syncs. Treat "it survived publish" as ✅ verified and "Copilot
+follows it" as ⚠️ needs a question-based check on your own model.
 
 ## Principles (from Microsoft Learn + [tabulareditor.com](https://tabulareditor.com/blog/how-to-write-good-ai-instructions-for-a-semantic-model), grounded in Anthropic's [context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents))
 
