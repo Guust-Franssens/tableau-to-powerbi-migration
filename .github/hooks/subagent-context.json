@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "subagentStart": [
+      {
+        "type": "command",
+        "matcher": "pbi-migration-validator",
+        "powershell": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/hooks/probe_subagent_start.ps1",
+        "bash": "bash scripts/hooks/probe_subagent_start.sh",
+        "cwd": ".",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
