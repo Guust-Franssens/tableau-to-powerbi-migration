@@ -2,8 +2,16 @@
 
 This file is auto-loaded by GitHub Copilot CLI (and other agent runtimes) for every session in this
 repository. It has two jobs: (1) tell you (or a fresh contributor) exactly which Copilot **plugins and
-MCP servers** this toolkit needs so the repo is self-configuring, and (2) hold the **conventions every
-agent inherits**, so the individual `.github/agents/*.agent.md` files stay lean and don't restate them.
+MCP servers** this toolkit needs so the repo is self-configuring, and (2) hold the **canonical copy of
+the shared agent conventions**, which `scripts/sync_agent_conventions.py` generates into every
+`.github/agents/*.agent.md`.
+
+> **Why generated, not inherited:** a custom-agent **subagent** receives ONLY its own persona file —
+> this file, `.github/copilot-instructions.md` and user-global instructions do **not** reach it
+> (verified 2026-07-30 with a sentinel experiment; all four agents confirmed independently). There is
+> no `include`/`extends` mechanism. So the conventions below are *duplicated* into each agent on
+> purpose, and CI fails if a copy drifts. **Edit them here, then run
+> `python scripts/sync_agent_conventions.py`** — never edit the copy inside an agent file.
 
 > **VS Code users:** VS Code Copilot auto-loads `.github/copilot-instructions.md`, *not* this file.
 > That pointer file duplicates only the session-start step below and defers everything else here, so
@@ -156,6 +164,7 @@ cloning to confirm the machine is configured.
 
 ---
 
+<!-- BEGIN:shared-conventions -->
 ## Shared agent conventions (all agents inherit these)
 
 - **Cite your source.** Every capability claim, mapping decision, or numeric result names its evidence:
@@ -191,11 +200,15 @@ cloning to confirm the machine is configured.
   calls**, retrying without ever surfacing the problem, until the user intervened and suggested taking
   the credential from Power BI Desktop. Waiting is not progress, and a credential is something only a
   human can supply — no number of retries will conjure one.
-  - **Cap it: ~2 minutes or 3 attempts, whichever comes first**, for any connect / refresh / sign-in /
-    connectivity test against a database, warehouse, gateway or tenant.
+  - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
+    system, not just credentials: a database/warehouse/gateway/tenant connection, an MCP server, an
+    XMLA refresh, **and the Power BI Desktop bridge** (`open`/`reload`/`screenshot`). A "kill the
+    process and relaunch" recovery is an unbounded retry loop unless you cap the relaunches too —
+    cap them at 2, then ask.
   - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
     the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
-    "give me a PAT/key"). Never re-run the same call hoping for a different result.
+    "give me a PAT/key"). Never re-run the same call hoping for a different result. Ask in your normal
+    reply — there is no `ask_user` tool.
   - **Report elapsed time in your progress updates** whenever an operation exceeds ~60s, so a stall is
     visible rather than looking like work.
   - If a credential is already cached in **Power BI Desktop**, prefer that path — it is usually the
@@ -216,3 +229,4 @@ cloning to confirm the machine is configured.
   scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
   scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
   scratch leaked into git before reporting done.
+<!-- END:shared-conventions -->

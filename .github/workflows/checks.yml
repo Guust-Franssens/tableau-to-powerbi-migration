@@ -45,3 +45,6 @@ jobs:
 
       - name: M syntax gate - catch Desktop's unlocalised "Token ',' expected" first
         run: uv run python scripts/check_m_syntax.py --all
+
+      - name: Shared conventions reach every agent (a subagent sees ONLY its persona)
+        run: uv run python scripts/sync_agent_conventions.py --check

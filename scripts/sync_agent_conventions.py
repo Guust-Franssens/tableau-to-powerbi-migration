@@ -1,0 +1,147 @@
+"""
+purpose: Copy the shared agent conventions from AGENTS.md into every .github/agents/*.agent.md,
+         because a custom-agent subagent receives ONLY its own persona file.
+usage:   python scripts/sync_agent_conventions.py          # write the block into every agent
+         python scripts/sync_agent_conventions.py --check  # CI gate: exit 1 if any agent has drifted
+
+Why this exists (measured, not assumed)
+---------------------------------------
+`AGENTS.md` calls itself "conventions every agent inherits, so the individual `.github/agents/*.agent.md`
+files stay lean and don't restate them". That premise is false for subagents.
+
+Verified 2026-07-30 with a sentinel experiment (a fixture AGENTS.md carrying unique tokens plus a
+probe persona):
+
+    invoked as a ROOT session   (`copilot --agent=probe`)  -> AGENTS.md sentinels PRESENT
+    invoked as a SUBAGENT       (via the Task tool)        -> AGENTS.md sentinels ABSENT
+
+All four real agents independently confirmed it; `pbi-semantic-builder` reported that "AGENTS.md"
+appears in its context exactly once - as a filename in a directory listing. `.github/copilot-instructions.md`
+and the user's global instructions are cut off the same way. There is no `include`/`extends`
+frontmatter and no documented inheritance mechanism: **text that is not in a `.agent.md` file does
+not reach that agent as a subagent.**
+
+The consequence was not theoretical. Conventions living only in AGENTS.md were silently no-ops, and
+the orchestrator had already written down the symptom without knowing the cause:
+"The shared convention tells each subagent to close its own instance when done, but in practice some
+don't" (tableau-migrator.agent.md).
+
+So the block is DUPLICATED into each persona on purpose. Four copies is exactly the redundancy
+AGENTS.md was written to avoid - but generation plus a CI gate makes drift impossible, whereas the
+"single source of truth" it replaces was invisible to 4 of 4 subagents. Deterministic duplication
+beats an elegant abstraction that does not execute.
+
+Reading it at runtime was considered and rejected: it costs a tool call, competes with a 40 KB
+persona, and is discretionary - and the agent that most needs the rule (one stuck in a retry loop)
+is precisely the one that will not pause to read a file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SOURCE = REPO_ROOT / "AGENTS.md"
+AGENTS_DIR = REPO_ROOT / ".github" / "agents"
+
+BEGIN = "<!-- BEGIN:shared-conventions -->"
+END = "<!-- END:shared-conventions -->"
+
+PREAMBLE = (
+    "> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**\n"
+    "> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not\n"
+    "> reach it (verified). So these conventions are generated into every agent by\n"
+    "> `scripts/sync_agent_conventions.py`, and CI fails if a copy drifts. Edit `AGENTS.md`, then\n"
+    "> re-run that script.\n"
+)
+
+log = logging.getLogger("sync_agent_conventions")
+
+
+def canonical_block() -> str:
+    """The fenced conventions block from AGENTS.md, without its fences."""
+    text = SOURCE.read_text(encoding="utf-8")
+    if BEGIN not in text or END not in text:
+        raise SystemExit(f"{SOURCE.name} is missing the {BEGIN} / {END} fences")
+    body = text.split(BEGIN, 1)[1].split(END, 1)[0]
+    return body.strip("\n")
+
+
+def _rendered() -> str:
+    return f"{BEGIN}\n{PREAMBLE}\n{canonical_block()}\n{END}"
+
+
+def _split_frontmatter(text: str) -> tuple[str, str]:
+    """Return (frontmatter_including_fences, rest). The block goes right after the frontmatter.
+
+    Early context beats buried context: a 40 KB persona can push a late rule out of an agent's
+    effective attention, so the conventions sit immediately below the agent's own header.
+    """
+    if not text.startswith("---"):
+        return "", text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return "", text
+    cut = text.find("\n", end + 1) + 1
+    return text[:cut], text[cut:]
+
+
+def apply_to(path: Path, write: bool) -> bool:
+    """Insert or refresh the block in one agent file. Returns True when the file is (or would be) changed."""
+    text = path.read_text(encoding="utf-8")
+    block = _rendered()
+
+    if BEGIN in text and END in text:
+        head, rest = text.split(BEGIN, 1)
+        _, tail = rest.split(END, 1)
+        updated = f"{head}{block}{tail}"
+    else:
+        frontmatter, body = _split_frontmatter(text)
+        updated = f"{frontmatter}\n{block}\n{body.lstrip(chr(10))}"
+
+    if updated == text:
+        return False
+    if write:
+        path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--check", action="store_true", help="CI gate: report drift and exit 1, changing nothing")
+    args = parser.parse_args(argv)
+
+    agents = sorted(AGENTS_DIR.glob("*.agent.md"))
+    if not agents:
+        log.error("No agent files found under %s", AGENTS_DIR)
+        return 1
+
+    drifted = [p for p in agents if apply_to(p, write=not args.check)]
+
+    if args.check:
+        if drifted:
+            log.error("SHARED CONVENTIONS OUT OF SYNC - these agents do not carry the current AGENTS.md block:")
+            for path in drifted:
+                log.error("  %s", path.relative_to(REPO_ROOT))
+            log.error("\nRun `python scripts/sync_agent_conventions.py` and commit the result.")
+            log.error(
+                "This matters because a subagent receives ONLY its persona file - a convention that "
+                "lives only in AGENTS.md silently does not apply to it."
+            )
+            return 1
+        log.info("OK - all %d agent(s) carry the current shared conventions.", len(agents))
+        return 0
+
+    for path in drifted:
+        log.info("  updated %s", path.relative_to(REPO_ROOT))
+    log.info("done - %d of %d agent file(s) updated.", len(drifted), len(agents))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

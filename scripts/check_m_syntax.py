@@ -46,7 +46,7 @@ log = logging.getLogger("check_m_syntax")
 
 PAIRS = {"(": ")", "[": "]", "{": "}"}
 CLOSERS = {v: k for k, v in PAIRS.items()}
-_NUMBER_RE = re.compile(r"[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?")
+_NUMBER_RE = re.compile(r"0[xX][0-9a-fA-F]+|[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 # Keywords that legitimately introduce or continue an expression, so an identifier following one of
@@ -54,6 +54,7 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 M_KEYWORDS = {
     "and",
     "as",
+    "catch",
     "each",
     "else",
     "error",
@@ -257,30 +258,61 @@ def _check_delimiters(tokens: list[Token], add: Callable[[str, str, int, int], N
         add("UNBALANCED", f"'{opener.text}' is never closed", opener.line, opener.col)
 
 
-def _check_expression(path: Path, text: str, offset_line: int = 0) -> list[Finding]:
-    """Structural checks over one M expression."""
+def _bracket_depths(tokens: list[Token]) -> list[int]:
+    """Bracket nesting depth at each token, so `[...]` contents can be excluded from keyword counts."""
+    depths: list[int] = []
+    depth = 0
+    for tok in tokens:
+        if tok.kind == "punct" and tok.text == "[":
+            depth += 1
+        depths.append(depth)
+        if tok.kind == "punct" and tok.text == "]":
+            depth = max(0, depth - 1)
+    return depths
+
+
+def _check_let_in(tokens: list[Token], add: Callable[[str, str, int, int], None]) -> None:
+    """Every `let` needs a matching `in`.
+
+    Counted only at bracket depth 0: `let` and `in` are legal generalized FIELD NAMES inside `[...]`
+    (`[let = 1]`, `each [in]`), and counting those produced a bogus LET_WITHOUT_IN on valid M.
+    """
+    depths = _bracket_depths(tokens)
+    top = [t for t, d in zip(tokens, depths, strict=True) if d == 0 and t.kind == "keyword"]
+    lets = sum(1 for t in top if t.text == "let")
+    ins = sum(1 for t in top if t.text == "in")
+    if lets > ins:
+        first = next(t for t in top if t.text == "let")
+        add("LET_WITHOUT_IN", f"{lets} 'let' but {ins} 'in' - every let needs a matching in", first.line, first.col)
+
+
+def _check_expression(path: Path, text: str, offset_line: int = 0, first_col: int = 0) -> list[Finding]:
+    """Structural checks over one M expression.
+
+    `first_col` shifts columns on the expression's FIRST line, which in TMDL starts partway along
+    (`source = let ...`). Without it a reported column is short by the length of that prefix, and
+    localisation is the entire value of this tool.
+    """
     findings: list[Finding] = []
     tokens, scan_errors = _tokenize(text)
 
     def add(kind: str, detail: str, line: int, col: int) -> None:
-        findings.append(Finding(path, line + offset_line, col, kind, detail, _snippet(text, line)))
+        shifted = col + first_col if line == 1 else col
+        findings.append(Finding(path, line + offset_line, shifted, kind, detail, _snippet(text, line)))
 
     for message, line, col in scan_errors:
         add("UNTERMINATED", f"{message} - the expression ends inside it", line, col)
 
     _check_delimiters(tokens, add, offset_line)
+    _check_let_in(tokens, add)
 
-    lets = sum(1 for t in tokens if t.kind == "keyword" and t.text == "let")
-    ins = sum(1 for t in tokens if t.kind == "keyword" and t.text == "in")
-    if lets > ins:
-        first = next(t for t in tokens if t.kind == "keyword" and t.text == "let")
-        add("LET_WITHOUT_IN", f"{lets} 'let' but {ins} 'in' - every let needs a matching in", first.line, first.col)
-
-    findings.extend(_check_missing_separator(path, text, tokens, offset_line))
+    findings.extend(_check_missing_separator(path, text, tokens, offset_line, first_col))
     return findings
 
 
-def _check_missing_separator(path: Path, text: str, tokens: list[Token], offset_line: int) -> list[Finding]:
+def _check_missing_separator(
+    path: Path, text: str, tokens: list[Token], offset_line: int, first_col: int = 0
+) -> list[Finding]:
     """Two values side by side inside a list literal, i.e. a dropped comma.
 
     Deliberately scoped to `{...}` only. `[...]` is ambiguous in M: it is a record literal
@@ -310,7 +342,7 @@ def _check_missing_separator(path: Path, text: str, tokens: list[Token], offset_
                 Finding(
                     path,
                     tok.line + offset_line,
-                    tok.col,
+                    tok.col + (first_col if tok.line == 1 else 0),
                     "MISSING_SEPARATOR",
                     f"'{prev.text}' is followed by '{tok.text}' with no comma between them inside a '{{' list literal",
                     _snippet(text, tok.line),
@@ -319,8 +351,31 @@ def _check_missing_separator(path: Path, text: str, tokens: list[Token], offset_
     return findings
 
 
-def _iter_m_blocks(path: Path) -> list[tuple[str, int]]:
-    """Every M expression in a .tmdl file, with the line it starts on.
+def _collect_body(lines: list[str], idx: int, indent: int, metadata_re: re.Pattern[str]) -> tuple[list[str], int]:
+    """Continuation lines of one TMDL expression, and where scanning should resume.
+
+    A TMDL metadata key only ends the block when it sits at a SIBLING indent. Matching it anywhere
+    truncated valid M that merely uses one as an identifier (`let mode = 1 in mode`), which then
+    reported a bogus LET_WITHOUT_IN.
+    """
+    body: list[str] = []
+    while idx < len(lines):
+        current = lines[idx]
+        if current.strip() and (len(current) - len(current.lstrip())) <= indent:
+            break
+        metadata = metadata_re.match(current)
+        if metadata and len(metadata.group(1)) <= indent + 1:
+            break
+        body.append(current)
+        idx += 1
+    return body, idx
+
+
+def _iter_m_blocks(path: Path) -> list[tuple[str, int, int]]:  # pylint: disable=too-many-locals
+    """Every M expression in a .tmdl file, with the line it starts on, and its starting column.
+
+    One cohesive line scanner; splitting it further would spread the TMDL shape knowledge across
+    helpers that each only make sense together, so the local count is accepted deliberately.
 
     Two shapes carry M: a model-level `expression <Name> = <M>` (expressions.tmdl) and a table
     partition declared `partition <Name> = m` (tables/*.tmdl).
@@ -330,11 +385,17 @@ def _iter_m_blocks(path: Path) -> list[tuple[str, int]]:
     separator). Reading those as M produced 64 false positives across the committed examples, so the
     partition's declared source type decides whether its `source =` is checked at all.
     """
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
     lines = text.splitlines()
     blocks: list[tuple[str, int]] = []
     partition_re = re.compile(r"^\s*partition\s+.+?=\s*(\w+)\s*$")
-    starters = re.compile(r"^\s*(expression\s+.+?=|source\s*=)\s*(.*)$")
+    # `'quoted name'` first: TMDL requires quoting a name containing '=', and a non-greedy match
+    # would otherwise stop at the wrong equals sign and feed the tail into the M scanner.
+    starters = re.compile(r"^(\s*)(?:expression\s+(?:'[^']*'|[^=]+?)\s*=|source\s*=)\s*(.*)$")
+    # TMDL metadata keys only terminate the block at the SAME indent as a sibling property. Matching
+    # them anywhere truncated valid M that merely uses one as an identifier (`let mode = 1 in mode`),
+    # which then reported a bogus LET_WITHOUT_IN.
+    metadata_re = re.compile(r"^(\s*)(lineageTag|annotation|queryGroup|mode|dataType|isHidden)\b")
 
     idx = 0
     current_partition_kind: str | None = None
@@ -348,11 +409,13 @@ def _iter_m_blocks(path: Path) -> list[tuple[str, int]]:
         if not match:
             idx += 1
             continue
-        is_source = match.group(1).strip().startswith("source")
+        is_source = lines[idx].lstrip().startswith("source")
         if is_source and current_partition_kind not in (None, "m"):
             idx += 1
             continue
-        indent = len(lines[idx]) - len(lines[idx].lstrip())
+        indent = len(match.group(1))
+        # Column of the M text on the starter line, so a finding on it points at the real column.
+        first_col = len(lines[idx]) - len(match.group(2))
         body = [match.group(2)]
         start = idx + 1
         idx += 1
@@ -360,12 +423,12 @@ def _iter_m_blocks(path: Path) -> list[tuple[str, int]]:
             current = lines[idx]
             if current.strip() and (len(current) - len(current.lstrip())) <= indent:
                 break
-            # TMDL metadata lines are not part of the M expression.
-            if re.match(r"^\s*(lineageTag|annotation|queryGroup|mode|dataType|isHidden)\b", current):
+            metadata = metadata_re.match(current)
+            if metadata and len(metadata.group(1)) <= indent + 1:
                 break
             body.append(current)
             idx += 1
-        blocks.append(("\n".join(body), start))
+        blocks.append(("\n".join(body), start, first_col))
     return blocks
 
 
@@ -377,14 +440,25 @@ def _model_dirs(target: Path) -> list[Path]:
 
 def check_model(model_dir: Path) -> list[Finding]:
     """Every M expression in one .SemanticModel."""
+    return check_model_counted(model_dir)[0]
+
+
+def check_model_counted(model_dir: Path) -> tuple[list[Finding], int]:
+    """Findings plus HOW MANY M expressions were actually scanned.
+
+    The count matters: "no findings" and "nothing was checked" are the same output otherwise, and a
+    missing/empty/unreadable model would report a reassuring "M syntax OK" while proving nothing.
+    """
     findings: list[Finding] = []
+    scanned = 0
     definition = model_dir / "definition"
     files = sorted(definition.glob("expressions.tmdl")) + sorted(definition.glob("tables/*.tmdl"))
     for tmdl in files:
-        for block, start_line in _iter_m_blocks(tmdl):
+        for block, start_line, first_col in _iter_m_blocks(tmdl):
             if block.strip():
-                findings.extend(_check_expression(tmdl, block, offset_line=start_line - 1))
-    return findings
+                scanned += 1
+                findings.extend(_check_expression(tmdl, block, offset_line=start_line - 1, first_col=first_col))
+    return findings, scanned
 
 
 def main() -> int:
@@ -407,13 +481,26 @@ def main() -> int:
         return 0
 
     total = 0
+    scanned_total = 0
+    empty: list[Path] = []
     for model in targets:
-        findings = check_model(model)
+        findings, scanned = check_model_counted(model)
+        scanned_total += scanned
+        if scanned == 0:
+            empty.append(model)
         if findings:
             total += len(findings)
             log.error("M SYNTAX ERRORS in %s", model.relative_to(REPO_ROOT) if REPO_ROOT in model.parents else model)
             for finding in findings:
                 log.error("%s", finding.render(REPO_ROOT))
+
+    if empty:
+        # "clean" and "nothing was checked" must never look the same - an agent would read the
+        # reassuring line as proof its model is fine.
+        log.warning("NOT CHECKED - no M expressions found in %d target(s):", len(empty))
+        for model in empty:
+            log.warning("  %s", model)
+        log.warning("  (missing definition/, no `= m` partitions, or an unreadable path)")
 
     if total:
         log.error(
@@ -423,7 +510,16 @@ def main() -> int:
             len(targets),
         )
         return 1
-    log.info("M syntax OK - %d model(s) checked, no structural problems found.", len(targets))
+    if scanned_total == 0:
+        log.warning("NOTHING CHECKED - 0 M expressions scanned across %d target(s).", len(targets))
+        return 1
+    log.info(
+        "M syntax OK - %d M expression(s) across %d model(s), no structural problems found.\n"
+        "  NOTE: structural checks only (delimiters, separators, let/in, strings). This is not a full "
+        "M parser - a clean result does not prove the model opens.",
+        scanned_total,
+        len(targets),
+    )
     return 0
 
 
