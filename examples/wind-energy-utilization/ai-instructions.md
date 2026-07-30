@@ -11,7 +11,8 @@ level or for a single selected turbine.
   `[Energy Actual Mwh]`, `[Capacity Factor Actual]`, `[Month Number]`.
 - `'Turbine'`: turbine dimension (`[Upd Turbine Name]`, onshore/offshore, active flag).
 - `'CO2 Savings'`: `[Co2 Saved Tonnes]` per the fleet's output.
-- `'NL Densification'`: geography for the map.
+  - `'NL Densification'`: a DISCONNECTED spiral-geometry scaffold (126 rows) that only drives the
+  spiral visual's layout. It is NOT geography and NOT a map source - map geography lives on `'Turbine'`.
 - `'* Parameter'` / `'Spiral Start Point'` / `'Thickness'` tables are disconnected slicer proxies (what-if
   and view controls), NOT related dimensions. They feed `[... Parameter Value]` measures only.
 
@@ -42,7 +43,7 @@ level or for a single selected turbine.
 ## For Copilot (style + visuals)
 
 - Lead with the number and its unit (MWh, tonnes CO2, %); keep to two or three sentences.
-- Monthly trends: line or column by month; fleet-vs-turbine or ANSP comparisons: bar. Avoid pie charts.
+- Monthly trends: line or column by month; fleet-vs-turbine comparisons: bar. Avoid pie charts.
 
 ## Things to avoid
 
