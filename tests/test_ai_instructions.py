@@ -86,8 +86,9 @@ def test_stamped_models_have_qna_enabled() -> None:
 def test_scaffold_uses_a_real_linguistic_schema_version() -> None:
     """ "4.2.0" was copy-pasted from definition.pbism, a different schema.
 
-    Power BI-generated culture files in this repo use 2.0.0 / 1.0.0; an unrecognised version risks
-    the service silently dropping the payload.
+    Power BI-generated culture files in this repo use 2.0.0 / 1.0.0. Measured 2026-07-30: a model
+    published to Fabric with "4.2.0" round-tripped through `getDefinition` with CustomInstructions
+    intact, so this is a correctness tidy-up rather than a fix for an observed data loss.
     """
     source = (REPO_ROOT / "scripts" / "set_ai_instructions.py").read_text(encoding="utf-8")
     assert '"Version": "2.0.0"' in source

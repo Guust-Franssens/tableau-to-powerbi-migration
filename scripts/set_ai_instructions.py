@@ -142,11 +142,14 @@ def ensure_culture(model_dir: Path) -> Path:
     culture_path = cultures_dir / f"{culture}.tmdl"
     if not culture_path.is_file():
         cultures_dir.mkdir(parents=True, exist_ok=True)
-        # "2.0.0" is the LINGUISTIC-SCHEMA version, taken from this repo's own Power BI-generated
+        # "2.0.0" is the LINGUISTIC-SCHEMA version, matching this repo's own Power BI-generated
         # culture files (AirlineAllianceActivity: 2.0.0 with 27 Entities; PriceOfProsperity: 1.0.0).
-        # It was previously "4.2.0", which is the `version` of definition.pbism - a different schema
-        # entirely. An unrecognised linguistic-schema version risks the service silently dropping the
-        # CustomInstructions payload, i.e. exactly the silent no-op this layer exists to prevent.
+        # It was previously "4.2.0", which is the `version` of definition.pbism - a different schema,
+        # so it was a copy-paste from the wrong file.
+        # Measured 2026-07-30, to avoid overstating the risk: a model published to Fabric with
+        # "4.2.0" round-tripped through `getDefinition` with its CustomInstructions fully intact, so
+        # the service does NOT drop the payload on an odd version. This is therefore a correctness
+        # tidy-up (say what Power BI itself says), not a fix for an observed failure.
         scaffold = (
             f"cultureInfo {culture}\n\n"
             f'\tlinguisticMetadata = {{"Version": "2.0.0", "Language": "{culture}"}}\n'
