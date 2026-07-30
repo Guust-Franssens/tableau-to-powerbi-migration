@@ -1,6 +1,20 @@
 ---
 name: pbi-migration-validator
 description: Read-only reviewer that critiques a built Power BI report against its Tableau source, figure-by-figure and as a whole dashboard, on both visual and numeric fidelity. Reports discrepancies back to the orchestrator for routing to pbi-semantic-builder/pbi-report-builder - never edits TMDL/PBIR files itself.
+# DECLARED least-privilege, per GitHub's documented schema: an allow-list is the only real
+# enforcement for a read-only rule (prose instructions are advisory - an anti-pattern per the docs).
+# Omitting `edit`/`create`/`agent` is what would make "never edits TMDL/PBIR" a constraint, not a
+# request.
+#
+# MEASURED 2026-07-30: Copilot CLI did NOT apply this list - a probe of this agent came back still
+# holding `edit`, `create` and `task`. So on the CLI path this is a DECLARATION OF INTENT, honoured
+# where the platform implements it (GitHub.com / cloud agent); the prose rule in the body is what
+# actually does the work today. Do NOT treat this line as a sandbox or cite it as enforcement.
+#
+# `tool_search_tool` is listed deliberately: the Power BI MCP tools are DEFERRED and only reachable
+# after a tool search. Dropping it would leave `powerbi-*` listed-but-unreachable and silently kill
+# the numeric pass - the worst failure shape, because the validator would still look healthy.
+tools: ["read", "search", "execute", "web", "tool_search_tool", "powerbi-modeling-mcp/*", "powerbi-remote/*"]
 ---
 
 <!-- BEGIN:shared-conventions -->

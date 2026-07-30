@@ -1,6 +1,10 @@
 ---
 name: tableau-migrator
 description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx) to a Microsoft Fabric Power BI semantic model + report. Parses the workbook, then delegates to the pbi-semantic-builder, pbi-report-builder, and pbi-migration-validator subagents.
+# This is the entry point a human drives deliberately - it runs a long, multi-phase, capacity-using
+# pipeline and delegates to three other agents. `disable-model-invocation: true` stops the model
+# auto-selecting it for some loosely-related request; it must be chosen explicitly.
+disable-model-invocation: true
 ---
 
 <!-- BEGIN:shared-conventions -->
