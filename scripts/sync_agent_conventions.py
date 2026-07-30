@@ -50,6 +50,15 @@ AGENTS_DIR = REPO_ROOT / ".github" / "agents"
 BEGIN = "<!-- BEGIN:shared-conventions -->"
 END = "<!-- END:shared-conventions -->"
 
+# GitHub documents a 30,000-character maximum for a custom agent prompt
+# (docs.github.com/en/copilot/reference/custom-agents-configuration).
+# Measured 2026-07-30: Copilot **CLI** does NOT enforce it - a ~48,000-char persona was probed at its
+# tail and every section came back verbatim. But the documented limit covers GitHub.com and the IDEs
+# too, so an over-cap persona is a portability risk: the same agent run GitHub-side may lose its tail,
+# and in these files the tail is the accumulated `## Gotchas` - precisely the hard-won learnings.
+# Hence a warning, not a failure: it keeps the number visible instead of letting it drift silently.
+PROMPT_CHAR_LIMIT = 30_000
+
 PREAMBLE = (
     "> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**\n"
     "> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not\n"
@@ -109,6 +118,31 @@ def apply_to(path: Path, write: bool) -> bool:
     return True
 
 
+def prompt_size(path: Path) -> int:
+    """Characters in the agent's prompt - the markdown body, excluding YAML frontmatter."""
+    text = path.read_text(encoding="utf-8")
+    _, body = _split_frontmatter(text)
+    return len(body)
+
+
+def report_sizes(agents: list[Path]) -> list[Path]:
+    """Warn about personas over the documented prompt cap. Returns the over-cap files."""
+    over = [p for p in agents if prompt_size(p) > PROMPT_CHAR_LIMIT]
+    for path in sorted(agents, key=prompt_size, reverse=True):
+        size = prompt_size(path)
+        marker = "  OVER CAP" if size > PROMPT_CHAR_LIMIT else ""
+        log.info("  %6d chars (%3d%% of cap)  %s%s", size, 100 * size // PROMPT_CHAR_LIMIT, path.name, marker)
+    if over:
+        log.warning(
+            "%d persona(s) exceed GitHub's documented %d-char prompt cap. Copilot CLI does not "
+            "enforce it (measured), but GitHub-hosted runs may truncate - and the tail of these "
+            "files is the accumulated Gotchas. Trim before relying on the hosted path.",
+            len(over),
+            PROMPT_CHAR_LIMIT,
+        )
+    return over
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -135,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         log.info("OK - all %d agent(s) carry the current shared conventions.", len(agents))
+        report_sizes(agents)
         return 0
 
     for path in drifted:
