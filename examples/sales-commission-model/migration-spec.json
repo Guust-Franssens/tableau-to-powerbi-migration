@@ -99,7 +99,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/Sample _ Superstore Sales Englis.hyper"
+        "hyper_file": "Data/Extracts/Sample _ Superstore Sales Englis.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1511,7 +1513,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/Store DC _wal_mart_store_opening.hyper"
+        "hyper_file": "Data/Extracts/Store DC _wal_mart_store_opening.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1936,7 +1940,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/excel_40387_939089618056.hyper"
+        "hyper_file": "Data/Extracts/excel_40387_939089618056.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {

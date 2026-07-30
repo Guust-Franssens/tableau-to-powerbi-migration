@@ -52,6 +52,8 @@
               "server": { "type": ["string", "null"] },
               "database": { "type": ["string", "null"] },
               "hyper_file": { "type": ["string", "null"], "description": "Relative path to the embedded .hyper file inside the .twbx, when mode=extract" },
+              "powerbi_target": { "type": "string", "enum": ["live_source", "flat_file", "unknown"], "description": "What the Power BI semantic model must CONNECT TO. 'live_source': connect to the upstream system directly, exactly as Tableau does - any packaged .hyper is only Tableau's cache, and building the model on extracted rows freezes the data and yields a model that can never refresh. 'flat_file': the source genuinely is a file, so materialising the rows and pointing at them is faithful. Do NOT infer this from mode=extract: an extract looks identical whether it caches a CSV or a Snowflake warehouse." },
+              "powerbi_target_reason": { "type": ["string", "null"], "description": "Human-readable justification for powerbi_target, safe to surface to the user" },
               "note": { "type": ["string", "null"] }
             }
           },

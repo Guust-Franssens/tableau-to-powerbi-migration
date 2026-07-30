@@ -936,7 +936,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 6.hyper"
+        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 6.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1064,7 +1066,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 5.hyper"
+        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 5.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -2565,7 +2569,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 1.hyper"
+        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 1.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -2714,7 +2720,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated.hyper"
+        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -2828,7 +2836,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 2.hyper"
+        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 2.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -2976,7 +2986,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 4.hyper"
+        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 4.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -3275,7 +3287,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 3.hyper"
+        "hyper_file": "Data/20190116Urban_vulnerability_ideas FR.twb Files/federated 3.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {

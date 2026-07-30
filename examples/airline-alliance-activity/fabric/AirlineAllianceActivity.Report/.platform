@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "AirlineAllianceActivity"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "05d47507-6701-4dc8-8bae-8d5efd8f5bb0"
+  }
+}

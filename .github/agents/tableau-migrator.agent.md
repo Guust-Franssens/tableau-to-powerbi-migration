@@ -153,9 +153,20 @@ it must show up in `limitations_encountered`, not be silently dropped.
    false `CREDENTIAL_PRESENT` for a *serverless* source that cold-starts and shows the sign-in modal only
    after the probe's timeout (confirmed 2026-07). It proves credentials + source reachability + valid M
    in one shot, entirely locally (no publish needed).
+   **TIME-BOX EVERY ATTEMPT: ~2 minutes or 3 tries, then STOP and ask.** Never sit in a connect/retry
+   loop — a real user lost **129 minutes and 298 tool calls** to an agent silently retrying "Testing
+   live Snowflake connectivity" before they intervened. Waiting is not progress, and only a human can
+   supply a credential. When you hit the cap, ask a specific question (name the system + server + what
+   you tried + the options), and mention that a credential already cached in **Power BI Desktop** is
+   usually the fastest unblock. Report elapsed time in any update for an operation over ~60s.
 6. **Delegate to `pbi-semantic-builder`** with: the path to `migration-spec.json`, the target Fabric
-   workspace/workspace-to-be, and any user preference on extract data materialization. Wait for it to
-   report back the semantic model location and any new limitations it appended.
+   workspace/workspace-to-be, and **the connection target for every data source**
+   (`connection.powerbi_target`). Be explicit: a **`live_source`** model must CONNECT to the upstream
+   system (the `.hyper` is only Tableau's cache — using it freezes the data and produces a model that
+   can never refresh); only a **`flat_file`** source is materialised to CSV + `DataFolder`. Use
+   `python scripts/extract_hyper_data.py <workbook.twbx> --schema` for schema discovery in the live
+   case — it exports no rows, and saves the builder hand-rolling a `tableauhyperapi` script. Wait for
+   it to report back the semantic model location and any new limitations it appended.
 7. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json`, the semantic model
    location from step 6, **and the Tableau reference bundle** (`migrations/workbooks/<name>/reference/` — its
    step 4 skeleton gate compares against the source dashboard image, so it cannot run without this;

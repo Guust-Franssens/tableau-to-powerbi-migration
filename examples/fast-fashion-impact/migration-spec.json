@@ -51,7 +51,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_00y6f261qog3m00ztlui30.hyper"
+        "hyper_file": "Data/Extracts/federated_00y6f261qog3m00ztlui30.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -247,7 +249,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_0njmxyg1x8e5fh1ciklp61.hyper"
+        "hyper_file": "Data/Extracts/federated_0njmxyg1x8e5fh1ciklp61.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -329,7 +333,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_0oyl16e10p0p9q112nx1f0.hyper"
+        "hyper_file": "Data/Extracts/federated_0oyl16e10p0p9q112nx1f0.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -520,7 +526,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_0qr326c05vsvyo12orw621.hyper"
+        "hyper_file": "Data/Extracts/federated_0qr326c05vsvyo12orw621.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -697,7 +705,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_10ml7f11wz2drr1cl47rt1.hyper"
+        "hyper_file": "Data/Extracts/federated_10ml7f11wz2drr1cl47rt1.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1005,7 +1015,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_1a9zswd0nb6hu412jdkjm1.hyper"
+        "hyper_file": "Data/Extracts/federated_1a9zswd0nb6hu412jdkjm1.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1391,7 +1403,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_1bus7db05aytbt1d9oc0q0.hyper"
+        "hyper_file": "Data/Extracts/federated_1bus7db05aytbt1d9oc0q0.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1473,7 +1487,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_1f7t9f90swbl1b1gncr2y1.hyper"
+        "hyper_file": "Data/Extracts/federated_1f7t9f90swbl1b1gncr2y1.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1683,7 +1699,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_1gv8m4b0am4aa017fl7zh1.hyper"
+        "hyper_file": "Data/Extracts/federated_1gv8m4b0am4aa017fl7zh1.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1860,7 +1878,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_1r5o6ls08z79by1e67d2f0.hyper"
+        "hyper_file": "Data/Extracts/federated_1r5o6ls08z79by1e67d2f0.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {
@@ -1997,7 +2017,9 @@
         "server": null,
         "database": null,
         "note": "extract-based - original logical source was 'excel-direct'; actual rows come from the packaged .hyper file, not a live connection",
-        "hyper_file": "Data/Extracts/federated_1rnn57i0nwlmid17hb62y1.hyper"
+        "hyper_file": "Data/Extracts/federated_1rnn57i0nwlmid17hb62y1.hyper",
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "'excel-direct' is a FILE source. Extract the rows and point the semantic model at them - there is no upstream system to connect to."
       },
       "tables": [
         {

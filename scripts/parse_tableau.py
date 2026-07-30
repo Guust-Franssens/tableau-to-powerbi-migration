@@ -21,6 +21,8 @@ from urllib.parse import unquote
 
 from lxml import etree
 
+from connection_target import powerbi_target
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("parse_tableau")
 
@@ -122,6 +124,7 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
     outer_conn = ds_el.find("connection")
     connection: dict[str, Any] = {"class": "unknown", "mode": "live", "server": None, "database": None, "note": None}
     if outer_conn is None:
+        connection["powerbi_target"], connection["powerbi_target_reason"] = powerbi_target("unknown", "live")
         return connection
 
     named_conn = outer_conn.find(".//named-connections/named-connection/connection")
@@ -141,8 +144,11 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
         connection["hyper_file"] = hyper_files.get(hyper_name, extract_conn.get("dbname"))
         connection["note"] = (
             f"extract-based - original logical source was '{connection['class']}'; "
-            "actual rows come from the packaged .hyper file, not a live connection"
+            "the packaged .hyper holds Tableau's cached copy of those rows"
         )
+    connection["powerbi_target"], connection["powerbi_target_reason"] = powerbi_target(
+        connection["class"], connection["mode"]
+    )
     return connection
 
 
@@ -982,6 +988,33 @@ def _field_limitations(f: dict[str, Any]) -> list[dict[str, Any]]:
     return found
 
 
+def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
+    """The high-severity flag that stops a live source being migrated onto extracted rows.
+
+    High, not medium: pointing the model at a cached copy of a live system produces numbers that
+    match on day one and a model that can never refresh - a failure that is invisible exactly when
+    someone would catch it.
+    """
+    conn = ds["connection"]
+    server = conn.get("server") or "<server not recorded>"
+    database = conn.get("database") or "<database not recorded>"
+    cached = " Tableau also packages a .hyper CACHE of these rows." if conn["mode"] == "extract" else ""
+    return {
+        "item": ds["id"],
+        "issue": (
+            f"LIVE source ('{conn['class']}' @ {server} / {database}): the Power BI semantic model MUST "
+            f"connect to this system directly.{cached} Do NOT migrate the model onto extracted rows/CSVs - "
+            "that silently freezes the data at export time and produces a model that can never refresh, "
+            "which is not a faithful migration. The .hyper is for SCHEMA DISCOVERY and VALIDATION BASELINES "
+            "only (`python scripts/extract_hyper_data.py --schema ...`). ACTION: get the credential for this "
+            "system from the user before building "
+            "(`python scripts/preflight_source_credentials.py --spec <spec>`)."
+        ),
+        "severity": "high",
+        "stage": "parse",
+    }
+
+
 def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """Scan the parsed spec for known risk areas (extract-based sources, LOD/table calcs, unresolved
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
@@ -1012,13 +1045,16 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                     "stage": "parse",
                 }
             )
-        if ds["connection"]["mode"] == "extract":
+        target = ds["connection"].get("powerbi_target")
+        if target == "live_source":
+            limitations.append(_live_source_limitation(ds))
+        elif ds["connection"]["mode"] == "extract":
             limitations.append(
                 {
                     "item": ds["id"],
-                    "issue": "extract-based (.hyper) data source - row data requires a separate "
-                    "extraction step (tableauhyperapi -> Parquet) or repointing to the true upstream "
-                    "system",
+                    "issue": "extract-based (.hyper) data source over a FILE original source - row data "
+                    "requires a separate extraction step; pointing the model at the extracted rows is "
+                    "faithful here because there is no upstream system to connect to",
                     "severity": "medium",
                     "stage": "parse",
                 }
