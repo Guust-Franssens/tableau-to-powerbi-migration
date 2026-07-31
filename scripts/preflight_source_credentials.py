@@ -15,7 +15,7 @@ purpose: preflight the DATA-SOURCE CREDENTIAL gate for a Tableau -> Power BI mig
          cannot replicate the user's locally-cached Desktop credential, so for live sources the
          migration must verify connectivity and prompt the user if it is missing.
 
-usage:   python scripts/preflight_source_credentials.py --spec migrations/<slug>/migration-spec.json
+usage:   python scripts/preflight_source_credentials.py --spec migrations/workbooks/<slug>/migration-spec.json
          python scripts/preflight_source_credentials.py --model "<Workspace>" "<SemanticModel>"
 
 The service gate shells out to the Fabric CLI (`fab`), which must be authenticated (`fab auth status`).
@@ -94,12 +94,39 @@ def classify_source(connection: dict) -> tuple[str, str]:
     if klass in FLAT_FILE_CLASSES:
         return "no-creds", f"flat-file source ('{klass}'); path-based, no credential"
     if klass in LIVE_DB_CLASSES:
-        server = connection.get("server") or "?"
         return (
             "needs-credential",
-            f"LIVE database ('{klass}' @ {server}); Power BI needs a bound connection + credential",
+            f"LIVE database ('{klass}' @ {credential_gate(connection)}); Power BI needs a bound connection "
+            "+ credential",
         )
     return "review", f"unrecognised connection class '{klass}' (mode='{mode}'); review manually"
+
+
+def credential_gate(connection: dict) -> str:
+    """Return the key Power BI actually caches a credential under: host **plus** compute path.
+
+    Verified first-hand (2026-07): re-pointing a model from one Databricks warehouse to a freshly
+    created warehouse on the *same host* re-triggered the sign-in modal, because the new
+    `/sql/1.0/warehouses/<id>` path had no cached credential. So counting "one live host = one
+    credential" under-reports the work: each distinct (host, httpPath) pair is its own gate, locally
+    in Desktop and again as its own Fabric cloud connection.
+    """
+    server = connection.get("server") or "?"
+    http_path = connection.get("http_path")
+    return f"{server}{http_path}" if http_path else server
+
+
+def source_label(src: dict, index: int) -> str:
+    """Human-readable name for a data source, using the keys migration-spec.json actually defines.
+
+    The spec has `caption` / `internal_name` / `id` - never `name`. Reaching for `name` first meant
+    every live source printed as `source[0]`, i.e. exactly where the user needs to know WHICH source
+    to authenticate, the tool told them nothing.
+    """
+    conn = src.get("connection", {}) or {}
+    return (
+        src.get("caption") or src.get("internal_name") or src.get("id") or conn.get("hyper_file") or f"source[{index}]"
+    )
 
 
 def cmd_classify(spec_path: Path) -> int:
@@ -112,23 +139,37 @@ def cmd_classify(spec_path: Path) -> int:
 
     needs = 0
     review = 0
+    gates: dict[str, list[str]] = {}
     log.info("Data-source credential preflight for %s", spec_path)
     for i, src in enumerate(sources):
         conn = src.get("connection", {}) or {}
         verdict, reason = classify_source(conn)
-        name = src.get("name") or conn.get("hyper_file") or f"source[{i}]"
+        name = source_label(src, i)
         marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
-        log.info("%s %-28s %s", marker, str(name)[:28], reason)
+        log.info("%s %-32s %s", marker, str(name)[:32], reason)
+        if verdict == "needs-credential":
+            gates.setdefault(credential_gate(conn), []).append(str(name))
         needs += verdict == "needs-credential"
         review += verdict == "review"
 
     log.info("-" * 60)
     if needs:
         log.warning(
-            "%d live data source(s) need a Power BI connection + credential BEFORE migration can "
-            "validate against data.",
+            "%d live data source(s) across %d DISTINCT credential gate(s) need a Power BI connection + "
+            "credential BEFORE migration can validate against data.",
             needs,
+            len(gates),
         )
+        for gate, users in sorted(gates.items()):
+            log.warning("  gate: %s   <- %s", gate, ", ".join(users))
+        if len(gates) > 1:
+            log.warning(
+                "NOTE: a credential is cached per (host + compute path), NOT per host. Two sources on the "
+                "same server but different warehouses are %d separate sign-ins locally and %d separate "
+                "Fabric connections in the cloud - do not assume one covers the others.",
+                len(gates),
+                len(gates),
+            )
         _print_remediation()
     else:
         log.info("No live sources: all extract/flat (CSV + DataFolder). No credential gate for this workbook.")
@@ -187,12 +228,28 @@ def cmd_gate(workspace: str, model: str) -> int:
     if status == "Failed":
         log.warning("refresh failed for a non-credential reason; inspect the error above.")
         return 2
-    log.info("refresh succeeded: credentials are configured; safe to proceed.")
-    return 0
+    if status == "Completed":
+        log.info("refresh succeeded: credentials are configured; safe to proceed.")
+        return 0
+    # status is still 'Unknown' (in-progress) after the poll budget. This is NOT success: a cold
+    # serverless warehouse (Databricks) can take longer than the poll window to finish its first
+    # refresh, so treating 'Unknown' as green would be a false pass. Report it as inconclusive.
+    log.warning(
+        "refresh did not reach a terminal state within the poll window (status=%s). This is INCONCLUSIVE, "
+        "not a pass -- a cold serverless source may still be starting. Re-run the gate; if it keeps timing "
+        "out, verify the refresh in the service before proceeding.",
+        status,
+    )
+    return 3
 
 
-def _poll_refresh(ws_id: str, ds_id: str, attempts: int = 12, delay: int = 5) -> tuple[str, str]:
-    """Poll the latest refresh until it leaves 'Unknown' (in-progress); return (status, error)."""
+def _poll_refresh(ws_id: str, ds_id: str, attempts: int = 24, delay: int = 5) -> tuple[str, str]:
+    """Poll the latest refresh until it leaves 'Unknown' (in-progress); return (status, error).
+
+    The budget (attempts * delay, default 120s) is deliberately generous: a cold serverless warehouse
+    (e.g. Databricks) can take over a minute to complete its first refresh, and a short window would
+    time out with a still-'Unknown' status that must NOT be mistaken for success (see cmd_gate).
+    """
     for _ in range(attempts):
         time.sleep(delay)
         latest = _fab_api(f"groups/{ws_id}/datasets/{ds_id}/refreshes").get("text", {}).get("value", [{}])[0]
