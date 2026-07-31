@@ -44,6 +44,7 @@ jobs:
         run: |
           uv run pylint scripts
           uv run pylint .github/skills/pbip-model-refresh/scripts
+          uv run pylint .github/skills/powerbi-ai-readiness/scripts
 
       - name: Tests
         run: uv run pytest -q
@@ -56,3 +57,10 @@ jobs:
 
       - name: Shared conventions reach every agent (a subagent sees ONLY its persona)
         run: uv run python scripts/sync_agent_conventions.py --check
+
+      - name: AI-readiness report (advisory - a visible backlog, not a blocker)
+        # Deliberately NOT --strict: the legacy models predate this layer, so a repo-wide gate would
+        # fail every build and get switched off. The enforcing form is scoped to one model
+        # (`--check --strict --model <*.SemanticModel>`) and belongs in the agent hand-off, per
+        # .github/skills/powerbi-ai-readiness/SKILL.md.
+        run: uv run python scripts/set_ai_instructions.py --check

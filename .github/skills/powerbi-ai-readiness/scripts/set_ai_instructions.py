@@ -3,16 +3,17 @@ purpose: sync a semantic model's AI instructions (an editable markdown file) int
          culture linguisticMetadata.CustomInstructions key. That key is what Power BI Copilot and
          Fabric data agents read as model-level AI instructions ("Prep data for AI" > AI instructions).
          Writing the TMDL directly avoids an XMLA refresh (and the LCID-4096 refresh bug on this box).
-usage:   python scripts/set_ai_instructions.py --model <path to *.SemanticModel> [--md <file.md>]
-         python scripts/set_ai_instructions.py --all             # stamp every migration that has an ai-instructions.md
-         python scripts/set_ai_instructions.py --check           # report every model (advisory, always exits 0)
-         python scripts/set_ai_instructions.py --check --strict --model <path>   # gate ONE model (exit 1)
+usage:   python .github/skills/powerbi-ai-readiness/scripts/set_ai_instructions.py
+             --model <*.SemanticModel> [--md <file.md>]
+             --all             # stamp every migration that has an ai-instructions.md
+             --check           # report every model (advisory, always exits 0)
+             --check --strict --model <*.SemanticModel>   # GATE one model (exit 1)
+         (ships inside the `powerbi-ai-readiness` skill; run it by its path from wherever the folder
+          was copied. `scripts/set_ai_instructions.py` in this repo is a forwarding shim.)
 
 By convention, a model's editable source lives at <migration>/ai-instructions.md (two levels above the
 *.SemanticModel folder). The culture file (definition/cultures/<lcid>.tmdl) is the generated artifact.
-
-`scripts/set_ai_instructions.py` at a host repo's root may be a forwarding shim; the real file ships
-inside the `powerbi-ai-readiness` skill. See that skill's SKILL.md for how to author the markdown.
+See this skill's SKILL.md for what to write and why each lever matters.
 """
 
 from __future__ import annotations
@@ -256,9 +257,7 @@ def iter_models(root: Path) -> list[Path]:
     `migrations/datasources/` hold the user's own workbook and published-data-source migrations.
     All three share the <tree>/<slug>/fabric/ shape.
     """
-    return sorted(
-        p for tree in MIGRATION_TREES for p in root.glob(f"{tree}/*/fabric/*.SemanticModel") if p.is_dir()
-    )
+    return sorted(p for tree in MIGRATION_TREES for p in root.glob(f"{tree}/*/fabric/*.SemanticModel") if p.is_dir())
 
 
 def cmd_check(root: Path, strict: bool = False, model_dir: Path | None = None) -> int:
@@ -348,7 +347,7 @@ def cmd_all(root: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", type=Path, help="Path to a *.SemanticModel folder")
     parser.add_argument(
         "--md", type=Path, help="Markdown instructions file (defaults to <migration>/ai-instructions.md)"

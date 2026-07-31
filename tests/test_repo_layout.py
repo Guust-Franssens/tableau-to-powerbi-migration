@@ -20,7 +20,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
-import set_data_folder
 from published_datasource_registry import _by_path_from_report, _near_misses, _normalize_key
 from set_data_folder import ABSOLUTE_USER_PATH_RE, _tree_and_slug_for
 from tableau_lineage import dedup_key

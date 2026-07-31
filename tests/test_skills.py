@@ -31,13 +31,19 @@ BUNDLED_SKILLS = sorted(skill.parent for skill in SKILL_FILES if (skill.parent /
 # A markdown link whose target is a relative path, i.e. not http(s):, mailto: or a #fragment.
 MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
 
-# Shims left at `scripts/<name>.py` after the real script moved into a skill, mapped to the flag that
-# only the bundled script's own argument parser knows about.
+# Shims left at `scripts/<name>.py` after the real script moved into a skill, mapped to the skill that
+# now owns the file and a flag that only the bundled script's own argument parser knows about.
 FORWARDING_SHIMS = {
-    "probe_desktop_query": "--table",
-    "refresh_pbip_model": "--ui-save",
+    "probe_desktop_query": ("pbip-model-refresh", "--table"),
+    "refresh_pbip_model": ("pbip-model-refresh", "--ui-save"),
+    "set_ai_instructions": ("powerbi-ai-readiness", "--strict"),
+    "check_ai_readiness": ("powerbi-ai-readiness", "--all"),
 }
-SKILL_SCRIPTS = SKILLS_DIR / "pbip-model-refresh" / "scripts"
+
+# The AI-instruction section template. Stated in the `powerbi-ai-readiness` skill and nowhere else -
+# the heading below is the canary, because it is the one no other document would coin by accident.
+SECTION_TEMPLATE_CANARY = "## Business terminology and defaults"
+SECTION_TEMPLATE_HOME = SKILLS_DIR / "powerbi-ai-readiness" / "SKILL.md"
 
 
 def test_the_skills_directory_is_not_empty() -> None:
@@ -162,13 +168,14 @@ def test_no_bundled_script_imports_a_module_that_only_exists_in_this_repo(skill_
 def test_the_scripts_shim_still_reaches_the_script_that_moved_into_the_skill(shim: str) -> None:
     """`scripts/<name>.py` is a forwarding shim now; prove the forward actually arrives.
 
-    The four personas under `.github/agents/` still invoke `python scripts/refresh_pbip_model.py`,
-    and that directory is out of reach for the agent that moved these files - so the shims are the
-    reason nothing broke on merge. An entry point nobody exercises is an entry point that rots, and
-    the failure would surface mid-migration. `--help` is enough: only the BUNDLED parser knows the
-    flag asserted below, so seeing it proves the real script ran with `sys.argv` intact.
+    The four personas under `.github/agents/` still invoke `python scripts/refresh_pbip_model.py` and
+    `python scripts/set_ai_instructions.py`, and that directory is out of reach for the agent that
+    moved these files - so the shims are the reason nothing broke on merge. An entry point nobody
+    exercises is an entry point that rots, and the failure would surface mid-migration. `--help` is
+    enough: only the BUNDLED parser knows the flag asserted below, so seeing it proves the real script
+    ran with `sys.argv` intact.
     """
-    flag = FORWARDING_SHIMS[shim]
+    skill, flag = FORWARDING_SHIMS[shim]
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / f"{shim}.py"), "--help"],
         cwd=REPO_ROOT,
@@ -178,28 +185,69 @@ def test_the_scripts_shim_still_reaches_the_script_that_moved_into_the_skill(shi
     )
     assert result.returncode == 0, result.stderr
     assert flag in result.stdout, f"scripts/{shim}.py did not reach the bundled script ({flag} missing)"
-    assert str(Path(".github/skills/pbip-model-refresh/scripts") / f"{shim}.py") in result.stdout.replace("/", os.sep)
+    assert str(Path(".github/skills") / skill / "scripts" / f"{shim}.py") in result.stdout.replace("/", os.sep)
 
 
 def test_this_repo_really_has_the_examples_corpus_the_skill_tests_fall_back_from() -> None:
-    """Keeps the skill's honest `skip` from becoming a silent no-op *here*.
+    """Keeps the skills' honest `skip` from becoming a silent no-op *here*.
 
-    `test_tmdl_tables_matches_every_example_models_own_ref_list` skips when there is no `examples/`
-    tree, which is right for a copied skill and wrong for this repo: those 16 committed models are
-    the only ground truth the TMDL fingerprint has. Without this guard, deleting or renaming the
-    corpus would turn 16 assertions into one green skip.
+    Both bundles skip their corpus tests when there is no `examples/` tree, which is right for a
+    copied skill and wrong for this repo: those 16 committed models are the only ground truth the
+    TMDL fingerprint and the fabricated-reference check have. Without this guard, deleting or
+    renaming the corpus would turn a pile of assertions into green skips.
     """
     models = sorted((REPO_ROOT / "examples").glob("*/fabric/*.SemanticModel"))
-    assert models, "examples/*/fabric/*.SemanticModel is empty - the skill's corpus test now skips silently"
+    assert models, "examples/*/fabric/*.SemanticModel is empty - the skills' corpus tests now skip silently"
 
 
 def test_the_bundled_scripts_are_the_ones_the_shims_and_docs_point_at() -> None:
     """One canonical copy. Two files with the same name and different contents is the worst outcome."""
-    for name in sorted(FORWARDING_SHIMS):
-        bundled = SKILL_SCRIPTS / f"{name}.py"
+    for name, (skill, _flag) in sorted(FORWARDING_SHIMS.items()):
+        bundled = SKILLS_DIR / skill / "scripts" / f"{name}.py"
         assert bundled.exists(), f"{bundled} is missing"
         shim = (REPO_ROOT / "scripts" / f"{name}.py").read_text(encoding="utf-8")
-        assert "runpy" in shim and "pbip-model-refresh" in shim, (
-            f"scripts/{name}.py is no longer a forwarding shim - if the script moved back, "
+        assert "runpy" in shim and skill in shim, (
+            f"scripts/{name}.py is no longer a forwarding shim for {skill} - if the script moved back, "
             "delete it from the skill bundle and update SKILL.md's 'Available scripts' section"
         )
+
+
+def _markdown_outside_the_agents_dir() -> list[Path]:
+    """Every committed markdown file except agent personas and generated instruction instances.
+
+    `.github/agents/` is excluded because that directory is off-limits to the Copilot coding agent
+    that packaged this skill: the persona still carries a compressed copy of the template, and
+    removing it is tracked maintainer follow-up. `ai-instructions.md` files are excluded because they
+    are *instances* of the template - filling it in is the point, not drift.
+    """
+    skip_dirs = {".git", ".venv", "node_modules", "__pycache__"}
+    return [
+        path
+        for path in sorted(REPO_ROOT.rglob("*.md"))
+        if not skip_dirs & set(path.relative_to(REPO_ROOT).parts)
+        and ".github/agents" not in path.relative_to(REPO_ROOT).as_posix()
+        and path.name != "ai-instructions.md"
+    ]
+
+
+def test_the_ai_instruction_section_template_is_stated_in_exactly_one_place() -> None:
+    """The drift guard. A second copy of the template is how a section quietly goes missing.
+
+    That already happened: one copy listed six sections and the other seven - "Verified headline
+    numbers" was in the guide and absent from the persona, so which one you read decided whether a
+    migration anchored its instructions to ground-truth totals. Nothing failed; the copies just
+    disagreed. `docs/ai-instructions-authoring-guide.md` is now a stub pointing here for exactly
+    this reason.
+    """
+    assert SECTION_TEMPLATE_CANARY in SECTION_TEMPLATE_HOME.read_text(encoding="utf-8"), (
+        f"the section template is no longer in {SECTION_TEMPLATE_HOME.name} - this guard now proves nothing"
+    )
+    others = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _markdown_outside_the_agents_dir()
+        if path != SECTION_TEMPLATE_HOME and SECTION_TEMPLATE_CANARY in path.read_text(encoding="utf-8")
+    ]
+    assert not others, (
+        f"the AI-instruction section template is restated in {others} - link to "
+        f"{SECTION_TEMPLATE_HOME.relative_to(REPO_ROOT).as_posix()} instead of copying it"
+    )
