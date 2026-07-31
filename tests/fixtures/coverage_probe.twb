@@ -1,0 +1,186 @@
+<?xml version='1.0' encoding='utf-8' ?>
+
+<!-- Coverage-probe fixture. Every construct below is a REAL Tableau feature that none of the 16
+     worked examples exercises. The question this fixture answers is not "does the parser support
+     it" - mostly it does not, and that is fine - but "does the parser SAY SO, or does it drop the
+     construct silently?". A logged limitation is an honest gap; a silent drop is a bug, because the
+     migration then looks complete while a piece of the workbook has vanished. -->
+<workbook original-version='18.1' source-build='2026.1.0 (20261.26.0226.1626)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource caption='Coverage Probe' inline='true' name='federated.cov1' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='sales' name='textscan.cov1'>
+            <connection class='textscan' directory='.' filename='sales.csv' />
+          </named-connection>
+        </named-connections>
+        <!-- Custom SQL with a Tableau parameter embedded in it -->
+        <relation connection='textscan.cov1' name='CustomSQLQuery' type='text'>SELECT * FROM orders WHERE region = &lt;Parameters.Region Param&gt;</relation>
+      </connection>
+
+      <column caption='Region' datatype='string' name='[Region]' role='dimension' type='nominal' />
+      <column caption='State' datatype='string' name='[State]' role='dimension' type='nominal' />
+      <column caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+      <column caption='Profit' datatype='real' name='[Profit]' role='measure' type='quantitative' />
+      <column caption='Order Date' datatype='date' name='[Order Date]' role='dimension' type='ordinal' />
+
+      <!-- (1) GROUP: states mapped into regions. Tableau's own grouping construct. -->
+      <group caption='State Group' name='[State (group)]' name-style='unqualified'>
+        <groupfilter function='union' user:ui-domain='database' user:ui-enumeration='inclusive' user:ui-marker='enumerate'>
+          <groupfilter function='member' level='[State]' member='&quot;Texas&quot;' />
+          <groupfilter function='member' level='[State]' member='&quot;Oklahoma&quot;' />
+        </groupfilter>
+      </group>
+
+      <!-- (2) BIN: a numeric bin over Sales -->
+      <column caption='Sales (bin)' datatype='real' name='[Sales (bin)]' role='dimension' type='ordinal'>
+        <calculation class='bin' decimals='0' formula='[Sales]' peg='0' size-parameter='[bin_size]' />
+      </column>
+
+      <!-- (3) SET: a computed top-N set -->
+      <group caption='Top Customers Set' name='[Top Customers Set]' name-style='unqualified' user:ui-builder='filter-set'>
+        <groupfilter count='10' end='top' function='order' column='[Sales]' direction='DESC' level='[State]' />
+      </group>
+
+      <!-- (4) HIERARCHY (drill path) -->
+      <drill-paths>
+        <drill-path name='Geography'>
+          <field>[Region]</field>
+          <field>[State]</field>
+        </drill-path>
+      </drill-paths>
+
+      <!-- (5) DATA SOURCE FILTER: applies to every worksheet using this source -->
+      <filter class='categorical' column='[Region]'>
+        <groupfilter function='member' level='[Region]' member='&quot;West&quot;' />
+      </filter>
+    </datasource>
+
+    <!-- (6) A SECOND source, used for a data BLEND (not a join) -->
+    <datasource caption='Targets' inline='true' name='federated.cov2' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='targets' name='excel-direct.cov2'>
+            <connection class='excel-direct' />
+          </named-connection>
+        </named-connections>
+        <relation connection='excel-direct.cov2' name='Targets' table='[Targets$]' type='table' />
+      </connection>
+      <column caption='Region' datatype='string' name='[Region]' role='dimension' type='nominal' />
+      <column caption='Target' datatype='real' name='[Target]' role='measure' type='quantitative' />
+    </datasource>
+  </datasources>
+
+  <worksheets>
+    <worksheet name='Blended View'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Coverage Probe' name='federated.cov1' />
+            <datasource caption='Targets' name='federated.cov2' />
+          </datasources>
+          <datasource-dependencies datasource='federated.cov1'>
+            <column caption='Region' datatype='string' name='[Region]' role='dimension' type='nominal' />
+            <column caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+            <column-instance column='[Region]' derivation='None' name='[none:Region:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Sales]' derivation='Sum' name='[sum:Sales:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+          <datasource-dependencies datasource='federated.cov2'>
+            <column caption='Target' datatype='real' name='[Target]' role='measure' type='quantitative' />
+            <column-instance column='[Target]' derivation='Sum' name='[sum:Target:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+          <!-- the blend relationship: Region linked across the two sources -->
+          <datasource-relation datasource='federated.cov2' primary='federated.cov1'>
+            <relation-column primary='[Region]' secondary='[Region]' />
+          </datasource-relation>
+          <!-- (7) CONTEXT FILTER -->
+          <filter class='categorical' column='[federated.cov1].[none:Region:nk]' context='true'>
+            <groupfilter function='member' level='[none:Region:nk]' member='&quot;West&quot;' />
+          </filter>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+          </pane>
+        </panes>
+        <rows>[federated.cov1].[sum:Sales:qk]</rows>
+        <cols>[federated.cov1].[none:Region:nk]</cols>
+      </table>
+    </worksheet>
+
+    <worksheet name='Forecast View'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Coverage Probe' name='federated.cov1' />
+          </datasources>
+          <datasource-dependencies datasource='federated.cov1'>
+            <column caption='Order Date' datatype='date' name='[Order Date]' role='dimension' type='ordinal' />
+            <column caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+            <column-instance column='[Order Date]' derivation='Month' name='[mn:Order Date:qk]' pivot='key' type='ordinal' />
+            <column-instance column='[Sales]' derivation='Sum' name='[sum:Sales:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Line' />
+            <!-- (8) FORECAST and (9) TREND LINE -->
+            <forecast>
+              <forecast-settings forecast-horizon-periods='6' forecast-model='automatic' />
+            </forecast>
+          </pane>
+        </panes>
+        <rows>[federated.cov1].[sum:Sales:qk]</rows>
+        <cols>[federated.cov1].[mn:Order Date:qk]</cols>
+      </table>
+      <trendlines>
+        <trendline factors='[none:Region:nk]' model-type='linear' />
+      </trendlines>
+    </worksheet>
+
+    <worksheet name='Clustered View'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Coverage Probe' name='federated.cov1' />
+          </datasources>
+          <datasource-dependencies datasource='federated.cov1'>
+            <column caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+            <column caption='Profit' datatype='real' name='[Profit]' role='measure' type='quantitative' />
+            <column-instance column='[Sales]' derivation='Sum' name='[sum:Sales:qk]' pivot='key' type='quantitative' />
+            <column-instance column='[Profit]' derivation='Sum' name='[sum:Profit:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Circle' />
+            <encodings>
+              <!-- (10) CLUSTER -->
+              <color column='[federated.cov1].[Clustering]' />
+            </encodings>
+          </pane>
+        </panes>
+        <rows>[federated.cov1].[sum:Profit:qk]</rows>
+        <cols>[federated.cov1].[sum:Sales:qk]</cols>
+      </table>
+    </worksheet>
+  </worksheets>
+
+  <dashboards>
+    <dashboard name='Overview'>
+      <zones>
+        <zone h='100000' id='4' name='Blended View' w='100000' x='0' y='0' />
+      </zones>
+    </dashboard>
+  </dashboards>
+
+  <!-- (11) STORY: a Tableau story with two story points -->
+  <stories>
+    <story name='Sales Story'>
+      <story-points>
+        <story-point captured-sheet='Blended View' id='1' />
+        <story-point captured-sheet='Forecast View' id='2' />
+      </story-points>
+    </story>
+  </stories>
+</workbook>

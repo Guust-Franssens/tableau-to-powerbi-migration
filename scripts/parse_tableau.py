@@ -22,6 +22,7 @@ from urllib.parse import unquote
 from lxml import etree
 
 from connection_target import powerbi_target
+from prompt_injection import scan_spec
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("parse_tableau")
@@ -118,6 +119,26 @@ def parse_parameters(root: etree._Element, ids: IdRegistry) -> list[dict[str, An
     return parameters
 
 
+def _fcp_attr(el: etree._Element, name: str) -> str | None:
+    """Read attribute `name`, tolerating Tableau's feature-control-prefixed variants.
+
+    Tableau writes attributes twice when a document-format feature flag is in play, e.g.
+    `_.fcp.DatabricksCatalog.true...v-http-path` alongside plain `v-http-path`. The prefixed form is
+    the value that applies when the named feature is ON, so a parser that only reads the plain name
+    silently drops the attribute on every workbook saved with the flag active. Precedence: the plain
+    attribute, then the `...true` variant, then any other prefixed variant.
+    """
+    direct = el.get(name)
+    if direct:
+        return direct
+    suffix = f"...{name}"
+    candidates = [(k, v) for k, v in el.attrib.items() if k.endswith(suffix) and v]
+    for key, value in candidates:
+        if ".true..." in key:
+            return value
+    return candidates[0][1] if candidates else None
+
+
 def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dict[str, Any]:
     """Resolve both the *original* source connection (e.g. excel-direct, sqlserver) and whether the
     datasource runs off a packaged .hyper extract (Tableau Public workbooks always do)."""
@@ -129,13 +150,9 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
 
     named_conn = outer_conn.find(".//named-connections/named-connection/connection")
     if named_conn is not None:
-        connection["class"] = named_conn.get("class", "unknown")
-        connection["server"] = named_conn.get("server")
-        connection["database"] = named_conn.get("dbname")
+        _read_connection_attrs(connection, named_conn)
     elif outer_conn.get("class") not in (None, "federated"):
-        connection["class"] = outer_conn.get("class", "unknown")
-        connection["server"] = outer_conn.get("server")
-        connection["database"] = outer_conn.get("dbname")
+        _read_connection_attrs(connection, outer_conn)
 
     extract_conn = ds_el.find(".//extract/connection")
     if extract_conn is not None:
@@ -150,6 +167,31 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
         connection["class"], connection["mode"]
     )
     return connection
+
+
+def _read_connection_attrs(connection: dict[str, Any], el: etree._Element) -> None:
+    """Copy the connection coordinates Power BI actually needs off one Tableau <connection> element.
+
+    Beyond class/server/database this captures the two attributes that decide *which* compute and
+    *which* namespace a live warehouse query hits:
+
+    * `schema` - the namespace inside the catalog. `dbname` alone is not enough to locate the table
+      on a three-part-namespace source (Databricks Unity Catalog, Snowflake), so dropping it leaves
+      the semantic model unable to resolve the table.
+    * `http_path` - Databricks/Spark's compute path (`/sql/1.0/warehouses/<id>`). Power BI's
+      credential cache and its Fabric cloud connection are keyed on host **and** httpPath, so two
+      sources on the same host but different warehouses are *different* credential gates. Without it
+      they collapse into byte-identical connection records and the distinction is unrecoverable.
+    """
+    connection["class"] = el.get("class", "unknown")
+    connection["server"] = el.get("server")
+    connection["database"] = _fcp_attr(el, "dbname")
+    schema = _fcp_attr(el, "schema")
+    if schema:
+        connection["schema"] = schema
+    http_path = _fcp_attr(el, "v-http-path") or _fcp_attr(el, "http-path")
+    if http_path:
+        connection["http_path"] = http_path if http_path.startswith("/") else f"/{http_path}"
 
 
 _CONTAINER_RELATION_TYPES = {"collection", "join", "union"}
@@ -256,14 +298,18 @@ def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]
         for rel in _collect_leaf_relations(top):
             rel_type = rel.get("type", "table")
             name = rel.get("name") or rel.get("table", "table")
-            tables.append(
-                {
-                    "id": ids.make("tbl", name),
-                    "name": name,
-                    "source_relation": "custom-sql" if rel_type == "text" else rel_type,
-                    "custom_sql": rel.text if rel_type == "text" else None,
-                }
-            )
+            table = {
+                "id": ids.make("tbl", name),
+                "name": name,
+                "source_relation": "custom-sql" if rel_type == "text" else rel_type,
+                "custom_sql": rel.text if rel_type == "text" else None,
+            }
+            # `table='[catalog].[schema].[table]'` is the only place the namespace qualification
+            # survives; `name` is just the short alias. A live warehouse query needs the full path.
+            qualified = rel.get("table")
+            if qualified and qualified.strip("[]") != name:
+                table["qualified_name"] = qualified
+            tables.append(table)
     return tables
 
 
@@ -998,12 +1044,19 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
     conn = ds["connection"]
     server = conn.get("server") or "<server not recorded>"
     database = conn.get("database") or "<database not recorded>"
+    schema = conn.get("schema")
+    namespace = f"{database}.{schema}" if schema else database
+    # Name the compute path explicitly: Power BI keys BOTH the Desktop credential cache and the
+    # Fabric cloud connection on host + httpPath, so "same server" does not mean "same credential".
+    # A user reading this needs to know which warehouse to authenticate.
+    http_path = conn.get("http_path")
+    compute = f" via compute path {http_path}" if http_path else ""
     cached = " Tableau also packages a .hyper CACHE of these rows." if conn["mode"] == "extract" else ""
     return {
         "item": ds["id"],
         "issue": (
-            f"LIVE source ('{conn['class']}' @ {server} / {database}): the Power BI semantic model MUST "
-            f"connect to this system directly.{cached} Do NOT migrate the model onto extracted rows/CSVs - "
+            f"LIVE source ('{conn['class']}' @ {server} / {namespace}{compute}): the Power BI semantic model "
+            f"MUST connect to this system directly.{cached} Do NOT migrate the model onto extracted rows/CSVs - "
             "that silently freezes the data at export time and produces a model that can never refresh, "
             "which is not a faithful migration. The .hyper is for SCHEMA DISCOVERY and VALIDATION BASELINES "
             "only (`python scripts/extract_hyper_data.py --schema ...`). ACTION: get the credential for this "
@@ -1013,6 +1066,117 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
         "severity": "high",
         "stage": "parse",
     }
+
+
+# Tableau constructs the parser does NOT model, keyed by the XPath that proves one is present.
+# Measured 2026-07-31 against tests/fixtures/coverage_probe.twb: a workbook using all of these parsed
+# with **zero** limitations - every one of them vanished silently. A gap the migrator KNOWS about is a
+# manageable scoping conversation; a gap it cannot see becomes a report that looks complete and is
+# quietly wrong. The parser does not need to SUPPORT these - it needs to refuse to hide them.
+#
+# (severity, human name, what it means for the migration)
+_UNSUPPORTED_FEATURES: list[tuple[str, str, str, str]] = [
+    (
+        ".//datasource/filter",
+        "high",
+        "data source filter",
+        "a filter applied at the DATA SOURCE level, so it silently constrains EVERY worksheet built on "
+        "it. Dropping it does not break anything visibly - it just makes every number in the migrated "
+        "report larger than the original. Reproduce it as a Power Query filter step or a model-level "
+        "filter, and reconcile one figure against Tableau before trusting the rest",
+    ),
+    (
+        ".//group[@name-style]",
+        "high",
+        "Tableau Group / Set",
+        "a Group (members folded into a new category) or a Set (a saved membership rule). Neither has "
+        "a native Power BI equivalent: a Group becomes a mapped calculated column, a computed Set "
+        "becomes a measure-driven filter. Both change what a dimension MEANS, so a silently dropped "
+        "one changes every aggregation that used it",
+    ),
+    (
+        ".//drill-paths/drill-path",
+        "medium",
+        "hierarchy (drill path)",
+        "a Tableau drill hierarchy. Power BI hierarchies are a direct equivalent, so this is cheap to "
+        "reproduce - but only if the migrator knows it existed. Dropped, the report loses drill-down",
+    ),
+    (
+        ".//*[@context='true']",
+        "high",
+        "context filter",
+        "a CONTEXT filter, which in Tableau executes before FIXED LOD expressions and therefore changes "
+        "what those LODs compute over. It is captured here as an ordinary filter, which is NOT "
+        "equivalent. Any FIXED LOD in this workbook must be re-checked against the context set",
+    ),
+    (
+        ".//forecast",
+        "medium",
+        "forecast",
+        "Tableau's built-in forecasting. Power BI's analytics pane has a forecast option for line "
+        "charts; anything beyond the default model needs to be reproduced explicitly or dropped with "
+        "the user's agreement",
+    ),
+    (
+        ".//trendlines/trendline",
+        "medium",
+        "trend line",
+        "a trend line. Power BI supports a trend line on a line/scatter chart via the analytics pane; "
+        "model type (linear/log/exponential/polynomial) and the per-factor split must be matched",
+    ),
+    (
+        ".//stories/story",
+        "high",
+        "Tableau Story",
+        "a Tableau Story - an ordered narrative of captured sheet states. Power BI has no direct "
+        "equivalent (bookmarks + buttons are the closest). An entire navigation artifact disappears "
+        "if this is not surfaced, and users notice immediately",
+    ),
+    (
+        ".//datasource-relation",
+        "high",
+        "data blend",
+        "a data BLEND (a cross-source link resolved at query time), which is not the same thing as a "
+        "join: it aggregates the secondary source to the linking dimension's grain. Modelling it as a "
+        "relationship changes the numbers. Decide explicitly between a Power BI relationship and a "
+        "pre-aggregated table",
+    ),
+]
+
+
+def unsupported_feature_limitations(root: etree._Element) -> list[dict[str, Any]]:
+    """Flag Tableau constructs this parser does not model, so they cannot vanish silently.
+
+    Deliberately driven off the RAW XML rather than the parsed spec: the whole point is to catch
+    things the spec has no field for. Each hit becomes one limitation naming the construct and what
+    it means for fidelity - the migrator can then scope it, reproduce it, or agree to drop it, but
+    cannot be unaware of it.
+    """
+    found: list[dict[str, Any]] = []
+    for xpath, severity, name, meaning in _UNSUPPORTED_FEATURES:
+        try:
+            hits = root.findall(xpath)
+        except SyntaxError:  # pragma: no cover - guards a malformed xpath during development
+            continue
+        if not hits:
+            continue
+        labels = [h.get("caption") or h.get("name") or h.get("model-type") or "" for h in hits]
+        named = ", ".join(sorted({x for x in labels if x})[:5])
+        found.append(
+            {
+                "item": f"workbook.{name.replace(' ', '_').replace('/', '_').lower()}",
+                "issue": (
+                    f"UNSUPPORTED TABLEAU FEATURE - {name} x{len(hits)}"
+                    f"{f' ({named})' if named else ''}: {meaning}. The parser does NOT model this, so it "
+                    "is absent from the rest of this spec: do not treat the spec as a complete "
+                    "inventory of the workbook here. Handle it explicitly or agree to drop it with the "
+                    "user - do not discover it after sign-off."
+                ),
+                "severity": severity,
+                "stage": "parse",
+            }
+        )
+    return found
 
 
 def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1090,6 +1254,10 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                     "stage": "parse",
                 }
             )
+    # A .twb is UNTRUSTED input, and everything above copies its strings verbatim into the contract
+    # that agents then read as context. Scan for injection-shaped text last, so the finding sits
+    # alongside the other parse-stage limitations the orchestrator reads out before building.
+    limitations.extend(scan_spec(spec))
     return limitations
 
 
@@ -1128,6 +1296,7 @@ def parse_workbook(path: Path) -> dict[str, Any]:
     }
     annotate_known_idioms(spec)
     spec["limitations_encountered"] = collect_limitations(spec)
+    spec["limitations_encountered"].extend(unsupported_feature_limitations(root))
     return spec
 
 
@@ -1144,6 +1313,39 @@ def validate_spec(spec: dict[str, Any], schema_path: Path) -> None:
     logger.info("migration-spec.json validated against schema")
 
 
+def _guard_downstream_limitations(output: Path, force: bool) -> None:
+    """Refuse to silently overwrite a spec that later stages have already written into.
+
+    `migration-spec.json` is the contract every stage reads AND writes: pbi-semantic-builder,
+    pbi-report-builder and the orchestrator append `limitations_encountered` entries (routinely
+    20-50 of them) that are the raw material for the final migration summary. Re-parsing rewrites the
+    file in place and destroys all of it.
+
+    That rule already existed - as prose, in one agent persona. Prose is not a control: the repo
+    itself names "MANDATORY prose without enforcement" as an anti-pattern. This is the enforcement.
+    Only entries whose stage is NOT "parse" count, so re-parsing a spec the parser alone produced
+    stays frictionless.
+    """
+    if force or not output.exists():
+        return
+    try:
+        existing = json.loads(output.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return  # unreadable/corrupt - nothing worth protecting
+    downstream = [x for x in existing.get("limitations_encountered", []) if x.get("stage") not in (None, "parse")]
+    if not downstream:
+        return
+    stages = sorted({x.get("stage", "?") for x in downstream})
+    raise SystemExit(
+        f"REFUSING to overwrite {output}: it already carries {len(downstream)} limitation(s) appended by "
+        f"downstream stage(s) [{', '.join(stages)}]. Re-parsing rewrites the file in place and destroys "
+        "them - they are the raw material for the migration summary and the validator's context.\n"
+        "  * Resuming a migration or doing a fix round? You do NOT need to re-parse; use the spec as-is.\n"
+        "  * The SOURCE workbook genuinely changed? Copy the current spec aside first, then re-run with "
+        "--force and merge the downstream entries back."
+    )
+
+
 def main() -> None:
     """CLI entry point: parse the workbook given on the command line and write migration-spec.json."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1155,7 +1357,14 @@ def main() -> None:
         default=Path(__file__).resolve().parent.parent / "docs" / "migration-spec.schema.json",
         help="Path to migration-spec.schema.json for validation",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing spec even when downstream stages have appended to it (DESTRUCTIVE)",
+    )
     args = parser.parse_args()
+
+    _guard_downstream_limitations(args.output, args.force)
 
     logger.info("Parsing %s", args.workbook)
     spec = parse_workbook(args.workbook)

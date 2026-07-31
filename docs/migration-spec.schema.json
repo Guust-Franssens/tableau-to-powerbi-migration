@@ -4,33 +4,105 @@
   "title": "Tableau Migration Spec",
   "description": "Normalized intermediate representation produced by scripts/parse_tableau.py from a .twb/.twbx workbook. This is the contract consumed by the pbi-semantic-builder and pbi-report-builder subagents.",
   "type": "object",
-  "required": ["migration_spec_version", "source", "data_sources", "worksheets", "dashboards"],
+  "required": [
+    "migration_spec_version",
+    "source",
+    "data_sources",
+    "worksheets",
+    "dashboards"
+  ],
   "properties": {
-    "migration_spec_version": { "type": "string", "const": "1.0" },
+    "migration_spec_version": {
+      "type": "string",
+      "const": "1.0"
+    },
     "source": {
       "type": "object",
-      "required": ["file_name"],
+      "required": [
+        "file_name"
+      ],
       "properties": {
-        "file_name": { "type": "string" },
-        "tableau_version": { "type": ["string", "null"] },
-        "source_build": { "type": ["string", "null"] },
-        "repository_location_id": { "type": ["string", "null"] },
-        "parsed_at": { "type": "string", "format": "date-time" }
+        "file_name": {
+          "type": "string"
+        },
+        "tableau_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_build": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_location_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parsed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
       }
     },
     "parameters": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "caption", "data_type", "domain_type"],
+        "required": [
+          "id",
+          "caption",
+          "data_type",
+          "domain_type"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "internal_name": { "type": "string" },
-          "caption": { "type": "string" },
-          "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime"] },
-          "domain_type": { "type": "string", "enum": ["list", "range", "all", "any"] },
-          "allowed_values": { "type": "array", "items": { "type": "string" } },
-          "current_value": { "type": ["string", "number", "boolean", "null"] }
+          "id": {
+            "type": "string"
+          },
+          "internal_name": {
+            "type": "string"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "data_type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "integer",
+              "real",
+              "boolean",
+              "date",
+              "datetime"
+            ]
+          },
+          "domain_type": {
+            "type": "string",
+            "enum": [
+              "list",
+              "range",
+              "all",
+              "any"
+            ]
+          },
+          "allowed_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "current_value": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          }
         }
       }
     },
@@ -38,49 +110,197 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "connection", "fields"],
+        "required": [
+          "id",
+          "connection",
+          "fields"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "caption": { "type": "string" },
-          "internal_name": { "type": "string" },
+          "id": {
+            "type": "string"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "internal_name": {
+            "type": "string"
+          },
           "connection": {
             "type": "object",
-            "required": ["class", "mode"],
+            "required": [
+              "class",
+              "mode"
+            ],
             "properties": {
-              "class": { "type": "string", "description": "Tableau connection class, e.g. hyper, sqlserver, excel-direct, textscan" },
-              "mode": { "type": "string", "enum": ["extract", "live"] },
-              "server": { "type": ["string", "null"] },
-              "database": { "type": ["string", "null"] },
-              "hyper_file": { "type": ["string", "null"], "description": "Relative path to the embedded .hyper file inside the .twbx, when mode=extract" },
-              "powerbi_target": { "type": "string", "enum": ["live_source", "flat_file", "unknown"], "description": "What the Power BI semantic model must CONNECT TO. 'live_source': connect to the upstream system directly, exactly as Tableau does - any packaged .hyper is only Tableau's cache, and building the model on extracted rows freezes the data and yields a model that can never refresh. 'flat_file': the source genuinely is a file, so materialising the rows and pointing at them is faithful. Do NOT infer this from mode=extract: an extract looks identical whether it caches a CSV or a Snowflake warehouse." },
-              "powerbi_target_reason": { "type": ["string", "null"], "description": "Human-readable justification for powerbi_target, safe to surface to the user" },
-              "note": { "type": ["string", "null"] }
+              "class": {
+                "type": "string",
+                "description": "Tableau connection class, e.g. hyper, sqlserver, excel-direct, textscan"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "extract",
+                  "live"
+                ]
+              },
+              "server": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "database": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hyper_file": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Relative path to the embedded .hyper file inside the .twbx, when mode=extract"
+              },
+              "powerbi_target": {
+                "type": "string",
+                "enum": [
+                  "live_source",
+                  "flat_file",
+                  "unknown"
+                ],
+                "description": "What the Power BI semantic model must CONNECT TO. 'live_source': connect to the upstream system directly, exactly as Tableau does - any packaged .hyper is only Tableau's cache, and building the model on extracted rows freezes the data and yields a model that can never refresh. 'flat_file': the source genuinely is a file, so materialising the rows and pointing at them is faithful. Do NOT infer this from mode=extract: an extract looks identical whether it caches a CSV or a Snowflake warehouse."
+              },
+              "powerbi_target_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Human-readable justification for powerbi_target, safe to surface to the user"
+              },
+              "note": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Namespace inside the catalog (Databricks Unity Catalog schema, Snowflake schema). Required alongside `database` to locate a table on a three-part-namespace source."
+              },
+              "http_path": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Databricks/Spark compute path, e.g. /sql/1.0/warehouses/<id>. Power BI's Desktop credential cache AND its Fabric cloud connection are keyed on host + httpPath, so two sources on the same host but different warehouses are DIFFERENT credential gates. Parsed from `v-http-path` (or its `_.fcp.DatabricksCatalog.*` variant)."
+              }
             }
           },
           "published_datasource": {
             "type": "object",
             "description": "Present only when this datasource is a Tableau PUBLISHED (server-side) data source that the workbook merely points at (connection class 'sqlproxy'). Its calculated fields / custom SQL live server-side, so the exported .tds/.tdsx is required for complete coverage. Several workbooks commonly share one published datasource - migrate it once to a single semantic model and rebind downstream reports.",
             "properties": {
-              "id": { "type": ["string", "null"], "description": "Published data source name on the server" },
-              "site": { "type": ["string", "null"], "description": "Tableau site the datasource lives on" },
-              "path": { "type": ["string", "null"] },
-              "derived_from": { "type": ["string", "null"], "description": "Full server URL it was derived from" },
-              "revision": { "type": ["string", "null"] },
-              "name_source": { "type": ["string", "null"], "description": "Which attribute the name was resolved from: derived-from | connection.dbname | repository-location.id (in precedence order)" },
-              "id_attribute": { "type": ["string", "null"], "description": "Raw repository-location@id. When it differs from `id`, the server-side datasource was renamed after this workbook was published and this value is stale." },
-              "key": { "type": ["string", "null"], "description": "Stable dedup identity '<site>/<name>' (lowercased, excludes revision + host) - the key to match the SAME published datasource across multiple workbooks so it is migrated to ONE shared semantic model" }
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Published data source name on the server"
+              },
+              "site": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Tableau site the datasource lives on"
+              },
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "derived_from": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Full server URL it was derived from"
+              },
+              "revision": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name_source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Which attribute the name was resolved from: derived-from | connection.dbname | repository-location.id (in precedence order)"
+              },
+              "id_attribute": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Raw repository-location@id. When it differs from `id`, the server-side datasource was renamed after this workbook was published and this value is stale."
+              },
+              "key": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Stable dedup identity '<site>/<name>' (lowercased, excludes revision + host) - the key to match the SAME published datasource across multiple workbooks so it is migrated to ONE shared semantic model"
+              }
             }
           },
           "tables": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["id", "name", "source_relation"],
+              "required": [
+                "id",
+                "name",
+                "source_relation"
+              ],
               "properties": {
-                "id": { "type": "string" },
-                "name": { "type": "string" },
-                "source_relation": { "type": "string", "enum": ["table", "custom-sql", "join", "text", "pivot", "collection", "union"] },
-                "custom_sql": { "type": ["string", "null"] }
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "source_relation": {
+                  "type": "string",
+                  "enum": [
+                    "table",
+                    "custom-sql",
+                    "join",
+                    "text",
+                    "pivot",
+                    "collection",
+                    "union"
+                  ]
+                },
+                "custom_sql": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "qualified_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Fully-qualified source name as Tableau wrote it, e.g. [catalog].[schema].[table]. Present when it differs from `name` (which is only the short alias)."
+                }
               }
             }
           },
@@ -89,16 +309,38 @@
             "items": {
               "type": "object",
               "properties": {
-                "left": { "type": ["string", "null"] },
-                "right": { "type": ["string", "null"] },
-                "type": { "type": "string", "enum": ["inner", "left", "right", "full"] },
+                "left": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "right": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "inner",
+                    "left",
+                    "right",
+                    "full"
+                  ]
+                },
                 "conditions": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "left_field": { "type": "string" },
-                      "right_field": { "type": "string" }
+                      "left_field": {
+                        "type": "string"
+                      },
+                      "right_field": {
+                        "type": "string"
+                      }
                     }
                   }
                 }
@@ -109,35 +351,145 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["id", "internal_name", "caption", "kind", "data_type", "role"],
+              "required": [
+                "id",
+                "internal_name",
+                "caption",
+                "kind",
+                "data_type",
+                "role"
+              ],
               "properties": {
-                "id": { "type": "string" },
-                "internal_name": { "type": "string", "description": "Raw Tableau [bracketed] field name" },
-                "caption": { "type": "string" },
-                "table_id": { "type": ["string", "null"] },
-                "kind": { "type": "string", "enum": ["column", "calculated", "group", "bin", "hierarchy"] },
-                "data_type": { "type": "string", "enum": ["string", "integer", "real", "boolean", "date", "datetime", "table", "spatial"], "description": "'table' is Tableau's internal relationship-model table-anchor pseudo-column (internal_name prefixed '[__tableau_internal_object_id__]') - not real data. 'spatial' is a MAKEPOINT/MAKELINE-derived geometry field (map point/line) with no native DAX/PQ equivalent - see migration-spec.md" },
-                "role": { "type": "string", "enum": ["dimension", "measure"] },
-                "default_aggregation": { "type": ["string", "null"], "enum": ["SUM", "AVG", "COUNT", "COUNTD", "MIN", "MAX", "MEDIAN", "ATTR", "None", null] },
-                "hidden": { "type": "boolean", "default": false },
-                "from_metadata_record": { "type": "boolean", "default": false, "description": "true if recovered from <metadata-records> (a physical/extract column with no <column> element) rather than a user-surfaced Tableau field" },
-                "semantic_role": { "type": ["string", "null"], "description": "e.g. geography.city if geo-coded" },
+                "id": {
+                  "type": "string"
+                },
+                "internal_name": {
+                  "type": "string",
+                  "description": "Raw Tableau [bracketed] field name"
+                },
+                "caption": {
+                  "type": "string"
+                },
+                "table_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "column",
+                    "calculated",
+                    "group",
+                    "bin",
+                    "hierarchy"
+                  ]
+                },
+                "data_type": {
+                  "type": "string",
+                  "enum": [
+                    "string",
+                    "integer",
+                    "real",
+                    "boolean",
+                    "date",
+                    "datetime",
+                    "table",
+                    "spatial"
+                  ],
+                  "description": "'table' is Tableau's internal relationship-model table-anchor pseudo-column (internal_name prefixed '[__tableau_internal_object_id__]') - not real data. 'spatial' is a MAKEPOINT/MAKELINE-derived geometry field (map point/line) with no native DAX/PQ equivalent - see migration-spec.md"
+                },
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "dimension",
+                    "measure"
+                  ]
+                },
+                "default_aggregation": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "SUM",
+                    "AVG",
+                    "COUNT",
+                    "COUNTD",
+                    "MIN",
+                    "MAX",
+                    "MEDIAN",
+                    "ATTR",
+                    "None",
+                    null
+                  ]
+                },
+                "hidden": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "from_metadata_record": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "true if recovered from <metadata-records> (a physical/extract column with no <column> element) rather than a user-surfaced Tableau field"
+                },
+                "semantic_role": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "e.g. geography.city if geo-coded"
+                },
                 "formatting": {
                   "type": "object",
-                  "properties": { "number_format": { "type": ["string", "null"] } }
+                  "properties": {
+                    "number_format": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
                 },
                 "aliases": {
                   "type": "object",
                   "description": "Map of raw stored value -> display value, from Tableau <aliases>",
-                  "additionalProperties": { "type": "string" }
+                  "additionalProperties": {
+                    "type": "string"
+                  }
                 },
-                "tableau_formula": { "type": ["string", "null"], "description": "Raw formula text, required when kind=calculated" },
-                "referenced_fields": { "type": "array", "items": { "type": "string" }, "description": "field ids this calculation depends on" },
-                "is_lod": { "type": "boolean", "default": false },
-                "is_table_calc": { "type": "boolean", "default": false },
+                "tableau_formula": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Raw formula text, required when kind=calculated"
+                },
+                "referenced_fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "field ids this calculation depends on"
+                },
+                "is_lod": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "is_table_calc": {
+                  "type": "boolean",
+                  "default": false
+                },
                 "reshape_hint": {
-                  "type": ["string", "null"],
-                  "enum": ["pivot_derived", null],
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "pivot_derived",
+                    null
+                  ],
                   "description": "Set when the field re-derives a category/date from a generic 'Pivot Field Names'/'Pivot Field Values' pair (Tableau's automatic cross-tab pivot). Signals the semantic builder to prefer a Power Query unpivot + conditional column over replicating the CONTAINS/LEFT/RIGHT string parsing as DAX."
                 }
               }
@@ -150,24 +502,98 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name", "mark_type", "encodings"],
+        "required": [
+          "id",
+          "name",
+          "mark_type",
+          "encodings"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" },
-          "title_text": { "type": ["string", "null"] },
-          "data_source_ids": { "type": "array", "items": { "type": "string" } },
-          "mark_type": { "type": "string", "description": "Tableau mark class: Bar, Line, Circle, Area, Text, Map, Square, Automatic, ..." },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "title_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data_source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mark_type": {
+            "type": "string",
+            "description": "Tableau mark class: Bar, Line, Circle, Area, Text, Map, Square, Automatic, ..."
+          },
           "encodings": {
             "type": "object",
             "properties": {
-              "rows": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
-              "columns": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
-              "color": { "anyOf": [{ "$ref": "#/definitions/shelfField" }, { "type": "null" }] },
-              "size": { "anyOf": [{ "$ref": "#/definitions/shelfField" }, { "type": "null" }] },
-              "shape": { "anyOf": [{ "$ref": "#/definitions/shelfField" }, { "type": "null" }] },
-              "label": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
-              "detail": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } },
-              "tooltip": { "type": "array", "items": { "$ref": "#/definitions/shelfField" } }
+              "rows": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/shelfField"
+                }
+              },
+              "columns": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/shelfField"
+                }
+              },
+              "color": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/shelfField"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "size": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/shelfField"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "shape": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/shelfField"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "label": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/shelfField"
+                }
+              },
+              "detail": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/shelfField"
+                }
+              },
+              "tooltip": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/shelfField"
+                }
+              }
             }
           },
           "reference_lines": {
@@ -176,11 +602,48 @@
             "items": {
               "type": "object",
               "properties": {
-                "id": { "type": "string" },
-                "label": { "type": "string" },
-                "formula": { "type": "string", "enum": ["constant", "computed", "average", "median", "sum", "min", "max", "percentile", "total", "count", "countd", "attr", "stdev", "stdevp", "var", "varp"] },
-                "value": { "type": ["number", "string", "null"] },
-                "scope": { "type": "string", "enum": ["per-table", "per-cell", "per-pane"] }
+                "id": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "formula": {
+                  "type": "string",
+                  "enum": [
+                    "constant",
+                    "computed",
+                    "average",
+                    "median",
+                    "sum",
+                    "min",
+                    "max",
+                    "percentile",
+                    "total",
+                    "count",
+                    "countd",
+                    "attr",
+                    "stdev",
+                    "stdevp",
+                    "var",
+                    "varp"
+                  ]
+                },
+                "value": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "per-table",
+                    "per-cell",
+                    "per-pane"
+                  ]
+                }
               }
             }
           },
@@ -189,11 +652,38 @@
             "items": {
               "type": "object",
               "properties": {
-                "field_id": { "type": "string" },
-                "type": { "type": "string", "enum": ["categorical", "quantitative", "relative_date", "relative-date", "parameter_binding", "parameter-binding", "context"] },
-                "exclude_nulls": { "type": "boolean", "default": false },
-                "members": { "type": "array", "items": { "type": "string" } },
-                "note": { "type": ["string", "null"], "description": "e.g. 'parameter-equality idiom: field = IF [Param]=[Dim] THEN [Dim] END, filtered to exclude null -> collapses to a plain PBI slicer on the dimension, no calculated column needed'" }
+                "field_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "categorical",
+                    "quantitative",
+                    "relative_date",
+                    "relative-date",
+                    "parameter_binding",
+                    "parameter-binding",
+                    "context"
+                  ]
+                },
+                "exclude_nulls": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "members": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "e.g. 'parameter-equality idiom: field = IF [Param]=[Dim] THEN [Dim] END, filtered to exclude null -> collapses to a plain PBI slicer on the dimension, no calculated column needed'"
+                }
               }
             }
           },
@@ -202,8 +692,15 @@
             "items": {
               "type": "object",
               "properties": {
-                "field_id": { "type": "string" },
-                "order": { "type": "array", "items": { "type": "string" } }
+                "field_id": {
+                  "type": "string"
+                },
+                "order": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             }
           },
@@ -213,15 +710,38 @@
                 "type": "object",
                 "description": "Tableau's built-in 'Measure Names/Measure Values' virtual pivot (dragging the Measure Names pseudo-dimension onto rows/columns/label so Measure Values can carry N real measures at once). No direct Power BI equivalent - resolved here so consumers don't have to reverse-parse an UNRESOLVED:... shelf reference themselves.",
                 "properties": {
-                  "axis": { "type": "string", "enum": ["rows", "columns", "label"], "description": "Which shelf carried the 'Measure Names' (or, as a fallback signal, 'Multiple Values') marker." },
-                  "pivoted_field_ids": { "type": "array", "items": { "type": "string" }, "description": "Real field ids Measure Values would have shown, resolved from the accompanying 'Measure Names' filter's member list. Empty if no such filter was found - inspect the worksheet by hand." },
-                  "note": { "type": "string" }
+                  "axis": {
+                    "type": "string",
+                    "enum": [
+                      "rows",
+                      "columns",
+                      "label"
+                    ],
+                    "description": "Which shelf carried the 'Measure Names' (or, as a fallback signal, 'Multiple Values') marker."
+                  },
+                  "pivoted_field_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Real field ids Measure Values would have shown, resolved from the accompanying 'Measure Names' filter's member list. Empty if no such filter was found - inspect the worksheet by hand."
+                  },
+                  "note": {
+                    "type": "string"
+                  }
                 }
               },
-              { "type": "null" }
+              {
+                "type": "null"
+              }
             ]
           },
-          "customized_tooltip_text": { "type": ["string", "null"] }
+          "customized_tooltip_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       }
     },
@@ -229,29 +749,81 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "name", "size", "zones"],
+        "required": [
+          "id",
+          "name",
+          "size",
+          "zones"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
           "size": {
             "type": "object",
             "properties": {
-              "width": { "type": "number" },
-              "height": { "type": "number" },
-              "sizing_mode": { "type": "string", "enum": ["fixed", "automatic", "range"] }
+              "width": {
+                "type": "number"
+              },
+              "height": {
+                "type": "number"
+              },
+              "sizing_mode": {
+                "type": "string",
+                "enum": [
+                  "fixed",
+                  "automatic",
+                  "range"
+                ]
+              }
             }
           },
-          "zones": { "$ref": "#/definitions/zone" },
+          "zones": {
+            "$ref": "#/definitions/zone"
+          },
           "actions": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "type": { "type": "string", "enum": ["filter", "highlight", "url", "parameter"] },
-                "field_id": { "type": ["string", "null"] },
-                "source_worksheet_id": { "type": ["string", "null"] },
-                "target_worksheet_ids": { "type": "array", "items": { "type": "string" } },
-                "run_on": { "type": "string", "enum": ["select", "hover", "menu"] }
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "filter",
+                    "highlight",
+                    "url",
+                    "parameter"
+                  ]
+                },
+                "field_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_worksheet_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "target_worksheet_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "run_on": {
+                  "type": "string",
+                  "enum": [
+                    "select",
+                    "hover",
+                    "menu"
+                  ]
+                }
               }
             }
           }
@@ -261,10 +833,28 @@
     "theme": {
       "type": "object",
       "properties": {
-        "palette_hexes": { "type": "array", "items": { "type": "string" } },
-        "font_family": { "type": ["string", "null"] },
-        "background": { "type": ["string", "null"] },
-        "source_note": { "type": "string", "description": "Tableau has no single global theme file - this is a best-effort aggregation from per-worksheet color encodings/palettes; treat as a starting point, not an authoritative theme to clone." }
+        "palette_hexes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "font_family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "background": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_note": {
+          "type": "string",
+          "description": "Tableau has no single global theme file - this is a best-effort aggregation from per-worksheet color encodings/palettes; treat as a starting point, not an authoritative theme to clone."
+        }
       }
     },
     "limitations_encountered": {
@@ -272,12 +862,38 @@
       "description": "Appended to by every pipeline stage (parser + subagents). Raw material for the capabilities & limitations writeup.",
       "items": {
         "type": "object",
-        "required": ["item", "issue", "severity"],
+        "required": [
+          "item",
+          "issue",
+          "severity"
+        ],
         "properties": {
-          "item": { "type": "string", "description": "id of the affected worksheet/dashboard/field" },
-          "issue": { "type": "string" },
-          "severity": { "type": "string", "enum": ["info", "low", "medium", "high"] },
-          "stage": { "type": "string", "enum": ["parse", "semantic_build", "report_build", "deploy", "validate"] }
+          "item": {
+            "type": "string",
+            "description": "id of the affected worksheet/dashboard/field"
+          },
+          "issue": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "parse",
+              "semantic_build",
+              "report_build",
+              "deploy",
+              "validate"
+            ]
+          }
         }
       }
     }
@@ -286,28 +902,112 @@
     "shelfField": {
       "type": "object",
       "properties": {
-        "field_id": { "type": "string" },
-        "aggregation": { "type": ["string", "null"] },
-        "derivation": { "type": ["string", "null"], "description": "Tableau column-instance derivation, e.g. Sum, None, User, Year, Quarter" },
-        "nested_with": { "type": ["string", "null"], "description": "field_id this is grouped/nested with on the same shelf, from Tableau's (a / b) shelf notation" }
+        "field_id": {
+          "type": "string"
+        },
+        "aggregation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "derivation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Tableau column-instance derivation, e.g. Sum, None, User, Year, Quarter"
+        },
+        "nested_with": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "field_id this is grouped/nested with on the same shelf, from Tableau's (a / b) shelf notation"
+        }
       }
     },
     "zone": {
       "type": "object",
-      "required": ["type", "x", "y", "w", "h"],
+      "required": [
+        "type",
+        "x",
+        "y",
+        "w",
+        "h"
+      ],
       "properties": {
-        "id": { "type": "string" },
-        "type": { "type": "string", "enum": ["layout-basic", "layout-flow", "layout-floating", "worksheet", "text", "image", "title", "filter", "parameter", "legend"] },
-        "x": { "type": "number" },
-        "y": { "type": "number" },
-        "w": { "type": "number" },
-        "h": { "type": "number" },
-        "direction": { "type": ["string", "null"], "enum": ["horizontal", "vertical", null] },
-        "worksheet_id": { "type": ["string", "null"] },
-        "field_id": { "type": ["string", "null"] },
-        "text_html": { "type": ["string", "null"] },
-        "background_color": { "type": ["string", "null"] },
-        "children": { "type": "array", "items": { "$ref": "#/definitions/zone" } }
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "layout-basic",
+            "layout-flow",
+            "layout-floating",
+            "worksheet",
+            "text",
+            "image",
+            "title",
+            "filter",
+            "parameter",
+            "legend"
+          ]
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        },
+        "direction": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "horizontal",
+            "vertical",
+            null
+          ]
+        },
+        "worksheet_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "field_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_html": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "background_color": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/zone"
+          }
+        }
       }
     }
   }

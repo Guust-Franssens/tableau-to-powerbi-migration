@@ -1,0 +1,64 @@
+<?xml version='1.0' encoding='utf-8' ?>
+
+<!-- Minimal LIVE Databricks workbook. Two sources on the SAME host but DIFFERENT SQL warehouses,
+     which is the case that used to collapse into byte-identical connection records. The second one
+     deliberately uses Tableau's feature-control-prefixed attribute spelling
+     (`_.fcp.DatabricksCatalog.true...`), which real workbooks emit when that document-format flag is
+     active. Attribute shapes verified against real .twb files (Tableau 2026.1 output). -->
+<workbook original-version='18.1' source-build='2026.1.0 (20261.26.0226.1626)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <document-format-change-manifest>
+    <DatabricksCatalog />
+  </document-format-change-manifest>
+  <datasources>
+    <datasource caption='Orders Live' inline='true' name='federated.dbxlive1' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='adb-1111.11.azuredatabricks.net' name='databricks.wh1'>
+            <connection authentication='oauth' class='databricks' dbname='main' instanceurl='https://adb-1111.11.azuredatabricks.net/oidc' schema='sales' server='adb-1111.11.azuredatabricks.net' v-http-path='/sql/1.0/warehouses/aaaaaaaaaaaaaaaa' />
+          </named-connection>
+        </named-connections>
+        <relation connection='databricks.wh1' name='orders' table='[main].[sales].[orders]' type='table' />
+      </connection>
+      <column caption='Amount' datatype='real' name='[amount]' role='measure' type='quantitative' />
+    </datasource>
+    <datasource caption='Returns Live' inline='true' name='federated.dbxlive2' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='adb-1111.11.azuredatabricks.net' name='databricks.wh2'>
+            <connection _.fcp.DatabricksCatalog.true...dbname='main' _.fcp.DatabricksCatalog.true...v-http-path='sql/1.0/warehouses/bbbbbbbbbbbbbbbb' authentication='oauth' class='databricks' schema='sales' server='adb-1111.11.azuredatabricks.net' />
+          </named-connection>
+        </named-connections>
+        <relation connection='databricks.wh2' name='returns' table='[main].[sales].[returns]' type='table' />
+      </connection>
+      <column caption='Returned' datatype='string' name='[returned]' role='dimension' type='nominal' />
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Amount by Return'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Orders Live' name='federated.dbxlive1' />
+          </datasources>
+          <datasource-dependencies datasource='federated.dbxlive1'>
+            <column caption='Amount' datatype='real' name='[amount]' role='measure' type='quantitative' />
+            <column-instance column='[amount]' derivation='Sum' name='[sum:amount:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+          </pane>
+        </panes>
+        <rows>[federated.dbxlive1].[sum:amount:qk]</rows>
+      </table>
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Live Overview'>
+      <zones>
+        <zone h='100000' id='4' name='Amount by Return' w='100000' x='0' y='0' />
+      </zones>
+    </dashboard>
+  </dashboards>
+</workbook>

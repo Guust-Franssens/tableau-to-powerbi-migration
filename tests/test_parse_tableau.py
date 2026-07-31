@@ -15,6 +15,8 @@ from parse_tableau import _parse_published_datasource, parse_workbook  # noqa: E
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
 TDS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "standalone_datasource.tds"
+DATABRICKS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "databricks_live.twb"
+COVERAGE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "coverage_probe.twb"
 
 
 def test_parses_top_level_shape():
@@ -337,3 +339,109 @@ def test_parser_and_server_lineage_agree_on_the_dedup_key():
     assert parsed["id"] == "Sales Master"  # percent-decoded, not 'Sales%20Master'
     assert parsed["key"] == dedup_key("Finance", "Sales Master")
     assert parsed["key"] == "finance/sales master"
+
+
+def test_live_databricks_captures_http_path_and_schema():
+    """A live Databricks source must carry the coordinates Power BI needs to reach the data.
+
+    `server` + `dbname` alone are not enough: without `schema` the table cannot be located inside the
+    catalog, and without `http_path` the model cannot address a warehouse at all. This regression
+    exists because both were silently dropped, which also made the next test's case unrepresentable.
+    """
+    spec = parse_workbook(DATABRICKS_FIXTURE)
+    orders = spec["data_sources"][0]["connection"]
+    assert orders["class"] == "databricks"
+    assert orders["powerbi_target"] == "live_source"
+    assert orders["server"] == "adb-1111.11.azuredatabricks.net"
+    assert orders["database"] == "main"
+    assert orders["schema"] == "sales"
+    assert orders["http_path"] == "/sql/1.0/warehouses/aaaaaaaaaaaaaaaa"
+
+
+def test_two_warehouses_on_one_host_are_distinguishable():
+    """Power BI keys its credential cache on host AND httpPath, so two sources on the same host but
+    different warehouses are two DIFFERENT credential gates. If the parser drops httpPath they
+    collapse into identical connection records and that distinction becomes unrecoverable."""
+    spec = parse_workbook(DATABRICKS_FIXTURE)
+    first, second = (ds["connection"] for ds in spec["data_sources"][:2])
+    assert first["server"] == second["server"]
+    assert first["http_path"] != second["http_path"]
+    assert first != second
+
+
+def test_feature_control_prefixed_attributes_are_read():
+    """Tableau re-spells attributes as `_.fcp.<Feature>.true...<name>` when a document-format flag is
+    active (seen on real DatabricksCatalog workbooks). Reading only the plain name silently drops
+    them. The second fixture source uses ONLY the prefixed spelling, and also omits the leading
+    slash, which the parser normalises."""
+    spec = parse_workbook(DATABRICKS_FIXTURE)
+    returns = spec["data_sources"][1]["connection"]
+    assert returns["database"] == "main"
+    assert returns["http_path"] == "/sql/1.0/warehouses/bbbbbbbbbbbbbbbb"
+
+
+def test_qualified_table_name_survives():
+    """`name` is only Tableau's short alias; the catalog/schema qualification lives on `table=`.
+    A live warehouse query needs the full three-part path."""
+    spec = parse_workbook(DATABRICKS_FIXTURE)
+    table = spec["data_sources"][0]["tables"][0]
+    assert table["name"] == "orders"
+    assert table["qualified_name"] == "[main].[sales].[orders]"
+
+
+def test_live_source_limitation_names_the_compute_path():
+    """The live-source limitation is what the orchestrator reads aloud to the user before building.
+    It must name the specific warehouse, because that is what the credential gate is keyed on."""
+    spec = parse_workbook(DATABRICKS_FIXTURE)
+    live = [x for x in spec["limitations_encountered"] if "LIVE source" in x["issue"]]
+    assert len(live) == 2
+    assert any("/sql/1.0/warehouses/aaaaaaaaaaaaaaaa" in x["issue"] for x in live)
+
+
+def test_unsupported_tableau_features_are_never_dropped_silently():
+    """A workbook using Groups, Sets, hierarchies, data-source/context filters, forecasts, trend
+    lines, Stories and a data blend parsed with **zero** limitations before this check existed.
+
+    The parser does not model these, and does not need to. What it must not do is hide them: a gap
+    the migrator knows about is a scoping conversation, a gap it cannot see is a report that looks
+    complete and is quietly wrong. The data-source filter is the sharpest case - it constrains every
+    worksheet, so dropping it inflates every number in the migration with no visible symptom.
+    """
+    spec = parse_workbook(COVERAGE_FIXTURE)
+    issues = [x["issue"] for x in spec["limitations_encountered"] if "UNSUPPORTED TABLEAU FEATURE" in x["issue"]]
+    blob = " ".join(issues)
+    for feature in (
+        "data source filter",
+        "Tableau Group / Set",
+        "hierarchy (drill path)",
+        "context filter",
+        "forecast",
+        "trend line",
+        "Tableau Story",
+        "data blend",
+    ):
+        assert feature in blob, f"{feature} was dropped silently"
+
+
+def test_unsupported_feature_findings_name_the_offending_object():
+    """ "Something unsupported exists somewhere" is not actionable. The entry has to name it."""
+    spec = parse_workbook(COVERAGE_FIXTURE)
+    issues = [x["issue"] for x in spec["limitations_encountered"] if "UNSUPPORTED TABLEAU FEATURE" in x["issue"]]
+    assert any("State Group" in i and "Top Customers Set" in i for i in issues)
+    assert any("Sales Story" in i for i in issues)
+    assert any("Geography" in i for i in issues)
+
+
+def test_data_source_filter_and_blend_are_high_severity():
+    """Both silently change NUMBERS rather than appearance, so they cannot be low-priority notes."""
+    spec = parse_workbook(COVERAGE_FIXTURE)
+    for feature in ("data source filter", "data blend", "context filter"):
+        entry = next(x for x in spec["limitations_encountered"] if feature in x["issue"])
+        assert entry["severity"] == "high", f"{feature} must be high severity"
+
+
+def test_no_unsupported_feature_false_positives_on_ordinary_workbooks():
+    """A plain workbook must stay quiet - a checker that cries wolf gets ignored."""
+    for fixture in (FIXTURE, PUBLISHED_FIXTURE, DATABRICKS_FIXTURE):
+        spec = parse_workbook(fixture)
+        assert not [x for x in spec["limitations_encountered"] if "UNSUPPORTED TABLEAU FEATURE" in x["issue"]]
