@@ -9,6 +9,7 @@ though the artifact itself is gitignored.
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -78,6 +79,37 @@ def test_no_build_artifacts_are_published(built: Path) -> None:
 def test_the_diagnostic_probe_skill_is_never_published() -> None:
     """`sentinel-probe` is a context-visibility experiment, not something a consumer should install."""
     assert "sentinel-probe" not in build_plugin.SHIPPED_SKILLS
+
+
+def test_rebuilding_preserves_a_git_clone(tmp_path: Path) -> None:
+    """The publish workflow is clone -> rebuild -> commit -> push, so a rebuild must not nuke `.git`.
+
+    It used to: `build()` called `shutil.rmtree(out)` unconditionally, which (a) deleted the clone's
+    history, turning every republish into a fresh `git init`, and (b) crashed outright on Windows with
+    `PermissionError: [WinError 5]`, because git marks objects under `.git/objects` read-only and
+    `os.unlink` refuses those.
+    """
+    out = tmp_path / "marketplace"
+    build_plugin.build(out)
+
+    # Stand in for a clone: a .git dir containing a read-only object, exactly what tripped rmtree.
+    objects = out / ".git" / "objects" / "07"
+    objects.mkdir(parents=True)
+    marker = objects / "d19e41700f821b3fb26bbe25216b7e1bad6577"
+    marker.write_text("object", encoding="utf-8")
+    marker.chmod(stat.S_IREAD)
+    (out / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    stale = out / "plugins" / build_plugin.PLUGIN_NAME / "skills" / "removed-skill"
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text("gone next build", encoding="utf-8")
+
+    build_plugin.build(out)
+
+    assert marker.is_file(), "rebuild destroyed the clone's git objects"
+    assert (out / ".git" / "HEAD").is_file(), "rebuild destroyed .git/HEAD"
+    assert not stale.exists(), "rebuild left generated content from a previous run"
+    assert (out / ".claude-plugin" / "marketplace.json").is_file(), "rebuild did not regenerate the manifest"
 
 
 def test_check_detects_drift(tmp_path: Path) -> None:
