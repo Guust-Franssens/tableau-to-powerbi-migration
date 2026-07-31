@@ -243,11 +243,19 @@ that is what orchestrator step 12 is for.
      list. So a skill can at best be *invoked* by name — it can never silently carry content the way
      the SDK's `skills:` preload does (§2).
 
-   **Consequence for persona authoring:** an instruction of the form "use the `<x>` skill" is not
-   reliable for a **repo-local** skill inside a subagent, because the name is not registered there.
-   Prefer an explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary
-   `view` call and demonstrably works. Promoting the skill into a plugin/global collection is the
-   other fix, and is what would make the name resolvable.
+   **Consequence for persona authoring:** an instruction of the form "use the `<x>` skill" **does not
+   work** for a repo-local skill inside a subagent. A second probe (2026-07-31) settled the narrower
+   question of whether an *explicit* invocation resolves even though the name is unlisted: a
+   subagent was told to call the `skill` tool with `sentinel-probe` and nothing else. It has the
+   tool, it made the call, and it got a hard failure:
+
+   > `Skill "sentinel-probe" not found. Available skills: account-explorer, acr, … xlsx`
+
+   — 91 names, every one from a plugin or user-global directory, no project-local entry. So naming
+   the skill in the persona is **not** a workaround for it being unlisted; both paths fail. Use an
+   explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary `view` call
+   and demonstrably works. Promoting the bundle into a plugin/global collection is the only fix that
+   would make the *name* resolve.
 
 2. **Does `subagentStart` fire and inject? — ⬜ STILL OPEN (needs a fresh session).**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload
@@ -269,9 +277,8 @@ that is what orchestrator step 12 is for.
 
 Recorded so nobody re-derives them or fills the gap with a plausible guess:
 
-1. Whether a repo-local skill, once *named* in a persona, can still be **invoked** from inside a
-   subagent. (That it is not *listed* there is now measured — §6.1. The narrower question of whether
-   invocation-by-name resolves anyway is untested; prefer a file path either way.)
+1. ~~Whether a repo-local skill, once *named* in a persona, can still be **invoked** from inside a
+   subagent.~~ **Answered 2026-07-31 — no.** See §6.1; the `skill` tool rejects the name outright.
 2. Whether `subagentStart`'s `additionalContext` has any size cap. The **field name is documented**
    (§4) — that entry previously said it was inferred, which was wrong. What is genuinely missing is a
    dedicated Output block and any stated cap; the 10 KB figure belongs to `postToolUse`.
