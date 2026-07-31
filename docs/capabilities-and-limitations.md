@@ -41,10 +41,15 @@ observed on a specific workbook, that workbook's slug is cited so the claim is c
    `.github/pbi.kb/` visual cookbook (26 known-good `visual.json` templates harvested from real
    migrations) so structurally unusual visuals are built from proven encodings rather than
    invented ones.
-6. **Preparing the model for AI/Copilot.** `scripts/check_ai_readiness.py` reports description coverage
-   across tables, columns, and measures and flags categorical columns that do not enumerate their
-   domain values. Getting to near-100% coverage is a required final phase of `pbi-semantic-builder`, so
-   the generated model can answer Power BI Copilot / natural-language questions.
+6. **Preparing the model for AI/Copilot.** The
+   [`powerbi-ai-readiness`](../.github/skills/powerbi-ai-readiness/SKILL.md) skill.
+   `check_ai_readiness.py` reports description coverage across tables, columns, and measures and flags
+   categorical columns that do not enumerate their domain values; `set_ai_instructions.py` stamps the
+   model's AI instructions into its culture TMDL and forces `qnaEnabled: true`. Getting to near-100%
+   coverage is a required final phase of `pbi-semantic-builder`, so the generated model can answer
+   Power BI Copilot / natural-language questions. What that does **not** prove is covered in the
+   skill's "Evidence and limits": the instructions provably survive publish, but "Copilot obeys them"
+   is unverified, and consumption additionally needs a post-deploy refresh.
 7. **Full traceability.** Every parser decision, translation choice, and simplification is recorded in a
    structured `limitations_encountered` list. Nothing is silently guessed.
 

@@ -54,8 +54,8 @@ session is running, so plugin updates remain a manual, between-sessions step.
 This toolkit is not self-contained: its agents build on Microsoft's official **Fabric / Power BI
 skills** (published as a Copilot *plugin*) and talk to Power BI through **MCP servers**. A clone needs
 all three layers below. The agent files under `.github/agents/` are already committed and load
-automatically; `.github/skills/` is an enabled skill location (see `.vscode/settings.json`) that is
-currently empty — repo-local skills dropped there load automatically too.
+automatically; `.github/skills/` is an enabled skill location (see `.vscode/settings.json`) — the
+repo-local skills committed there load automatically too.
 
 ### 1. Skill plugin — `powerbi-authoring@fabric-collection`
 
@@ -103,7 +103,23 @@ Copilot CLI users register the same servers with `/mcp`, or copy them into
 - Agents: [`.github/agents/*.agent.md`](.github/agents/) — `tableau-migrator` (orchestrator),
   `pbi-semantic-builder`, `pbi-report-builder`, `pbi-migration-validator`.
 - Any repo-specific skills live under `.github/skills/` (already an enabled skill location via
-  `.vscode/settings.json`).
+  `.vscode/settings.json`). Committed today:
+  - [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md) — refresh a local PBIP/TMDL model
+    in Power BI Desktop and persist it to `.pbi/cache.abf` (AMO `ImageSave`, UIA fallback), plus the
+    edit-then-refresh-then-save ordering rule and the pid-binding rule.
+  - [`powerbi-ai-readiness`](.github/skills/powerbi-ai-readiness/SKILL.md) — make a semantic model
+    answer natural-language questions correctly: descriptions, enumerated domains, model-level AI
+    instructions (`CustomInstructions`), and the `qnaEnabled` switch that silently voids all of it.
+    Includes the writing guide (`docs/ai-instructions-authoring-guide.md` is now a stub pointing here)
+    and the scoped gate `set_ai_instructions.py --check --strict --model <model>`.
+
+  Both are deliberately source-tool agnostic so they port to Qlik/Cognos migrations or a global skill
+  location, and packaged to match: each folder carries its own `scripts/` and `tests/`, so **copying
+  that one folder** takes the whole procedure with it. `tests/test_skills.py` gates their links and
+  executes that claim — it copies each folder to a temp dir and runs its bundled tests with this repo
+  unimportable. `scripts/probe_desktop_query.py`, `scripts/refresh_pbip_model.py`,
+  `scripts/set_ai_instructions.py` and `scripts/check_ai_readiness.py` remain as forwarding shims for
+  callers that predate the moves.
 - **Visual cookbook: [`.github/pbi.kb/visual-cookbook.md`](.github/pbi.kb/visual-cookbook.md) +
   [`.github/pbi.kb/visuals/`](.github/pbi.kb/visuals/)** — a committed library of worked,
   `validate`-passing PBIR `visual.json` encodings, each with roles, the Tableau idiom it maps to, and a
@@ -147,7 +163,9 @@ If a version differs, re-verify the version-specific Gotchas in `.github/agents/
 `uv venv && uv sync --all-extras` — the deterministic parser (`scripts/parse_tableau.py`), harvester,
 showcase, and validation scripts (`--all-extras` pulls `tableauhyperapi`/`playwright`/`pillow`, which
 several documented scripts import). Lint/format with `ruff`; the parser has a `pytest` regression suite
-in `tests/`. **`uv.lock` is deliberately gitignored** — see the note in `.gitignore`.
+in `tests/`, and a skill bundle keeps its own suite next to its scripts (`pyproject.toml`'s
+`testpaths` covers both — pytest skips dot-directories by default). **`uv.lock` is deliberately
+gitignored** — see the note in `.gitignore`.
 
 ### 6. Preflight — verify everything above in one command
 

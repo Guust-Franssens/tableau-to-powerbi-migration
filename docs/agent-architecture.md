@@ -24,7 +24,12 @@ A custom agent invoked **as a subagent** (via the Task/agent tool) receives:
 - the task text the orchestrator passes it.
 
 It does **not** receive `AGENTS.md`, `.github/copilot-instructions.md`, user-global instructions, or
-the parent's conversation. Skills are not inherited from the parent either.
+the parent's conversation. Skills are not inherited from the parent either — that one is now
+documented, not just measured:
+
+> "Skills are **opt-in**: agents receive no skills by default, and sub-agents do not inherit skills
+> from the parent. Skill names are resolved from the session-level `skillDirectories`."
+> — <https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/custom-agents> (Per-agent skills)
 
 This is **intended design**, not a bug — GitHub's SDK states it plainly:
 
@@ -145,6 +150,8 @@ session to separate the two; §6.2 has the outcome table.
 | `docs/tableau-dax-translation-guide.md` (24k) | External; persona says "Read … before starting" | Only if the agent actually reads it — advisory |
 | `docs/migration-spec.md` (9k) | External; same instruction | Same |
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
+| `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | **Only if the persona points at the path.** §6.1 measured that a repo-local skill is not in a subagent's registry at all, so the *name* does not resolve there — the persona must say **"read `.github/skills/pbip-model-refresh/SKILL.md`"**, which is an ordinary `view` call and does reach a subagent |
+| `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | Same — `pbi-semantic-builder` must read it **by path**. It absorbs `docs/ai-instructions-authoring-guide.md` (now a stub) and is *meant* to absorb that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8). **The persona edit is pending:** `.github/agents/` is off-limits to the Copilot coding agent, so until a maintainer replaces those lines with the one-line read-by-path imperative, the third copy is still there and no budget is reclaimed |
 | Per-agent Gotchas | Inline in each persona | Yes |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
@@ -152,6 +159,44 @@ different from passive inheritance, and the repo already depends on it for ~44 K
 anti-pattern ("requests to refer to external resources") is about *unresolved ambient conformance*
 ("conform to styleguide.md"), not an imperative, verifiable step. But it is still **discretionary**:
 an agent may skip it.
+
+**Why package procedural knowledge as a skill anyway**, now that §6.1 has resolved *against* a skill
+being auto-delivered to a subagent. Four reasons, none of which depended on that outcome:
+
+1. **It is strictly no worse than the status quo.** A skill file is still a readable path, so the
+   floor is today's advisory "read this file" behaviour — and per §6.1 that floor is also the
+   ceiling inside a subagent, until a bundle is promoted to a plugin. There is no downside branch: a
+   bundle is never worse than the paragraph it replaced.
+2. **It reclaims persona budget.** `tableau-migrator` is already 108% of the 30,000-char cap (§2), and
+   the tail of a persona is exactly where the accumulated knowledge lives. Procedure that is not
+   Tableau-specific does not belong in a Tableau persona at all.
+3. **It is the only shape that ports.** Nothing about refreshing and persisting a PBIP — or about
+   `CustomInstructions` and `qnaEnabled` — is source-tool-specific; the input is already a Power BI
+   model, so the same procedure is needed by a Qlik or Cognos migration. **One self-contained folder**
+   moves — `SKILL.md`, the scripts it runs and the tests that gate them; a paragraph inside
+   `pbi-semantic-builder.agent.md` does not. That is why each bundle owns its `scripts/` and `tests/`
+   instead of borrowing the repo's, and why `tests/test_skills.py` proves it by copying the folder to
+   a temp dir and running its tests there with this repo unimportable.
+4. **It collapses duplicate copies into one.** `powerbi-ai-readiness` replaced a persona section and a
+   `docs/` guide that stated the same recipe twice; they had already diverged (one listed the
+   "Verified headline numbers" section, the other did not), which is §8's "conflicting instructions
+   across files" in the wild. A skill gives the knowledge exactly one home, and
+   `tests/test_skills.py` now fails if the section template reappears elsewhere.
+
+**Relocation does not enforce anything, though.** Prose is advisory wherever it lives (§8), so moving
+words only pays off if the mandate rides on an exit code. `powerbi-ai-readiness` therefore ships the
+scoped gate the prose always implied: `set_ai_instructions.py --check --strict --model <model>` fails
+closed on the one model an agent is accountable for, while the repo-wide `--check` stays advisory in
+CI as a visible backlog. A repo-wide `--strict` would fail on every model that predates the layer,
+which is a gate nobody can ever switch on.
+
+**How a persona must reference a bundle.** §6.1 settled the discriminator: a subagent listed 91
+skills, every one from a plugin or user-global directory and **none** project-local — so
+**registration scope**, not the subagent boundary, is what excludes a repo-local skill. A persona
+must therefore say **"read `.github/skills/<name>/SKILL.md`"** (an ordinary `view` call, which
+demonstrably reaches a subagent) and **not** "use the `<name>` skill", whose name does not resolve
+there. Promoting a proven bundle into a plugin/global collection is the fix that would make the name
+work; authoring the procedure as a bundle now keeps that path open without a rewrite.
 
 ### Why the shared block stays generated into the personas
 
@@ -198,11 +243,19 @@ that is what orchestrator step 12 is for.
      list. So a skill can at best be *invoked* by name — it can never silently carry content the way
      the SDK's `skills:` preload does (§2).
 
-   **Consequence for persona authoring:** an instruction of the form "use the `<x>` skill" is not
-   reliable for a **repo-local** skill inside a subagent, because the name is not registered there.
-   Prefer an explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary
-   `view` call and demonstrably works. Promoting the skill into a plugin/global collection is the
-   other fix, and is what would make the name resolvable.
+   **Consequence for persona authoring:** an instruction of the form "use the `<x>` skill" **does not
+   work** for a repo-local skill inside a subagent. A second probe (2026-07-31) settled the narrower
+   question of whether an *explicit* invocation resolves even though the name is unlisted: a
+   subagent was told to call the `skill` tool with `sentinel-probe` and nothing else. It has the
+   tool, it made the call, and it got a hard failure:
+
+   > `Skill "sentinel-probe" not found. Available skills: account-explorer, acr, … xlsx`
+
+   — 91 names, every one from a plugin or user-global directory, no project-local entry. So naming
+   the skill in the persona is **not** a workaround for it being unlisted; both paths fail. Use an
+   explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary `view` call
+   and demonstrably works. Promoting the bundle into a plugin/global collection is the only fix that
+   would make the *name* resolve.
 
 2. **Does `subagentStart` fire and inject? — ⬜ STILL OPEN (needs a fresh session).**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload
@@ -224,9 +277,8 @@ that is what orchestrator step 12 is for.
 
 Recorded so nobody re-derives them or fills the gap with a plausible guess:
 
-1. Whether a repo-local skill, once *named* in a persona, can still be **invoked** from inside a
-   subagent. (That it is not *listed* there is now measured — §6.1. The narrower question of whether
-   invocation-by-name resolves anyway is untested; prefer a file path either way.)
+1. ~~Whether a repo-local skill, once *named* in a persona, can still be **invoked** from inside a
+   subagent.~~ **Answered 2026-07-31 — no.** See §6.1; the `skill` tool rejects the name outright.
 2. Whether `subagentStart`'s `additionalContext` has any size cap. The **field name is documented**
    (§4) — that entry previously said it was inferred, which was wrong. What is genuinely missing is a
    dedicated Output block and any stated cap; the 10 KB figure belongs to `postToolUse`.

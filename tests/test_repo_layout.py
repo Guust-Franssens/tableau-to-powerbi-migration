@@ -20,14 +20,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
-import check_ai_readiness
-import set_ai_instructions
-import set_data_folder
 from published_datasource_registry import _by_path_from_report, _near_misses, _normalize_key
 from set_data_folder import ABSOLUTE_USER_PATH_RE, _tree_and_slug_for
 from tableau_lineage import dedup_key
 
 TREES = ("examples", "migrations/workbooks", "migrations/datasources")
+# Every script that walks the trees, by PATH rather than by import: two of them now ship inside the
+# `powerbi-ai-readiness` skill, and `scripts/` keeps same-named forwarding shims. A bare `import
+# set_ai_instructions` here would bind the shim (which scans nothing) AND poison `sys.modules` for
+# the bundled suite that has to import the real one.
+TREE_SCANNERS = (
+    REPO_ROOT / "scripts" / "set_data_folder.py",
+    REPO_ROOT / ".github/skills/powerbi-ai-readiness/scripts/set_ai_instructions.py",
+    REPO_ROOT / ".github/skills/powerbi-ai-readiness/scripts/check_ai_readiness.py",
+)
 
 
 def _expr(tree: str, slug: str) -> Path:
@@ -55,10 +61,11 @@ def test_data_folder_keeps_the_slug_in_every_tree(tree: str, slug: str) -> None:
 
 def test_all_three_trees_are_scanned_for_models() -> None:
     """A tree missing from a scanner is silently never localized / AI-stamped / audited."""
-    for module in (set_data_folder, set_ai_instructions, check_ai_readiness):
-        source = Path(module.__file__).read_text(encoding="utf-8")
+    for script in TREE_SCANNERS:
+        assert script.exists(), f"{script} moved - repoint this test at its new home"
+        source = script.read_text(encoding="utf-8")
         for tree in TREES:
-            assert f'"{tree}"' in source, f"{Path(module.__file__).name} does not scan {tree}"
+            assert f'"{tree}"' in source, f"{script.name} does not scan {tree}"
 
 
 def test_shared_model_by_path_hop_count() -> None:
