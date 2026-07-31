@@ -277,7 +277,7 @@ silent-failure category above.
    explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary `view` call
    and demonstrably works.
 
-   **The fix is to publish, and it is proven end to end (2026-07-31).** Packaging the two
+   **The fix is to publish — proven, with the plugin copy isolated (2026-07-31).** Packaging the two
    source-tool-agnostic bundles as a marketplace plugin makes the name resolve:
 
    ```
@@ -286,15 +286,35 @@ silent-failure category above.
    → Plugin "powerbi-migration-skills" installed successfully. Installed 2 skills.
    ```
 
-   A **fresh** session then lists both, and invoking one by name returns its body:
-   `skill(powerbi-ai-readiness)` → `# Power BI AI readiness`. Built by
-   `scripts/build_plugin.py`; see §5 for why it publishes to a separate repo.
+   Run from a directory **outside this repo**, so no `.github/skills/` copy can shadow it, a fresh
+   session lists both and `skill(powerbi-ai-readiness)` succeeds, loading from:
 
-   ⚠️ **Two traps when testing this.** (a) Skills are snapshotted at **session start** — a plugin
-   installed mid-session is invisible to that session *and* its subagents, which looks exactly like a
-   broken plugin. Restart before concluding anything. (b) In non-interactive `-p` mode, subagents get
-   **no `skill` tool at all** (`Tool 'skill' is not available.`), so `-p` cannot test the subagent hop.
-   Neither is a defect in the plugin; both produce convincing false negatives.
+   ```
+   C:\Users\<user>\.copilot\installed-plugins\powerbi-migration-collection\
+       powerbi-migration-skills\skills\powerbi-ai-readiness
+   ```
+
+   That path is the proof. Built by `scripts/build_plugin.py`; see §5 for why it publishes to a
+   separate repo.
+
+   ⚠️ **Three traps when testing this.** Each produced a convincing false result here:
+
+   1. **Skills are snapshotted at session start.** A plugin installed mid-session is invisible to that
+      session *and* its subagents — indistinguishable from a broken plugin. A subagent probed this way
+      even concluded "the defect is specific to this plugin"; it was not. **Restart before judging.**
+   2. **Testing from inside this repo proves nothing about the plugin.** `.github/skills/` supplies the
+      same two names, and the *project* copy wins — `skill(powerbi-ai-readiness)` reported a base
+      directory under `.github/skills/`, not the plugin. A green result here is a false *positive*.
+      Always isolate from an unrelated directory.
+   3. **A subagent may have no `skill` tool at all.** Measured 2026-07-31 in two different agents
+      (`pbi-migration-validator`, `explore`): the tool is simply absent from their inventory
+      (`powershell`, `view`, `grep`, `glob`, MCP tools — no `skill`). Earlier in the same day, before a
+      CLI restart, the same validator persona *did* have it. No persona declares `tools:`, so this is
+      the runtime, not repo config — the session now runs with deferred tool loading. **Consequence:
+      a persona must never depend on invoking a skill by name.** Reading
+      `.github/skills/<x>/SKILL.md` by path is an ordinary `view` call and works in every
+      configuration measured; that is why the personas do it that way (#33), and publishing the plugin
+      does **not** change that guidance for subagents.
 
 2. **Does `subagentStart` fire and inject? — ⬜ STILL OPEN (needs a fresh session).**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload
