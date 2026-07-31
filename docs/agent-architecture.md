@@ -151,7 +151,7 @@ session to separate the two; §6.2 has the outcome table.
 | `docs/migration-spec.md` (9k) | External; same instruction | Same |
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
 | `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | **Only if the persona points at the path.** §6.1 measured that a repo-local skill is not in a subagent's registry at all, so the *name* does not resolve there — the persona must say **"read `.github/skills/pbip-model-refresh/SKILL.md`"**, which is an ordinary `view` call and does reach a subagent |
-| `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | Same — `pbi-semantic-builder` must read it **by path**. It absorbs `docs/ai-instructions-authoring-guide.md` (now a stub) and is *meant* to absorb that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8). **The persona edit is pending:** `.github/agents/` is off-limits to the Copilot coding agent, so until a maintainer replaces those lines with the one-line read-by-path imperative, the third copy is still there and no budget is reclaimed |
+| `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | Same — `pbi-semantic-builder` reads it **by path** (done, #33). It absorbed `docs/ai-instructions-authoring-guide.md` (now a stub) and that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8), now one |
 | Per-agent Gotchas | Inline in each persona | Yes |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
@@ -217,6 +217,27 @@ cheaper problem. **Rule: anything whose absence is silent and harmful stays inli
 *supplement*.** If the persona budget must come down, cut per-agent Gotchas that have gone stale —
 that is what orchestrator step 12 is for.
 
+**The same rule blocks the obvious next trim, so state it before someone tries it.** `Gotchas`
+sections are ~36% of `pbi-report-builder` (16,788 chars across three), which makes them the fattest
+remaining target — but relocating them into `.github/pbi.kb/` puts them in the *discretionary* row of
+the §5 table, and a gotcha the agent stops seeing is a defect it silently repeats. Gotchas are the
+"absence is silent and harmful" category almost by definition. The only safe reduction is **deleting
+ones with evidence they are obsolete** (fixed upstream, superseded by a script gate), which needs a
+real migration's retrospective — not a guess.
+
+Budget after #33 pointed `pbi-semantic-builder` at both bundles:
+
+| Persona | chars | % of 30k cap |
+|---|---|---|
+| `pbi-report-builder` | 46,051 | 153% |
+| `pbi-semantic-builder` | 42,796 | 142% (was 160% / 48,049) |
+| `tableau-migrator` | 32,574 | 108% |
+| `pbi-migration-validator` | 17,677 | 58% |
+
+Three are still over. That is a **portability risk, not a live bug** — Copilot CLI was measured not to
+enforce the cap (§2), and the hosted failure mode is untested. Track it; don't panic-trim into the
+silent-failure category above.
+
 ## 6. Experiments — one resolved, one still open
 
 1. **Do repository skills reach a subagent? — ✅ RESOLVED 2026-07-31: NO.**
@@ -254,8 +275,26 @@ that is what orchestrator step 12 is for.
    — 91 names, every one from a plugin or user-global directory, no project-local entry. So naming
    the skill in the persona is **not** a workaround for it being unlisted; both paths fail. Use an
    explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary `view` call
-   and demonstrably works. Promoting the bundle into a plugin/global collection is the only fix that
-   would make the *name* resolve.
+   and demonstrably works.
+
+   **The fix is to publish, and it is proven end to end (2026-07-31).** Packaging the two
+   source-tool-agnostic bundles as a marketplace plugin makes the name resolve:
+
+   ```
+   copilot plugin marketplace add Guust-Franssens/powerbi-migration-skills
+   copilot plugin install powerbi-migration-skills@powerbi-migration-collection
+   → Plugin "powerbi-migration-skills" installed successfully. Installed 2 skills.
+   ```
+
+   A **fresh** session then lists both, and invoking one by name returns its body:
+   `skill(powerbi-ai-readiness)` → `# Power BI AI readiness`. Built by
+   `scripts/build_plugin.py`; see §5 for why it publishes to a separate repo.
+
+   ⚠️ **Two traps when testing this.** (a) Skills are snapshotted at **session start** — a plugin
+   installed mid-session is invisible to that session *and* its subagents, which looks exactly like a
+   broken plugin. Restart before concluding anything. (b) In non-interactive `-p` mode, subagents get
+   **no `skill` tool at all** (`Tool 'skill' is not available.`), so `-p` cannot test the subagent hop.
+   Neither is a defect in the plugin; both produce convincing false negatives.
 
 2. **Does `subagentStart` fire and inject? — ⬜ STILL OPEN (needs a fresh session).**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload

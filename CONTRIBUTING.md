@@ -60,8 +60,14 @@ pylint .github/skills/powerbi-ai-readiness/scripts      # module name, so a comb
 
 `scripts/probe_desktop_query.py`, `scripts/refresh_pbip_model.py`, `scripts/set_ai_instructions.py`
 and `scripts/check_ai_readiness.py` are **forwarding shims** that `runpy` the bundled copies, so the
-existing `python scripts/…` invocations in the personas keep working. Delete them once every caller
-points at the skill path.
+existing `python scripts/…` invocations in the personas keep working.
+
+**Think before deleting them.** The stated goal was "delete once every caller points at the skill
+path", but measure the cost first: the personas call these short paths in ~10 places, and rewriting
+each to `python .github/skills/<bundle>/scripts/<name>.py` makes every persona *longer* — which fights
+the 30,000-char cap that motivated the bundles in the first place (`docs/agent-architecture.md` §5).
+A four-line shim that `tests/test_skills.py` proves still reaches its target is cheap; the personas are
+not. Delete them only if they actually go stale, not to tick off the plan.
 
 A bundled script must not assume its depth below the repo root — `parents[N]` resolves to the skill
 folder, where every glob silently matches nothing. Walk up for a known migration tree instead (see

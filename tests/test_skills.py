@@ -213,20 +213,29 @@ def test_the_bundled_scripts_are_the_ones_the_shims_and_docs_point_at() -> None:
 
 
 def _markdown_outside_the_agents_dir() -> list[Path]:
-    """Every committed markdown file except agent personas and generated instruction instances.
+    """Every **tracked** markdown file except agent personas and generated instruction instances.
 
-    `.github/agents/` is excluded because that directory is off-limits to the Copilot coding agent
-    that packaged this skill: the persona still carries a compressed copy of the template, and
-    removing it is tracked maintainer follow-up. `ai-instructions.md` files are excluded because they
-    are *instances* of the template - filling it in is the point, not drift.
+    `.github/agents/` is excluded because the persona carries a deliberately compressed pointer to
+    the template rather than the template itself. `ai-instructions.md` files are excluded because
+    they are *instances* of the template - filling it in is the point, not drift.
+
+    Enumerated with `git ls-files`, not `rglob`. An earlier version walked the filesystem while
+    claiming to list committed files, so it also swept up **gitignored build output**: once
+    `scripts/build_plugin.py` copied the skills into `dist/marketplace/`, the template legitimately
+    existed twice on disk and this guard failed on an artifact nobody committed. Tracking is the
+    property the guard actually cares about.
     """
-    skip_dirs = {".git", ".venv", "node_modules", "__pycache__"}
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "*.md"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
     return [
-        path
-        for path in sorted(REPO_ROOT.rglob("*.md"))
-        if not skip_dirs & set(path.relative_to(REPO_ROOT).parts)
-        and ".github/agents" not in path.relative_to(REPO_ROOT).as_posix()
-        and path.name != "ai-instructions.md"
+        REPO_ROOT / rel
+        for rel in sorted(filter(None, tracked.split("\0")))
+        if ".github/agents" not in rel and not rel.endswith("ai-instructions.md")
     ]
 
 
