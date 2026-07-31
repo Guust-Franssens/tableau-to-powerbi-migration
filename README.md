@@ -95,10 +95,12 @@ original dashboards belongs to their respective Tableau Public authors.
 - **PBIR visual cookbook** (`.github/pbi.kb/`): a `visual-cookbook.md` plus 27 known-good
   `visuals/*.visual.json` templates harvested from real migrations, so the report builder reuses
   verified PBIR JSON instead of guessing undocumented visual encodings.
-- **AI (Copilot) readiness pass** (`scripts/check_ai_readiness.py`): reports the share of tables,
-  columns, and measures that carry a TMDL description, and flags categorical columns that do not
-  enumerate their domain values, so the generated model is ready for Power BI Copilot and
-  natural-language Q&A. It is a required final phase in `pbi-semantic-builder`.
+- **AI (Copilot) readiness pass** — the [`powerbi-ai-readiness`](.github/skills/powerbi-ai-readiness/SKILL.md)
+  skill. `check_ai_readiness.py` reports the share of tables, columns, and measures that carry a TMDL
+  description and flags categorical columns that do not enumerate their domain values;
+  `set_ai_instructions.py` stamps the model's AI instructions into its culture TMDL, forces
+  `qnaEnabled: true` (false silently voids everything else), and gates one model with
+  `--check --strict --model`. It is a required final phase in `pbi-semantic-builder`.
 - **Preflight** (`scripts/preflight.ps1`): a dependency-free PowerShell bootstrap the orchestrator
   runs first. It checks Python and parser deps, the `powerbi-authoring` plugin, the MCP servers,
   Power BI Desktop and its Bridge CLI, `npx`, the .NET SDK, and the known-good CLI version matrix
@@ -154,11 +156,14 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
   users add the same with `/mcp`).
 - Repo-local agents (`.github/agents/`) are committed and load automatically. So are repo-local
   skills under `.github/skills/` (an enabled skill location — see `.vscode/settings.json`), which
-  currently ships [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md): refresh a local
-  PBIP model in Power BI Desktop and persist it to `cache.abf`. It is a **self-contained bundle** —
-  `SKILL.md` plus its own `scripts/` and `tests/` — so copying that one folder into a Qlik or Cognos
-  migration repo takes the whole procedure with it; a test proves that by running the copy's tests
-  outside this repo. Drop new skills in the same place.
+  currently ships two:
+  [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md) (refresh a local PBIP model in
+  Power BI Desktop and persist it to `cache.abf`) and
+  [`powerbi-ai-readiness`](.github/skills/powerbi-ai-readiness/SKILL.md) (descriptions, enumerated
+  domains, `CustomInstructions`, `qnaEnabled`, and how to write AI instructions that help rather than
+  mislead). Each is a **self-contained bundle** — `SKILL.md` plus its own `scripts/` and `tests/` — so
+  copying one folder into a Qlik or Cognos migration repo takes the whole procedure with it; a test
+  proves that by running the copy's tests outside this repo. Drop new skills in the same place.
 
 In Copilot CLI, install the plugin once with `/plugin` (add marketplace `microsoft/skills-for-fabric`,
 enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run

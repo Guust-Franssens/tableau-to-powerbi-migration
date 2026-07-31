@@ -115,6 +115,7 @@ That is consistent with hooks being loaded at session start, like instruction fi
 | `docs/migration-spec.md` (9k) | External; same instruction | Same |
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
 | `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | **Only if the persona names it.** The SDK documents that "agents receive no skills by default, and sub-agents do not inherit skills from the parent" — and `.agent.md` frontmatter has no `skills` property (§2), so the one-line "use the `pbip-model-refresh` skill" instruction in each persona is **required**, not contingent on §6.1 |
+| `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | Same — `pbi-semantic-builder` must name it. It absorbs `docs/ai-instructions-authoring-guide.md` (now a stub) and is *meant* to absorb that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8). **The persona edit is pending:** `.github/agents/` is off-limits to the Copilot coding agent, so until a maintainer replaces those lines with the one-line "use the `powerbi-ai-readiness` skill" imperative, the third copy is still there and no budget is reclaimed |
 | Per-agent Gotchas | Inline in each persona | Yes |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
@@ -132,13 +133,25 @@ hold regardless of the outcome:
 2. **It reclaims persona budget.** `tableau-migrator` is already 108% of the 30,000-char cap (§2), and
    the tail of a persona is exactly where the accumulated knowledge lives. Procedure that is not
    Tableau-specific does not belong in a Tableau persona at all.
-3. **It is the only shape that ports.** Nothing about refreshing and persisting a PBIP is
-   source-tool-specific — the input is already a Power BI model — so the same procedure is needed by
-   a Qlik or Cognos migration. **One self-contained folder** moves — `SKILL.md`, the scripts it runs
-   and the tests that gate them; a paragraph inside `pbi-semantic-builder.agent.md` does not. That is
-   why `pbip-model-refresh` owns its `scripts/` and `tests/` instead of borrowing the repo's, and why
-   `tests/test_skills.py` proves it by copying the folder to a temp dir and running its tests there
-   with this repo unimportable.
+3. **It is the only shape that ports.** Nothing about refreshing and persisting a PBIP — or about
+   `CustomInstructions` and `qnaEnabled` — is source-tool-specific; the input is already a Power BI
+   model, so the same procedure is needed by a Qlik or Cognos migration. **One self-contained folder**
+   moves — `SKILL.md`, the scripts it runs and the tests that gate them; a paragraph inside
+   `pbi-semantic-builder.agent.md` does not. That is why each bundle owns its `scripts/` and `tests/`
+   instead of borrowing the repo's, and why `tests/test_skills.py` proves it by copying the folder to
+   a temp dir and running its tests there with this repo unimportable.
+4. **It collapses duplicate copies into one.** `powerbi-ai-readiness` replaced a persona section and a
+   `docs/` guide that stated the same recipe twice; they had already diverged (one listed the
+   "Verified headline numbers" section, the other did not), which is §8's "conflicting instructions
+   across files" in the wild. A skill gives the knowledge exactly one home, and
+   `tests/test_skills.py` now fails if the section template reappears elsewhere.
+
+**Relocation does not enforce anything, though.** Prose is advisory wherever it lives (§8), so moving
+words only pays off if the mandate rides on an exit code. `powerbi-ai-readiness` therefore ships the
+scoped gate the prose always implied: `set_ai_instructions.py --check --strict --model <model>` fails
+closed on the one model an agent is accountable for, while the repo-wide `--check` stays advisory in
+CI as a visible backlog. A repo-wide `--strict` would fail on every model that predates the layer,
+which is a gate nobody can ever switch on.
 
 The §6.1 note that a subagent *did* see plugin-provided skills while missing this repo's local one
 points at **registration**, not the subagent boundary, as the discriminator. If that holds, promoting
@@ -166,10 +179,15 @@ instruction files all appear to be snapshotted at session start, so **restart th
    (<https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/custom-agents>, "Per-agent
    skills"). The SDK's opt-in is a `skills: string[]` array on `customAgents`, which the markdown
    `.agent.md` surface does not expose (§2). So outcome 1 is off the table for our personas, and the
-   one-line **"use the `pbip-model-refresh` skill"** instruction in each persona is **required**, not
-   a fallback — cheap next to the ~7 KB it replaces. What is still worth probing is the narrower
-   question: once *named*, is a repo-local skill resolvable from inside a subagent, or does it have
-   to be promoted to a plugin/global collection first?
+   one-line **"use the `<name>` skill"** instruction in each persona is **required**, not a fallback —
+   cheap next to the ~7 KB each replaces. What is still worth probing is the narrower question: once
+   *named*, is a repo-local skill resolvable from inside a subagent, or does it have to be promoted to
+   a plugin/global collection first?
+   **The stakes rose with the second bundle.** `pbi-semantic-builder` runs *only* as a subagent, and
+   `powerbi-ai-readiness` now holds the whole AI-instruction recipe. If a named repo-local skill turns
+   out to be unresolvable there, the floor still holds — `SKILL.md` is a readable path and an
+   instructed read reaches a subagent — but the fix is promotion to a plugin/global collection, not a
+   rewrite back into the persona.
 
 2. **Does `subagentStart` fire and inject?**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload
