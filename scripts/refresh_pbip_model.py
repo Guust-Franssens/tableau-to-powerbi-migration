@@ -48,6 +48,17 @@ model whose `definition/*.tmdl` were touched a week after the cache was written 
 `NO_DATA` despite a 113 KB cache sitting right there. So: make ALL model edits FIRST, then refresh,
 then save. Anything that rewrites TMDL afterwards - including this repo's own
 `scripts/set_data_folder.py --sanitize`, which you must run before committing - invalidates it.
+
+Binding to the right instance (parallel batches)
+------------------------------------------------
+The destination is resolved from the pid (`cache_file`), but the DATA comes from whatever Analysis
+Services instance answers on `port`. If those two ever disagree - one bad `--port`, or a widened
+port lookup - this writes a **sibling migration's model into your own correct `cache.abf`**, and
+nothing catches it: `image_save` can only check that the file exists, is non-empty and is newly
+written, and `row_count` queries that same wrong port, so both signals agree and both are wrong.
+Hence `same_model()` runs FIRST, before the refresh: it compares the connected model's tables with
+the TMDL that owns the destination cache, and a mismatch aborts with `REFRESH: WRONG_MODEL`. File
+metadata fundamentally cannot tell you whose rows are in the blob; only the model's own contents can.
 """
 
 from __future__ import annotations
@@ -55,6 +66,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -64,10 +76,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 # pylint: disable=wrong-import-position
-from probe_desktop_query import _load_adomd, discover_port, first_table
+from probe_desktop_query import _load_adomd, discover_port, first_table, table_names
 
 SAVE_SETTLE_SECONDS = 3
 SAVE_TIMEOUT_SECONDS = 120
+
+# A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
+# only when it needs to be (spaces, punctuation), so both forms have to be accepted.
+TABLE_DECL_RE = re.compile(r"^table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 
 
 def _catalog_id(conn) -> str:
@@ -122,11 +138,20 @@ def _bridge_status() -> dict:
         return {}
 
 
+def _instances() -> list[dict]:
+    return _bridge_status().get("instances", [])
+
+
 def _instance(pid: int | None) -> dict | None:
-    for inst in _bridge_status().get("instances", []):
-        if pid is None or inst.get("pid") == pid:
-            return inst
-    return None
+    """The bridge's record for `pid` - or, with no pid, the ONLY instance (never an arbitrary one).
+
+    Returning the first instance for `pid is None` is fine interactively but ambiguous in a parallel
+    batch: it silently binds the run to whichever Desktop the bridge happened to list first.
+    """
+    instances = _instances()
+    if pid is not None:
+        return next((inst for inst in instances if inst.get("pid") == pid), None)
+    return instances[0] if len(instances) == 1 else None
 
 
 def _load_amo():
@@ -274,6 +299,57 @@ def cache_file(pid: int) -> Path | None:
     return chosen / ".pbi" / "cache.abf"
 
 
+def tmdl_tables(model_dir: Path) -> set[str]:
+    """Table names declared by the TMDL on disk - the fingerprint of the model that owns the cache."""
+    definition = model_dir / "definition"
+    names: set[str] = set()
+    for tmdl in sorted(definition.glob("tables/*.tmdl")):
+        text = tmdl.read_text(encoding="utf-8", errors="replace")
+        names.update(quoted or bare for quoted, bare in TABLE_DECL_RE.findall(text))
+    return names
+
+
+def _live_tables(port: int) -> set[str]:
+    """Table names in the model currently served on `port` (hidden included, auto date tables not)."""
+    adomd_connection = _load_adomd()
+    conn = adomd_connection(f"Data Source=localhost:{port}")
+    conn.Open()
+    try:
+        return set(table_names(conn, include_hidden=True))
+    finally:
+        conn.Close()
+
+
+def same_model(port: int, cache_path: Path | None) -> tuple[bool, str]:
+    """Is the model served on `port` the one that owns `cache_path`? Returns (ok, message).
+
+    The only check that can catch a wrong-instance bind. The destination path is resolved from the
+    pid so it is always right; the DATA comes from the port, so a widened/mistyped port silently
+    writes a sibling migration's model into this migration's cache.abf - and every other signal
+    (file exists, non-empty, mtime advanced, row count) agrees with it, because they all read the
+    same wrong source. Comparing the model's own tables is what breaks that self-consistency.
+
+    Extra tables in the engine are fine (a field parameter added in-memory, or anything the caller
+    has not exported yet). A TMDL table MISSING from the engine is not: either this is a different
+    model, or the definition on disk changed after Desktop opened it - and Desktop discards a cache
+    that is older than the definition, so persisting then would be pointless anyway.
+    """
+    if cache_path is None:
+        return True, "identity unverified (no model folder resolved for this pid)"
+    model_dir = cache_path.parent.parent
+    on_disk = tmdl_tables(model_dir)
+    if not on_disk:
+        return True, f"identity unverified (no TMDL tables under {model_dir / 'definition'})"
+    live = {name.casefold() for name in _live_tables(port)}
+    missing = sorted(name for name in on_disk if name.casefold() not in live)
+    if missing:
+        return False, (
+            f"port {port} does NOT serve {model_dir.name}: {len(missing)}/{len(on_disk)} of its TMDL "
+            f"tables are absent from the connected model (e.g. {missing[:3]})"
+        )
+    return True, f"{model_dir.name} confirmed on port {port} ({len(on_disk)} TMDL table(s) present)"
+
+
 def row_count(port: int) -> tuple[int, str]:
     """Rows in the first queryable table - the gate of record.
 
@@ -329,10 +405,48 @@ def _refresh_and_save(pid: int, port: int, args: argparse.Namespace) -> int | No
     return None
 
 
+def _resolve_pid(pid: int | None) -> int | None:
+    """The Desktop pid to act on: the one given, or the ONLY running instance - never a guess.
+
+    Picking "the first instance the bridge listed" is fine on a one-instance box and ambiguous in a
+    parallel batch, where it silently binds the run to somebody else's migration.
+    """
+    if pid is not None:
+        return pid
+    running = _instances()
+    if len(running) > 1:
+        listed = "; ".join(f"{i.get('pid')} -> {i.get('currentFilePath') or '?'}" for i in running)
+        print(f"REFRESH: ERROR {len(running)} Power BI Desktop instances are running - name yours with --pid")
+        print(f"  instances: {listed}")
+        return None
+    pid = running[0].get("pid") if running else None
+    if pid is None:
+        print("REFRESH: ERROR no Power BI Desktop instance found (open the .pbip first)")
+    return pid
+
+
+def _identity_gate(port: int, cache_path: Path | None) -> bool:
+    """Print and enforce `same_model`. False means: do not refresh, query or persist this instance."""
+    try:
+        ok, message = same_model(port, cache_path)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: ERROR could not read the model on port {port}: {type(exc).__name__}: {exc}")
+        return False
+    print(f"  model  : {message}")
+    if not ok:
+        print("REFRESH: WRONG_MODEL (refusing to refresh or persist another instance's model)")
+    return ok
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: refresh, save, and prove data is really there."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--pid", type=int, help="Power BI Desktop process id")
+    parser.add_argument(
+        "--pid",
+        type=int,
+        help="Power BI Desktop process id - required when several instances are open "
+        "(`powerbi-desktop status` maps pid -> open file)",
+    )
     parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
     parser.add_argument("--tables", nargs="*", help="Tables to refresh (default: whole database)")
     parser.add_argument("--no-save", action="store_true", help="Refresh only; do NOT persist the cache")
@@ -344,17 +458,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    pid = args.pid
+    pid = _resolve_pid(args.pid)
     if pid is None:
-        inst = _instance(None)
-        pid = inst.get("pid") if inst else None
-    if pid is None:
-        print("REFRESH: ERROR no Power BI Desktop instance found (open the .pbip first)")
         return 2
 
     port = args.port or discover_port(pid)
     before_cache = cache_file(pid)
     before_stamp = before_cache.stat().st_mtime if before_cache and before_cache.exists() else 0.0
+
+    # Gate everything on identity: refreshing, row-counting or persisting a sibling's model is a
+    # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
+    if not _identity_gate(port, before_cache):
+        return 2
 
     if not args.verify_only:
         outcome = _refresh_and_save(pid, port, args)
