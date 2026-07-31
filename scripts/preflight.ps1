@@ -11,7 +11,8 @@
   (Get-AppxPackage for the Desktop MSIX, Get-OdbcDriver, the JSONC ~/.copilot config), so PowerShell
   is the correct, dependency-free bootstrap.
 
-  Verifies: Python + the parser's Python deps, the powerbi-authoring@fabric-collection skill plugin,
+  Verifies: Python + the parser's Python deps, both skill plugins
+  (powerbi-authoring@fabric-collection and powerbi-migration-skills@powerbi-migration-collection),
   the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, and the npm CLI version
   matrix. Prints a per-item status (OK / WARN / MISS) with an install hint for anything absent.
 
@@ -36,6 +37,7 @@ param([switch]$Update)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $copilot = Join-Path $HOME '.copilot'
+$repoRoot = Split-Path -Parent $PSScriptRoot
 $results = New-Object System.Collections.Generic.List[object]
 
 function Add-Check([string]$Name, [string]$Tier, [bool]$Ok, [string]$Detail, [string]$Hint = '') {
@@ -142,16 +144,51 @@ if (Get-Command 'powerbi-report-author' -ErrorAction SilentlyContinue) {
         'Run `powerbi-report-author doctor` for detail. If schema fetch fails, treat a 0-error `validate` as STRUCTURE-ONLY (see AGENTS.md).'
 }
 
-# --- Fabric/Power BI skill plugin ---
+# --- Skill plugins ---
+# Both are REQUIRED for the agents to work as written: `powerbi-authoring` supplies the planning/
+# design/authoring/semantic-model skills the builder personas chain, and `powerbi-migration-skills`
+# republishes this repo's own two bundles so a subagent can invoke them BY NAME. Measured 2026-07-31:
+# a custom subagent does get a `skill` tool and CAN invoke both plugin and repo-local skills - so a
+# missing plugin is a real capability loss, not a cosmetic one.
 $cfg = Read-CopilotJson 'config.json'
-$plugin = $null
-if ($cfg -and $cfg.installedPlugins) {
-    $plugin = $cfg.installedPlugins | Where-Object { $_.name -eq 'powerbi-authoring' -and $_.marketplace -eq 'fabric-collection' } | Select-Object -First 1
+$migrationPlugin = $null
+foreach ($p in @(
+        @{ name = 'powerbi-authoring'; market = 'fabric-collection'; tier = 'critical'
+            hint = 'In Copilot: /plugin -> add marketplace microsoft/skills-for-fabric -> enable powerbi-authoring. See AGENTS.md.' },
+        @{ name = 'powerbi-migration-skills'; market = 'powerbi-migration-collection'; tier = 'recommended'
+            hint = 'In Copilot: /plugin -> add marketplace Guust-Franssens/powerbi-migration-skills -> enable powerbi-migration-skills. See AGENTS.md.' }
+    )) {
+    $plugin = $null
+    if ($cfg -and $cfg.installedPlugins) {
+        $plugin = $cfg.installedPlugins | Where-Object { $_.name -eq $p.name -and $_.marketplace -eq $p.market } | Select-Object -First 1
+    }
+    $pluginOk = $plugin -and (Test-Path $plugin.cache_path)
+    Add-Check "plugin: $($p.name)@$($p.market)" $p.tier ([bool]$pluginOk) `
+        $(if ($pluginOk) { "v$($plugin.version)" } else { 'not installed/enabled' }) $p.hint
+    if ($pluginOk -and $p.name -eq 'powerbi-migration-skills') { $migrationPlugin = $plugin }
 }
-$pluginOk = $plugin -and (Test-Path $plugin.cache_path)
-Add-Check 'plugin: powerbi-authoring@fabric-collection' 'critical' ([bool]$pluginOk) `
-    $(if ($pluginOk) { "v$($plugin.version)" } else { 'not installed/enabled' }) `
-    'In Copilot: /plugin -> add marketplace microsoft/skills-for-fabric -> enable powerbi-authoring. See AGENTS.md.'
+
+# --- Skill-bundle drift (the plugin copy SHADOWS .github/skills/ for a subagent) ---
+# Measured 2026-07-31: a subagent invoking `powerbi-ai-readiness` by name loaded the PLUGIN copy under
+# ~/.copilot/installed-plugins, NOT the repo copy - even with the repo copy present and the cwd inside
+# this repo. So editing .github/skills/ without re-publishing serves subagents stale guidance, and
+# nothing in the skill registry or the tool output flags the divergence. This check is the only thing
+# that would catch it. Bundles with no plugin twin (e.g. sentinel-probe) are skipped, not failed.
+if ($migrationPlugin) {
+    $drift = @()
+    $paired = 0
+    foreach ($d in (Get-ChildItem (Join-Path $repoRoot '.github\skills') -Directory -ErrorAction SilentlyContinue)) {
+        $mine = Join-Path $d.FullName 'SKILL.md'
+        $theirs = Join-Path $migrationPlugin.cache_path "skills\$($d.Name)\SKILL.md"
+        if ((Test-Path $mine) -and (Test-Path $theirs)) {
+            $paired++
+            if ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash) { $drift += $d.Name }
+        }
+    }
+    Add-Check 'skill bundles match published plugin' 'recommended' ($drift.Count -eq 0) `
+        $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { "$paired bundle(s) in sync" }) `
+        'Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then `copilot plugin install powerbi-migration-skills@powerbi-migration-collection`.'
+}
 
 # --- MCP servers ---
 $mcp = Read-CopilotJson 'mcp-config.json'

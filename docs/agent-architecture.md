@@ -75,8 +75,15 @@ progressive disclosure needs:
 
 It is **absent from the `.agent.md` YAML frontmatter table** at the canonical reference above, so it
 is not known to apply to the markdown persona files this repo uses. Do not write `skills:` into an
-`.agent.md` and assume it works — §6.1 measured that repo-local skills do not even reach a subagent's
-skill registry. Treat it as: *documented for SDK-defined agents, unverified for `.agent.md`.*
+`.agent.md` and assume it works.
+
+Read the quote precisely, because it is easy to over-read: what a subagent does not inherit is the
+**preload** — no skill *body* is ever injected into a subagent. The very next sentence, *"skill names
+are resolved from the session-level `skillDirectories`"*, is the part that does hold: §6.1 measures a
+subagent invoking both a plugin skill and a **repo-local** `.github/skills/` skill **by name**, and
+getting the real body back. So "sub-agents do not inherit skills" means *not preloaded*, **not**
+*unreachable*. Treat `skills:` itself as: *documented for SDK-defined agents, unverified for
+`.agent.md`* — but treat invoke-by-name as **working and measured**.
 
 VS Code-only (ignored elsewhere): `argument-hint`, `agents`, `handoffs`, `hooks`.
 
@@ -150,8 +157,8 @@ session to separate the two; §6.2 has the outcome table.
 | `docs/tableau-dax-translation-guide.md` (24k) | External; persona says "Read … before starting" | Only if the agent actually reads it — advisory |
 | `docs/migration-spec.md` (9k) | External; same instruction | Same |
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
-| `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | **Only if the persona points at the path.** §6.1 measured that a repo-local skill is not in a subagent's registry at all, so the *name* does not resolve there — the persona must say **"read `.github/skills/pbip-model-refresh/SKILL.md`"**, which is an ordinary `view` call and does reach a subagent |
-| `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | Same — `pbi-semantic-builder` reads it **by path** (done, #33). It absorbed `docs/ai-instructions-authoring-guide.md` (now a stub) and that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8), now one |
+| `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | **Yes, two ways.** §6.1 measured a subagent invoking a repo-local skill **by name** and getting the body back, so `use the pbip-model-refresh skill` works; reading `.github/skills/pbip-model-refresh/SKILL.md` by path also works. Either is discretionary — the agent must choose to do it |
+| `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | Same. It absorbed `docs/ai-instructions-authoring-guide.md` (now a stub) and that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8), now one |
 | Per-agent Gotchas | Inline in each persona | Yes |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
@@ -160,13 +167,14 @@ anti-pattern ("requests to refer to external resources") is about *unresolved am
 ("conform to styleguide.md"), not an imperative, verifiable step. But it is still **discretionary**:
 an agent may skip it.
 
-**Why package procedural knowledge as a skill anyway**, now that §6.1 has resolved *against* a skill
-being auto-delivered to a subagent. Four reasons, none of which depended on that outcome:
+**Why package procedural knowledge as a skill.** Four reasons — and §6.1 has now resolved *in favour*
+of the strongest one, that the name resolves inside a subagent:
 
-1. **It is strictly no worse than the status quo.** A skill file is still a readable path, so the
-   floor is today's advisory "read this file" behaviour — and per §6.1 that floor is also the
-   ceiling inside a subagent, until a bundle is promoted to a plugin. There is no downside branch: a
-   bundle is never worse than the paragraph it replaced.
+1. **It is strictly no worse than the status quo, and now measurably better.** A skill file is still a
+   readable path, so the floor is today's advisory "read this file" behaviour. Since §6.1, the ceiling
+   is higher than that floor: a subagent can invoke the bundle **by name**, which is shorter to write
+   in a persona and cheaper in persona budget than a path. There is no downside branch: a bundle is
+   never worse than the paragraph it replaced.
 2. **It reclaims persona budget.** `tableau-migrator` is already 108% of the 30,000-char cap (§2), and
    the tail of a persona is exactly where the accumulated knowledge lives. Procedure that is not
    Tableau-specific does not belong in a Tableau persona at all.
@@ -190,13 +198,22 @@ closed on the one model an agent is accountable for, while the repo-wide `--chec
 CI as a visible backlog. A repo-wide `--strict` would fail on every model that predates the layer,
 which is a gate nobody can ever switch on.
 
-**How a persona must reference a bundle.** §6.1 settled the discriminator: a subagent listed 91
-skills, every one from a plugin or user-global directory and **none** project-local — so
-**registration scope**, not the subagent boundary, is what excludes a repo-local skill. A persona
-must therefore say **"read `.github/skills/<name>/SKILL.md`"** (an ordinary `view` call, which
-demonstrably reaches a subagent) and **not** "use the `<name>` skill", whose name does not resolve
-there. Promoting a proven bundle into a plugin/global collection is the fix that would make the name
-work; authoring the procedure as a bundle now keeps that path open without a rewrite.
+**How a persona must reference a bundle.** §6.1 reversed the earlier answer here. A subagent **does**
+carry an `<available_skills>` registry and **can** invoke a repo-local skill by name (proven with
+`sentinel-probe`, which exists in no plugin). So a persona may say **"use the `<name>` skill"** — with
+two conditions:
+
+1. **The persona must not declare a `tools:` allow-list that omits `skill`.** That is what actually
+   broke `pbi-migration-validator`, and it fails silently (§6, experiment 3).
+2. **Prefer the name; keep the path as the fallback.** `read .github/skills/<name>/SKILL.md` is an
+   ordinary `view` call that works in every configuration measured, including agents with a restricted
+   tool set. Naming *and* pathing the bundle in one sentence costs a few characters and removes the
+   failure mode entirely — which is what the personas now do.
+
+Publishing a bundle as a plugin remains worthwhile (it is how *other* repos get it), but it is no
+longer a prerequisite for the name to resolve here. Note the trade-off it introduces: the plugin copy
+**shadows** the repo copy, so a published bundle must be kept in sync — `scripts/preflight.ps1` hashes
+each pair and fails on drift.
 
 ### Why the shared block stays generated into the personas
 
@@ -238,47 +255,52 @@ Three are still over. That is a **portability risk, not a live bug** — Copilot
 enforce the cap (§2), and the hosted failure mode is untested. Track it; don't panic-trim into the
 silent-failure category above.
 
-## 6. Experiments — one resolved, one still open
+## 6. Experiments — all three resolved
 
-1. **Do repository skills reach a subagent? — ✅ RESOLVED 2026-07-31: NO.**
-   `.github/skills/sentinel-probe/SKILL.md` contains `SKILL_SENTINEL_ZEPHYR_74193`. A
-   `pbi-migration-validator` subagent was asked to quote it **without being told the value**, and
-   **under a no-tools rule** so it could not read the file and fake a hit. Result:
+1. **Do repository skills reach a subagent? — ✅ RESOLVED 2026-07-31: YES, and they are invocable.**
 
-   | Probe | Result |
+   ⚠️ **This reverses an earlier conclusion in this same file.** On 2026-07-30 a probe concluded
+   "repo-local skills are root-only; `use the <x> skill` fails outright inside a subagent", and that
+   claim was shipped as fact (#36) and written into `pbi-semantic-builder`. It is **wrong** on the
+   current CLI (1.0.77). Re-measured with a persona that declares no `tools:` allow-list:
+
+   | Probe (from `pbi-report-builder`, no `tools:` allow-list) | Result |
    |---|---|
-   | `sentinel-probe` skill (repo-local, `.github/skills/`) | **ABSENT** — not in the subagent's skill registry at all, not even by name |
-   | Its `SKILL_SENTINEL_*` token | **ABSENT** |
-   | `HOOK_SENTINEL_*` (see §6.2) | **ABSENT** — nothing prepended; prompt begins at its own `#` heading |
-   | *Control:* own persona | **PRESENT** |
-   | *Control:* generated shared-conventions block | **PRESENT**, quoted verbatim |
-   | *Control:* `AGENTS.md` | **ABSENT** — as predicted |
+   | Does a `skill` tool exist? | **YES** — 22 loaded tools incl. `skill`, plus 204 deferred MCP tools |
+   | `<available_skills>` registry | **PRESENT** — 92 entries (26 with description, 66 bare name) |
+   | `skill("powerbi-report-authoring")` (plugin) | **SUCCESS**, base dir under `.copilot\installed-plugins\fabric-collection\powerbi-authoring\` |
+   | `skill("powerbi-ai-readiness")` (plugin ∪ repo) | **SUCCESS**, base dir under `.copilot\installed-plugins\powerbi-migration-collection\` |
+   | `skill("sentinel-probe")` (**repo-local only**) | **SUCCESS**, base dir `…\tableau-to-pbi-migration\.github\skills\sentinel-probe` |
+   | Its `SKILL_SENTINEL_ZEPHYR_74193` token | **QUOTED**, arriving only via the `skill` tool |
 
-   Two findings, both load-bearing:
-   - **Repo-local skills are root-only.** The parent session lists `sentinel-probe` with
-     `<location>project</location>`; the subagent listed **91** skills — every one of them from a
-     plugin or from user-global `~/.copilot/skills/` — and **no** project-local skill. The
-     discriminator is *registration scope*, not merely the subagent boundary.
-   - **No skill's body is ever injected**, for any skill, in a subagent. 26 arrived as
-     name + description, 65 as a bare name in an "Additional skills available (invoke by name)"
-     list. So a skill can at best be *invoked* by name — it can never silently carry content the way
-     the SDK's `skills:` preload does (§2).
+   `sentinel-probe` is the load-bearing case: it exists in **no** plugin, so a correct quote of its
+   token can only have come from `.github/skills/`. The probing agent attested it never opened the
+   file by `view`/`grep`/shell, and its one prior filesystem touch was a `Get-ChildItem -Directory`
+   that returned names only.
 
-   **Consequence for persona authoring:** an instruction of the form "use the `<x>` skill" **does not
-   work** for a repo-local skill inside a subagent. A second probe (2026-07-31) settled the narrower
-   question of whether an *explicit* invocation resolves even though the name is unlisted: a
-   subagent was told to call the `skill` tool with `sentinel-probe` and nothing else. It has the
-   tool, it made the call, and it got a hard failure:
+   Two things remain true from the old finding, and one is now explained:
+   - **No skill body is ever *preloaded*** into a subagent — 26 names arrived with a description, 66
+     as bare names. Invocation is what fetches the body. This matches the SDK wording exactly (§2):
+     not inherited ≠ not reachable.
+   - **The earlier "no `skill` tool" observation was real but misattributed.** It was measured on
+     `pbi-migration-validator`, the one persona that **declares a `tools:` allow-list** — see
+     experiment 3. The allow-list, not the subagent boundary, is what removed the tool. The old note
+     claimed "no persona declares `tools:`, so this is the runtime"; that statement was simply false
+     about this repo.
 
-   > `Skill "sentinel-probe" not found. Available skills: account-explorer, acr, … xlsx`
+   **Consequence for persona authoring.** `use the <x> skill` **does** work in a subagent, for plugin
+   and repo-local skills alike — provided the persona does not declare a `tools:` allow-list that
+   omits `skill`. Reading `.github/skills/<x>/SKILL.md` by path also still works and is the more
+   conservative option; prefer invoke-by-name for brevity, path-read when the exact file matters.
 
-   — 91 names, every one from a plugin or user-global directory, no project-local entry. So naming
-   the skill in the persona is **not** a workaround for it being unlisted; both paths fail. Use an
-   explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary `view` call
-   and demonstrably works.
+   ⚠️ **Publishing introduces shadowing.** Where a name exists both in `.github/skills/` and in an
+   installed plugin, the **plugin copy wins** (measured: `powerbi-ai-readiness` resolved to
+   `.copilot\installed-plugins\`, with the cwd inside this repo and the repo copy present). Both pairs
+   hashed identical on 2026-07-31 (`BCBD9DD3…` / `CF619036…`), so nothing is lost *today* — but the
+   plugin is a downstream snapshot, so a repo-side edit that is never re-published is served stale and
+   **silently**. `scripts/preflight.ps1` now hashes each pair and fails on drift.
 
-   **The fix is to publish — proven, with the plugin copy isolated (2026-07-31).** Packaging the two
-   source-tool-agnostic bundles as a marketplace plugin makes the name resolve:
+   **Publishing works — proven, with the plugin copy isolated (2026-07-31):**
 
    ```
    copilot plugin marketplace add Guust-Franssens/powerbi-migration-skills
@@ -294,50 +316,92 @@ silent-failure category above.
        powerbi-migration-skills\skills\powerbi-ai-readiness
    ```
 
-   That path is the proof. Built by `scripts/build_plugin.py`; see §5 for why it publishes to a
-   separate repo.
+   Built by `scripts/build_plugin.py`; see §5 for why it publishes to a separate repo.
 
-   ⚠️ **Three traps when testing this.** Each produced a convincing false result here:
+   ⚠️ **Four traps when testing this.** Each produced a convincing false result here:
 
-   1. **Skills are snapshotted at session start.** A plugin installed mid-session is invisible to that
-      session *and* its subagents — indistinguishable from a broken plugin. A subagent probed this way
-      even concluded "the defect is specific to this plugin"; it was not. **Restart before judging.**
-   2. **Testing from inside this repo proves nothing about the plugin.** `.github/skills/` supplies the
-      same two names, and the *project* copy wins — `skill(powerbi-ai-readiness)` reported a base
-      directory under `.github/skills/`, not the plugin. A green result here is a false *positive*.
-      Always isolate from an unrelated directory.
-   3. **A subagent may have no `skill` tool at all.** Measured 2026-07-31 in two different agents
-      (`pbi-migration-validator`, `explore`): the tool is simply absent from their inventory
-      (`powershell`, `view`, `grep`, `glob`, MCP tools — no `skill`). Earlier in the same day, before a
-      CLI restart, the same validator persona *did* have it. No persona declares `tools:`, so this is
-      the runtime, not repo config — the session now runs with deferred tool loading. **Consequence:
-      a persona must never depend on invoking a skill by name.** Reading
-      `.github/skills/<x>/SKILL.md` by path is an ordinary `view` call and works in every
-      configuration measured; that is why the personas do it that way (#33), and publishing the plugin
-      does **not** change that guidance for subagents.
+   1. **Skills — and agent definitions — are snapshotted at session start.** A plugin installed
+      mid-session is invisible to that session *and* its subagents — indistinguishable from a broken
+      plugin. A subagent probed this way even concluded "the defect is specific to this plugin"; it was
+      not. The same applies to `.agent.md` frontmatter (see experiment 3: an edited `tools:` list had
+      no effect until a fresh process). **Restart before judging.**
+   2. **Testing from inside this repo proves nothing about the *plugin*.** `.github/skills/` supplies
+      the same two names. It does not shadow the plugin (the plugin wins), but a green
+      `skill(powerbi-ai-readiness)` here cannot distinguish the two copies while they are identical —
+      only the printed base directory can. Always read the base directory, or isolate from an
+      unrelated directory.
+   3. **A `tools:` allow-list silently strips the `skill` tool** — and with it the entire
+      `<available_skills>` registry (the validator reported `NO SKILL REGISTRY BLOCK`). If a probe
+      says "no skill tool", check the persona's frontmatter *before* blaming the runtime. That is the
+      exact error this document made.
+   4. **Built-in lightweight agents are not representative.** `explore` has a curated read-only set
+      (`powershell`, `view`, `rg`, `glob`, 4 github-mcp tools) with **no `skill` tool**. Measuring
+      `explore` and generalising to custom personas is invalid — they differ by 22 vs 11 tools.
 
-2. **Does `subagentStart` fire and inject? — ⬜ STILL OPEN (needs a fresh session).**
-   `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload
-   to `_hook_probe.log` and inject `HOOK_SENTINEL_ORBIT_58231`.
-   Measured 2026-07-31: **no log, no sentinel** — but that session predated the hook file, so it only
-   shows "not loaded", not "does not work". **Restart the CLI**, then invoke `pbi-migration-validator`
-   and check both:
-   - Log written **and** sentinel visible → the mechanism works; a hook *could* carry supplementary
-     context. Even then, see §5 before moving anything load-bearing into it.
-   - Log written, sentinel absent → hook fires but the output shape is wrong. The field name itself
-     is documented (§4), so suspect the JSON envelope or the exit code.
-   - No log again, in a session that started *after* the file existed → the hook is genuinely not
-     loading; check location and precedence before designing around it.
+2. **Does `subagentStart` fire and inject? — ✅ RESOLVED 2026-07-31: YES, both halves.**
+   `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload to
+   `_hook_probe.log` and inject `HOOK_SENTINEL_ORBIT_58231`. In a session started *after* the hook file
+   existed, invoking `pbi-migration-validator` produced **both**: the log line, and the subagent
+   quoting its first user-turn line verbatim as
 
-3. **Is the `tools` allow-list enforced on the current CLI?** Re-run the validator probe: ask whether
-   it holds `edit`/`create`/`task`. Last measured 2026-07-30: not enforced.
+   > `HOOK_SENTINEL_ORBIT_58231 - injected by subagentStart at 2026-07-31T16:13:45.5445600+02:00.`
+
+   — matching the log timestamp `16:13:45.5372852` to the same second. So `additionalContext` from a
+   `subagentStart` hook **does** reach a subagent's context, and the `matcher` field correctly scoped
+   it to one agent name. The earlier "no log, no sentinel" result was a session that predated the hook
+   file, i.e. "not loaded", exactly as suspected.
+
+   Payload shape, measured (no `agentType`, no prompt text):
+
+   ```json
+   {"sessionId":"…","timestamp":1785507224746,"cwd":"…","transcriptPath":"…\\events.jsonl",
+    "agentName":"pbi-migration-validator","agentDisplayName":"pbi-migration-validator",
+    "agentDescription":"Read-only reviewer that critiques…"}
+   ```
+
+   **This does not change the §5 rule.** A hook can carry supplementary context, but it can still be
+   disabled wholesale via `disableAllHooks`, so nothing whose absence is silent and harmful may move
+   into it. Useful for *advisory* context; never for load-bearing rules.
+
+3. **Is the `tools` allow-list enforced on the current CLI? — ✅ RESOLVED 2026-07-31: YES. This changed.**
+   Measured 2026-07-30: **not** enforced (the validator came back still holding `edit`, `create`,
+   `task`). Measured 2026-07-31 on CLI **1.0.77**: **enforced**. `pbi-migration-validator` declared
+
+   ```yaml
+   tools: ["read", "search", "execute", "web", "tool_search_tool", "powerbi-modeling-mcp/*", "powerbi-remote/*"]
+   ```
+
+   and received exactly 14 tools: `view`, the four `powershell` tools, and the nine `powerbi-remote-*`
+   tools. Compare `pbi-report-builder`, which declares **no** `tools:` and received 22.
+
+   ⚠️ **Enforcement is partial, and the misses are silent.** Of the declared entries, only `read`
+   (→ `view`), `execute` (→ the `powershell` family) and `powerbi-remote/*` produced tools.
+   **`search`, `web` and `tool_search_tool` produced nothing** — no search tool, no `web_fetch`, no
+   `web_search`, and no `skill` (never declared). An unrecognised entry is dropped without warning, so
+   an allow-list can quietly cost an agent capability its own persona tells it to use.
+
+   Rewriting the list with **literal tool names** fixes it. Verified inventory afterwards: `skill`,
+   `glob`, `web_fetch`, `web_search` **PRESENT**; `edit`, `create`, `task` **ABSENT** — so least
+   privilege is real *and* the agent can reach its skills. Two entries still never resolve:
+   `tool_search_tool` (in any form), and `grep` — the search tool is exposed under the name **`rg`**,
+   so declare both. A dropped entry is harmless, so listing an alias costs nothing.
+
+   ⚠️ **Trap: agent definitions are snapshotted at session start, exactly like skills.** Editing a
+   persona's frontmatter mid-session changes nothing — a re-probe returned the *identical* 14-tool
+   inventory and looked like "literal names don't work either". The corrected list only took effect in
+   a **fresh CLI process** (`copilot --allow-all -p "…"` delegating to the subagent). Always verify a
+   frontmatter change in a new process, or you will measure the old definition and draw the wrong
+   conclusion. **Declare a `tools:` list only if you verify the resulting inventory that way**; when in
+   doubt, omit it and enforce read-only behaviour in prose.
 
 ## 7. Things the docs genuinely do not say
 
 Recorded so nobody re-derives them or fills the gap with a plausible guess:
 
 1. ~~Whether a repo-local skill, once *named* in a persona, can still be **invoked** from inside a
-   subagent.~~ **Answered 2026-07-31 — no.** See §6.1; the `skill` tool rejects the name outright.
+   subagent.~~ **Answered 2026-07-31 — YES.** See §6.1: a subagent invoked `sentinel-probe` (which
+   exists only in `.github/skills/`) and quoted its sentinel token. An earlier entry here said "no";
+   that was measured on the one persona carrying a `tools:` allow-list that omits `skill`.
 2. Whether `subagentStart`'s `additionalContext` has any size cap. The **field name is documented**
    (§4) — that entry previously said it was inferred, which was wrong. What is genuinely missing is a
    dedicated Output block and any stated cap; the 10 KB figure belongs to `postToolUse`.
