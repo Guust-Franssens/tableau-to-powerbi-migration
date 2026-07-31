@@ -65,7 +65,7 @@ working. Delete them once every caller points at the skill path.
 The deterministic parser has a `pytest` regression suite:
 
 ```bash
-pytest -q                    # currently 175 tests
+pytest -q                    # currently 177 tests
 ```
 
 `testpaths` in `pyproject.toml` covers both roots (`tests` **and** `.github/skills`) — pytest skips
