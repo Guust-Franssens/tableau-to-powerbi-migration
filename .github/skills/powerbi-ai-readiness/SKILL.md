@@ -96,6 +96,28 @@ actually accountable for. Advisory repo-wide `--check` still belongs in CI as a 
 `--check` prints, per model: char count, lint flags, and a loud warning for **stamped but
 `qnaEnabled != true`** — the silent-no-op state.
 
+### Setting the descriptions themselves (levers 1–2), via the Modeling MCP
+
+The scripts above *audit* descriptions and *stamp* instructions; they do not write descriptions. Do
+that through the Power BI Modeling MCP rather than regex-editing `/// ` lines — the MCP round-trips
+the model properly and cannot corrupt TMDL the way a text substitution can.
+
+1. `connection_operations` **ConnectFolder**, `folderPath` = the `…SemanticModel` folder. This loads
+   the model **offline — no Power BI Desktop required** (it reads tables/measures/relationships
+   straight from the TMDL).
+2. **Learn the real domains before you describe them.** Read the extracted data, or run
+   `dax_query_operations` **Execute** → `EVALUATE VALUES('Table'[Col])` per categorical column. Never
+   invent a domain list; an enumerated domain that does not match the data is worse than none.
+3. Set descriptions in batch via `table_operations` / `column_operations` / `measure_operations`
+   **Update** with the `description` field. Lead with business meaning, then unit/grain, then the enum
+   domain for categoricals: `"Latest recorded Body Mass Index (kg/m²), as of the most recent date."` —
+   not a raw formula dump. Remember only the first ~200 chars are read (§1).
+4. Persist with `database_operations` **ExportToTmdlFolder**, `tmdlFolderPath` = the model's
+   **`definition`** subfolder — **not** the `.SemanticModel` root, which flattens the PBIP layout.
+   The export normalizes identifier quoting/whitespace model-wide: expect a one-time cosmetic reformat
+   diff; content, lineageTags and DAX are preserved.
+5. Audit with `check_ai_readiness.py` (§3) before claiming done.
+
 ## 4. How to write good AI instructions
 
 ### Principles

@@ -88,6 +88,20 @@ examples, not hypothetical ones.
 
 ## Skills you use
 
+**Two kinds, and they are reached differently — this matters.**
+
+**Repo-local bundles — read these BY PATH.** They are not registered in a subagent's skill registry,
+so `use the <name> skill` fails outright (measured; `docs/agent-architecture.md` §6.1). Open them with
+an ordinary file read:
+
+- [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md) — the whole
+  Copilot-readiness recipe: descriptions, enumerated domains, `CustomInstructions`, `qnaEnabled`, the
+  Modeling-MCP workflow for setting descriptions, and what to write in `ai-instructions.md`.
+- [`.github/skills/pbip-model-refresh/SKILL.md`](../skills/pbip-model-refresh/SKILL.md) — refreshing a
+  local PBIP and persisting it to `cache.abf`, the pid-binding rule, and the edit→refresh→save order.
+
+**Plugin skills — invoke these by name** (they *are* registered):
+
 - **`semantic-model-authoring`** — for everything TMDL: creating tables/columns, relationships,
   measures, and deploying to Fabric. This is your primary tool for all file/deployment mechanics.
 - **Read-only DAX (`EVALUATE`) + metadata — your validation surface.** Primary path, works on the local
@@ -233,36 +247,23 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
     ```
     python scripts/refresh_pbip_model.py --pid <desktop-pid>
     ```
-    It refreshes over XMLA, persists via AMO `ImageSave` (no UI), and only reports
-   `REFRESH: DATA_OK + PERSISTED`
-    when a real row came back **and** the cache file advanced. Anything else is a failure — do not
-    hand over.
-    **Why a save is required, and how it is done (no UI needed):** Desktop persists a PBIP's data to
-    `<Name>.SemanticModel/.pbi/cache.abf` (gitignored — it is data), and an XMLA refresh alone only
-    populates the *in-memory* model. The script persists it programmatically via AMO
-    **`Server.ImageSave(databaseId, stream)`**, which writes exactly that cache file.
-    **Proven end to end 2026-07-30**, including the control that rules out a silent re-refresh:
-    delete `cache.abf` → refresh in memory → `ImageSave` → **kill Desktop with `-Force`** (no save,
-    no prompt) → **rename the source data folder away** → reopen → `DATA_OK` with real rows. With the
-    source absent, the data can only have come from the cache.
-    Background worth knowing: a TMSL `backup` is refused because Desktop runs its Analysis Services
-    instance in **Diskless mode** (*"Backup/Restore … not supported"*), but that same mode sets
-    `EnableDisklessTMImageSave=1`, which is why `ImageSave` works. The Power BI product group's
-    guidance that *"only the Desktop UI performs"* the save describes the MCP/Bridge surface — the
-    engine itself does expose this. Note the AMO client throws *"The server sent an unrecognizable
-    response"* while writing correctly, so the script judges success by the FILE (exists, non-empty,
-    newly written), never by the absence of an exception.
-    A UI-Automation fallback remains (`--ui-save`) for the case where `ImageSave` is unavailable, but
-    it is no longer the default: it needed an interactive desktop, depended on an element named
-    "Save", and broke on non-English installs.
-    refresh → save → `cache.abf` updated → close Desktop → reopen → `DATA_OK` **without refreshing**.
-    **Order matters — the cache dies if the definition changes after it.** Desktop discards
-    `cache.abf` when `definition/*.tmdl` is newer (verified: a model with a valid 113 KB cache opened
-    `NO_DATA` because its TMDL had been touched a week later). So make **every** model edit first,
-    then refresh, then save. Anything that rewrites TMDL afterwards invalidates it — including this
-    repo's own `scripts/set_data_folder.py --sanitize`, which you must run before committing, so the
-    committed state always has a stale cache. That is fine (it is gitignored); just re-refresh if you
-    edit the model again.
+    It refreshes over XMLA and persists via AMO `ImageSave` (no UI). The **only** acceptable result is
+    `REFRESH: DATA_OK + PERSISTED` — a real row came back **and** the cache file advanced. Anything
+    else is a failure: do not hand over.
+
+    **Read [`.github/skills/pbip-model-refresh/SKILL.md`](../skills/pbip-model-refresh/SKILL.md)
+    before you run this**, and whenever it misbehaves. It owns the mechanism and the reasoning: why a
+    save is required at all, why `ImageSave` works when TMSL `backup` is refused, why success is judged
+    by the file rather than by the absence of an exception, the `--ui-save` fallback, and the strict
+    pid-binding rule. Read it by path — do not try to invoke it as a named skill, which does not
+    resolve inside a subagent (`docs/agent-architecture.md` §6.1).
+
+    **The one rule you must carry in your head, because it constrains your whole build order:** Desktop
+    discards `cache.abf` when `definition/*.tmdl` is *newer* than it. So make **every** model edit
+    first, then refresh, then save. Anything that rewrites TMDL afterwards invalidates it — including
+    `scripts/set_data_folder.py --sanitize`, which you must run before committing, so the committed
+    state always has a stale cache. That is fine (it is gitignored); just re-refresh if you edit again.
+
     Before reporting done, confirm ALL of: model deserializes; `check_m_syntax.py` clean; every
     measure/column has a description; AI instructions stamped **and `qnaEnabled: true`**; sample
     `EVALUATE` verified; and `REFRESH: DATA_OK + PERSISTED`.
@@ -275,88 +276,39 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
 
 ## Prep the model for AI (Copilot readiness) — final build phase
 
-A migrated model is not done until it is **Copilot-ready**. Per Microsoft Learn
-([Prepare your data for AI](https://learn.microsoft.com/en-us/power-bi/create-reports/copilot-prepare-data-ai),
-[Optimize for Copilot](https://learn.microsoft.com/en-us/power-bi/create-reports/copilot-evaluate-data)),
-Copilot answer quality depends on the model carrying enough context to disambiguate fields, and the
-DAX-generation path uses the **first 200 characters** of each object's description. Run this as the
-**last phase** of the build (after every measure/column exists and is validated). It is also runnable
-standalone against an already-built model (an "AI-prep-only" pass for retrofits) — it is still the
-model-builder owning its own layer, so no other agent edits these TMDL files.
+**Read [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md)
+before starting this phase, and follow it.** It is the single home for the recipe: the five
+committable levers, the `CustomInstructions` storage mechanism, the Modeling-MCP workflow for setting
+descriptions, what to write in `ai-instructions.md`, and the two scripts. Read it by path — do not try
+to invoke it as a named skill, which does not resolve inside a subagent
+(`docs/agent-architecture.md` §6.1).
 
-**Scope — what to bake into the committed model now (research-confirmed):**
+Everything below is what that skill *cannot* know: your place in this pipeline.
 
-- ✅ **Descriptions on every table, column, and measure** — classic TMDL metadata, fully committable.
-- ✅ **Enumerate the domain of categorical/dimension columns** in their description — the single
-  highest-leverage item (lets NL questions resolve category filters). Read the extracted CSV (or query
-  the model) for the distinct values of each low-cardinality string/dimension column and list them.
-  Skip high-cardinality keys / free-text (describe those by role).
-- ✅ **Synonyms** where the display name isn't natural language (Tableau captions like `Cdd 0 1`, `RPK`
-  → `cooling degree days`, `revenue passenger kilometers`) via the model's culture linguistic schema.
-- ✅ **Model-level AI instructions (MANDATORY — a migrated model is not done without them).** Free-form
-  markdown that Copilot / Fabric data agents read before querying. Per
-  [Microsoft Learn](https://learn.microsoft.com/en-us/fabric/data-science/semantic-model-best-practices),
-  the DAX-generation tool relies **solely on model metadata + Prep-for-AI** and **ignores** any
-  data-agent-level notes, so `CustomInstructions` is the *only* free-text lever that reaches it — every
-  model MUST ship them. **This IS file-committable** (ground-truthed 2026-07, and verified round-trip via
-  the remote Power BI MCP `GetSemanticModelSchema` after publish): it lives in the culture object as
-  `cultureInfo <lcid>` → `linguisticMetadata` JSON → top-level **`CustomInstructions`** key (sibling of
-  `Entities`/`Agents`), and TOM deserializes it cleanly (compatibilityLevel 1702). It is NOT reachable
-  through the MCP culture Update surface (name/annotations/extendedProperties only), so edit the TMDL
-  directly via the script — which also avoids an XMLA refresh. **How to author + stamp: see step 6 below
-  and [`docs/ai-instructions-authoring-guide.md`](../../docs/ai-instructions-authoring-guide.md).**
-- ⏸️ **Defer (not reliably committable today, per research):** the service "AI data schema" lives in
-  **LSDL** with no stable file-authoring contract yet; **verified answers** are explicitly **not
-  Git-supported** and require report visuals; "Approved for Copilot" + indexing are tenant/runtime
-  settings. Note these as post-deploy service steps in `limitations_encountered`, don't fake them in
-  files.
+- **When.** Run it as the **last phase** of the build, after every measure and column exists and is
+  validated. It is also runnable standalone against an already-built model (an "AI-prep-only" retrofit
+  pass).
+- **Who.** You own it, because it edits TMDL — your layer. No other agent touches these files, and you
+  do not delegate this.
+- **Where the source lives.** Author `migrations/workbooks/<slug>/ai-instructions.md`; the culture TMDL
+  is generated from it. Ground every line in *this* model — the real TMDL, the extracted CSV, the
+  ground-truth totals you already verified. A migrated model has idioms a generic writer would miss:
+  disconnected parameter-proxy tables that are not dimensions, `CM`/`T `-style measure-name prefixes
+  the migration introduced, and `Latest*` snapshot measures that must not be re-aggregated.
+- **A migrated model is not done without model-level AI instructions.** The DAX-generation path relies
+  solely on model metadata plus Prep-for-AI and ignores data-agent-level notes, so `CustomInstructions`
+  is the only free-text lever that reaches it.
+- **Your gate before hand-off** — scoped to the model you built, not the whole repo:
 
-**Mechanism — use the Power BI Modeling MCP (validated), not regex-editing of `///`:**
+  ```bash
+  python scripts/check_ai_readiness.py migrations/workbooks/<slug>
+  python scripts/set_ai_instructions.py --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel
+  python scripts/set_ai_instructions.py --check --strict --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel
+  ```
 
-1. `connection_operations` **ConnectFolder** with `folderPath` = the `…SemanticModel` folder — this
-   loads the model **offline, no Power BI Desktop required** (confirmed: loads tables/measures/rels
-   from the TMDL directly).
-2. Understand the data: read the extracted CSV, or `dax_query_operations` **Execute**
-   `EVALUATE VALUES('Table'[Col])` for each categorical column to get its real domain values.
-3. Set descriptions in batch via `table_operations` / `column_operations` / `measure_operations`
-   **Update** with the `description` field (business-meaning first, unit/grain, then the enum domain
-   for categoricals). Lead with meaning: `"Latest recorded Body Mass Index (kg/m²), as of the most
-   recent date."` not a raw `{FIXED …}` dump.
-4. Persist with `database_operations` **ExportToTmdlFolder**, `tmdlFolderPath` = the model's
-   **`definition`** subfolder (NOT the SemanticModel root — that flattens the PBIP layout). The export
-   normalizes identifier quoting/whitespace model-wide (cosmetic; content, lineageTags, and DAX are
-   preserved) — expect a one-time reformat diff; that's fine.
-5. Verify with `python scripts/check_ai_readiness.py migrations/workbooks/<slug>` — ~100% description coverage,
-   no categorical column missing its domain values — before reporting done.
-6. **Model-level AI instructions (MANDATORY, file-committable, validated). HOW:**
-   a. **Author** `migrations/workbooks/<slug>/ai-instructions.md`. It is a *writing* task, not engineering — do
-      NOT mass-generate it; ground every line in the real model (read the TMDL, the extracted CSV, the
-      ground-truth totals). Keep it high-signal (aim ~1–3 KB; the 10,000-char cap is a ceiling, not a
-      target — beware "context rot"). **Say nothing the schema already shows** (no column/type
-      catalogs). Use short sections:
-      - `# <Model>` + one-line purpose and grain.
-      - **Grain and tables** — fact grain; and flag every disconnected / parameter-proxy table a
-        migration produces as "not a dimension, not a calendar".
-      - **Business terminology and defaults** (the core value): map fuzzy terms to a specific measure
-        ("'sales' = `[Net Sales]`"), state the default table/filter/period, and clarification triggers.
-      - **Measure-naming conventions** — explain PATTERNS the migration introduced (e.g. `CM`=current
-        month, `T `=turbine-filtered), don't enumerate every measure.
-      - **For Copilot (style + visuals)** — concise answers (lead with the number), preferred/avoided
-        charts (part-to-whole = bar, not pie).
-      - **Things to avoid** — prefer explicit measures over implicit `SUM`/`AVERAGE` of raw columns
-        (that's where migrated DAX lives); don't re-aggregate `Latest*`/`CM*` snapshots; "latest" = max
-        date, not today; IronViz geometry measures are helpers, not metrics.
-      See [`docs/ai-instructions-authoring-guide.md`](../../docs/ai-instructions-authoring-guide.md) for
-      the full recipe, MS Learn/Anthropic grounding, and worked instruction patterns.
-   b. **Stamp** it: `python scripts/set_ai_instructions.py --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel`.
-      The script creates the `cultureInfo` + `ref cultureInfo` if the model has none, injects/normalizes
-      the `CustomInstructions` key (single-line canonical form), **sets `settings.qnaEnabled = true` in
-      `definition.pbism`** (CRUCIAL — migrated models default to `false`, which makes Q&A/Copilot silently
-      ignore the instructions), round-trip-guards the JSON, and prints advisory quality warnings
-      (context-rot length, missing headings/field-refs/avoid-section, qnaEnabled not true).
-   c. **Verify**: `python scripts/set_ai_instructions.py --check` shows the model OK with no `[!]`
-      warnings, and an offline `tmdl_validate` deserialize still passes. (Post-publish, the remote MCP
-      `GetSemanticModelSchema` returns this text to Copilot/data agents — proven.)
+  The last one must exit 0. Report what you **deferred** (AI data schema, verified answers, "Approved
+  for Copilot") in `limitations_encountered` — a migration that claims "AI-ready" without naming the
+  deferred items is overstating its coverage.
 
 ## Gotchas
 
