@@ -74,6 +74,24 @@ examples, not hypothetical ones.
 - **Durable learnings go in committed files** (the agent `Gotchas` sections and
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
   real migration permanently improves the toolkit.
+- **Power BI Desktop is the best diagnostic in the toolchain, and every CLI around it hides that.**
+  Measured 2026-07-31 (Desktop 2.157.480.0) on a model with a duplicated TMDL property:
+  `powerbi-desktop open` returned `"status":"launched"` and **exit 0**; `powerbi-desktop status`
+  returned `BRIDGE_ERROR "Host is not ready to accept operations"` with **`retryable: true`**,
+  `retryAfterMs: 2000` and `details: {}`. Desktop itself was displaying the file, the line number and
+  the offending text. **`Host is not ready` has TWO causes and the bridge cannot tell them apart:**
+  transient (still starting / genuine contention from orphaned instances) and **permanent** (a modal
+  error dialog that will never clear because the model cannot load). Sweeping orphans and retrying —
+  the documented remedy for the first — is exactly the 129-minute loop for the second.
+  **Disambiguate before you retry, every time:** `python scripts/dump_desktop_error.py --pid <pid>`.
+  A dialog (exit 3) means PERMANENT: read the message, fix it, do not retry and do not sweep. No
+  dialog (exit 0) means it really may be contention/startup — then a bounded retry is legitimate.
+  Trust the dialog over `retryable: true`. It works on a **background** window (it reads the dialog's
+  MSHTML DOM via a window message, not the foreground/input path), so it is safe in a parallel batch.
+  Two rules follow: **never minimize a Desktop instance an agent is driving** — minimizing the owner
+  removes the dialog from the UIA enumeration and a minimize/restore cycle *destroys* it, taking the
+  only real diagnostic with it; and **always pin to your own PID**, because `powerbi-desktop status`
+  reports a top-level `"status": "ready"` when ANY instance is healthy, even while yours is dead.
 - **Clean up after yourself when you finish.** (a) **Close any Power BI Desktop instance you opened.**
   In a parallel batch, orphaned Desktop instances (+ their child `msmdsrv`) cause Desktop-bridge
   contention that blocks later agents from opening/rendering — a real bottleneck. Close the instance
@@ -214,13 +232,16 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    **Validate** returned *"DAX query operations are not supported on offline connections"*. TMDL
    deserialization treats M as an opaque string, so the mashup engine never sees it until Desktop
    opens the `.pbip`.
-   **Know its limits — it is a structural checker, not an M parser.** An adversarial review measured
-   roughly **10% recall on arbitrary broken M**: it does NOT catch a missing comma between call
-   arguments or `let` steps, a missing `=` in a record field, `if` without `then`, a stray semicolon,
-   smart quotes, or a truncated expression. So **a clean result is not proof the model opens** — it
-   only rules out the specific shapes above. Treat a finding as almost certainly real (its false
-   positives are pinned by regression tests) and a clean run as "one class of defect excluded";
-   step 9's refresh against real data is what actually proves the M is valid.
+   **Know its limits, and run the TMDL checker alongside it.** Re-measured 2026-07-31: recall is
+   **6/10** on broken-M shapes (not the ~10% previously claimed here), and the `in`-variant gap is
+   fixed. It still misses a missing comma between call arguments or `let` steps, a missing `=` in a
+   record field, and `if` without `then`. It also only reads **M**, so it is blind to TMDL defects —
+   run **`python scripts/check_tmdl.py <Name>.SemanticModel`** too: duplicate properties,
+   measure/column name collisions and the illegal `'T'[Col]=[Measure]` compact filter all stop
+   Desktop opening the model while `check_m_syntax` and `powerbi-report-author validate` both report
+   green. Treat any finding from either as almost certainly real (false positives are pinned by
+   regression tests) and a clean run as "those classes excluded, nothing more"; step 9's refresh
+   against real data is what actually proves the model loads.
 9. **Validate a sample — this is mandatory and works offline.** For at least the non-trivial translated
    measures (anything that wasn't a pure passthrough), run a real `EVALUATE` and sanity-check output
    shape and spot values. On a local PBIP use `powerbi-modeling-mcp` → `connection_operations`

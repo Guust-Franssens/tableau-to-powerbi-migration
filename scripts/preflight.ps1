@@ -166,26 +166,68 @@ Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP 
 Add-Cli 'powerbi-desktop' 'recommended' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
 # --- Power BI Desktop (Windows-only; this is why the bootstrap is PowerShell) ---
-$desktop = $null
-if ($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH }
-if (-not $desktop) {
-    $loc = (Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop).InstallLocation
-    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) { $desktop = (Join-Path $loc 'bin\PBIDesktop.exe') }
-}
-if (-not $desktop) {
-    $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
-    if (Test-Path $classic) { $desktop = $classic }
-}
+# TWO separate questions, and conflating them produced a real FALSE GREEN:
+#   (a) is Desktop installed?           -> this script can find an MSIX install via Get-AppxPackage.
+#   (b) can the Desktop BRIDGE find it? -> the bridge CANNOT enumerate AppX. For a Store/MSIX install
+#       it resolves the exe from $env:PBI_DESKTOP_PATH, and its built-in fallbacks only cover the
+#       classic (non-Store) install locations.
+# Because the MSIX path embeds the VERSION, every Store auto-update invalidates that pinned value.
+# Measured 2026-07-31: PBI_DESKTOP_PATH still pointed at ...PowerBIDesktop_2.156.879.0... while
+# 2.157.480.0 was installed, so `powerbi-desktop open` died with DESKTOP_EXE_NOT_FOUND and the whole
+# refresh/render/screenshot loop was dead - yet this script printed "Ready to migrate", because it
+# silently fell back to the AppX path that only IT can see. Now we check the bridge's own resolution.
+$appxExe = $null
+$appxLoc = (Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop).InstallLocation
+if ($appxLoc -and (Test-Path (Join-Path $appxLoc 'bin\PBIDesktop.exe'))) { $appxExe = Join-Path $appxLoc 'bin\PBIDesktop.exe' }
+$classicExe = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
+if (-not (Test-Path $classicExe)) { $classicExe = $null }
+
+$desktop = $appxExe
+if (-not $desktop) { $desktop = $classicExe }
+if (-not $desktop -and $env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH }
 Add-Check 'Power BI Desktop' 'recommended' ([bool]$desktop) `
     $(if ($desktop) { $desktop } else { 'not found' }) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
 
-# --- .NET SDK (builds scripts/tmdl_validate for offline TMDL deserialization) ---
-# NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
-# ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
-# check could never pass. TOM now comes from the NuGet package Microsoft.AnalysisServices.NetCore.retail.amd64,
-# restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
-Add-Cli 'dotnet' 'recommended' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
+# The bridge-resolution check. Only meaningful for an MSIX install; a classic install is found by the
+# bridge's own fallbacks and needs no env var.
+$envPath = $env:PBI_DESKTOP_PATH
+$bridgeOk = $true
+$bridgeDetail = 'classic install - bridge finds it without PBI_DESKTOP_PATH'
+if ($appxExe) {
+    if (-not $envPath) {
+        $bridgeOk = $false
+        $bridgeDetail = 'MSIX install but PBI_DESKTOP_PATH is NOT set - the bridge cannot enumerate AppX'
+    }
+    elseif (-not (Test-Path $envPath)) {
+        $bridgeOk = $false
+        $bridgeDetail = "PBI_DESKTOP_PATH points at a path that no longer exists (stale after a Store update): $envPath"
+    }
+    elseif ($envPath -ne $appxExe) {
+        $bridgeOk = $false
+        $bridgeDetail = "PBI_DESKTOP_PATH points at a DIFFERENT build than the installed one ($envPath)"
+    }
+    else {
+        $bridgeDetail = "matches the installed MSIX build"
+    }
+}
+elseif (-not $classicExe) {
+    $bridgeOk = $false
+    $bridgeDetail = 'no Power BI Desktop found at all'
+}
+Add-Check 'Desktop Bridge can resolve Desktop' 'recommended' $bridgeOk $bridgeDetail `
+    $(if ($appxExe) { "Run: setx PBI_DESKTOP_PATH `"$appxExe`"  (then restart the shell). The MSIX path embeds the version, so this breaks on EVERY Power BI Desktop update - re-run preflight after one." } else { 'Install Power BI Desktop.' })
+
+# --- .NET SDK (optional; the offline TMDL structural checks now run in Python) ---
+# NOTE: this used to say the SDK was needed to build `scripts/tmdl_validate`, an offline TMDL
+# deserializer. That project does not exist in this repo - preflight was demanding a dependency for a
+# tool that was never built. The structural TMDL gate is now `scripts/check_tmdl.py` (pure Python,
+# no .NET, no MCP): it catches duplicate properties, measure/column name collisions and the illegal
+# `'T'[Col]=[Measure]` compact filter, all of which are invisible to check_m_syntax (M only) and to
+# powerbi-report-author validate (Report item only). A full round-trip via the modeling MCP's
+# ConnectFolder remains the deeper check. .NET stays listed because the ADOMD/AMO path used by
+# probe_desktop_query.py and refresh_pbip_model.py needs it.
+Add-Cli 'dotnet' 'optional' 'Install the .NET SDK - needed by the ADOMD/AMO path (probe_desktop_query.py, refresh_pbip_model.py).'
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'

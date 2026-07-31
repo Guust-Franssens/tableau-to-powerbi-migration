@@ -95,6 +95,24 @@ reasoning or self-report of success.
 - **Durable learnings go in committed files** (the agent `Gotchas` sections and
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
   real migration permanently improves the toolkit.
+- **Power BI Desktop is the best diagnostic in the toolchain, and every CLI around it hides that.**
+  Measured 2026-07-31 (Desktop 2.157.480.0) on a model with a duplicated TMDL property:
+  `powerbi-desktop open` returned `"status":"launched"` and **exit 0**; `powerbi-desktop status`
+  returned `BRIDGE_ERROR "Host is not ready to accept operations"` with **`retryable: true`**,
+  `retryAfterMs: 2000` and `details: {}`. Desktop itself was displaying the file, the line number and
+  the offending text. **`Host is not ready` has TWO causes and the bridge cannot tell them apart:**
+  transient (still starting / genuine contention from orphaned instances) and **permanent** (a modal
+  error dialog that will never clear because the model cannot load). Sweeping orphans and retrying —
+  the documented remedy for the first — is exactly the 129-minute loop for the second.
+  **Disambiguate before you retry, every time:** `python scripts/dump_desktop_error.py --pid <pid>`.
+  A dialog (exit 3) means PERMANENT: read the message, fix it, do not retry and do not sweep. No
+  dialog (exit 0) means it really may be contention/startup — then a bounded retry is legitimate.
+  Trust the dialog over `retryable: true`. It works on a **background** window (it reads the dialog's
+  MSHTML DOM via a window message, not the foreground/input path), so it is safe in a parallel batch.
+  Two rules follow: **never minimize a Desktop instance an agent is driving** — minimizing the owner
+  removes the dialog from the UIA enumeration and a minimize/restore cycle *destroys* it, taking the
+  only real diagnostic with it; and **always pin to your own PID**, because `powerbi-desktop status`
+  reports a top-level `"status": "ready"` when ANY instance is healthy, even while yours is dead.
 - **Clean up after yourself when you finish.** (a) **Close any Power BI Desktop instance you opened.**
   In a parallel batch, orphaned Desktop instances (+ their child `msmdsrv`) cause Desktop-bridge
   contention that blocks later agents from opening/rendering — a real bottleneck. Close the instance
