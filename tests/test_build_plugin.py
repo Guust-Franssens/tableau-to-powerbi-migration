@@ -63,11 +63,23 @@ def test_every_skill_the_manifest_declares_is_present_at_that_path(built: Path) 
 
 
 def test_each_published_skill_travels_with_its_scripts_and_tests(built: Path) -> None:
-    """The copy-one-folder promise: a consumer installs the whole bundle, not just its markdown."""
+    """The copy-one-folder promise: a consumer installs the whole bundle, not just its markdown.
+
+    Conditional on the SOURCE bundle actually shipping code, because not every bundle does: the two
+    gotcha catalogues are pure knowledge (no scripts, so nothing to gate). Asserting unconditionally
+    would forbid a documentation-only bundle, and asserting nothing would let a build silently drop
+    the `scripts/` of a bundle that has them - which is the failure this test exists to catch.
+    """
     skills = built / "plugins" / build_plugin.PLUGIN_NAME / "skills"
+    carried = 0
     for name in build_plugin.SHIPPED_SKILLS:
-        assert (skills / name / "scripts").is_dir(), f"{name} published without its scripts/"
-        assert (skills / name / "tests").is_dir(), f"{name} published without its tests/"
+        source = build_plugin.SKILLS_DIR / name
+        assert (skills / name / "SKILL.md").is_file(), f"{name} published without its SKILL.md"
+        for folder in ("scripts", "tests"):
+            if (source / folder).is_dir():
+                assert (skills / name / folder).is_dir(), f"{name} published without its {folder}/"
+                carried += 1
+    assert carried, "no shipped bundle carries scripts/ or tests/ - this test now proves nothing"
 
 
 def test_no_build_artifacts_are_published(built: Path) -> None:

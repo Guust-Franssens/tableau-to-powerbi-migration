@@ -29,18 +29,25 @@ SKILLS_DIR = REPO_ROOT / ".github" / "skills"
 
 MARKETPLACE_NAME = "powerbi-migration-collection"
 PLUGIN_NAME = "powerbi-migration-skills"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-migration-skills"
 
 # Only source-tool-agnostic bundles ship. `sentinel-probe` is a diagnostic, and anything
 # Tableau-specific belongs in the migration repo's personas, not in a reusable plugin.
-SHIPPED_SKILLS = ("powerbi-ai-readiness", "pbip-model-refresh")
+SHIPPED_SKILLS = (
+    "powerbi-ai-readiness",
+    "pbip-model-refresh",
+    "powerbi-report-gotchas",
+    "powerbi-semantic-model-gotchas",
+)
 
 PLUGIN_DESCRIPTION = (
-    "Make a Power BI semantic model AI-ready and persist a refreshed local PBIP. "
-    "Descriptions, enumerated domains, model-level AI instructions (CustomInstructions) and the "
-    "qnaEnabled switch that silently voids them; plus refreshing a PBIP in Power BI Desktop and "
-    "saving it headlessly to cache.abf via AMO ImageSave. Source-tool agnostic - the input is "
+    "Reusable Power BI skills: make a semantic model AI-ready, persist a refreshed local PBIP, and "
+    "avoid the PBIR and TMDL defects that pass validation but break at open, refresh or render. "
+    "Covers descriptions, enumerated domains, model-level AI instructions (CustomInstructions) and "
+    "the qnaEnabled switch that silently voids them; refreshing a PBIP in Power BI Desktop and "
+    "saving it headlessly to cache.abf via AMO ImageSave; and two hard-won gotcha catalogues for "
+    "report authoring and semantic modelling. Source-tool agnostic - the input is "
     "already a Power BI model - so it applies to Tableau, Qlik and Cognos migrations alike."
 )
 

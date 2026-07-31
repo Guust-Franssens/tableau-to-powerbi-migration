@@ -83,6 +83,10 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
 
 ## Skills you use, in this order
 
+0. **`powerbi-report-gotchas`** — read this **first**, before planning turns into authoring. It is the
+   accumulated PBIR/Desktop failure knowledge of every prior migration; skipping it is how the same bug
+   gets rediscovered. Invoke by name, or read
+   [`.github/skills/powerbi-report-gotchas/SKILL.md`](../skills/powerbi-report-gotchas/SKILL.md).
 1. **`powerbi-report-planning`** — turn the Tableau dashboard inventory into a page plan with an
    approval gate before building anything.
 2. **`powerbi-report-design`** — for each planned page, decide chart types, layout, color, and produce
@@ -181,24 +185,11 @@ year ago may be superseded.
 
 ### Research subtasks: keep the mapping current, per idiom (not per instance)
 
-To keep visual choices up to date without re-researching 30 visuals on every dashboard, research **per
-distinct Tableau idiom**, cache the result, and reuse it:
-
-1. **Collect the distinct idioms** in this workbook (mark type × key encoding: e.g. "filled map / region
-   choropleth", "dual-axis line+bar", "part-to-whole", "KPI with trend"). Dedupe — 30 visuals are
-   usually 5-8 idioms.
-2. **For each idiom without current cached guidance, spawn a focused research subtask** that answers:
-   *what is the best Power BI visual for this Tableau idiom today, and how does Microsoft Learn say to
-   build/configure it well?* The subtask must return a recommended visual + concrete configuration
-   notes + **Microsoft Learn citation(s) with the access date**, cross-checked against
-   `catalog describe`. **Maps are the priority** — Azure Maps guidance (reference layers, data-bound
-   layers, bubble vs choropleth) changes and is easy to get subtly wrong.
-3. **Cache it into the cookbook**: add/refresh a `## MS Learn best practice (as of <date>)` section in
-   the idiom's `visuals/<type>.md` with the recommendation + citation. Downstream, every instance of
-   that idiom reuses the cached decision; the dated citation makes staleness visible on the next run.
-4. Only then encode, following the (B) precedence above.
-
-This is what makes the cookbook self-refreshing against Microsoft Learn rather than a frozen snapshot.
+Research **per distinct Tableau idiom**, cache the result in the cookbook, and reuse it — 30 visuals
+are usually 5–8 idioms. The full four-step procedure (dedupe idioms → focused research subtask with a
+dated Microsoft Learn citation → cache into `visuals/<type>.md` → then encode) is
+`powerbi-report-gotchas` §9. It is what makes the cookbook self-refreshing rather than a frozen
+snapshot.
 
 ### Chart-type mapping (Tableau `mark_type` → Power BI visual)
 
@@ -277,266 +268,89 @@ wrong encoding. Instead:
 
 ## Mandatory validation (before Desktop screenshot review)
 
-Structural validation is not optional and not just "nice if the tooling supports it" — run it before
-every screenshot-based design review, on both the initial build and every later fix pass:
+Structural validation is not optional. Run it before every screenshot-based design review, on both the
+initial build and every later fix pass:
 
-1. **Check which `powerbi-report-authoring` skill version is active.** There have been two installed
-   copies of this skill in this environment at different capability levels — an older one with no
-   automated validation CLI, and a newer one (`fabric-collection\powerbi-authoring`) that ships a
-   `powerbi-report-author validate` CLI (structural/schema/cross-reference/role-binding checks) and a
-   `powerbi-desktop` CLI (`status`/`reload`/`screenshot` over the Desktop Bridge). Run `check-updates`
-   once per session as instructed by the skill, and prefer the newer CLI-driven flow if available —
-   it mechanically catches classes of bugs (e.g. broken field projections, `tableEx`-vs-`pivotTable`
-   misuse) that this session instead found the hard way, one manual screenshot at a time.
-2. **If only the older skill copy is active**, do the equivalent checks manually before every
-   screenshot review: every `visual.json` field reference resolves against the real TMDL; every page
-   is listed in `pages/pages.json`; no two visuals overlap; `definition.pbir`'s model reference is
-   correct — note it may legitimately point **outside** this migration folder when the model is shared
-   across workbooks (a Tableau *published* data source migrates once into `migrations/datasources/<ds-slug>/`). A
-   relative cross-tree `byPath` like `"../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"` is
-   verified to resolve in Desktop; do **not** "fix" it by copying the `.SemanticModel` folder in beside
-   your report. Cloud equivalent: `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`. and every table/matrix `Values` well matches the shape called out in the Gotchas below
-   (no suspicious single-active-field-with-inactive-siblings pattern).
+1. **Confirm the CLI-driven flow is available.** Run the `powerbi-report-authoring` skill's
+   `check-updates` once per session. The current skill ships `powerbi-report-author validate`
+   (structural/schema/cross-reference/role-binding) and the `powerbi-desktop` bridge
+   (`status`/`reload`/`screenshot`). Prefer it — it mechanically catches bug classes that were
+   previously found one manual screenshot at a time.
+2. **If only an older skill copy is active**, do the equivalent checks by hand before every screenshot
+   review: every `visual.json` field reference resolves against the real TMDL; every page is listed in
+   `pages/pages.json`; no two visuals overlap; every table/matrix `Values` well is free of the
+   single-active-field-with-inactive-siblings pattern (`powerbi-report-gotchas` §4); and
+   `definition.pbir`'s model reference is correct.
+   **Model reference:** it may legitimately point **outside** this migration folder when the model is
+   shared across workbooks (a Tableau *published* data source migrates once into
+   `migrations/datasources/<ds-slug>/`). A relative cross-tree `byPath` like
+   `"../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"` is verified to resolve in Desktop
+   — do **not** "fix" it by copying the `.SemanticModel` folder in beside your report. Cloud
+   equivalent: `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`.
 3. **Only after structural validation passes**, do the visual/numeric Desktop screenshot review.
-4. **Don't treat a clean Bridge/MCP response as proof the report renders error-free.** As of this
-   skill generation, errors that occur *inside* Power BI Desktop's own rendering/evaluation (a visual
-   showing an error glyph, a card failing to evaluate, a refresh failure banner) are not reliably
-   surfaced as structured data back through the Desktop Bridge — a `status`/`reload` call can return
-   cleanly while Desktop is still showing a visible error state. The product team is actively working
-   on surfacing these in-app errors programmatically (per Microsoft's own Desktop Bridge roadmap
-   commentary); until that lands, a successful API/CLI response is **not** sufficient — always
-   cross-check with an actual screenshot for error glyphs/banners, don't skip that step just because
-   the mechanical call succeeded.
+4. **A clean Bridge/MCP response is NOT proof the report renders error-free.** Errors *inside*
+   Desktop's own rendering (a visual error glyph, a card failing to evaluate, a refresh banner) are not
+   reliably surfaced back through the bridge — `status`/`reload` can return cleanly while Desktop shows
+   a visible error state. Always cross-check with an actual screenshot for error glyphs and banners.
 
 ## Iterating on an existing report — still go through the skill chain
 
-A large share of this session's actual bug-fixing (5+ checkpoints) happened as direct, ad hoc PBIR
-file edits and MCP calls made outside of `pbi-report-builder`/`powerbi-report-authoring`, not as a
-proper re-invocation of this subagent. That was the single biggest process gap this session — it
-meant none of the skill's own validation steps, anti-pattern checks, or design-consistency guardrails
-were applied to any of the fixes. **When fixing a bug in an already-built report, re-invoke this
-subagent (or at minimum re-follow its "Task: Edit an existing report" workflow) instead of making a
-one-off direct edit** — even for something that looks like a trivial one-line fix. The skill's own
-pre-development discovery step and post-development validation checklist exist specifically to catch
-the side effects a quick direct edit tends to miss.
+**When fixing a bug in an already-built report, re-invoke this subagent (or at minimum re-follow the
+`powerbi-report-authoring` skill's "Task: Edit an existing report" workflow) instead of making a
+one-off direct edit** — even for a trivial-looking one-line fix. Its pre-development discovery step and
+post-development validation checklist exist precisely to catch the side effects a quick direct edit
+misses. This was the single biggest process gap in an earlier session: 5+ checkpoints of real bug-fixing
+happened as ad hoc PBIR/MCP edits, so none of the validation, anti-pattern or design-consistency
+guardrails ran against any of the fixes.
 
 ## Definition of Done
 
 Don't report the report as complete until all of the following hold — "it opens in Desktop without
 crashing" is necessary but not sufficient:
 
-1. **Structural validation passed** (see "Mandatory validation" above), not just a visual glance.
-2. **`layout_contract` is fully specified and `space_audit`-clean** — no overlapping regions, no
+1. **The `powerbi-report-gotchas` skill was read this session**, before the first visual was authored.
+   Several items below are one-line summaries of entries that only make sense in full.
+2. **Structural validation passed** (see "Mandatory validation" above), not just a visual glance.
+3. **`layout_contract` is fully specified and `space_audit`-clean** — no overlapping regions, no
    visual placed outside its page bounds.
-3. **Every slicer that drives the report's default view has an explicit default value set** — no
-   visual should render an all-rows aggregate on first load (see Gotcha below).
-4. **Every table/matrix visual's field projection has been checked against the real Tableau
+4. **Every slicer that drives the report's default view has an explicit default value set** — no
+   visual should render an all-rows aggregate on first load (`powerbi-report-gotchas` §8).
+5. **Every table/matrix visual's field projection has been checked against the real Tableau
    worksheet**, not accepted on a plausible-looking guess — especially any single-active-field
-   pattern (see Gotcha below).
-5. **Every percentage/scaled numeric field's `formatString` has been checked against a real sample
-   value via DAX**, not assumed from the field's semantic name alone.
-6. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
+   pattern (`powerbi-report-gotchas` §4).
+6. **Every percentage/scaled numeric field's `formatString` has been checked against a real sample
+   value via DAX**, not assumed from the field's semantic name alone (`powerbi-report-gotchas` §3).
+7. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
    `limitations_encountered` has been explicitly addressed or explicitly flagged** — none silently
    dropped.
-7. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
-   still needs the relevant subset of this list re-checked (at minimum #3–#5 for the visual touched)
+8. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
+   still needs the relevant subset of this list re-checked (at minimum #4–#6 for the visual touched)
    before you report it done.
 
 ## Gotchas
 
-- **Nested shelf grouping** — Tableau's `(a / b)` shelf notation (seen in the EEA sample: period
-  nested with land-use type on the columns shelf) is a layout/hierarchy nesting, not a calculation.
-  Translate to a multi-field axis or a legend + axis combination, matching the nesting order.
-- **Customized tooltips** (`worksheets[].customized_tooltip_text`) — Tableau's tooltip text often
-  embeds dynamic field references. Recreate as a Power BI tooltip page or the visual's default tooltip
-  fields, whichever preserves the intent with less custom-build effort; note if fidelity is reduced.
-- **Manual sort orders** (`worksheets[].manual_sort`) — implement via a "Sort by column" helper column
-  in the semantic model (coordinate with `pbi-semantic-builder` if one doesn't exist yet) rather than
-  a one-off visual-level sort that won't survive a refresh.
-- **Don't silently drop unresolved shelf references** (`UNRESOLVED:...` field ids surfaced in
-  `limitations_encountered`) — surface them as "this visual may be missing a field" rather than
-  building an incomplete visual without comment.
-- **`measure_names_values_pivot`** (parser field, see `docs/migration-spec.md`) — Tableau's "Measure
-  Names/Measure Values" virtual pivot has no direct PBI equivalent and shouldn't be recreated
-  literally. Bind each field in `pivoted_field_ids` directly to the visual instead. If it's empty, the
-  parser couldn't resolve the underlying fields — flag it, don't guess.
-- **Never infer a parameter/field's purpose from its raw internal name** — always use the resolved
-  `field_id`/`caption`. Tableau's internal names go permanently stale after a Ctrl-drag duplication
-  (e.g. a zone's `param` reference resolving to a field internally named `[Y-Axis (copy 2)]` whose
-  real caption is "Map KPI" — nothing to do with any Y-axis control). This applies to parameter-control
-  zones (`type: "parameter"`) just as much as to semantic-model fields: if a zone's `field_id` is
-  `null`, that's the parser telling you the parameter reference didn't resolve — flag it, don't guess
-  from the XML name text.
-- **Crosstab/pivot visuals are a recurring fragility class — two distinct failure modes seen so far:**
-  1. Using `tableEx` for a dimension+measure grid can render column headers with **zero data rows**,
-     even though the underlying DAX is correct. Prefer `pivotTable` for any dimension-in-rows +
-     measure-in-values grid.
-  2. A matrix that pivots a dimension into **Columns** (cross-tab) and reads a single shared,
-     mixed-type text column via one measure can have `SUMMARIZECOLUMNS` **silently drop specific
-     (row, column) combinations** from the result — even when the underlying data is 100% clean
-     (verified via direct `CALCULATETABLE`/`COUNTROWS`), and regardless of grouping column, measure
-     formula, or relationship cross-filter direction. Root cause not fully understood at the DAX
-     engine internals level. **The robust fix: avoid the Columns-pivot pattern entirely.** Use one
-     measure per branch (each with its own internal `CALCULATE(..., dimension = "X")` filter) and
-     project them as separate flat `Values` entries (no `Columns` bucket) — this is usually also a
-     *more faithful* translation of the Tableau original, which is typically a flat table under the
-     hood, not a true cross-tab.
-  **Whenever you're about to build a visual that pivots a dimension into columns, consider the
-  flat-table alternative first** — it's both safer and usually more faithful to the source.
-- **A `Text`/table-style worksheet's exact field projection must be checked against the real Tableau
-  worksheet, not inferred from a plausible guess.** This bug class recurred and needed correcting more
-  than once on the *same* visual in this session (a table was first expanded from a broken
-  single-active-column to a plausible-looking 3-column projection, then later found to still have one
-  redundant/wrong field and had to be trimmed to 2 correct columns). **Red flag to check for:** a
-  table/matrix `Values` well with exactly one active field and other candidate fields
-  present-but-inactive — that exact pattern showed up as a broken/incomplete migration artifact twice
-  in this workbook. When you see it, verify against the actual Tableau worksheet's rendered columns
-  before accepting it as correct.
-- **Set a sensible default value on every filter-driving slicer before calling the report done.** A
-  slicer left with no default selection makes every bound visual render an aggregate-across-all-rows
-  value on first load (in this workbook: an aggregate across 906 cities) — which reads as "broken"
-  even though the DAX/binding is correct. Pick a default that matches the reference Tableau
-  screenshot/state, and confirm visually.
-- **Check `formatString` against the field's actual numeric scale, not just its semantic meaning.** A
-  Tableau field can already be stored pre-scaled (e.g. `12.83` meaning "12.83%", not the fraction
-  `0.1283`). Applying Power BI's standard `0.00%` format (which multiplies by 100 for display) on an
-  already-scaled value produces a **100x inflated** display (`1283%` instead of `12.83%`). Check a
-  sample raw value via DAX before choosing between `0.00%` (true 0–1 fraction) and `0.00"%"` (literal
-  suffix on an already-scaled number).
-- **PBIR files and an open Desktop session can race.** Desktop autosaves periodically; a direct file
-  edit to `definition/` while Desktop has the report open can be silently clobbered by the next
-  autosave, or vice versa. Prefer closing/reloading Desktop around direct PBIR edits, or use the
-  Desktop Bridge's `reload` command if that skill version is available (see "Mandatory validation"
-  above).
+**INVOKE THE `powerbi-report-gotchas` SKILL BEFORE YOU AUTHOR YOUR FIRST VISUAL** — and again whenever
+a visual validates clean but renders wrong. It is ~18 KB of PBIR/Desktop failure knowledge accumulated
+across every prior migration. Invoke it by name, or read
+[`.github/skills/powerbi-report-gotchas/SKILL.md`](../skills/powerbi-report-gotchas/SKILL.md).
 
-### Iteration-3 hard-won gotchas (Telecom, Sales Commission, Shipping, Tale-of-100, Airline, Superstore)
+**What is in it, so you can tell when you need it.** If any row below matches what you are about to
+build or debug, you have not read enough yet:
 
-**Validation-invisible rendering bugs — these pass `powerbi-report-author validate` but render wrong;
-only a live Desktop screenshot catches them, so treat structural validation as necessary-not-sufficient:**
-- **Conditional/Cases `Else` is IGNORED by Desktop for table `fontColor`** — the top/else band renders
-  **black**. Fix: append an explicit always-true final `Case` (e.g. `driver < 1e12` → the else color)
-  instead of relying on `Else`.
-- **azureMap `Location` role + explicit Lat/Long = a Desktop error** ("Remove Location… or set aggregate
-  to Average"). Fix: keep `Location`, set Lat/Long to **Average** aggregation (lossless when the grain
-  is one coordinate per point).
-- **`field.Aggregation.Function` enum: Sum=0, Avg=1, Max=2, Min=3, Count=4.** A wrong value is not a
-  field reference, so it passes validation but **silently aggregates wrong**.
-- **Projection-level `format` overrides** (`proj.format = "0.00%"`) and **`expansionStates`** both pass
-  validation but their Desktop honoring is unconfirmed offline — `expansionStates` in particular is a
-  **no-op on initial render** (matrix still shows collapsed); don't burn cycles chasing it, document a
-  collapsed default or use a flat `tableEx` when the grain is one row per leaf.
+| § | Covers |
+|---|---|
+| 1 | Validation-invisible rendering bugs: `Else` ignored for table `fontColor`, azureMap `Location` + Lat/Long, the `Aggregation.Function` enum, `expansionStates`, measure-filters that silently zero a visual, "Column cannot be found" = a field-parameter model bug |
+| 2 | Data colours: `Conditional.Cases[]` vs `fillRule`, per-point colour needs a PROJECTED field, `scopeId` mode, string colour-helpers cannot drive rules |
+| 3 | PBIR mechanics: `filterConfig` is a SIBLING of `visual`, stacked bar = `barChart`, `displayName` renames headers, type-suffixed reference-line literals, theme rules, `formatString` scale |
+| 4 | Crosstabs: `tableEx` empty-rows, the `SUMMARIZECOLUMNS` Columns-pivot drop, prefer flat tables |
+| 5 | Maps: azureMap is the only non-deprecated one; choropleth `referenceLayer` encoding, fixed-view zoom, route maps need one row per endpoint |
+| 6 | Scatter: X and Y must BOTH be measures |
+| 7 | Desktop mechanics: no refresh verb, `cache.abf`, the XMLA fallback, MSIX `PBI_DESKTOP_PATH`, autosave races, the bridge as a serialization point |
+| 8 | Reading the spec: nested shelves, tooltips, manual sorts, stale internal names, Measure Names/Values, slicer defaults |
 
-**Data colors / conditional formatting (see the `powerbi-report-authoring` skill →
-`references/conditional-formatting.md`; for table-specific idioms see `.github/pbi.kb/visuals/table-cond-format.md`):**
-- **Discrete/banded data colors use `dataPoint.fill.solid.color.expr.Conditional.Cases[]`, NOT
-  `fillRule.cases`** (`fillRule` is gradient/`linearGradient` only). Each case = a `Comparison`
-  (`Left = SelectRef.ExpressionName` of a projection's `queryRef`, cascading first-match) plus a
-  top-level `Else`, with `selector.data = [{dataViewWildcard:{matchingOption:0}}]`.
-- **Scatter/chart per-point color must reference a PROJECTED field.** A `dataPoint.fill` expr over an
-  *unprojected* measure (e.g. a text KPI measure in no field well) silently falls back to one solid
-  color — carry the numeric driver on an axis or in Tooltips so it's in the visual query.
-- **`scopeId` per-point coloring is the confirmed-good mode for many series** (verified with 81
-  per-company line `dataPoint.fill` entries — all render, no disappearing-line issue).
-- **String-valued "color helper" measures (Tableau `… Circle Col` returning glyph/indicator strings)
-  cannot drive PBIR data-color rules** → static colors; a recurring color-encoding fidelity loss.
+**Semantic-model-owned bugs stay with `pbi-semantic-builder`.** Anything that turns out to be a TMDL or
+DAX defect (a field-parameter `sourceColumn` missing its brackets, a measure evaluated at the wrong
+grain) is *reported*, not fixed here — own your layer.
 
-**PBIR mechanics facts:**
-- **Visual-level filter = a top-level `filterConfig` key in `visual.json` (sibling to `visual`, NOT
-  nested under it)**, `type:"Categorical"`, `Version:2` `In`-condition. Nesting it under `visual` is
-  silently ignored.
-- **Stacked bar = `barChart` visualType (not `clusteredBarChart`); the first Y projection stacks from
-  0.** Per-series colors via `dataPoint[]` with `selector.metadata = <queryRef>` (queryRef, not
-  nativeQueryRef).
-- **`displayName` on a projection is the header-rename mechanism** — Desktop auto-labels non-default
-  aggregations "Average of X"; `nativeQueryRef` does not control the header.
-- **Reference-line `value` needs a type-suffixed numeric literal** (`{Literal:{Value:"100D"}}`); a bare
-  `"100"` parses to 0 and pins the line to the axis baseline with no validation error.
-- **azureMap draws true 2-point route/line maps via `PathID` + `PointOrder` + `pathLayer`** (a fidelity
-  win over Tableau's dual-axis workaround) — but this needs **one data row per endpoint**. If the fact
-  stores origin+destination lat/long as columns on a single row, the arc can't render — that reshape
-  is a **semantic-model decision** (coordinate with `pbi-semantic-builder` up front for any Tableau
-  `MAKELINE`/`MAKEPOINT` route map; otherwise fall back to endpoint bubbles + a documented note).
-- **Theme: custom `visualStyles` are strictly validated per-visual-object and `fillPoint` is not valid
-  for scatterChart/filledMap** — keep custom themes minimal (set visual-specific formatting in each
-  `visual.json`); the theme file's internal `name` must exactly equal the `report.json` `customTheme`
-  reference including `.json`. Single-line caption/legend textboxes need ≥3.4 grid rows or they trip
-  `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR`.
-- **What-if % slicer format: `0.0"%"` (quoted) when the stored value is pre-scaled (e.g. 22.8); `0.0%`
-  (unquoted) only when it's a true 0–1 fraction** — mixing them mis-scales the display by 100×.
-
-### Iteration-4 hard-won gotchas (Superstore — Azure Maps + Field Parameters)
-
-**Azure Maps is the ONLY non-deprecated map** (`map`/`filledMap` are legacy Bing → a
-`PBIR_VISUAL_TYPE_DEPRECATED` warning **plus** a once-per-session Desktop "Bing maps are going away"
-nag modal that the bridge screenshot does NOT surface). All recipes below are Desktop-verified on the
-Superstore build.
-
-- **Measure-driven choropleth (shade regions/states by a measure) — the sanctioned azureMap pattern,
-  ground-truth PBIR encoding:**
-  - `query.queryState.Category` = the location **key column** (e.g. `State`) as a `Column` projection.
-    That alone data-binds the reference layer (Azure Maps matches the key to a property in the boundary
-    file). The colouring measure does **not** go in a data well.
-  - `objects.referenceLayer` is a **2-entry array**:
-    - `[0]` (no selector): `datasourceType` = `'url'`, `referenceLayerUrl` = a hosted boundary GeoJSON
-      URL — fully declarative, no file upload, nothing in `RegisteredResources`. US states:
-      `https://raw.githubusercontent.com/PublicaMundi/MappingAPI/master/data/geojson/us-states.json`
-      (its `name` property = full state name). Add `unmappedObjectVisibility: false` to hide states
-      filtered out of the data.
-    - `[1]` (selector `{data:[{dataViewWildcard:{matchingOption:1}}]}`): `polygonFillColor` = a
-      `FillRule`/`linearGradient3` bound to the measure — the **exact same FillRule shape as
-      `dataPoint.fill`** (`{Input:{Measure:…}, FillRule:{linearGradient3:{min, mid{value:0D}, max,
-      nullColoringStrategy 'asZero'}}}`).
-  - Bring a boundary file for the geography *before* building; if none exists or the join key is
-    uncertain, that is a research-then-ask moment (see "When unsure about a visual" above).
-- **azureMap fixed-view small-multiples:** for a small (≤~400px) region-highlighter multiple, set
-  `mapControls`: `defaultStyle 'road'`, `autoZoom` **false** (otherwise it fits to Alaska/Hawaii/PR in
-  the boundary file and shrinks the lower-48 to a dot), plus a fixed `zoom` + `centerLatitude/Longitude`.
-  Zoom scales with viewport (512px vector tiles): continental US fills a **384px**-wide map at
-  **`zoom ≈ 2.0`** (a 700–940px map uses ≈2.9). `blank` style + `autoZoom` rendered empty/tiny — avoid.
-- **scatterChart X and Y must BOTH be MEASURES, never a grouping column.** Binding `Y` (or `X`) to a
-  dimension renders "Remove Values to display x- and y-axis pairs" (validation-clean, Desktop-only). A
-  Tableau "dimension-on-rows dot strip" → scatter with `Category` = the dimension (Details, one dot
-  each), `X` = value measure, `Y` = a **constant baseline measure** (`measure 'Dot Baseline' = 0`,
-  hidden), `Size` = value measure, colour via a `FillRule` gradient on a signed diff measure; hide the
-  constant `valueAxis` (`show:false` + `showAxisTitle:false`). (Superstore's 3 region-comparison
-  dot-strips.)
-- **A measure used as a visual-level filter at a FINER grain than it evaluates silently zeroes the
-  visual.** Superstore's scatter carried a `Region Filter` measure filter, but at Sub-Category grain
-  `SELECTEDVALUE('…'[Region])` is blank so the filter is false for every point → empty visual. When the
-  underlying measures already bake in the restriction (they did — DAX guide §4), just drop the
-  redundant visual filter.
-- **Slicers/maps showing "Column … cannot be found or may not be used"** almost always mean the
-  field-parameter table's columns didn't materialize — a semantic-model bug (`sourceColumn` needs
-  brackets `[Value1]`); see `pbi-semantic-builder.agent.md` Gotchas. Suspect this first for FP-bound
-  visuals.
-
-**Desktop verification mechanics (when a live check is possible):**
-- **The `powerbi-desktop` bridge has NO refresh verb** (verbs as of bridge CLI 0.1.2: `status`,
-  `manifest`, `open`, `reload`, `screenshot`, `screenshot-all` — the underlying bridge methods are
-  `application.state.get` / `report.snapshot.capture` / `file.reload`), and PBIP stores no data cache,
-  so a freshly-opened import
-  report renders **empty** ("tables have incomplete or no data"). A clean screenshot with empty visuals
-  is an unrefreshed-model artifact, not a binding defect. **First check whether you even need to
-  refresh:** pbi-semantic-builder step 10 now hands over a model that is already refreshed AND
-  saved, which persists the data to `<Name>.SemanticModel/.pbi/cache.abf` and survives reopening
-  (verified 2026-07-30). Run `python scripts/refresh_pbip_model.py --pid <pid> --verify-only` — if
-  it reports `DATA_OK` you are done. If it reports `NO_DATA`, run the same script WITHOUT
-  `--verify-only` rather than hand-rolling the XMLA dance; it also saves, so the next open keeps
-  the data. Note the cache is discarded whenever `definition/*.tmdl` becomes newer than it, so any
-  model edit means re-running it. **Workaround (proven):** refresh via TOM/XMLA
-  against the child `msmdsrv` port — load `Microsoft.AnalysisServices.AdomdClient` (copy the DLL out of
-  WindowsApps first; direct load = Access Denied), find the port via `Get-NetTCPConnection`, resolve the
-  catalog GUID via `$SYSTEM.DBSCHEMA_CATALOGS`, and `ExecuteNonQuery` a TMSL
-  `{"refresh":{"type":"full","objects":[{"database":"<guid>"}]}}`. **Refresh report-bound tables only**
-  (a full refresh can hang 6+ min on a large orphaned table); never kill `SaveChanges` mid-flight; the
-  refreshed data **survives `reload`**, so the steady-state loop is regenerate→validate→reload→screenshot.
-- **External XMLA refresh does NOT clear Desktop's "calculated columns need refresh" banner** (UI
-  dirty-flag only; data underneath is correct).
-- **Store/MSIX Desktop** needs `$env:PBI_DESKTOP_PATH` set to the WindowsApps `PBIDesktop.exe` on each
-  fresh PowerShell process; `reload` can deadlock (`BRIDGE_ERROR "Another operation is already in
-  progress"`, `-32511`) while idle — recover by killing **your own** Desktop PID and relaunching.
-- **In a parallel batch the single Desktop bridge is a hard serialization point** — only one build can
-  hold it; do NOT force-open into an instance owned by another build with unsaved changes, and never
-  screen-scrape as a substitute (focus-steal + privacy risk). Base sign-off on structural validation +
-  an independent field-reference cross-check against the model TMDL when contended. `PBIR_SCHEMA_UNREACHABLE`
-  offline is benign but means JSON-schema validation was skipped — back it with the field cross-check.
+**When you learn a new one, add it to the skill, not back into this file.** That is what keeps this
+persona under the cap and makes the knowledge portable to the next migration.

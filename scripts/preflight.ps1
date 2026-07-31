@@ -173,21 +173,40 @@ foreach ($p in @(
 # ~/.copilot/installed-plugins, NOT the repo copy - even with the repo copy present and the cwd inside
 # this repo. So editing .github/skills/ without re-publishing serves subagents stale guidance, and
 # nothing in the skill registry or the tool output flags the divergence. This check is the only thing
-# that would catch it. Bundles with no plugin twin (e.g. sentinel-probe) are skipped, not failed.
+# that would catch it.
+#
+# It checks BOTH failure shapes, because they are different mistakes:
+#   MISSING - a bundle listed in build_plugin.py's SHIPPED_SKILLS that is not in the installed plugin
+#             (you added or published a bundle but never re-installed; a pairwise hash check alone is
+#             blind to this, since there is nothing to pair with).
+#   STALE   - a bundle present in both whose bytes differ (you edited the repo copy without publishing).
+# Bundles deliberately NOT shipped (e.g. sentinel-probe) are absent from SHIPPED_SKILLS and so ignored.
 if ($migrationPlugin) {
-    $drift = @()
-    $paired = 0
-    foreach ($d in (Get-ChildItem (Join-Path $repoRoot '.github\skills') -Directory -ErrorAction SilentlyContinue)) {
-        $mine = Join-Path $d.FullName 'SKILL.md'
-        $theirs = Join-Path $migrationPlugin.cache_path "skills\$($d.Name)\SKILL.md"
-        if ((Test-Path $mine) -and (Test-Path $theirs)) {
-            $paired++
-            if ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash) { $drift += $d.Name }
+    $buildScript = Join-Path $repoRoot 'scripts\build_plugin.py'
+    $shipped = @()
+    if (Test-Path $buildScript) {
+        $src = Get-Content $buildScript -Raw
+        if ($src -match '(?s)SHIPPED_SKILLS\s*=\s*\((.*?)\)') {
+            $shipped = [regex]::Matches($Matches[1], '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
         }
     }
-    Add-Check 'skill bundles match published plugin' 'recommended' ($drift.Count -eq 0) `
-        $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { "$paired bundle(s) in sync" }) `
-        'Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then `copilot plugin install powerbi-migration-skills@powerbi-migration-collection`.'
+    $missing = @()
+    $drift = @()
+    foreach ($name in $shipped) {
+        $mine = Join-Path $repoRoot ".github\skills\$name\SKILL.md"
+        $theirs = Join-Path $migrationPlugin.cache_path "skills\$name\SKILL.md"
+        if (-not (Test-Path $theirs)) { $missing += $name; continue }
+        if ((Test-Path $mine) -and ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash)) { $drift += $name }
+    }
+    $detail = if ($missing.Count -or $drift.Count) {
+        (@(
+            $(if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" })
+            $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" })
+        ) | Where-Object { $_ }) -join '; '
+    }
+    else { "$($shipped.Count) bundle(s) in sync" }
+    Add-Check 'skill bundles match published plugin' 'recommended' (-not ($missing.Count -or $drift.Count)) $detail `
+        'Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then `copilot plugin install powerbi-migration-skills@powerbi-migration-collection` (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
 }
 
 # --- MCP servers ---

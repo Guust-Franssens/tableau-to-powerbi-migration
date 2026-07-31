@@ -276,7 +276,15 @@ silent-failure category above.
    `sentinel-probe` is the load-bearing case: it exists in **no** plugin, so a correct quote of its
    token can only have come from `.github/skills/`. The probing agent attested it never opened the
    file by `view`/`grep`/shell, and its one prior filesystem touch was a `Get-ChildItem -Directory`
-   that returned names only.
+   that returned names only. Confirmed on disk afterwards: `sentinel-probe` appears **nowhere** under
+   `~/.copilot` (no plugin copy, no user-global copy), and the installed `powerbi-migration-skills`
+   plugin ships exactly two skills, neither of them this one.
+
+   **How the repo-local directory gets registered:** `.vscode/settings.json` (committed) sets
+   `chat.agentSkillsLocations` with `".github/skills": true`. So the behaviour travels with a clone —
+   but a repo that drops that file, or a runtime that ignores it, is the one configuration where
+   repo-local skills might not resolve. That is the reason personas name the bundle **and** give its
+   path: the path is an ordinary `view` call and never depends on registration.
 
    Two things remain true from the old finding, and one is now explained:
    - **No skill body is ever *preloaded*** into a subagent — 26 names arrived with a description, 66
