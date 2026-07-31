@@ -17,22 +17,53 @@ candidates), and prove the connected model really is the one that owns the cache
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-
-# ruff: noqa: E402  (the sys.path insert above must precede these imports)
+# `conftest.py` next to this file puts the skill's own `scripts/` on `sys.path`, resolved relatively
+# so the suite runs wherever this folder was copied.
+# ruff: noqa: E402  (the conftest-provided path must be in place before these imports)
 import probe_desktop_query
 import refresh_pbip_model
 from probe_desktop_query import discover_port, table_names
 from refresh_pbip_model import _instance, _resolve_pid, same_model, tmdl_tables
 
-EXAMPLE_MODELS = sorted((REPO_ROOT / "examples").glob("*/fabric/*.SemanticModel"))
+SKILL_ROOT = Path(__file__).resolve().parents[1]
 REF_TABLE_RE = re.compile(r"^ref table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
+
+
+def _example_models() -> list[Path]:
+    """This repo's committed `examples/` corpus, if the host repo has one.
+
+    Ground truth for the TMDL fingerprint has to come from real models, and this repo has 16 of them.
+    They are a HOST-repo fixture, though, not part of the skill: a Qlik repo that copies this folder
+    has no `examples/` tree, so the corpus test must skip with a reason there rather than fail (or,
+    worse, silently parametrize to nothing). `tests/test_skills.py` in this repo asserts the corpus
+    is non-empty HERE, so the skip cannot quietly turn into a no-op where it is meant to run.
+    """
+    for parent in Path(__file__).resolve().parents:
+        models = sorted((parent / "examples").glob("*/fabric/*.SemanticModel"))
+        if models:
+            return models
+    return []
+
+
+EXAMPLE_MODELS = _example_models()
+
+
+def test_the_suite_exercises_the_scripts_bundled_beside_it() -> None:
+    """A copied skill must test ITS OWN scripts, not a same-named module from the host repo.
+
+    This repo keeps forwarding shims at `scripts/probe_desktop_query.py` (so existing agent
+    invocations do not break), which is exactly the shape that could shadow the real modules if
+    anything put the host repo's `scripts/` on `sys.path` first. Then every test below would pass
+    while proving nothing about the files that actually ship.
+    """
+    for module in (probe_desktop_query, refresh_pbip_model):
+        assert Path(module.__file__).resolve().parent == SKILL_ROOT / "scripts", (
+            f"{module.__name__} was imported from {module.__file__}, not from this skill's scripts/"
+        )
 
 
 def _stub_ports(monkeypatch, answers: dict[int | None, list[list[int]]]) -> list[int | None]:
@@ -158,7 +189,8 @@ def test_table_names_filters_the_auto_date_scaffolding_but_can_keep_hidden_table
     assert table_names(_FakeConnection(rows), include_hidden=True) == ["Sales", "Bridge"]
 
 
-@pytest.mark.parametrize("model_dir", EXAMPLE_MODELS, ids=lambda p: p.parts[-3])
+@pytest.mark.skipif(not EXAMPLE_MODELS, reason="no examples/*/fabric/*.SemanticModel corpus in this repo")
+@pytest.mark.parametrize("model_dir", EXAMPLE_MODELS or [None], ids=lambda p: p.parts[-3] if p else "no-corpus")
 def test_tmdl_tables_matches_every_example_models_own_ref_list(model_dir: Path) -> None:
     """Ground truth for the fingerprint: `model.tmdl` lists exactly the tables it `ref`s.
 

@@ -29,13 +29,21 @@ jobs:
         run: uv sync --all-extras
 
       - name: Lint (ruff)
+        # `.github/skills/*/scripts` is code that MOVED out of `scripts/` to make each skill a
+        # self-contained copyable unit; without naming it here it would be linted by nobody.
+        # Keep in step with `testpaths` in pyproject.toml.
         run: |
-          uv run ruff format --check scripts tests
-          uv run ruff check scripts tests
+          uv run ruff format --check scripts tests .github/skills
+          uv run ruff check scripts tests .github/skills
 
       - name: Static analysis (pylint)
-        # scripts/ only - the toolkit code is held at 10.00/10; tests are not.
-        run: uv run pylint scripts
+        # Two invocations, not one: `scripts/probe_desktop_query.py` is a forwarding shim with the
+        # same module name as the bundled script it forwards to, so a single `pylint scripts
+        # .github/skills/...` puts both on the path and resolves the import to the shim
+        # (E0611 no-name-in-module). Tests are not held to 10.00/10; the toolkit code is.
+        run: |
+          uv run pylint scripts
+          uv run pylint .github/skills/pbip-model-refresh/scripts
 
       - name: Tests
         run: uv run pytest -q

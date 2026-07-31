@@ -31,6 +31,14 @@ dev = [
 [tool.setuptools]
 py-modules = []
 
+[tool.pytest.ini_options]
+# pytest skips dot-directories by default (`norecursedirs` includes `.*`), so the tests bundled
+# inside `.github/skills/<skill>/tests/` were collected by NOBODY - the code moved out of `tests/`
+# would have gone silently ungated. Naming the roots explicitly is what makes a self-contained skill
+# folder a real gate rather than a claim. `ruff`/`pylint` need the same treatment in
+# `.github/workflows/checks.yml`; keep the two lists in step.
+testpaths = ["tests", ".github/skills"]
+
 [tool.ruff]
 exclude = [
     ".bzr", ".direnv", ".eggs", ".git", ".git-rewrite", ".hg",

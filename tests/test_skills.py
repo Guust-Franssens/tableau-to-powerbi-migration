@@ -6,13 +6,18 @@ both invisible at review time. `docs/agent-architecture.md` §8 names one of the
 
 The other is subtler and is the whole point of packaging this knowledge as a skill: the
 `pbip-model-refresh` skill promises the procedure is portable to another BI migration (Qlik, Cognos)
-by copying **two files**. That promise is only true while `refresh_pbip_model.py` imports nothing
-from `scripts/` except `probe_desktop_query`. One innocent `from tableau_lineage import ...` would
-silently make the skill wrong everywhere it was copied, so the claim is checked rather than trusted.
+by copying **the skill folder**. An import of a repo-local module, a test that reaches back into this
+repo's `tests/`, or a fixture path that only exists here would all break that silently - the copy
+still looks fine in review and only fails at runtime, in the other repo. So the promise is executed,
+not asserted: the folder is copied to a temp directory and made to pass its own tests with this repo
+unimportable.
 """
 
-import ast
+import os
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,9 +25,18 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = REPO_ROOT / ".github" / "skills"
 SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))
+BUNDLED_SKILLS = sorted(skill.parent for skill in SKILL_FILES if (skill.parent / "tests").is_dir())
 
 # A markdown link whose target is a relative path, i.e. not http(s):, mailto: or a #fragment.
 MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
+
+# Shims left at `scripts/<name>.py` after the real script moved into a skill, mapped to the flag that
+# only the bundled script's own argument parser knows about.
+FORWARDING_SHIMS = {
+    "probe_desktop_query": "--table",
+    "refresh_pbip_model": "--ui-save",
+}
+SKILL_SCRIPTS = SKILLS_DIR / "pbip-model-refresh" / "scripts"
 
 
 def test_the_skills_directory_is_not_empty() -> None:
@@ -53,33 +67,86 @@ def test_every_path_a_skill_points_at_exists(skill: Path) -> None:
         assert resolved.exists(), f"{skill} links to {target}, which does not exist"
 
 
-def _repo_module_imports(script: Path, siblings: set[str]) -> set[str]:
-    """Names `script` imports that resolve to another module in the same folder."""
-    tree = ast.parse(script.read_text(encoding="utf-8"))
-    found: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in siblings:
-            found.add(node.module)
-        elif isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names if alias.name in siblings)
-    return found
+def _repo_free_env() -> dict[str, str]:
+    """A child environment with nothing of this repo importable."""
+    env = dict(os.environ)
+    # An inherited PYTHONPATH (or the parent pytest's own bookkeeping) would put this repo's
+    # `scripts/` back on `sys.path` and make the copy pass for the wrong reason.
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTEST_CURRENT_TEST", None)
+    env.pop("PYTEST_ADDOPTS", None)
+    return env
 
 
-def test_the_refresh_procedure_stays_portable_to_other_migration_repos() -> None:
-    """`pbip-model-refresh` tells the reader to copy exactly two files. Keep that true.
+@pytest.mark.parametrize("skill_dir", BUNDLED_SKILLS, ids=lambda p: p.name)
+def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_repo(
+    skill_dir: Path, tmp_path: Path
+) -> None:
+    """The portability promise, executed instead of asserted.
 
-    Nothing about refreshing and persisting a PBIP is Tableau-specific - the input is already a Power
-    BI model - so this pair is meant to move to a Qlik or Cognos migration repo (or a global skill
-    location) unchanged. A new import from `scripts/` would break that silently: the copy would still
-    look fine in review and only fail at runtime, in the other repo.
+    `pbip-model-refresh` tells the reader to copy ONE folder into a Qlik or Cognos migration repo -
+    nothing about refreshing and persisting a PBIP is Tableau-specific, the input is already a Power
+    BI model. This copies exactly what a reader would copy, then runs the bundled tests from that
+    copy with the repo root out of `sys.path` (`cwd` is the temp dir, `PYTHONPATH` cleared, and the
+    project installs no modules - see `py-modules = []`). A stray `import tableau_lineage`, a
+    `parents[N]` walk that assumes this repo's depth, or a fixture that only exists here all fail
+    HERE rather than in someone else's repo.
     """
-    scripts = REPO_ROOT / "scripts"
-    siblings = {path.stem for path in scripts.glob("*.py")}
-    portable = {"probe_desktop_query", "refresh_pbip_model"}
+    copied = shutil.copytree(skill_dir, tmp_path / skill_dir.name)
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(copied / "tests")],
+        cwd=tmp_path,
+        env=_repo_free_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"{skill_dir.name} does not pass its own tests when copied out:\n{result.stdout}"
+    assert "no tests ran" not in result.stdout, f"{skill_dir.name} shipped a tests/ folder that collects nothing"
 
-    for name in sorted(portable):
-        imported = _repo_module_imports(scripts / f"{name}.py", siblings)
-        assert imported <= portable, (
-            f"scripts/{name}.py imports {sorted(imported - portable)} from scripts/, "
-            "which breaks the 'copy these two files' claim in .github/skills/pbip-model-refresh/SKILL.md"
+
+@pytest.mark.parametrize("shim", sorted(FORWARDING_SHIMS), ids=str)
+def test_the_scripts_shim_still_reaches_the_script_that_moved_into_the_skill(shim: str) -> None:
+    """`scripts/<name>.py` is a forwarding shim now; prove the forward actually arrives.
+
+    The four personas under `.github/agents/` still invoke `python scripts/refresh_pbip_model.py`,
+    and that directory is out of reach for the agent that moved these files - so the shims are the
+    reason nothing broke on merge. An entry point nobody exercises is an entry point that rots, and
+    the failure would surface mid-migration. `--help` is enough: only the BUNDLED parser knows the
+    flag asserted below, so seeing it proves the real script ran with `sys.argv` intact.
+    """
+    flag = FORWARDING_SHIMS[shim]
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / f"{shim}.py"), "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert flag in result.stdout, f"scripts/{shim}.py did not reach the bundled script ({flag} missing)"
+    assert str(Path(".github/skills/pbip-model-refresh/scripts") / f"{shim}.py") in result.stdout.replace("/", os.sep)
+
+
+def test_this_repo_really_has_the_examples_corpus_the_skill_tests_fall_back_from() -> None:
+    """Keeps the skill's honest `skip` from becoming a silent no-op *here*.
+
+    `test_tmdl_tables_matches_every_example_models_own_ref_list` skips when there is no `examples/`
+    tree, which is right for a copied skill and wrong for this repo: those 16 committed models are
+    the only ground truth the TMDL fingerprint has. Without this guard, deleting or renaming the
+    corpus would turn 16 assertions into one green skip.
+    """
+    models = sorted((REPO_ROOT / "examples").glob("*/fabric/*.SemanticModel"))
+    assert models, "examples/*/fabric/*.SemanticModel is empty - the skill's corpus test now skips silently"
+
+
+def test_the_bundled_scripts_are_the_ones_the_shims_and_docs_point_at() -> None:
+    """One canonical copy. Two files with the same name and different contents is the worst outcome."""
+    for name in sorted(FORWARDING_SHIMS):
+        bundled = SKILL_SCRIPTS / f"{name}.py"
+        assert bundled.exists(), f"{bundled} is missing"
+        shim = (REPO_ROOT / "scripts" / f"{name}.py").read_text(encoding="utf-8")
+        assert "runpy" in shim and "pbip-model-refresh" in shim, (
+            f"scripts/{name}.py is no longer a forwarding shim - if the script moved back, "
+            "delete it from the skill bundle and update SKILL.md's 'Available scripts' section"
         )
