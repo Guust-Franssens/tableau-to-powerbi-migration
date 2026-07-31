@@ -330,9 +330,10 @@ def same_model(port: int, cache_path: Path | None) -> tuple[bool, str]:
     same wrong source. Comparing the model's own tables is what breaks that self-consistency.
 
     Extra tables in the engine are fine (a field parameter added in-memory, or anything the caller
-    has not exported yet). A TMDL table MISSING from the engine is not: either this is a different
-    model, or the definition on disk changed after Desktop opened it - and Desktop discards a cache
-    that is older than the definition, so persisting then would be pointless anyway.
+    has not exported yet) and are only reported, since TMDL that lags the engine is worth knowing
+    about. A TMDL table MISSING from the engine is not: either this is a different model, or the
+    definition on disk changed after Desktop opened it - and Desktop discards a cache that is older
+    than the definition, so persisting then would be pointless anyway.
     """
     if cache_path is None:
         return True, "identity unverified (no model folder resolved for this pid)"
@@ -347,7 +348,9 @@ def same_model(port: int, cache_path: Path | None) -> tuple[bool, str]:
             f"port {port} does NOT serve {model_dir.name}: {len(missing)}/{len(on_disk)} of its TMDL "
             f"tables are absent from the connected model (e.g. {missing[:3]})"
         )
-    return True, f"{model_dir.name} confirmed on port {port} ({len(on_disk)} TMDL table(s) present)"
+    extra = len(live) - len(on_disk)
+    note = f", engine has {extra} more not in TMDL" if extra > 0 else ""
+    return True, f"{model_dir.name} confirmed on port {port} ({len(on_disk)} TMDL table(s) present{note})"
 
 
 def row_count(port: int) -> tuple[int, str]:

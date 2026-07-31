@@ -107,6 +107,12 @@ or a connect error -> the gate is red. This is the real "can Power BI actually g
 runs entirely **locally, before any publish**. (It needs the model open in Desktop and refreshed; run it
 after `probe_desktop_credential.ps1` returns `CREDENTIAL_PRESENT`, or after the user signs in.)
 
+**Pass `--pid` whenever more than one Desktop instance is open** (a parallel batch): the probe binds
+strictly to the `msmdsrv` owned by that pid - it retries briefly for startup lag, then fails, rather than
+falling back to another instance. Without a pid it refuses to choose between instances, because a
+`DATA_OK` read from a *sibling's* model looks exactly like a `DATA_OK` read from yours.
+`powerbi-desktop status` maps pid -> open file.
+
 ### Cloud gate (Power BI service)
 
 Publish the model (`fab import`) and trigger a refresh: it **fails in ~2 s** with

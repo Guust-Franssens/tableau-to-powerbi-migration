@@ -187,6 +187,7 @@ def test_same_model_accepts_the_model_that_owns_the_cache(monkeypatch, tmp_path:
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"orders", "Date Table", "Extra"})
     ok, message = same_model(52001, cache)
     assert ok, message
+    assert "more not in TMDL" in message, "TMDL that lags the engine is worth reporting, not refusing"
 
 
 def test_same_model_refuses_a_siblings_model(monkeypatch, tmp_path: Path) -> None:
@@ -254,7 +255,7 @@ def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_p
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders", "LocalDateTable_ignored"})
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
 
