@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -136,12 +138,40 @@ def marketplace_manifest() -> dict:
     }
 
 
+def _force_remove(func, path, _exc) -> None:
+    """`shutil.rmtree` error handler: clear the read-only bit and retry.
+
+    Git marks objects in `.git/objects` read-only, and on Windows `os.unlink` refuses those outright
+    with `PermissionError: [WinError 5]`. Without this, rebuilding into a directory that has ever
+    been a git clone fails.
+    """
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def _clear_but_keep_git(out: Path) -> None:
+    """Empty `out` of generated content while preserving `.git`.
+
+    The publish workflow is clone -> rebuild -> commit -> push, so blowing away the whole directory
+    would delete the clone's history and turn every republish into a fresh `git init`. Only the
+    generated entries are removed.
+    """
+    for entry in out.iterdir():
+        if entry.name == ".git":
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, onexc=_force_remove)
+        else:
+            entry.chmod(stat.S_IWRITE)
+            entry.unlink()
+
+
 def build(out: Path) -> None:
-    """Generate the whole marketplace tree at `out`, replacing anything already there."""
+    """Generate the whole marketplace tree at `out`, replacing any previously generated content."""
     skills = shipped_skill_dirs()
 
     if out.exists():
-        shutil.rmtree(out)
+        _clear_but_keep_git(out)
     plugin_skills = out / "plugins" / PLUGIN_NAME / "skills"
     plugin_skills.mkdir(parents=True)
 
@@ -173,8 +203,12 @@ def build(out: Path) -> None:
 
 
 def describe(out: Path) -> int:
-    """Print what was produced; returns the total file count."""
-    files = sorted(p for p in out.rglob("*") if p.is_file())
+    """Print what was produced; returns the generated file count.
+
+    `.git` is excluded: rebuilding into a clone is the intended workflow, and counting its objects
+    would report a plugin many times its real size.
+    """
+    files = sorted(p for p in out.rglob("*") if p.is_file() and ".git" not in p.relative_to(out).parts)
     total = sum(p.stat().st_size for p in files)
     print(f"BUILD: {out}")
     print(f"  marketplace : {MARKETPLACE_NAME}")
@@ -182,6 +216,20 @@ def describe(out: Path) -> int:
     print(f"  skills      : {', '.join(SHIPPED_SKILLS)}")
     print(f"  files       : {len(files)} totalling {total / 1024:.1f} KB")
     return len(files)
+
+
+def _generated_files(root: Path) -> dict[Path, bytes]:
+    """Every generated file under `root`, keyed by relative path, with `.git` excluded.
+
+    `.git` must be excluded or `--check` is useless on the very thing it is meant to guard: a clone
+    of the marketplace repo has git objects that the freshly-built scratch tree never will, so every
+    comparison would report drift.
+    """
+    return {
+        p.relative_to(root): p.read_bytes()
+        for p in root.rglob("*")
+        if p.is_file() and ".git" not in p.relative_to(root).parts
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,11 +245,11 @@ def main(argv: list[str] | None = None) -> int:
         if not out.exists():
             print(f"BUILD: ERROR --check but nothing built at {out}")
             return 1
-        existing = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
+        existing = _generated_files(out)
         scratch = out.parent / f"{out.name}.check"
         build(scratch)
-        fresh = {p.relative_to(scratch): p.read_bytes() for p in scratch.rglob("*") if p.is_file()}
-        shutil.rmtree(scratch)
+        fresh = _generated_files(scratch)
+        shutil.rmtree(scratch, onexc=_force_remove)
         if existing != fresh:
             drifted = sorted({*existing} ^ {*fresh}) or [k for k in existing if k in fresh and existing[k] != fresh[k]]
             print("BUILD: DRIFT - rebuild required. Differing paths:")
