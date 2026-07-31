@@ -85,8 +85,7 @@ on an already-authenticated host.
 Verified 2026-07 (agent-run): against a *serverless* warehouse that cold-starts, the modal-watch
 `scripts/probe_desktop_credential.ps1` returned a **false `CREDENTIAL_PRESENT` three times** because the
 sign-in modal appeared only *after* the probe's 90s window. The one-row data probe
-the one-row data probe (`probe_desktop_query.py --pid <pid>`) correctly reported `NO_DATA` (0 rows)
-throughout, then a
+(`probe_desktop_query.py --pid <pid>`) correctly reported `NO_DATA` (0 rows) throughout, then a
 UIA re-dump confirmed the modal was open. So: **treat `probe_desktop_query.py` (`DATA_OK` vs
 `NO_DATA`/`ERROR`) as the gate of record**, and use `probe_desktop_credential.ps1` only to *explain* a
 `NO_DATA` (i.e. "is a credential modal the reason?"). A `CREDENTIAL_PRESENT` from the modal probe must

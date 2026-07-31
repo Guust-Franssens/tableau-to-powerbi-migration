@@ -13,6 +13,7 @@ not asserted: the folder is copied to a temp directory and made to pass its own 
 unimportable.
 """
 
+import ast
 import os
 import re
 import shutil
@@ -43,6 +44,21 @@ def test_the_skills_directory_is_not_empty() -> None:
     """Guards the collection itself: `SKILL_FILES` drives parametrization, and an empty glob would
     turn every test below into a silent no-op that still reports green."""
     assert SKILL_FILES, f"no SKILL.md found under {SKILLS_DIR}"
+
+
+def test_every_skill_that_ships_code_also_ships_the_tests_that_travel_with_it() -> None:
+    """Same guard, one level down - and the rule that keeps bundled code gated.
+
+    `BUNDLED_SKILLS` is discovered by looking for a `tests/` folder beside each `SKILL.md`, so
+    renaming or relocating that folder would empty the parameter set of the portability gate below,
+    and pytest turns an empty `parametrize` into a *skip*: green CI, promise never executed. This
+    also states the convention for the next bundle - if a skill ships `scripts/`, the tests that
+    prove those scripts survive the copy ship with them.
+    """
+    assert BUNDLED_SKILLS, f"no skill under {SKILLS_DIR} has a tests/ folder - the portability gate now skips"
+    for skill in SKILL_FILES:
+        if (skill.parent / "scripts").is_dir():
+            assert skill.parent in BUNDLED_SKILLS, f"{skill.parent.name} ships scripts/ but no tests/ beside them"
 
 
 @pytest.mark.parametrize("skill", SKILL_FILES, ids=lambda p: p.parent.name)
@@ -92,7 +108,11 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
     `parents[N]` walk that assumes this repo's depth, or a fixture that only exists here all fail
     HERE rather than in someone else's repo.
     """
-    copied = shutil.copytree(skill_dir, tmp_path / skill_dir.name)
+    copied = shutil.copytree(
+        skill_dir,
+        tmp_path / skill_dir.name,
+        ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
+    )
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", str(copied / "tests")],
         cwd=tmp_path,
@@ -103,6 +123,39 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
     )
     assert result.returncode == 0, f"{skill_dir.name} does not pass its own tests when copied out:\n{result.stdout}"
     assert "no tests ran" not in result.stdout, f"{skill_dir.name} shipped a tests/ folder that collects nothing"
+
+
+def _imported_top_level_names(script: Path) -> set[str]:
+    """Every top-level module name `script` imports, on any code path."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(script.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".", 1)[0])
+    return names
+
+
+@pytest.mark.parametrize("skill_dir", BUNDLED_SKILLS, ids=lambda p: p.name)
+def test_no_bundled_script_imports_a_module_that_only_exists_in_this_repo(skill_dir: Path) -> None:
+    """Static counterpart to the copy-and-run gate above, which only sees imports that EXECUTE.
+
+    Both bundled scripts import their Windows dependencies lazily, inside functions (`_load_adomd`,
+    `_load_amo`), and the bundled suite monkeypatches ADOMD/AMO rather than reaching those bodies -
+    so a repo-local import added there would run in nobody's test, pass the copy-and-run gate, and
+    break only in the repo that copied the folder. `ast.walk` sees it whatever code path it is on.
+    """
+    bundled = {path.stem for path in (skill_dir / "scripts").glob("*.py")}
+    repo_local = {path.stem for path in (REPO_ROOT / "scripts").glob("*.py")}
+    repo_local |= {path.stem for path in (REPO_ROOT / "tests").glob("*.py")}
+    forbidden = repo_local - bundled
+
+    for script in sorted((skill_dir / "scripts").glob("*.py")):
+        offenders = _imported_top_level_names(script) & forbidden
+        assert not offenders, (
+            f"{script.relative_to(REPO_ROOT)} imports {sorted(offenders)} from this repo, which "
+            f"breaks the 'copy this folder' claim in {skill_dir.name}/SKILL.md"
+        )
 
 
 @pytest.mark.parametrize("shim", sorted(FORWARDING_SHIMS), ids=str)
