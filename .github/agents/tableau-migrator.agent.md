@@ -386,19 +386,20 @@ environment, tell the user to run `/agent pbi-semantic-builder`, `/agent pbi-rep
 
 ## Frontmatter hardening — status
 
-- **`tools:` allow-list — DECLARED on `pbi-migration-validator`, and measured NOT enforced by the
-  CLI.** Setting `tools:` is an **allowlist**: every alias and MCP-scoped tool must be listed
-  (`powerbi-modeling-mcp/*`, and `tool_search_tool` — the Power BI MCP tools are *deferred*, so
-  omitting it leaves them listed-but-unreachable). This orchestrator would need the `agent`/`Task`
-  alias or it loses the ability to delegate at all, which is why it has **no** `tools:` line.
-  Probed 2026-07-30: the CLI returned the validator with `edit`, `create` and `task` regardless, so
-  treat the line as a declaration honoured where the platform implements it (GitHub.com / cloud
-  agent), **not** as a sandbox. The prose rules are still what do the work today.
+- **`tools:` allow-list — DECLARED on `pbi-migration-validator`, and measured ENFORCED (CLI 1.0.77,
+  2026-07-31).** This reverses the 2026-07-30 probe. It is a real allowlist: **unrecognised entries
+  are dropped silently**, so use literal tool names (the category names `read`/`search`/`execute`/`web`
+  mostly yielded nothing), list `skill` explicitly or the agent cannot invoke skills at all, and
+  re-measure the inventory in a **fresh process** after any edit — persona frontmatter is snapshotted
+  at session start. Detail: `docs/agent-architecture.md` §6, experiment 3. This orchestrator has **no**
+  `tools:` line, deliberately: it would need the delegation tool listed or it loses the ability to
+  delegate at all.
 - **`disable-model-invocation: true` — SET on this agent.** It drives a long, capacity-using,
   three-subagent pipeline and must be chosen deliberately rather than auto-selected.
 - **`model:` — deliberately NOT set.** GitHub recommends it, but a pinned model may be unavailable on
   another operator's plan, and this repo already lets the operator choose.
-- **Hooks** (`preToolUse`/`postToolUse`) remain the only mechanism that can intercept the *main*
-  session's own tool calls regardless of delegation — e.g. blocking a direct PBIR/TMDL write while
-  Desktop has the report open. Still not implemented; worth investigating if the ad hoc-edit pattern
-  recurs despite the prose rules.
+- **Hooks — `subagentStart` measured WORKING (2026-07-31):** it fires and its `additionalContext`
+  reaches the subagent. Use it for *advisory* context only — it can be disabled wholesale via
+  `disableAllHooks`, so nothing load-bearing may live there. `preToolUse`/`postToolUse` remain the only
+  mechanism that can intercept the *main* session's own tool calls regardless of delegation — e.g.
+  blocking a direct PBIR/TMDL write while Desktop has the report open. Still not implemented.

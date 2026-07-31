@@ -88,20 +88,16 @@ examples, not hypothetical ones.
 
 ## Skills you use
 
-**Two kinds, and they are reached differently — this matters.**
+**Invoke all of these by name with the `skill` tool.** Repo-local bundles and plugin skills alike
+resolve inside a subagent (measured 2026-07-31; `docs/agent-architecture.md` §6.1). If a name ever
+fails to resolve, fall back to reading `.github/skills/<name>/SKILL.md` directly — the bundles are
+committed here as well as published.
 
-**Repo-local bundles — read these BY PATH.** They are not registered in a subagent's skill registry,
-so `use the <name> skill` fails outright (measured; `docs/agent-architecture.md` §6.1). Open them with
-an ordinary file read:
-
-- [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md) — the whole
-  Copilot-readiness recipe: descriptions, enumerated domains, `CustomInstructions`, `qnaEnabled`, the
-  Modeling-MCP workflow for setting descriptions, and what to write in `ai-instructions.md`.
-- [`.github/skills/pbip-model-refresh/SKILL.md`](../skills/pbip-model-refresh/SKILL.md) — refreshing a
-  local PBIP and persisting it to `cache.abf`, the pid-binding rule, and the edit→refresh→save order.
-
-**Plugin skills — invoke these by name** (they *are* registered):
-
+- **`powerbi-ai-readiness`** — the whole Copilot-readiness recipe: descriptions, enumerated domains,
+  `CustomInstructions`, `qnaEnabled`, the Modeling-MCP workflow for setting descriptions, and what to
+  write in `ai-instructions.md`.
+- **`pbip-model-refresh`** — refreshing a local PBIP and persisting it to `cache.abf`, the pid-binding
+  rule, and the edit→refresh→save order.
 - **`semantic-model-authoring`** — for everything TMDL: creating tables/columns, relationships,
   measures, and deploying to Fabric. This is your primary tool for all file/deployment mechanics.
 - **Read-only DAX (`EVALUATE`) + metadata — your validation surface.** Primary path, works on the local
@@ -251,12 +247,12 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
     `REFRESH: DATA_OK + PERSISTED` — a real row came back **and** the cache file advanced. Anything
     else is a failure: do not hand over.
 
-    **Read [`.github/skills/pbip-model-refresh/SKILL.md`](../skills/pbip-model-refresh/SKILL.md)
-    before you run this**, and whenever it misbehaves. It owns the mechanism and the reasoning: why a
+    **Read the `pbip-model-refresh` skill before you run this**, and whenever it misbehaves (invoke it
+    by name, or read [`.github/skills/pbip-model-refresh/SKILL.md`](../skills/pbip-model-refresh/SKILL.md)).
+    It owns the mechanism and the reasoning: why a
     save is required at all, why `ImageSave` works when TMSL `backup` is refused, why success is judged
     by the file rather than by the absence of an exception, the `--ui-save` fallback, and the strict
-    pid-binding rule. Read it by path — do not try to invoke it as a named skill, which does not
-    resolve inside a subagent (`docs/agent-architecture.md` §6.1).
+    pid-binding rule.
 
     **The one rule you must carry in your head, because it constrains your whole build order:** Desktop
     discards `cache.abf` when `definition/*.tmdl` is *newer* than it. So make **every** model edit
@@ -276,12 +272,11 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
 
 ## Prep the model for AI (Copilot readiness) — final build phase
 
-**Read [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md)
-before starting this phase, and follow it.** It is the single home for the recipe: the five
+**Read the `powerbi-ai-readiness` skill before starting this phase, and follow it** (invoke it by name,
+or read [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md)).
+It is the single home for the recipe: the five
 committable levers, the `CustomInstructions` storage mechanism, the Modeling-MCP workflow for setting
-descriptions, what to write in `ai-instructions.md`, and the two scripts. Read it by path — do not try
-to invoke it as a named skill, which does not resolve inside a subagent
-(`docs/agent-architecture.md` §6.1).
+descriptions, what to write in `ai-instructions.md`, and the two scripts.
 
 Everything below is what that skill *cannot* know: your place in this pipeline.
 

@@ -3,18 +3,31 @@ name: pbi-migration-validator
 description: Read-only reviewer that critiques a built Power BI report against its Tableau source, figure-by-figure and as a whole dashboard, on both visual and numeric fidelity. Reports discrepancies back to the orchestrator for routing to pbi-semantic-builder/pbi-report-builder - never edits TMDL/PBIR files itself.
 # DECLARED least-privilege, per GitHub's documented schema: an allow-list is the only real
 # enforcement for a read-only rule (prose instructions are advisory - an anti-pattern per the docs).
-# Omitting `edit`/`create`/`agent` is what would make "never edits TMDL/PBIR" a constraint, not a
-# request.
+# Omitting `edit`/`create`/`task` is what makes "never edits TMDL/PBIR" a constraint, not a request.
 #
-# MEASURED 2026-07-30: Copilot CLI did NOT apply this list - a probe of this agent came back still
-# holding `edit`, `create` and `task`. So on the CLI path this is a DECLARATION OF INTENT, honoured
-# where the platform implements it (GitHub.com / cloud agent); the prose rule in the body is what
-# actually does the work today. Do NOT treat this line as a sandbox or cite it as enforcement.
+# MEASURED 2026-07-31 (CLI 1.0.77): this list IS NOW ENFORCED. That reverses the 2026-07-30 result,
+# when the same probe came back still holding `edit`/`create`/`task`. Enforcement is real least
+# privilege now - but it is also a live footgun, because UNRECOGNISED ENTRIES ARE DROPPED SILENTLY.
+# The previous list used the category names `read`/`search`/`execute`/`web`; only `read` (-> view) and
+# `execute` (-> the powershell family) yielded anything. `search` and `web` yielded NOTHING, so this
+# agent silently ran with no search tool, no `web_fetch`, no `web_search` and no `skill` - capability
+# its own body tells it to use. Hence: LITERAL TOOL NAMES ONLY below.
 #
-# `tool_search_tool` is listed deliberately: the Power BI MCP tools are DEFERRED and only reachable
-# after a tool search. Dropping it would leave `powerbi-*` listed-but-unreachable and silently kill
-# the numeric pass - the worst failure shape, because the validator would still look healthy.
-tools: ["read", "search", "execute", "web", "tool_search_tool", "powerbi-modeling-mcp/*", "powerbi-remote/*"]
+# VERIFIED in a fresh CLI process (the edit does NOT apply in an already-running session - agent
+# definitions are snapshotted at session start, exactly like skills): `skill`, `glob`, `web_fetch`,
+# `web_search` all PRESENT; `edit`/`create`/`task` all ABSENT, so the read-only posture holds.
+# Two entries still do not resolve and are kept only because a dropped entry is harmless:
+#   - `grep` -> the search tool is exposed under the name `rg` on this runtime, so BOTH are listed.
+#   - `tool_search_tool` -> never resolved in any probe. The `powerbi-remote/*` wildcard delivered its
+#     nine tools directly when the MCP server was connected, so deferred-tool search was not needed.
+# Re-measure the inventory after ANY edit here, in a FRESH process (docs/agent-architecture.md
+# section 6, experiment 3).
+#
+# `skill` is listed deliberately: a subagent CAN invoke skills by name (measured 2026-07-31), but only
+# if the allow-list grants the tool. Dropping it leaves every `skill` instruction in the body
+# listed-but-unreachable and silently kills the numeric pass - the worst failure shape, because the
+# validator would still look healthy.
+tools: ["view", "rg", "grep", "glob", "powershell", "read_powershell", "stop_powershell", "list_powershell", "web_fetch", "web_search", "skill", "tool_search_tool", "powerbi-modeling-mcp/*", "powerbi-remote/*"]
 ---
 
 # PBI Migration Validator — Subagent
