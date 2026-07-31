@@ -109,6 +109,7 @@ That is consistent with hooks being loaded at session start, like instruction fi
 | `docs/tableau-dax-translation-guide.md` (24k) | External; persona says "Read … before starting" | Only if the agent actually reads it — advisory |
 | `docs/migration-spec.md` (9k) | External; same instruction | Same |
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
+| `.github/skills/pbip-model-refresh/SKILL.md` (7k) | Repo-local **skill** | **Unknown — this is open experiment §6.1.** Worst case it behaves like the external files above; it is not *worse* than them |
 | Per-agent Gotchas | Inline in each persona | Yes |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
@@ -116,6 +117,25 @@ different from passive inheritance, and the repo already depends on it for ~44 K
 anti-pattern ("requests to refer to external resources") is about *unresolved ambient conformance*
 ("conform to styleguide.md"), not an imperative, verifiable step. But it is still **discretionary**:
 an agent may skip it.
+
+**Why package procedural knowledge as a skill anyway**, given §6.1 is unresolved. Three reasons that
+hold regardless of the outcome:
+
+1. **It is strictly no worse than the status quo.** A skill file is still a readable path, so the
+   floor is today's advisory "read this file" behaviour; the ceiling is auto-selection by
+   `description`. There is no downside branch.
+2. **It reclaims persona budget.** `tableau-migrator` is already 108% of the 30,000-char cap (§2), and
+   the tail of a persona is exactly where the accumulated knowledge lives. Procedure that is not
+   Tableau-specific does not belong in a Tableau persona at all.
+3. **It is the only shape that ports.** Nothing about refreshing and persisting a PBIP is
+   source-tool-specific — the input is already a Power BI model — so the same procedure is needed by
+   a Qlik or Cognos migration. A skill folder plus two scripts moves; a paragraph inside
+   `pbi-semantic-builder.agent.md` does not.
+
+The §6.1 note that a subagent *did* see plugin-provided skills while missing this repo's local one
+points at **registration**, not the subagent boundary, as the discriminator. If that holds, promoting
+a proven skill into a plugin/global collection is the fix — which is another argument for authoring
+procedure as a skill now, in a form that can be promoted later without a rewrite.
 
 ## 6. Open experiments — run these in a FRESH session
 
@@ -132,6 +152,10 @@ instruction files all appear to be snapshotted at session start, so **restart th
      that as a third distinct outcome.
    Note: a subagent probed here *did* see plugin-provided skills while not seeing this repo-local
    one, so the discriminator may be *registration*, not the subagent boundary.
+   **This now has stakes:** `.github/skills/pbip-model-refresh/SKILL.md` is real content, not a
+   probe. Outcome 1 means procedure can move out of the personas wholesale; outcome 2 or 3 means the
+   personas must keep an explicit "use the `pbip-model-refresh` skill" instruction (cheap — one line,
+   versus the ~7 KB it replaces), or the skill gets promoted to a plugin/global collection.
 
 2. **Does `subagentStart` fire and inject?**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload

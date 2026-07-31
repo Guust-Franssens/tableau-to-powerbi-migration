@@ -54,8 +54,8 @@ session is running, so plugin updates remain a manual, between-sessions step.
 This toolkit is not self-contained: its agents build on Microsoft's official **Fabric / Power BI
 skills** (published as a Copilot *plugin*) and talk to Power BI through **MCP servers**. A clone needs
 all three layers below. The agent files under `.github/agents/` are already committed and load
-automatically; `.github/skills/` is an enabled skill location (see `.vscode/settings.json`) that is
-currently empty — repo-local skills dropped there load automatically too.
+automatically; `.github/skills/` is an enabled skill location (see `.vscode/settings.json`) — the
+repo-local skills committed there load automatically too.
 
 ### 1. Skill plugin — `powerbi-authoring@fabric-collection`
 
@@ -103,7 +103,12 @@ Copilot CLI users register the same servers with `/mcp`, or copy them into
 - Agents: [`.github/agents/*.agent.md`](.github/agents/) — `tableau-migrator` (orchestrator),
   `pbi-semantic-builder`, `pbi-report-builder`, `pbi-migration-validator`.
 - Any repo-specific skills live under `.github/skills/` (already an enabled skill location via
-  `.vscode/settings.json`).
+  `.vscode/settings.json`). Committed today:
+  [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md) — refresh a local PBIP/TMDL model
+  in Power BI Desktop and persist it to `.pbi/cache.abf` (AMO `ImageSave`, UIA fallback), plus the
+  edit-then-refresh-then-save ordering rule and the pid-binding rule. Deliberately source-tool
+  agnostic so it ports to Qlik/Cognos migrations or a global skill location; `tests/test_skills.py`
+  gates its links and its "copy these two files" portability claim.
 - **Visual cookbook: [`.github/pbi.kb/visual-cookbook.md`](.github/pbi.kb/visual-cookbook.md) +
   [`.github/pbi.kb/visuals/`](.github/pbi.kb/visuals/)** — a committed library of worked,
   `validate`-passing PBIR `visual.json` encodings, each with roles, the Tableau idiom it maps to, and a

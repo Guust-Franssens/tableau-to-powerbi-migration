@@ -152,9 +152,10 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
   conventions every agent inherits. **Read this first.**
 - [`.vscode/mcp.json`](.vscode/mcp.json): MCP server definitions (auto-read by VS Code Copilot; CLI
   users add the same with `/mcp`).
-- Repo-local agents (`.github/agents/`) are committed and load automatically. `.github/skills/` is
-  enabled as a skill location (see `.vscode/settings.json`) but is currently empty — drop repo-local
-  skills there and they load automatically too.
+- Repo-local agents (`.github/agents/`) are committed and load automatically. So are repo-local
+  skills under `.github/skills/` (an enabled skill location — see `.vscode/settings.json`), which
+  currently ships [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md): refresh a local
+  PBIP model in Power BI Desktop and persist it to `cache.abf`. Drop new skills in the same place.
 
 In Copilot CLI, install the plugin once with `/plugin` (add marketplace `microsoft/skills-for-fabric`,
 enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run
