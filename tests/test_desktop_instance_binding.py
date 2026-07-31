@@ -172,13 +172,46 @@ def test_tmdl_tables_matches_every_example_models_own_ref_list(model_dir: Path) 
     assert declared == referenced
 
 
-def _model_folder(root: Path, name: str, tables: list[str]) -> Path:
+def _model_folder(root: Path, name: str, tables: list[str], *, bom: bool = False) -> Path:
     """A minimal `<Name>.SemanticModel` on disk, returning the cache.abf destination inside it."""
     tables_dir = root / f"{name}.SemanticModel" / "definition" / "tables"
     tables_dir.mkdir(parents=True)
     for table in tables:
-        (tables_dir / f"{table}.tmdl").write_text(f"/// doc\ntable '{table}'\n\n\tcolumn X\n", encoding="utf-8")
+        head = "\ufeff" if bom else "/// doc\n"
+        (tables_dir / f"{table}.tmdl").write_text(f"{head}table '{table}'\n\n\tcolumn X\n", encoding="utf-8")
     return root / f"{name}.SemanticModel" / ".pbi" / "cache.abf"
+
+
+def test_tmdl_tables_reads_through_a_byte_order_mark(tmp_path: Path) -> None:
+    """Desktop writes TMDL with a BOM, and a BOM before `table` would empty the whole fingerprint.
+
+    That fails OPEN - an empty fingerprint reports "identity unverified", which the gate lets
+    through - so it would silently switch the check off on exactly the real-world files it guards.
+    `check_m_syntax.py` already strips `\\ufeff` for the same file set, so this shape is not theoretical.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"], bom=True)
+    assert tmdl_tables(cache.parent.parent) == {"Orders"}
+
+
+def test_a_bom_prefixed_model_still_refuses_a_siblings_data(monkeypatch, tmp_path: Path) -> None:
+    """The consequence that matters: BOM handling is what keeps the gate armed."""
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"], bom=True)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
+    ok, _ = same_model(52001, cache)
+    assert not ok
+
+
+def test_auto_date_tables_on_disk_do_not_look_like_a_stranger(monkeypatch, tmp_path: Path) -> None:
+    """A PBIP with auto date/time on serializes `LocalDateTable_*.tmdl` into `definition/tables/`.
+
+    The live side already strips them, so leaving them in the disk side would report them as
+    "missing from the connected model" and abort every such migration with WRONG_MODEL.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders", "LocalDateTable_9f2c", "DateTableTemplate_1a"])
+    assert tmdl_tables(cache.parent.parent) == {"Orders"}
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    ok, message = same_model(52001, cache)
+    assert ok, message
 
 
 def test_same_model_accepts_the_model_that_owns_the_cache(monkeypatch, tmp_path: Path) -> None:
@@ -270,6 +303,35 @@ def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_p
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.read_bytes() == b"cache"
+
+
+def test_persisting_uses_the_exact_cache_path_the_gate_verified(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Re-deriving the destination after the gate means writing somewhere never verified.
+
+    `cache_file` is a Desktop Bridge round trip, and `_bridge_status` returns `{}` on any non-JSON
+    output - so a hiccup at gate time (path `None`, "identity unverified", gate passes as a no-op)
+    followed by a successful call afterwards would have persisted an unchecked model. The write must
+    never reach a path the gate did not see.
+    """
+    written: list[Path] = []
+
+    def _record(port: int, path: Path) -> tuple[bool, str]:
+        written.append(path)
+        return True, "saved via ImageSave"
+
+    resolved = [None, _model_folder(tmp_path, "MyMigration", ["Orders"])]
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda pid: resolved.pop(0) if resolved else None)
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (7, "Orders"))
+    monkeypatch.setattr(refresh_pbip_model, "save", lambda pid: (True, "saved via UI"))
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _record)
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    assert written == []
+    assert exit_code == 1
+    assert "NOT_PERSISTED" in capsys.readouterr().out
 
 
 def _explode(name: str):

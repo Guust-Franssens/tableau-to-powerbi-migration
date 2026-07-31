@@ -37,7 +37,9 @@ _ADOMD_GLOBS = [str(Path.home() / ".nuget/packages" / _ADOMD_PKG / "**" / _ADOMD
 PORT_DISCOVERY_ATTEMPTS = 6
 PORT_DISCOVERY_INTERVAL_SECONDS = 2
 
-# Power BI's auto date/time scaffolding: real tables in the engine, never in the model's TMDL.
+# Power BI's auto date/time scaffolding. Present in the engine, and serialized into a PBIP's
+# `definition/tables/` too when auto date/time is (or ever was) on - so a comparison of the two
+# sides has to strip it from BOTH, not just from the engine.
 AUTO_DATE_TABLE_PREFIXES = ("LocalDateTable", "DateTableTemplate")
 
 

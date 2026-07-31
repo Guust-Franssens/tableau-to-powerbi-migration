@@ -76,7 +76,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 # pylint: disable=wrong-import-position
-from probe_desktop_query import _load_adomd, discover_port, first_table, table_names
+from probe_desktop_query import AUTO_DATE_TABLE_PREFIXES, _load_adomd, discover_port, first_table, table_names
 
 SAVE_SETTLE_SECONDS = 3
 SAVE_TIMEOUT_SECONDS = 120
@@ -300,13 +300,21 @@ def cache_file(pid: int) -> Path | None:
 
 
 def tmdl_tables(model_dir: Path) -> set[str]:
-    """Table names declared by the TMDL on disk - the fingerprint of the model that owns the cache."""
+    """Table names declared by the TMDL on disk - the fingerprint of the model that owns the cache.
+
+    `utf-8-sig` and the auto date-table filter both matter to the *gate*, not just to tidiness:
+    Desktop writes TMDL with a BOM, and a BOM immediately followed by the declaration would make
+    `^table` miss every file - leaving an empty fingerprint, which `same_model` reports as
+    "unverified" and lets through. Auto date tables are serialized into `tables/` when auto
+    date/time is (or ever was) on, and they are filtered out of the live side, so leaving them here
+    would make every such model look like a stranger.
+    """
     definition = model_dir / "definition"
     names: set[str] = set()
     for tmdl in sorted(definition.glob("tables/*.tmdl")):
-        text = tmdl.read_text(encoding="utf-8", errors="replace")
+        text = tmdl.read_text(encoding="utf-8-sig", errors="replace")
         names.update(quoted or bare for quoted, bare in TABLE_DECL_RE.findall(text))
-    return names
+    return {name for name in names if not name.startswith(AUTO_DATE_TABLE_PREFIXES)}
 
 
 def _live_tables(port: int) -> set[str]:
@@ -377,8 +385,13 @@ def row_count(port: int) -> tuple[int, str]:
         conn.Close()
 
 
-def _refresh_and_save(pid: int, port: int, args: argparse.Namespace) -> int | None:
-    """Run the refresh and (unless suppressed) persist it. Returns an exit code, or None to continue."""
+def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Namespace) -> int | None:
+    """Run the refresh and (unless suppressed) persist it. Returns an exit code, or None to continue.
+
+    `cache` is passed in rather than re-derived: `cache_file` is another Desktop Bridge round trip,
+    and the bridge returning nothing (or something else) after the identity gate has run would mean
+    writing to a destination that was never verified.
+    """
     try:
         ok, message = refresh(port, args.tables)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
@@ -391,7 +404,6 @@ def _refresh_and_save(pid: int, port: int, args: argparse.Namespace) -> int | No
 
     # Preferred: a real API call. Falls back to driving the UI only if it fails, so a change in the
     # engine can never leave the pipeline with no way to persist.
-    cache = cache_file(pid)
     saved, save_message = (False, "no cache path resolved")
     if cache is not None and not args.ui_save:
         try:
@@ -466,27 +478,28 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     port = args.port or discover_port(pid)
-    before_cache = cache_file(pid)
-    before_stamp = before_cache.stat().st_mtime if before_cache and before_cache.exists() else 0.0
+    # Resolved ONCE: the path that gets verified must be the path that gets written, and every
+    # re-derivation is another Desktop Bridge round trip that can come back empty.
+    cache = cache_file(pid)
+    before_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
 
     # Gate everything on identity: refreshing, row-counting or persisting a sibling's model is a
     # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
-    if not _identity_gate(port, before_cache):
+    if not _identity_gate(port, cache):
         return 2
 
     if not args.verify_only:
-        outcome = _refresh_and_save(pid, port, args)
+        outcome = _refresh_and_save(pid, port, cache, args)
         if outcome is not None:
             return outcome
 
     rows, table = row_count(port)
 
-    after_cache = cache_file(pid)
-    after_stamp = after_cache.stat().st_mtime if after_cache and after_cache.exists() else 0.0
-    persisted = after_cache is not None and after_stamp > before_stamp
+    after_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
+    persisted = cache is not None and after_stamp > before_stamp
 
     print(f"  data   : {rows} row(s) in '{table}'")
-    print(f"  cache  : {after_cache if after_cache else '<none>'}{' (updated)' if persisted else ''}")
+    print(f"  cache  : {cache if cache else '<none>'}{' (updated)' if persisted else ''}")
 
     if rows <= 0:
         print("REFRESH: NO_DATA (refresh ran but the table is empty - check the source and credentials)")
