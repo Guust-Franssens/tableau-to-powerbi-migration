@@ -149,24 +149,35 @@ The three subagents are orchestrated by `tableau-migrator`, a custom Copilot CLI
 This toolkit's agents build on Microsoft's official Fabric/Power BI **skill plugin** and talk to Power
 BI through **MCP servers**. Those dependencies are declared in the repo so a clone is self-configuring:
 
-- [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Declares the required plugin
-  (`powerbi-authoring@fabric-collection` from `microsoft/skills-for-fabric`), the MCP servers, and the
-  conventions every agent inherits. **Read this first.**
+- [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Declares the required plugins
+  (`powerbi-authoring@fabric-collection` from `microsoft/skills-for-fabric`, plus this repo's own
+  `powerbi-migration-skills@powerbi-migration-collection`), the MCP servers, and the conventions every
+  agent inherits. **Read this first.**
 - [`.vscode/mcp.json`](.vscode/mcp.json): MCP server definitions (auto-read by VS Code Copilot; CLI
   users add the same with `/mcp`).
 - Repo-local agents (`.github/agents/`) are committed and load automatically. So are repo-local
   skills under `.github/skills/` (an enabled skill location — see `.vscode/settings.json`), which
-  currently ships two:
+  currently ships four:
   [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md) (refresh a local PBIP model in
-  Power BI Desktop and persist it to `cache.abf`) and
+  Power BI Desktop and persist it to `cache.abf`),
   [`powerbi-ai-readiness`](.github/skills/powerbi-ai-readiness/SKILL.md) (descriptions, enumerated
   domains, `CustomInstructions`, `qnaEnabled`, and how to write AI instructions that help rather than
-  mislead). Each is a **self-contained bundle** — `SKILL.md` plus its own `scripts/` and `tests/` — so
-  copying one folder into a Qlik or Cognos migration repo takes the whole procedure with it; a test
-  proves that by running the copy's tests outside this repo. Drop new skills in the same place.
+  mislead),
+  [`powerbi-report-gotchas`](.github/skills/powerbi-report-gotchas/SKILL.md) (PBIR encodings and
+  Desktop-verification failures that pass `validate` but render wrong) and
+  [`powerbi-semantic-model-gotchas`](.github/skills/powerbi-semantic-model-gotchas/SKILL.md) (TMDL/DAX
+  defects that deserialize cleanly but break at open, refresh or render). Each is a **self-contained
+  bundle** — `SKILL.md` plus, where it ships code, its own `scripts/` and `tests/` — so copying one
+  folder into a Qlik or Cognos migration repo takes the whole procedure with it; a test proves that by
+  running the copy's tests outside this repo. All four are also published as a plugin so *other* repos
+  can install rather than copy. Drop new skills in the same place.
+- **Measured 2026-07-31:** a custom subagent can invoke these **by name** — repo-local ones included —
+  unless its persona declares a `tools:` allow-list that omits `skill`. See
+  [`docs/agent-architecture.md`](docs/agent-architecture.md) §6.
 
-In Copilot CLI, install the plugin once with `/plugin` (add marketplace `microsoft/skills-for-fabric`,
-enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run
+In Copilot CLI, install the plugins once with `/plugin` (add marketplaces `microsoft/skills-for-fabric`
+and `Guust-Franssens/powerbi-migration-skills`, enable `powerbi-authoring` and
+`powerbi-migration-skills`) and register the MCP servers with `/mcp`. Then run
 `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
 
 </details>

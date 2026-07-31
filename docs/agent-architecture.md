@@ -89,9 +89,10 @@ VS Code-only (ignored elsewhere): `argument-hint`, `agents`, `handoffs`, `hooks`
 
 **Prompt cap: 30,000 characters** for the markdown body. Measured here: Copilot CLI does **not**
 enforce it (a 48k persona quoted its own final section back verbatim). The failure mode on the
-GitHub-hosted path — truncate or reject — is **untested**. Since the tail of our personas is the
-accumulated Gotchas, treat over-cap as a portability risk and keep it visible:
-`python scripts/sync_agent_conventions.py --check` prints each persona's size.
+GitHub-hosted path — truncate or reject — is **untested**. As of 2026-07-31 **all four personas fit**
+(99% / 99% / 99% / 58%, §5), which leaves no headroom: keep it visible with
+`python scripts/sync_agent_conventions.py --check`, which prints each persona's size and exits
+non-zero when one goes over.
 
 ## 3. Enforcement vs. advice
 
@@ -159,7 +160,9 @@ session to separate the two; §6.2 has the outcome table.
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
 | `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | **Yes, two ways.** §6.1 measured a subagent invoking a repo-local skill **by name** and getting the body back, so `use the pbip-model-refresh skill` works; reading `.github/skills/pbip-model-refresh/SKILL.md` by path also works. Either is discretionary — the agent must choose to do it |
 | `.github/skills/powerbi-ai-readiness/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle**, also published as a plugin | Same. It absorbed `docs/ai-instructions-authoring-guide.md` (now a stub) and that persona's ~7.3 KB "Prep the model for AI" section — two copies of one recipe that had already diverged (§8), now one |
-| Per-agent Gotchas | Inline in each persona | Yes |
+| `.github/skills/powerbi-report-gotchas/` (SKILL.md only) | Repo-local **skill bundle**, also published | Same. Holds `pbi-report-builder`'s former inline Gotchas; the persona invokes it at step 0, gates on it in its DoD, and keeps a section index |
+| `.github/skills/powerbi-semantic-model-gotchas/` (SKILL.md only) | Repo-local **skill bundle**, also published | Same, for `pbi-semantic-builder` |
+| Per-agent Gotchas | `tableau-migrator` and `pbi-migration-validator` keep theirs inline; the two builders' moved into the bundles above (2026-07-31) | Inline = yes; bundled = only if invoked |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
 different from passive inheritance, and the repo already depends on it for ~44 KB. The documented
@@ -175,8 +178,8 @@ of the strongest one, that the name resolves inside a subagent:
    is higher than that floor: a subagent can invoke the bundle **by name**, which is shorter to write
    in a persona and cheaper in persona budget than a path. There is no downside branch: a bundle is
    never worse than the paragraph it replaced.
-2. **It reclaims persona budget.** `tableau-migrator` is already 108% of the 30,000-char cap (§2), and
-   the tail of a persona is exactly where the accumulated knowledge lives. Procedure that is not
+2. **It reclaims persona budget.** This is no longer theoretical: extracting the two gotcha catalogues
+   took all four personas under the 30,000-char cap (§5) for the first time. Procedure that is not
    Tableau-specific does not belong in a Tableau persona at all.
 3. **It is the only shape that ports.** Nothing about refreshing and persisting a PBIP — or about
    `CustomInstructions` and `qnaEnabled` — is source-tool-specific; the input is already a Power BI
@@ -234,26 +237,49 @@ cheaper problem. **Rule: anything whose absence is silent and harmful stays inli
 *supplement*.** If the persona budget must come down, cut per-agent Gotchas that have gone stale —
 that is what orchestrator step 12 is for.
 
-**The same rule blocks the obvious next trim, so state it before someone tries it.** `Gotchas`
-sections are ~36% of `pbi-report-builder` (16,788 chars across three), which makes them the fattest
-remaining target — but relocating them into `.github/pbi.kb/` puts them in the *discretionary* row of
-the §5 table, and a gotcha the agent stops seeing is a defect it silently repeats. Gotchas are the
-"absence is silent and harmful" category almost by definition. The only safe reduction is **deleting
-ones with evidence they are obsolete** (fixed upstream, superseded by a script gate), which needs a
-real migration's retrospective — not a guess.
+**That rule blocked the obvious next trim — until 2026-07-31, when the trim was done anyway. Here is
+why that is not a violation.** The `Gotchas` sections were ~36% of `pbi-report-builder` (16,788 chars)
+and ~35% of `pbi-semantic-builder`, making them the fattest targets, and the rule above said to leave
+them alone: a gotcha the agent stops seeing is a defect it silently repeats. Two things changed:
 
-Budget after #33 pointed `pbi-semantic-builder` at both bundles:
+1. **Inline was no longer reliable delivery.** At 153% of the cap, those sections *were already* the
+   part a hosted run truncates first (§2). "Absence is silent and harmful" was the argument for
+   keeping them inline, but at 153% inline delivery had itself become a silent-absence risk. The
+   choice was not "reliable inline vs discretionary skill" — it was two discretionary options.
+2. **A skill is not `.github/pbi.kb/`.** §6.1 measured that a subagent *can* invoke a repo-local skill
+   by name and get the body back. That is a real mechanism with a real tool call, not a hope that the
+   agent reads a reference folder.
 
-| Persona | chars | % of 30k cap |
-|---|---|---|
-| `pbi-report-builder` | 46,051 | 153% |
-| `pbi-semantic-builder` | 42,796 | 142% (was 160% / 48,049) |
-| `tableau-migrator` | 32,574 | 108% |
-| `pbi-migration-validator` | 17,677 | 58% |
+So the content moved into `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`, with three
+mitigations that are the actual price of the move:
 
-Three are still over. That is a **portability risk, not a live bug** — Copilot CLI was measured not to
-enforce the cap (§2), and the hosted failure mode is untested. Track it; don't panic-trim into the
-silent-failure category above.
+- the persona invokes the bundle as **step 0** of its skill chain,
+- it is a **Definition of Done item** ("the skill was read this session"),
+- the persona keeps a **section index** — a table of what each `§` covers — so the agent can *see
+  what it is missing* and know when it needs it. Without the index this would be a plain violation.
+
+⚠️ **Residual risk, stated plainly:** an agent that skips the invocation still loses the knowledge, and
+nothing mechanically fails. The index and the DoD item make that *visible*, not *impossible*. If a
+future migration shows an agent repeating a gotcha it never read, the mitigation was insufficient —
+record it here rather than quietly reverting.
+
+**The rule itself is unchanged** for everything else: anything whose absence is silent and harmful
+stays inline unless it moves somewhere the agent can *actively reach and be told to reach*. A hook
+still does not qualify.
+
+Budget after the 2026-07-31 extraction — **all four now fit** (`sync_agent_conventions.py --check`
+exits 0):
+
+| Persona | chars | % of 30k cap | was |
+|---|---|---|---|
+| `tableau-migrator` | 29,992 | 99% | 108% |
+| `pbi-report-builder` | 29,953 | 99% | 153% |
+| `pbi-semantic-builder` | 29,728 | 99% | 141% (peak 160%) |
+| `pbi-migration-validator` | 17,677 | 58% | 58% |
+
+There is now **no headroom**: at 99% a single appended gotcha puts a persona back over. That is
+deliberate — new craft learnings belong in the bundles (orchestrator step 12 routes them there), not
+back in a persona.
 
 ## 6. Experiments — all three resolved
 
@@ -278,7 +304,8 @@ silent-failure category above.
    file by `view`/`grep`/shell, and its one prior filesystem touch was a `Get-ChildItem -Directory`
    that returned names only. Confirmed on disk afterwards: `sentinel-probe` appears **nowhere** under
    `~/.copilot` (no plugin copy, no user-global copy), and the installed `powerbi-migration-skills`
-   plugin ships exactly two skills, neither of them this one.
+   plugin does not ship it — deliberately, and a test enforces that
+   (`test_the_diagnostic_probe_skill_is_never_published`).
 
    **How the repo-local directory gets registered:** `.vscode/settings.json` (committed) sets
    `chat.agentSkillsLocations` with `".github/skills": true`. So the behaviour travels with a clone —
@@ -306,7 +333,8 @@ silent-failure category above.
    `.copilot\installed-plugins\`, with the cwd inside this repo and the repo copy present). Both pairs
    hashed identical on 2026-07-31 (`BCBD9DD3…` / `CF619036…`), so nothing is lost *today* — but the
    plugin is a downstream snapshot, so a repo-side edit that is never re-published is served stale and
-   **silently**. `scripts/preflight.ps1` now hashes each pair and fails on drift.
+   **silently**. `scripts/preflight.ps1` hashes every shipped bundle and fails on **either** shape:
+   `STALE in plugin` (edited but not published) or `NOT INSTALLED` (published but not re-installed).
 
    **Publishing works — proven, with the plugin copy isolated (2026-07-31):**
 
@@ -316,6 +344,10 @@ silent-failure category above.
    → Plugin "powerbi-migration-skills" installed successfully. Installed 2 skills.
    ```
 
+   (That output is from v0.1.0. v0.2.0 ships **four** — the two gotcha catalogues were added when they
+   were extracted from the personas. Note `copilot plugin install` fails with `Access is denied`
+   while a Copilot session is running, so installs are a **between-sessions** step.)
+
    Run from a directory **outside this repo**, so no `.github/skills/` copy can shadow it, a fresh
    session lists both and `skill(powerbi-ai-readiness)` succeeds, loading from:
 
@@ -324,7 +356,8 @@ silent-failure category above.
        powerbi-migration-skills\skills\powerbi-ai-readiness
    ```
 
-   Built by `scripts/build_plugin.py`; see §5 for why it publishes to a separate repo.
+   Built by `scripts/build_plugin.py`; see [`AGENTS.md`](../AGENTS.md) §1b for why it publishes to a
+   separate repo *and* why it is published at all, given repo-local skills already resolve here.
 
    ⚠️ **Four traps when testing this.** Each produced a convincing false result here:
 

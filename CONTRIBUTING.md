@@ -48,7 +48,6 @@ code.** A skill under `.github/skills/<name>/` may ship `scripts/` and `tests/` 
 promoted to a global skill location) — splitting it across `scripts/` and `tests/` is what made the
 "just copy it" claim untrue. Same conventions apply inside the bundle (`purpose:`/`usage:` headers,
 10.00/10 pylint), and the same commands, with the extra paths:
-
 ```bash
 ruff format --check scripts tests .github/skills
 ruff check scripts tests .github/skills
@@ -57,6 +56,24 @@ pylint .github/skills/pbip-model-refresh/scripts        # a shim and its bundled
 pylint .github/skills/powerbi-ai-readiness/scripts      # module name, so a combined run resolves
                                                         # the import to the shim (false E0611)
 ```
+
+**A bundle need not ship code at all.** `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+are pure knowledge — `SKILL.md` only, no `scripts/`, so nothing to lint or gate. The rule is
+conditional: *if* a bundle ships `scripts/`, it must ship the `tests/` that travel with them
+(`tests/test_skills.py` and `tests/test_build_plugin.py` both enforce this shape rather than demanding
+code unconditionally).
+
+### New craft learnings go in a bundle, not a persona
+
+All four personas sit at **99% of the 30,000-char cap** with no headroom — appending a gotcha to one
+puts it straight back over. So PBIR/visual/Desktop learnings belong in `powerbi-report-gotchas`, and
+TMDL/DAX/MCP learnings in `powerbi-semantic-model-gotchas`. The orchestrator's step-12 retrospective
+has the full routing table. Rationale and the residual risk this accepts:
+[`docs/agent-architecture.md`](docs/agent-architecture.md) §5.
+
+If you edit a bundle that is also published, re-run `python scripts/build_plugin.py --out <clone>` and
+push, or `scripts/preflight.ps1` will flag `STALE in plugin` — the plugin copy shadows the repo copy
+for a subagent, so an unpublished edit is served stale and silently.
 
 `scripts/probe_desktop_query.py`, `scripts/refresh_pbip_model.py`, `scripts/set_ai_instructions.py`
 and `scripts/check_ai_readiness.py` are **forwarding shims** that `runpy` the bundled copies, so the

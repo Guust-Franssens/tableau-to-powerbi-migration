@@ -246,26 +246,21 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
     ```
     python scripts/refresh_pbip_model.py --pid <desktop-pid>
     ```
-    It refreshes over XMLA and persists via AMO `ImageSave` (no UI). The **only** acceptable result is
-    `REFRESH: DATA_OK + PERSISTED` — a real row came back **and** the cache file advanced. Anything
-    else is a failure: do not hand over.
+    It refreshes over XMLA and persists via AMO `ImageSave` (no UI). Acceptance criteria and the exact
+    required output are **Definition of Done item 11** below; anything else is a failure — do not hand
+    over.
 
     **Read the `pbip-model-refresh` skill before you run this**, and whenever it misbehaves (invoke it
     by name, or read [`.github/skills/pbip-model-refresh/SKILL.md`](../skills/pbip-model-refresh/SKILL.md)).
-    It owns the mechanism and the reasoning: why a
-    save is required at all, why `ImageSave` works when TMSL `backup` is refused, why success is judged
-    by the file rather than by the absence of an exception, the `--ui-save` fallback, and the strict
-    pid-binding rule.
+    It owns the mechanism and the reasoning: why a save is required at all, why `ImageSave` works when
+    TMSL `backup` is refused, why success is judged by the file rather than by the absence of an
+    exception, the `--ui-save` fallback, and the strict pid-binding rule.
 
     **The one rule you must carry in your head, because it constrains your whole build order:** Desktop
     discards `cache.abf` when `definition/*.tmdl` is *newer* than it. So make **every** model edit
     first, then refresh, then save. Anything that rewrites TMDL afterwards invalidates it — including
     `scripts/set_data_folder.py --sanitize`, which you must run before committing, so the committed
     state always has a stale cache. That is fine (it is gitignored); just re-refresh if you edit again.
-
-    Before reporting done, confirm ALL of: model deserializes; `check_m_syntax.py` clean; every
-    measure/column has a description; AI instructions stamped **and `qnaEnabled: true`**; sample
-    `EVALUATE` verified; and `REFRESH: DATA_OK + PERSISTED`.
 11. **Report back to the orchestrator**: semantic model location (local PBIP path, plus workspace + item
    only if actually deployed), **the Desktop PID you left it open on (or that you closed it)**, the
    refresh/persist result, a table→field
@@ -276,10 +271,10 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
 ## Prep the model for AI (Copilot readiness) — final build phase
 
 **Read the `powerbi-ai-readiness` skill before starting this phase, and follow it** (invoke it by name,
-or read [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md)).
-It is the single home for the recipe: the five
-committable levers, the `CustomInstructions` storage mechanism, the Modeling-MCP workflow for setting
-descriptions, what to write in `ai-instructions.md`, and the two scripts.
+or read [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md)). It
+is the single home for the recipe: the five committable levers, the `CustomInstructions` storage
+mechanism, the Modeling-MCP workflow for setting descriptions, what to write in `ai-instructions.md`,
+and the two scripts.
 
 Everything below is what that skill *cannot* know: your place in this pipeline.
 
@@ -293,9 +288,6 @@ Everything below is what that skill *cannot* know: your place in this pipeline.
   ground-truth totals you already verified. A migrated model has idioms a generic writer would miss:
   disconnected parameter-proxy tables that are not dimensions, `CM`/`T `-style measure-name prefixes
   the migration introduced, and `Latest*` snapshot measures that must not be re-aggregated.
-- **A migrated model is not done without model-level AI instructions.** The DAX-generation path relies
-  solely on model metadata plus Prep-for-AI and ignores data-agent-level notes, so `CustomInstructions`
-  is the only free-text lever that reaches it.
 - **Your gate before hand-off** — scoped to the model you built, not the whole repo:
 
   ```bash
@@ -374,3 +366,13 @@ throwing an error" is necessary but not sufficient:
    `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
    model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
    deserialize. A migrated model without AI instructions is not done.
+11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 10).** The
+   report builder must receive a model that already holds data; otherwise every visual it builds
+   renders empty and reads as a binding bug. Run
+   `python scripts/refresh_pbip_model.py --pid <desktop-pid>` and require exactly
+   **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
+   `<Name>.SemanticModel/.pbi/cache.abf` advanced. Re-check any time with `--verify-only`
+   (`DATA_OK` / `NO_DATA`). **The ordering is part of the gate:** Desktop discards the cache when
+   `definition/*.tmdl` is newer than it, so this must be the **last** action after every model edit,
+   including `set_data_folder.py --sanitize`. A model handed over without `DATA_OK + PERSISTED` is
+   not done.
