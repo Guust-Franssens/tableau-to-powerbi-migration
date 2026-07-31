@@ -40,13 +40,36 @@ pylint <path>                # must meet fail-under = 10 (config in pyproject.to
   `argparse`. Every script in `scripts/` starts with a `purpose:` / `usage:` header docstring.
 - Ruff replaces black/isort/flake8/pyupgrade — do not add those.
 
+### Where code lives (and the one exception)
+
+Shared tooling lives in `scripts/`, its tests in `tests/`. **Exception: a skill bundle owns its own
+code.** A skill under `.github/skills/<name>/` may ship `scripts/` and `tests/` next to its
+`SKILL.md`, because the whole folder is the unit that gets copied into another migration repo (or
+promoted to a global skill location) — splitting it across `scripts/` and `tests/` is what made the
+"just copy it" claim untrue. Same conventions apply inside the bundle (`purpose:`/`usage:` headers,
+10.00/10 pylint), and the same commands, with the extra paths:
+
+```bash
+ruff format --check scripts tests .github/skills
+ruff check scripts tests .github/skills
+pylint scripts                                        # two invocations, not one: the shim and the
+pylint .github/skills/pbip-model-refresh/scripts      # bundled script share a module name
+```
+
+`scripts/probe_desktop_query.py` and `scripts/refresh_pbip_model.py` are **forwarding shims** that
+`runpy` the bundled copies, so the existing `python scripts/…` invocations in the personas keep
+working. Delete them once every caller points at the skill path.
+
 ## Tests
 
 The deterministic parser has a `pytest` regression suite:
 
 ```bash
-pytest -q                    # currently 20 tests
+pytest -q                    # currently 175 tests
 ```
+
+`testpaths` in `pyproject.toml` covers both roots (`tests` **and** `.github/skills`) — pytest skips
+dot-directories by default, so a skill's bundled tests would otherwise be collected by nobody.
 
 If you change `scripts/parse_tableau.py` or `docs/migration-spec.schema.json`, add or update a test in
 `tests/`. The parser must always emit a `migration-spec.json` that validates against the schema.

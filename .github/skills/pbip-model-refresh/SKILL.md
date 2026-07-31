@@ -8,6 +8,20 @@ description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop a
 **Windows only.** Talks to the local Analysis Services instance that Power BI Desktop hosts, over
 ADOMD.NET/AMO (pythonnet), plus the Desktop Bridge CLI for process to file mapping.
 
+Requirements, in full: Windows with Power BI Desktop, Python >= 3.11 with `pythonnet`, the ADOMD.NET
+and AMO client libraries under `~/.nuget/packages`, and `npx` for
+`@microsoft/powerbi-desktop-bridge-cli`. No other dependency, and nothing repo-specific.
+
+## Available scripts
+
+- [**`scripts/refresh_pbip_model.py`**](scripts/refresh_pbip_model.py) - refresh the open model,
+  refuse a wrong-instance bind, and persist `cache.abf` (AMO `ImageSave`, UI-Automation fallback).
+- [**`scripts/probe_desktop_query.py`**](scripts/probe_desktop_query.py) - read-only preflight: port
+  discovery, ADOMD loading, table listing, and the one-row DAX probe. `refresh_pbip_model.py`
+  imports from this file and from nothing else.
+- [**`tests/`**](tests) - the regression suite for both, runnable from this folder
+  (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
+
 ## The problem this solves
 
 A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
@@ -44,8 +58,8 @@ cache sitting right there. So:
 
 > make **all** TMDL edits, then refresh, then save.
 
-Anything that rewrites TMDL afterwards invalidates it, including this repo's own
-`scripts/set_data_folder.py --sanitize`, which must run before committing. If you sanitize last, you
+Anything that rewrites TMDL afterwards invalidates it, including the host repo's own sanitize step
+(here, `set_data_folder.py --sanitize`, which must run before committing). If you sanitize last, you
 have thrown the cache away; re-run this script after.
 
 ## How persistence actually works
@@ -96,18 +110,37 @@ several instances open the scripts refuse to guess.
 
 ## Reusing this in another migration repo
 
-Nothing here is Tableau-specific, the input is already a Power BI model. The portable unit is **two
-files with no other repo imports**:
+Nothing here is Tableau-specific, the input is already a Power BI model. **Copy this folder.**
+`SKILL.md`, the two scripts it runs and the tests that gate them are one unit: the scripts import
+only each other, and `tests/conftest.py` resolves them at `../scripts`, so the suite runs from
+wherever the folder lands. Drop it in the target repo's skill location (`.github/skills/`) or promote
+it to a global one such as `~/.copilot/skills/`, then prove the copy on the spot:
 
-- [`scripts/probe_desktop_query.py`](../../../scripts/probe_desktop_query.py) - port discovery, ADOMD
-  loading, table listing, the read-only DAX probe.
-- [`scripts/refresh_pbip_model.py`](../../../scripts/refresh_pbip_model.py) - refresh, identity gate,
-  `ImageSave`/UIA persistence. Imports only from the file above.
+```
+pytest tests
+```
 
-Requirements: Windows + Power BI Desktop, Python >= 3.11 with `pythonnet`, the ADOMD.NET and AMO
-client libraries under `~/.nuget/packages`, and `npx` for `@microsoft/powerbi-desktop-bridge-cli`.
+The one repo-bound fixture degrades honestly: the TMDL-fingerprint test that reads this repo's
+`examples/*/fabric/*.SemanticModel` corpus **skips with a reason** when there is no such tree, rather
+than failing or silently collecting nothing.
 
-Copy both files plus this skill folder into the target repo (or promote the folder to a global skill
-location such as `~/.copilot/skills/`) and the procedure moves with it. If the scripts land somewhere
-other than `scripts/`, update the two links above: `tests/test_skills.py` fails on a skill that points
-at a path which does not exist.
+In the source repo that claim is a CI gate, not a sentence:
+`tests/test_skills.py::test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_repo`
+copies this folder to a temp directory and runs `pytest tests` there with the repo root out of
+`sys.path`. A new `import <something-repo-local>` fails there, before it can fail in your repo.
+
+Two things do **not** travel, by design:
+
+- `scripts/probe_desktop_query.py` and `scripts/refresh_pbip_model.py` at the *source repo's* root
+  are forwarding shims for callers that predate the move. Do not copy them.
+- `refresh_pbip_model.py` warns about this repo's `set_data_folder.py --sanitize`. Read that as
+  "any post-processing that rewrites TMDL", and substitute your own.
+
+No `allowed-tools` in the frontmatter, deliberately. Pre-approving `shell` would save one
+confirmation per run, and GitHub's warning is the reason it is not worth it: pre-approving `shell` or
+`bash` *"removes the confirmation step for running terminal commands and can allow attacker-controlled
+skills or prompt injections to execute arbitrary commands in your environment"*
+([docs](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/add-skills)).
+These scripts spawn PowerShell, load .NET assemblies and write a binary cache file, so they are
+exactly the shape that warning is about. The field is also marked experimental in the spec, with
+support varying by runtime. Revisit only with a reason.

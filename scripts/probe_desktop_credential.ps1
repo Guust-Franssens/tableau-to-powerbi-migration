@@ -11,8 +11,10 @@
 
   This probe tells the two states apart so the migrator only prompts when needed. NOTE: for a
   *serverless* source that cold-starts, the modal can appear only AFTER this probe's timeout, yielding a
-  false CREDENTIAL_PRESENT; treat scripts/probe_desktop_query.py (DATA_OK vs NO_DATA) as the gate of
-  record and use this modal probe only to explain a NO_DATA.
+  false CREDENTIAL_PRESENT; treat the one-row data probe (DATA_OK vs NO_DATA) as the gate of record and
+  use this modal probe only to explain a NO_DATA. That probe ships inside the pbip-model-refresh skill:
+  .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py (scripts/probe_desktop_query.py is a
+  forwarding shim kept for existing callers).
     * If a credential modal is already open, or appears within -TimeoutSec of a refresh -> MISSING.
     * If a refresh proceeds with no modal -> PRESENT (a credential is cached machine-wide; the loop
       can run unattended) -- but re-confirm with the one-row data probe for serverless sources.

@@ -49,8 +49,8 @@ Cache invalidation (important)
 Desktop discards `cache.abf` when the model **definition** is newer than the cache. Verified: a
 model whose `definition/*.tmdl` were touched a week after the cache was written opened with
 `NO_DATA` despite a 113 KB cache sitting right there. So: make ALL model edits FIRST, then refresh,
-then save. Anything that rewrites TMDL afterwards - including this repo's own
-`scripts/set_data_folder.py --sanitize`, which you must run before committing - invalidates it.
+then save. Anything that rewrites TMDL afterwards - including the host repo's sanitize step (here,
+`scripts/set_data_folder.py --sanitize`, which you must run before committing) - invalidates it.
 
 Binding to the right instance (parallel batches)
 ------------------------------------------------

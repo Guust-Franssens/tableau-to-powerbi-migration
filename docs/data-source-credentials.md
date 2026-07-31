@@ -17,8 +17,11 @@ missing, and what to do. It is grounded in a first-hand Databricks test (2026-07
    credential is configured. **You (the agent) cannot supply it.** Prompt the user, then verify:
    - **Local (Desktop, the iterative loop):** ask the user to open the `.pbip` in Power BI Desktop once
      and authenticate the source (Sign in / paste PAT) so Desktop caches it on the machine. Then prove
-     data actually flows with `python scripts/probe_desktop_query.py --pid <pid>` (queries one row from
-     the loaded model via the Desktop local AS) -> `PREFLIGHT: DATA_OK` before building the report.
+     data actually flows with `python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py
+     --pid <pid>` (queries one row from the loaded model via the Desktop local AS) ->
+     `PREFLIGHT: DATA_OK` before building the report. That probe ships inside the
+     [`pbip-model-refresh`](../.github/skills/pbip-model-refresh/SKILL.md) skill; `scripts/probe_desktop_query.py`
+     is a forwarding shim kept for existing callers.
    - **Cloud (service):** after publish, probe a refresh
      (`python scripts/preflight_source_credentials.py --model "<Workspace>" "<Model>"`); if it reports
      `ModelRefreshFailed_CredentialsNotSpecified`, have the user bind a credential (UI or a Fabric
@@ -82,7 +85,8 @@ on an already-authenticated host.
 Verified 2026-07 (agent-run): against a *serverless* warehouse that cold-starts, the modal-watch
 `scripts/probe_desktop_credential.ps1` returned a **false `CREDENTIAL_PRESENT` three times** because the
 sign-in modal appeared only *after* the probe's 90s window. The one-row data probe
-`scripts/probe_desktop_query.py --pid <pid>` correctly reported `NO_DATA` (0 rows) throughout, then a
+the one-row data probe (`probe_desktop_query.py --pid <pid>`) correctly reported `NO_DATA` (0 rows)
+throughout, then a
 UIA re-dump confirmed the modal was open. So: **treat `probe_desktop_query.py` (`DATA_OK` vs
 `NO_DATA`/`ERROR`) as the gate of record**, and use `probe_desktop_credential.ps1` only to *explain* a
 `NO_DATA` (i.e. "is a credential modal the reason?"). A `CREDENTIAL_PRESENT` from the modal probe must
@@ -100,7 +104,7 @@ Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because 
 
 **The robust positive check: query one row from the Desktop model (verified 2026-07).** Modal-absence is
 a *negative* signal; the *positive* proof that data actually flows is to query the loaded model. Power BI
-Desktop runs a local Analysis Services (`msmdsrv`); `scripts/probe_desktop_query.py --pid <pid>`
+Desktop runs a local Analysis Services (`msmdsrv`); the skill's `scripts/probe_desktop_query.py --pid <pid>`
 discovers its port and runs `EVALUATE TOPN(1, '<table>')` via ADOMD.NET. A returned row proves, in one
 shot, **credentials present + source reachable + M/partition valid** -> `PREFLIGHT: DATA_OK`. Zero rows
 or a connect error -> the gate is red. This is the real "can Power BI actually get data?" test, and it
@@ -173,7 +177,7 @@ The parser records `data_sources[].connection.{class,mode,server}` in `migration
    machine-wide but keyed by host **+ warehouse/`httpPath`**, so a prior sign-in to the *same host and
    warehouse* counts (a different warehouse on the same host does not). Only prompt on
    `CREDENTIAL_MISSING`. Then
-   confirm data actually flows with `scripts/probe_desktop_query.py --pid <pid>` (one-row DAX probe
+   confirm data actually flows with the skill's `scripts/probe_desktop_query.py --pid <pid>` (one-row DAX probe
    against the Desktop local AS -> `PREFLIGHT: DATA_OK`). This one-row query is the definitive local
    gate: it proves creds + reachability + valid M together, without publishing anything.
 4. **Cloud (if publishing):** publish, then run the gate (`--model`). If

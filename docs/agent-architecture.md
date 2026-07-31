@@ -18,7 +18,12 @@ A custom agent invoked **as a subagent** (via the Task/agent tool) receives:
 - the task text the orchestrator passes it.
 
 It does **not** receive `AGENTS.md`, `.github/copilot-instructions.md`, user-global instructions, or
-the parent's conversation. Skills are not inherited from the parent either.
+the parent's conversation. Skills are not inherited from the parent either — that one is now
+documented, not just measured:
+
+> "Skills are **opt-in**: agents receive no skills by default, and sub-agents do not inherit skills
+> from the parent. Skill names are resolved from the session-level `skillDirectories`."
+> — <https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/custom-agents> (Per-agent skills)
 
 This is **intended design**, not a bug — GitHub's SDK states it plainly:
 
@@ -109,7 +114,7 @@ That is consistent with hooks being loaded at session start, like instruction fi
 | `docs/tableau-dax-translation-guide.md` (24k) | External; persona says "Read … before starting" | Only if the agent actually reads it — advisory |
 | `docs/migration-spec.md` (9k) | External; same instruction | Same |
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
-| `.github/skills/pbip-model-refresh/SKILL.md` (7k) | Repo-local **skill** | **Unknown — this is open experiment §6.1.** Worst case it behaves like the external files above; it is not *worse* than them |
+| `.github/skills/pbip-model-refresh/` (SKILL.md + `scripts/` + `tests/`) | Repo-local **skill bundle** | **Only if the persona names it.** The SDK documents that "agents receive no skills by default, and sub-agents do not inherit skills from the parent" — and `.agent.md` frontmatter has no `skills` property (§2), so the one-line "use the `pbip-model-refresh` skill" instruction in each persona is **required**, not contingent on §6.1 |
 | Per-agent Gotchas | Inline in each persona | Yes |
 
 An **explicit instruction to read a file** is a normal tool call and does reach a subagent — this is
@@ -129,8 +134,11 @@ hold regardless of the outcome:
    Tableau-specific does not belong in a Tableau persona at all.
 3. **It is the only shape that ports.** Nothing about refreshing and persisting a PBIP is
    source-tool-specific — the input is already a Power BI model — so the same procedure is needed by
-   a Qlik or Cognos migration. A skill folder plus two scripts moves; a paragraph inside
-   `pbi-semantic-builder.agent.md` does not.
+   a Qlik or Cognos migration. **One self-contained folder** moves — `SKILL.md`, the scripts it runs
+   and the tests that gate them; a paragraph inside `pbi-semantic-builder.agent.md` does not. That is
+   why `pbip-model-refresh` owns its `scripts/` and `tests/` instead of borrowing the repo's, and why
+   `tests/test_skills.py` proves it by copying the folder to a temp dir and running its tests there
+   with this repo unimportable.
 
 The §6.1 note that a subagent *did* see plugin-provided skills while missing this repo's local one
 points at **registration**, not the subagent boundary, as the discriminator. If that holds, promoting
@@ -142,7 +150,7 @@ procedure as a skill now, in a form that can be promoted later without a rewrite
 Both probes below were inconclusive only because this session predated the files. Hooks, skills and
 instruction files all appear to be snapshotted at session start, so **restart the CLI first**.
 
-1. **Do repository skills reach a subagent?**
+1. **Do repository skills reach a subagent?** *(half-answered by the docs — see below)*
    `.github/skills/sentinel-probe/SKILL.md` contains `SKILL_SENTINEL_ZEPHYR_74193`.
    Start a fresh session → confirm the skill is listed → invoke a custom subagent → ask it to quote
    the token *without* telling it the value.
@@ -152,10 +160,16 @@ instruction files all appear to be snapshotted at session start, so **restart th
      that as a third distinct outcome.
    Note: a subagent probed here *did* see plugin-provided skills while not seeing this repo-local
    one, so the discriminator may be *registration*, not the subagent boundary.
-   **This now has stakes:** `.github/skills/pbip-model-refresh/SKILL.md` is real content, not a
-   probe. Outcome 1 means procedure can move out of the personas wholesale; outcome 2 or 3 means the
-   personas must keep an explicit "use the `pbip-model-refresh` skill" instruction (cheap — one line,
-   versus the ~7 KB it replaces), or the skill gets promoted to a plugin/global collection.
+   **What the docs now settle:** auto-selection inside a subagent is ruled out — *"Skills are
+   **opt-in**: agents receive no skills by default, and sub-agents do not inherit skills from the
+   parent"*
+   (<https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/custom-agents>, "Per-agent
+   skills"). The SDK's opt-in is a `skills: string[]` array on `customAgents`, which the markdown
+   `.agent.md` surface does not expose (§2). So outcome 1 is off the table for our personas, and the
+   one-line **"use the `pbip-model-refresh` skill"** instruction in each persona is **required**, not
+   a fallback — cheap next to the ~7 KB it replaces. What is still worth probing is the narrower
+   question: once *named*, is a repo-local skill resolvable from inside a subagent, or does it have
+   to be promoted to a plugin/global collection first?
 
 2. **Does `subagentStart` fire and inject?**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload
@@ -174,7 +188,8 @@ instruction files all appear to be snapshotted at session start, so **restart th
 
 Recorded so nobody re-derives them or fills the gap with a plausible guess:
 
-1. Whether repository skills are visible inside a custom-agent subagent.
+1. Whether a repo-local skill, once *named* in a persona, is resolvable inside a custom-agent
+   subagent (that skills are never *auto*-inherited is documented — §1, §6.1).
 2. The explicit output schema for `subagentStart` (the `additionalContext` field name is inferred
    from sibling hooks).
 3. Whether `deferred-tool-loading` is a supported frontmatter property.

@@ -155,7 +155,10 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
 - Repo-local agents (`.github/agents/`) are committed and load automatically. So are repo-local
   skills under `.github/skills/` (an enabled skill location — see `.vscode/settings.json`), which
   currently ships [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md): refresh a local
-  PBIP model in Power BI Desktop and persist it to `cache.abf`. Drop new skills in the same place.
+  PBIP model in Power BI Desktop and persist it to `cache.abf`. It is a **self-contained bundle** —
+  `SKILL.md` plus its own `scripts/` and `tests/` — so copying that one folder into a Qlik or Cognos
+  migration repo takes the whole procedure with it; a test proves that by running the copy's tests
+  outside this repo. Drop new skills in the same place.
 
 In Copilot CLI, install the plugin once with `/plugin` (add marketplace `microsoft/skills-for-fabric`,
 enable `powerbi-authoring`) and register the MCP servers with `/mcp`. Then run

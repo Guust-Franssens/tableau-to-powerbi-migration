@@ -107,8 +107,12 @@ Copilot CLI users register the same servers with `/mcp`, or copy them into
   [`pbip-model-refresh`](.github/skills/pbip-model-refresh/SKILL.md) — refresh a local PBIP/TMDL model
   in Power BI Desktop and persist it to `.pbi/cache.abf` (AMO `ImageSave`, UIA fallback), plus the
   edit-then-refresh-then-save ordering rule and the pid-binding rule. Deliberately source-tool
-  agnostic so it ports to Qlik/Cognos migrations or a global skill location; `tests/test_skills.py`
-  gates its links and its "copy these two files" portability claim.
+  agnostic so it ports to Qlik/Cognos migrations or a global skill location, and packaged to match:
+  the folder carries its own `scripts/` and `tests/`, so **copying that one folder** takes the whole
+  procedure with it. `tests/test_skills.py` gates its links and executes that claim — it copies the
+  folder to a temp dir and runs its bundled tests with this repo unimportable.
+  `scripts/probe_desktop_query.py` / `scripts/refresh_pbip_model.py` remain as forwarding shims for
+  callers that predate the move.
 - **Visual cookbook: [`.github/pbi.kb/visual-cookbook.md`](.github/pbi.kb/visual-cookbook.md) +
   [`.github/pbi.kb/visuals/`](.github/pbi.kb/visuals/)** — a committed library of worked,
   `validate`-passing PBIR `visual.json` encodings, each with roles, the Tableau idiom it maps to, and a
@@ -152,7 +156,9 @@ If a version differs, re-verify the version-specific Gotchas in `.github/agents/
 `uv venv && uv sync --all-extras` — the deterministic parser (`scripts/parse_tableau.py`), harvester,
 showcase, and validation scripts (`--all-extras` pulls `tableauhyperapi`/`playwright`/`pillow`, which
 several documented scripts import). Lint/format with `ruff`; the parser has a `pytest` regression suite
-in `tests/`. **`uv.lock` is deliberately gitignored** — see the note in `.gitignore`.
+in `tests/`, and a skill bundle keeps its own suite next to its scripts (`pyproject.toml`'s
+`testpaths` covers both — pytest skips dot-directories by default). **`uv.lock` is deliberately
+gitignored** — see the note in `.gitignore`.
 
 ### 6. Preflight — verify everything above in one command
 
