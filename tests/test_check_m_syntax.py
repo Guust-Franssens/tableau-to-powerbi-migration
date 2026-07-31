@@ -215,3 +215,20 @@ def test_block_extraction_stops_at_tmdl_metadata() -> None:
     blocks = _iter_m_blocks(expressions)
     assert blocks
     assert all("lineageTag" not in body and "annotation" not in body for body, _, _ in blocks)
+
+
+def test_trailing_comma_before_in_is_caught():
+    """`in` closes a let step list, so `B = A,` then `in` is the same trailing-separator defect.
+
+    Regression: this shape passed clean for a long time because the balance loop only considers
+    PUNCT closers and `in` tokenises as a keyword. It was found by seeding the defect into a real
+    committed model - `check_m_syntax` reported "no structural problems found" on M that Power BI
+    Desktop rejects with "Token ',' expected".
+    """
+    assert "TRAILING_COMMA" in _kinds("let A = 1, B = A,\nin\n B")
+
+
+def test_in_as_a_record_field_name_is_not_a_trailing_comma():
+    """`in` is a legal generalized field name inside `[...]`, so a comma before it there is fine.
+    Guards the fix above against the false positive it could easily have introduced."""
+    assert "TRAILING_COMMA" not in _kinds("let A = [x = 1, in = 2], B = A in B")

@@ -257,6 +257,26 @@ def _check_delimiters(tokens: list[Token], add: Callable[[str, str, int, int], N
     for opener in stack:
         add("UNBALANCED", f"'{opener.text}' is never closed", opener.line, opener.col)
 
+    # `in` closes a `let` step list, so `B = A,` followed by `in` is the same trailing-separator
+    # defect - and it is the shape agent-generated M actually produces most often (an extra step is
+    # deleted, its comma is left behind). It was missed for a long time because the loop above only
+    # considers PUNCT closers, and `in` tokenises as a keyword. Measured: seeding exactly this into a
+    # real model passed `check_m_syntax` clean while Power BI Desktop rejected the file.
+    # Depth 0 only: `in` is a legal generalized field name inside `[...]` (`each [in]`).
+    depths = _bracket_depths(tokens)
+    for idx, (tok, depth) in enumerate(zip(tokens, depths, strict=True)):
+        if depth or tok.kind != "keyword" or tok.text != "in" or idx == 0:
+            continue
+        prev = tokens[idx - 1]
+        if prev.kind == "punct" and prev.text == ",":
+            add(
+                "TRAILING_COMMA",
+                "comma immediately before 'in' - M rejects a trailing separator at the end of a "
+                "let step list (this is what Desktop reports as \"Token ',' expected\")",
+                prev.line,
+                prev.col,
+            )
+
 
 def _bracket_depths(tokens: list[Token]) -> list[int]:
     """Bracket nesting depth at each token, so `[...]` contents can be excluded from keyword counts."""
@@ -477,8 +497,15 @@ def main() -> int:
         targets.extend(_model_dirs(raw.resolve()))
 
     if not targets:
-        log.info("No .SemanticModel folders found.")
-        return 0
+        # Exiting 0 here was a FALSE GREEN in a mandatory gate: an agent that mistypes the model path
+        # (or points at the .pbip folder's parent) got "clean" and handed the model on unchecked.
+        # A gate that cannot find its subject has not passed - it has not run.
+        log.error(
+            "No .SemanticModel folders found under: %s. Nothing was checked - this is NOT a pass. "
+            "Point this at the folder containing <Name>.SemanticModel, or run with --all.",
+            ", ".join(str(p) for p in args.paths) or "(the repo's migration trees)",
+        )
+        return 2
 
     total = 0
     scanned_total = 0
