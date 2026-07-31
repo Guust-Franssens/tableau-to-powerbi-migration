@@ -275,8 +275,26 @@ silent-failure category above.
    — 91 names, every one from a plugin or user-global directory, no project-local entry. So naming
    the skill in the persona is **not** a workaround for it being unlisted; both paths fail. Use an
    explicit **file path** — "read `.github/skills/<x>/SKILL.md`" — which is an ordinary `view` call
-   and demonstrably works. Promoting the bundle into a plugin/global collection is the only fix that
-   would make the *name* resolve.
+   and demonstrably works.
+
+   **The fix is to publish, and it is proven end to end (2026-07-31).** Packaging the two
+   source-tool-agnostic bundles as a marketplace plugin makes the name resolve:
+
+   ```
+   copilot plugin marketplace add Guust-Franssens/powerbi-migration-skills
+   copilot plugin install powerbi-migration-skills@powerbi-migration-collection
+   → Plugin "powerbi-migration-skills" installed successfully. Installed 2 skills.
+   ```
+
+   A **fresh** session then lists both, and invoking one by name returns its body:
+   `skill(powerbi-ai-readiness)` → `# Power BI AI readiness`. Built by
+   `scripts/build_plugin.py`; see §5 for why it publishes to a separate repo.
+
+   ⚠️ **Two traps when testing this.** (a) Skills are snapshotted at **session start** — a plugin
+   installed mid-session is invisible to that session *and* its subagents, which looks exactly like a
+   broken plugin. Restart before concluding anything. (b) In non-interactive `-p` mode, subagents get
+   **no `skill` tool at all** (`Tool 'skill' is not available.`), so `-p` cannot test the subagent hop.
+   Neither is a defect in the plugin; both produce convincing false negatives.
 
 2. **Does `subagentStart` fire and inject? — ⬜ STILL OPEN (needs a fresh session).**
    `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload
