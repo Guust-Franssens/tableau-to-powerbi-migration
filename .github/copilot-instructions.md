@@ -25,7 +25,8 @@ readiness matrix. Session start is the **only safe moment** to change them.
 - **Never upgrade mid-migration.** Swapping the validator underneath a half-built report is worse than
   a slightly old CLI. Between migrations is fine.
 - It cannot update the **skill bundles** — `copilot plugin update` hits a file lock while any Copilot
-  session is running, so plugin updates stay a manual, between-sessions step.
+  session is running. That lock only blocks renaming the plugin directory, not writing inside it, so a
+  *content* refresh needs no restart: `python scripts/sync_installed_skills.py`.
 
 ### When to run which
 

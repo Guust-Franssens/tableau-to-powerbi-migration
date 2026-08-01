@@ -45,7 +45,9 @@ schema-required `reportVersionAtImport`) — a stale CLI silently green-lights a
 | Mid-migration | **never** | Swapping the validator under a half-built report is worse than a slightly old one |
 
 It cannot update the **skill bundles**: `copilot plugin update` hits a file lock while any Copilot
-session is running, so plugin updates remain a manual, between-sessions step.
+session is running. That lock is narrower than it looks, though — it blocks renaming the plugin
+directory, not writing inside it — so a *content* refresh needs no restart:
+`python scripts/sync_installed_skills.py`.
 
 ---
 
@@ -89,10 +91,17 @@ files + git history to deliver ~60 KB of skills.
 shadowing hazard below, and the preflight gate written to police it — is paid here, where both copies
 coexist. That is the trade, and it is worth it only because the bundles genuinely travel.
 
-⚠️ **Installing/updating a plugin only works BETWEEN sessions.** A running Copilot session file-locks
-the plugin directory, so `copilot plugin install` fails with `Access is denied. (os error 5)`. And
-because skills are snapshotted at session start, an install that *does* succeed is invisible until you
-restart. Preflight reports `NOT INSTALLED: <bundle>` when a shipped bundle is missing locally.
+⚠️ **Installing/updating a plugin only works BETWEEN sessions — but a *content* refresh does not have
+to wait.** A running Copilot session file-locks the plugin directory, so `copilot plugin install`
+fails with `Access is denied. (os error 5)`. Measured 2026-08-01, that lock is **narrower than the
+error implies**: it blocks *renaming* the top two plugin directories, while files inside stay freely
+writable. `plugin update` fails only because it swaps the directory wholesale. So when just a
+bundle's prose or scripts changed, run **`python scripts/sync_installed_skills.py`** and the installed
+copy is current immediately — no restart. A manifest/version/MCP change still needs the real
+`plugin update` between sessions (`scripts/update_migration_skills.ps1` automates that path).
+Either way, skills are snapshotted at session start, so a *running* session keeps the old copy in
+memory; new sessions and the subagents they spawn get the new one. Preflight reports
+`NOT INSTALLED: <bundle>` when a shipped bundle is missing locally.
 
 Install once, in Copilot CLI:
 

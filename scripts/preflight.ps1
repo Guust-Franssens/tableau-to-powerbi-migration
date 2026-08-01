@@ -221,7 +221,7 @@ if ($migrationPlugin) {
 
     Add-Check 'skill bundles match published plugin' 'recommended' ($drift.Count -eq 0) `
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
-        'The plugin copy SHADOWS .github/skills, so agents are running the OLDER code, not what this repo shows. Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then re-install BETWEEN sessions. Do not trust a measurement taken against a stale bundle.'
+        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push. Do not trust a measurement taken against a stale bundle.'
 }
 
 # --- MCP servers ---
