@@ -168,6 +168,11 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="CI gate: report drift and exit 1, changing nothing")
+    parser.add_argument(
+        "--allow-over-cap",
+        action="store_true",
+        help="with --check: report the prompt-cap overage but do not fail on it",
+    )
     args = parser.parse_args(argv)
 
     agents = sorted(AGENTS_DIR.glob("*.agent.md"))
@@ -189,7 +194,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         log.info("OK - all %d agent(s) carry the current shared conventions.", len(agents))
-        report_sizes(agents)
+        over = report_sizes(agents)
+        # The cap is now ENFORCED, not advisory. It was advisory while personas sat at 108-160% and a
+        # hard failure would have blocked every commit; as of 2026-08-01 all four fit (~99%), so the
+        # only thing left to catch is a regression - and this repo's own rule is that a mandate
+        # without an exit code behind it is an anti-pattern. Use --allow-over-cap for a deliberate,
+        # temporary overage.
+        if over and not args.allow_over_cap:
+            log.error(
+                "\nFAIL: %d persona(s) over the %d-char cap. Move craft knowledge into a skill bundle "
+                "(.github/skills/powerbi-report-gotchas or powerbi-semantic-model-gotchas) rather than "
+                "growing a persona - see docs/agent-architecture.md section 5. Re-run with "
+                "--allow-over-cap only for a deliberate, temporary overage.",
+                len(over),
+                PROMPT_CHAR_LIMIT,
+            )
+            return 1
         return 0
 
     for path in drifted:

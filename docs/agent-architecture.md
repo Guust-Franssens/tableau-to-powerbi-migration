@@ -55,7 +55,7 @@ Canonical reference: <https://docs.github.com/en/copilot/reference/custom-agents
 | `tools` | Allow-list. Omit = all tools. **See the enforcement caveat below** |
 | `model` | Optional; unset inherits the session model |
 | `target` | `vscode` or `github-copilot`; unset = both |
-| `disable-model-invocation` | `true` = must be selected explicitly, never auto-delegated |
+| `disable-model-invocation` | `true` = must be selected explicitly, never auto-delegated. **Not used here any more** — it was set on `tableau-migrator` and removed 2026-08-01, because it also blocks *deliberate* programmatic invocation: the agent vanished from the `task` tool's list, so no agent could orchestrate a migration |
 | `user-invocable` | `false` = programmatic only |
 | `mcp-servers` | Per-agent MCP servers |
 | `metadata` | Annotation only |
@@ -89,10 +89,12 @@ VS Code-only (ignored elsewhere): `argument-hint`, `agents`, `handoffs`, `hooks`
 
 **Prompt cap: 30,000 characters** for the markdown body. Measured here: Copilot CLI does **not**
 enforce it (a 48k persona quoted its own final section back verbatim). The failure mode on the
-GitHub-hosted path — truncate or reject — is **untested**. As of 2026-07-31 **all four personas fit**
-(99% / 99% / 99% / 58%, §5), which leaves no headroom: keep it visible with
-`python scripts/sync_agent_conventions.py --check`, which prints each persona's size and exits
-non-zero when one goes over.
+GitHub-hosted path — truncate or reject — is **untested**. As of 2026-08-01 all four personas fit
+(~98–99%, §5) and `python scripts/sync_agent_conventions.py --check` **fails on an overage** rather
+than warning about it. That gate was advisory while personas sat at 108–160%, where a hard failure
+would have blocked every commit; once they all fit, the only thing left to catch is a regression, and
+this repo's own rule is that a mandate without an exit code behind it is an anti-pattern (§3).
+`--allow-over-cap` exists for a deliberate, temporary overage.
 
 ## 3. Enforcement vs. advice
 
@@ -277,7 +279,8 @@ exits 0):
 | `pbi-semantic-builder` | 29,728 | 99% | 141% (peak 160%) |
 | `pbi-migration-validator` | 17,677 | 58% | 58% |
 
-There is now **no headroom**: at 99% a single appended gotcha puts a persona back over. That is
+There is now **no headroom**: at ~98–99% a single appended gotcha puts a persona back over, and
+`sync_agent_conventions.py --check` now **fails** on that rather than warning (§2). That is
 deliberate — new craft learnings belong in the bundles (orchestrator step 12 routes them there), not
 back in a persona.
 

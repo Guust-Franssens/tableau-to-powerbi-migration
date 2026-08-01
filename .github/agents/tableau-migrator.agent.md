@@ -1,10 +1,6 @@
 ---
 name: tableau-migrator
 description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx) to a Microsoft Fabric Power BI semantic model + report. Parses the workbook, then delegates to the pbi-semantic-builder, pbi-report-builder, and pbi-migration-validator subagents.
-# This is the entry point a human drives deliberately - it runs a long, multi-phase, capacity-using
-# pipeline and delegates to three other agents. `disable-model-invocation: true` stops the model
-# auto-selecting it for some loosely-related request; it must be chosen explicitly.
-disable-model-invocation: true
 ---
 
 # Tableau Migrator — Orchestrator Agent
@@ -365,17 +361,13 @@ the same context you would have.
 
 ## Frontmatter hardening — status
 
-Full detail and the measurements behind each: [`docs/agent-architecture.md`](../../docs/agent-architecture.md)
-§2 and §6. Operative points:
+Config rationale and the measurements behind it live in
+[`docs/agent-architecture.md`](../../docs/agent-architecture.md) §2 and §6 — read there before
+changing any persona's frontmatter. The two facts that affect **you**:
 
-- **`tools:` allow-lists ARE enforced** (CLI 1.0.77, 2026-07-31 — this reversed the earlier result), and
-  **unrecognised entries are dropped silently**, so a persona can lose capability with no warning:
-  `pbi-migration-validator` ran without a search tool, web access or `skill` that way. Use literal tool
-  names and re-measure in a **fresh process** — frontmatter is snapshotted at session start. **This
-  agent has no `tools:` line, deliberately:** it would need the delegation tool listed, or it could not
-  delegate at all.
-- **`disable-model-invocation: true` — SET here.** This pipeline is long and capacity-using; it must be
-  chosen deliberately, never auto-selected.
-- **`model:` — deliberately NOT set**, so the operator's plan decides.
-- **`subagentStart` hooks fire and inject** (measured) — advisory context only; `disableAllHooks` can
-  turn them off, so nothing load-bearing may live there.
+- **This agent deliberately has no `tools:` line.** Allow-lists *are* enforced and drop unrecognised
+  entries silently, so declaring one here risks losing the delegation tool — which would leave you
+  unable to delegate at all.
+- **`disable-model-invocation` was REMOVED (2026-08-01)**, so you can be invoked programmatically by
+  another agent, not only by a human. Accidental selection is cheap to absorb: steps 0/2/5 (preflight,
+  refuse-to-re-parse, credential stop) surface a mis-fire before it burns capacity.

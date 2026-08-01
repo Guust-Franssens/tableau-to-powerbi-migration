@@ -69,10 +69,12 @@ code unconditionally).
 
 ### New craft learnings go in a bundle, not a persona
 
-All four personas sit at **99% of the 30,000-char cap** with no headroom — appending a gotcha to one
-puts it straight back over. So PBIR/visual/Desktop learnings belong in `powerbi-report-gotchas`, and
-TMDL/DAX/MCP learnings in `powerbi-semantic-model-gotchas`. The orchestrator's step-12 retrospective
-has the full routing table. Rationale and the residual risk this accepts:
+All four personas sit at **~98–99% of the 30,000-char cap** with no headroom — appending a gotcha to
+one puts it straight back over, and `sync_agent_conventions.py --check` now **fails the build** on
+that (use `--allow-over-cap` only for a deliberate, temporary overage). So PBIR/visual/Desktop
+learnings belong in `powerbi-report-gotchas`, and TMDL/DAX/MCP learnings in
+`powerbi-semantic-model-gotchas`. The orchestrator's step-12 retrospective has the full routing table.
+Rationale and the residual risk this accepts:
 [`docs/agent-architecture.md`](docs/agent-architecture.md) §5.
 
 If you edit a bundle that is also published, re-run `python scripts/build_plugin.py --out <clone>` and
