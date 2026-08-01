@@ -348,6 +348,20 @@ back in a persona.
    were extracted from the personas. Note `copilot plugin install` fails with `Access is denied`
    while a Copilot session is running, so installs are a **between-sessions** step.)
 
+   **The full loop is proven repeatable, not a one-off (2026-08-01).** After v0.2.0 was published and
+   installed between sessions, a `pbi-report-builder` subagent in a fresh process invoked **both** new
+   bundles by name and got `SUCCESS`, each resolving to the plugin:
+
+   ```
+   Base directory for this skill: C:\Users\<user>\.copilot\installed-plugins\
+       powerbi-migration-collection\powerbi-migration-skills\skills\powerbi-report-gotchas
+   ```
+
+   So `build_plugin.py` → marketplace repo → `plugin install` → invoke-by-name in a subagent works
+   end to end, for a bundle that ships **no scripts at all**. Note the probe ran with the cwd *inside*
+   this repo and still resolved to the plugin — shadowing again, now with all four pairs hash-identical
+   (`preflight.ps1`: `4 bundle(s) in sync`), so nothing is lost either way.
+
    Run from a directory **outside this repo**, so no `.github/skills/` copy can shadow it, a fresh
    session lists both and `skill(powerbi-ai-readiness)` succeeds, loading from:
 
