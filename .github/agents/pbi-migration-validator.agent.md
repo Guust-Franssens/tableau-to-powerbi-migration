@@ -83,20 +83,25 @@ reasoning or self-report of success.
   human can supply — no number of retries will conjure one.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
     system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
-    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). A "kill the process and relaunch"
-    recovery is an unbounded retry loop unless you cap the relaunches too — cap them at 2, then ask.
+    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **Bound the CALL, not just your
+    patience:** a blocked refresh does not error, it hangs waiting on a human (hence the XMLA
+    `CommandTimeout` in `refresh_pbip_model.py`). A "kill the process and relaunch" recovery is an
+    unbounded retry loop unless you cap the relaunches too — cap them at 2, then ask.
   - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
     number of retries conjures a credential, so a refusal naming authentication, permissions or a
-    sign-in prompt is a **final answer**: stop on the first one and ask. Retry only a plainly
-    transient failure (a timeout while a serverless warehouse cold-starts), and only once.
+    sign-in prompt is a **final answer**. Retry only a plainly transient timeout (a serverless
+    warehouse cold-starting), once.
+  - **AUTOPILOT / auto-approve DOES NOT override a credential stop.** "Decide, don't ask" applies to
+    *choices*; this is a physical dependency on a human — the credential sits behind a **modal
+    sign-in dialog no automation can fill**. Stop and ask **even in an unattended run**, and end the
+    turn. A clear question costs the operator minutes; a confidently built, unvalidated model costs
+    the whole run and may go unnoticed.
   - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
     the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
     "give me a PAT/key"). Never re-run the same call hoping for a different result. Ask in your normal
     reply — there is no `ask_user` tool.
   - **Report elapsed time in your progress updates** whenever an operation exceeds ~60s, so a stall is
     visible rather than looking like work.
-  - If a credential is already cached in **Power BI Desktop**, prefer that path — it is usually the
-    fastest unblock, and `scripts/probe_desktop_query.py` tells you definitively whether it worked.
   - The same cap applies to any tool call that has hung once: the second identical retry needs a
     reason, and the third needs the user.
 - **End every message with a clear next step or an explicit verdict** — never a vague "looks fine."

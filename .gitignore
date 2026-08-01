@@ -85,3 +85,6 @@ Thumbs.db
 # pyproject.toml are the contract instead. To commit a lock, regenerate it against public PyPI first
 # (UV_INDEX_URL=https://pypi.org/simple uv lock).
 uv.lock
+
+# Throwaway agent-behaviour test fixtures (see scripts/probe_lab.py)
+_probe-lab/

@@ -49,20 +49,25 @@ examples, not hypothetical ones.
   human can supply — no number of retries will conjure one.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
     system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
-    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). A "kill the process and relaunch"
-    recovery is an unbounded retry loop unless you cap the relaunches too — cap them at 2, then ask.
+    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **Bound the CALL, not just your
+    patience:** a blocked refresh does not error, it hangs waiting on a human (hence the XMLA
+    `CommandTimeout` in `refresh_pbip_model.py`). A "kill the process and relaunch" recovery is an
+    unbounded retry loop unless you cap the relaunches too — cap them at 2, then ask.
   - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
     number of retries conjures a credential, so a refusal naming authentication, permissions or a
-    sign-in prompt is a **final answer**: stop on the first one and ask. Retry only a plainly
-    transient failure (a timeout while a serverless warehouse cold-starts), and only once.
+    sign-in prompt is a **final answer**. Retry only a plainly transient timeout (a serverless
+    warehouse cold-starting), once.
+  - **AUTOPILOT / auto-approve DOES NOT override a credential stop.** "Decide, don't ask" applies to
+    *choices*; this is a physical dependency on a human — the credential sits behind a **modal
+    sign-in dialog no automation can fill**. Stop and ask **even in an unattended run**, and end the
+    turn. A clear question costs the operator minutes; a confidently built, unvalidated model costs
+    the whole run and may go unnoticed.
   - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
     the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
     "give me a PAT/key"). Never re-run the same call hoping for a different result. Ask in your normal
     reply — there is no `ask_user` tool.
   - **Report elapsed time in your progress updates** whenever an operation exceeds ~60s, so a stall is
     visible rather than looking like work.
-  - If a credential is already cached in **Power BI Desktop**, prefer that path — it is usually the
-    fastest unblock, and `scripts/probe_desktop_query.py` tells you definitively whether it worked.
   - The same cap applies to any tool call that has hung once: the second identical retry needs a
     reason, and the third needs the user.
 - **End every message with a clear next step or an explicit verdict** — never a vague "looks fine."
@@ -179,12 +184,8 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    `preflight_source_credentials.py` is a **static spec check that never opens a connection**. Run it
    for the inventory, then actually **read one row** before translating a single calculation: build
    **one** table for the live source, open it, run `python scripts/refresh_pbip_model.py --pid <pid>`,
-   require `DATA_OK`. One table costs a minute; the whole model costs an hour you may have to throw
-   away.
-
-   **A missing credential is NOT transient — try ONCE.** The "~2 min / 3 attempts" cap is for *flaky*
-   systems. A refusal naming authentication, permissions or a sign-in prompt is a **final answer**.
-   Retry only a plainly transient timeout (serverless cold start), once.
+   require `DATA_OK`. One table costs a minute; the whole model costs an hour you may throw away.
+   (Try-once and the autopilot exception: shared conventions above.)
 
    ⛔ **NEVER supply the credential yourself** — no reading `.databrickscfg`/env/keyrings, no reusing
    your own `az`/`databricks` token, no PAT in TMDL or M (a committed secret **and** a model only you
@@ -192,9 +193,9 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    `Databricks.Catalogs(host, httpPath, …)`, `Sql.Database(server, db)`.
 
    **Stopping is the deliverable.** Say *"I cannot connect to `<system>` at `<server>` — Power BI has
-   no credential for it and I cannot supply one"*, offer (a) sign in once in Desktop or (b) authorize
-   build-only with validation deferred, and **end your turn**. "Deferred" NEVER means "skip the test":
-   it is the user's choice *after* a probe failed. Full procedure: `powerbi-semantic-model-gotchas` §5.
+   no credential and I cannot supply one"*, offer (a) sign in once in Desktop or (b) authorize
+   build-only, and **end your turn**. "Deferred" NEVER means "skip the test": it is the user's choice
+   *after* a probe failed. Full procedure: `powerbi-semantic-model-gotchas` §5.
 4. **Create tables and columns** via `semantic-model-authoring` for every non-hidden field. Preserve
    `caption` as the TMDL display name (never ship raw internal names like `Calculation_5871029` to the
    model).
@@ -268,33 +269,29 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
     first, then refresh, then save. Anything that rewrites TMDL afterwards invalidates it — including
     `scripts/set_data_folder.py --sanitize`, which you must run before committing, so the committed
     state always has a stale cache. That is fine (it is gitignored); just re-refresh if you edit again.
-11. **Report back to the orchestrator**: semantic model location (local PBIP path, plus workspace + item
-   only if actually deployed), **the Desktop PID you left it open on (or that you closed it)**, the
-   refresh/persist result, a table→field
-   count summary, which calculated fields became measures vs. columns, which idioms were simplified
-   away (parameter-equality, pivot reshape) and why, and any new `limitations_encountered` entries
-   (append them to `migration-spec.json` so the report builder and final summary see them).
+11. **Report back to the orchestrator**: semantic model location (local PBIP path, plus workspace +
+   item only if actually deployed), **the Desktop PID you left it open on (or that you closed it)**,
+   the refresh/persist result, a table→field count summary, which calculated fields became measures
+   vs. columns, which idioms were simplified away and why, and any new `limitations_encountered`
+   entries (append them to `migration-spec.json` so the report builder and final summary see them).
 
 ## Prep the model for AI (Copilot readiness) — final build phase
 
 **Read the `powerbi-ai-readiness` skill before starting this phase, and follow it** (invoke it by name,
 or read [`.github/skills/powerbi-ai-readiness/SKILL.md`](../skills/powerbi-ai-readiness/SKILL.md)). It
-is the single home for the recipe: the five committable levers, the `CustomInstructions` storage
-mechanism, the Modeling-MCP workflow for setting descriptions, what to write in `ai-instructions.md`,
-and the two scripts.
+is the single home for the recipe: the five committable levers, `CustomInstructions` storage, the
+Modeling-MCP description workflow, what to write in `ai-instructions.md`, and the two scripts.
 
 Everything below is what that skill *cannot* know: your place in this pipeline.
 
-- **When.** Run it as the **last phase** of the build, after every measure and column exists and is
-  validated. It is also runnable standalone against an already-built model (an "AI-prep-only" retrofit
-  pass).
-- **Who.** You own it, because it edits TMDL — your layer. No other agent touches these files, and you
-  do not delegate this.
+- **When.** The **last phase** of the build, after every measure and column exists and is validated.
+  Also runnable standalone against an already-built model (an "AI-prep-only" retrofit pass).
+- **Who.** You own it — it edits TMDL, your layer. Never delegated.
 - **Where the source lives.** Author `migrations/workbooks/<slug>/ai-instructions.md`; the culture TMDL
   is generated from it. Ground every line in *this* model — the real TMDL, the extracted CSV, the
-  ground-truth totals you already verified. A migrated model has idioms a generic writer would miss:
-  disconnected parameter-proxy tables that are not dimensions, `CM`/`T `-style measure-name prefixes
-  the migration introduced, and `Latest*` snapshot measures that must not be re-aggregated.
+  ground-truth totals you verified. A migrated model has idioms a generic writer misses: disconnected
+  parameter-proxy tables that are not dimensions, `CM`/`T `-style prefixes the migration introduced,
+  `Latest*` snapshot measures that must not be re-aggregated.
 - **Your gate before hand-off** — scoped to the model you built, not the whole repo:
 
   ```bash
