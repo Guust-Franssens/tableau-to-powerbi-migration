@@ -48,10 +48,13 @@ examples, not hypothetical ones.
   the credential from Power BI Desktop. Waiting is not progress, and a credential is something only a
   human can supply — no number of retries will conjure one.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
-    system, not just credentials: a database/warehouse/gateway/tenant connection, an MCP server, an
-    XMLA refresh, **and the Power BI Desktop bridge** (`open`/`reload`/`screenshot`). A "kill the
-    process and relaunch" recovery is an unbounded retry loop unless you cap the relaunches too —
-    cap them at 2, then ask.
+    system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
+    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). A "kill the process and relaunch"
+    recovery is an unbounded retry loop unless you cap the relaunches too — cap them at 2, then ask.
+  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
+    number of retries conjures a credential, so a refusal naming authentication, permissions or a
+    sign-in prompt is a **final answer**: stop on the first one and ask. Retry only a plainly
+    transient failure (a timeout while a serverless warehouse cold-starts), and only once.
   - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
     the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
     "give me a PAT/key"). Never re-run the same call hoping for a different result. Ask in your normal
@@ -172,20 +175,26 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    Record the decision and its reason in `limitations_encountered` (`stage: "semantic_build"`).
    Never silently fabricate data. A structure-only stub is acceptable ONLY if the user explicitly
    chooses it, and must be labelled as such.
-3. **PROVE the live source is reachable BEFORE you build — then time-box, then ask.**
+3. **PROVE the live source is reachable BEFORE you build — ONE attempt, then ask.**
    `preflight_source_credentials.py` is a **static spec check that never opens a connection**. Run it
-   for the inventory, then **actually read one row** from each live source *before* you translate a
-   single calculation. If you cannot, STOP and ask.
+   for the inventory, then actually **read one row** before translating a single calculation: build
+   **one** table for the live source, open it, run `python scripts/refresh_pbip_model.py --pid <pid>`,
+   require `DATA_OK`. One table costs a minute; the whole model costs an hour you may have to throw
+   away.
 
-   ⛔ **NEVER supply the credential yourself.** Do not read `.databrickscfg`/env vars/keyrings, reuse
-   your own `az`/`databricks` token, embed a PAT/key in TMDL or M (a committed secret **and** a model
-   only you can refresh), or drive Desktop's sign-in modal. Correct M defers to Power BI's own
-   credential store: `Databricks.Catalogs(host, httpPath, …)`, `Sql.Database(server, db)`.
+   **A missing credential is NOT transient — try ONCE.** The "~2 min / 3 attempts" cap is for *flaky*
+   systems. A refusal naming authentication, permissions or a sign-in prompt is a **final answer**.
+   Retry only a plainly transient timeout (serverless cold start), once.
 
-   **"Validation deferred" NEVER means "skip the test."** It means the user accepted the risk *after*
-   a probe failed. Cap at **~2 min or 3 attempts**, then STOP and ask, naming system + server + what
-   you tried + options. Full procedure and the two war stories behind this rule:
-   `powerbi-semantic-model-gotchas` §5.
+   ⛔ **NEVER supply the credential yourself** — no reading `.databrickscfg`/env/keyrings, no reusing
+   your own `az`/`databricks` token, no PAT in TMDL or M (a committed secret **and** a model only you
+   can refresh), no driving Desktop's sign-in modal. Correct M defers to Power BI's credential store:
+   `Databricks.Catalogs(host, httpPath, …)`, `Sql.Database(server, db)`.
+
+   **Stopping is the deliverable.** Say *"I cannot connect to `<system>` at `<server>` — Power BI has
+   no credential for it and I cannot supply one"*, offer (a) sign in once in Desktop or (b) authorize
+   build-only with validation deferred, and **end your turn**. "Deferred" NEVER means "skip the test":
+   it is the user's choice *after* a probe failed. Full procedure: `powerbi-semantic-model-gotchas` §5.
 4. **Create tables and columns** via `semantic-model-authoring` for every non-hidden field. Preserve
    `caption` as the TMDL display name (never ship raw internal names like `Calculation_5871029` to the
    model).
@@ -301,27 +310,24 @@ Everything below is what that skill *cannot* know: your place in this pipeline.
 ## Gotchas
 
 **INVOKE THE `powerbi-semantic-model-gotchas` SKILL BEFORE YOU WRITE YOUR FIRST TMDL FILE** — and
-again whenever a model parses clean but fails at open, refresh, or render. It holds ~16 KB of
-TMDL/DAX/MCP failure knowledge that used to sit inline here and pushed this persona 45% past the
-30,000-char cap, i.e. into the region a hosted run truncates first. Knowledge you lose silently is
-worse than knowledge you have to ask for. Invoke it by name, or read
+again whenever a model parses clean but fails at open, refresh, or render. ~20 KB of TMDL/DAX/MCP
+failure knowledge, extracted from this persona so it does not sit in the region a hosted run truncates
+first. Invoke by name, or read
 [`.github/skills/powerbi-semantic-model-gotchas/SKILL.md`](../skills/powerbi-semantic-model-gotchas/SKILL.md).
 
-**What is in it, so you can tell when you need it.** If any row below matches what you are about to
-build or debug, you have not read enough yet:
+**What is in it, so you can tell when you need it.** If any row matches what you are about to build or
+debug, you have not read enough yet:
 
 | § | Covers |
 |---|---|
-| 1 | Translating source fields: `ATTR()` at row grain, duplicate `CASE WHEN` branches, reference-line measure naming, never trusting a stale `internal_name`, and the two non-tabular `data_type` values (`table`, `spatial`) |
-| 2 | TMDL hand-authoring pitfalls that **crash Desktop on open**: `database.tmdl` shape, single-line DAX, the measure/column name-collision rule, `.pbip` `$schema`, the **field-parameter `sourceColumn: [Value1]` bracket trap** (validates clean, never binds, and Desktop rewrites your file), and the **`'Table'[Col] = [Measure]` PLACEHOLDER error** that only throws at render time |
-| 3 | MCP / Desktop operational rules: DAX must use a column's `name` not its `sourceColumn`, explicit M culture and the `'4096' locale` failure, re-discovering the AS port after every Desktop restart, blank MCP response = success, clearing the pending-changes banner, deleting junk artifacts |
-| 4 | Offline model-integrity checks the parser misses (**duplicate measure names break Desktop load**), table calcs at compat 1606, what `pbi-report-builder` needs decided at model-design time (route PATH tables, every dashboard-visible metric, `ParameterMetadata`), and modeling at scale |
+| 1 | Translating source fields: `ATTR()` at row grain, duplicate `CASE WHEN` branches, reference-line measure naming, stale `internal_name`s, the non-tabular `table`/`spatial` data types |
+| 2 | TMDL pitfalls that **crash Desktop on open**: `database.tmdl` shape, single-line DAX, measure/column name collisions, `.pbip` `$schema`, the **field-parameter `sourceColumn: [Value1]` bracket trap**, the **`'Table'[Col] = [Measure]` PLACEHOLDER error** |
+| 3 | MCP/Desktop rules: DAX uses a column's `name` not `sourceColumn`, explicit M culture and the `'4096' locale` failure, re-discovering the AS port, blank MCP response = success, pending-changes banner, junk artifacts |
+| 4 | Offline integrity checks the parser misses (**duplicate measure names break Desktop load**), table calcs at compat 1606, what `pbi-report-builder` needs decided at model-design time, modeling at scale |
+| 5 | **Live sources**: prove reachability first, why a static spec check is not a test, and never self-supplying a credential |
 
-**Report-layer bugs stay with `pbi-report-builder`.** A visual that binds correctly to a correct model
-is not yours to fix — own your layer.
-
-**When you learn a new one, add it to the skill, not back into this file.** That is what keeps this
-persona under the cap and makes the knowledge portable to the next migration.
+**Report-layer bugs stay with `pbi-report-builder`** — own your layer. **New learnings go in the skill,
+not back in this file.**
 
 ## Definition of Done
 

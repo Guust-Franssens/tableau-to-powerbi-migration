@@ -168,6 +168,32 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 - **Ground-truth EACH table calc two independent ways in Python** (Tableau semantics via sorted-partition
   `.iloc`/`cumcount`, and a literal DAX-mechanics replica via boolean masks over the raw table) and assert
   equality per probe row — two independent codings agreeing is far stronger than restating one formula.
+- **A running total must clear EVERY date-ish column of its own table, not just the daily one** [seen,
+  LogisticsLive]. The canonical `CALCULATE(SUM(t[v]), FILTER(ALL(t[Date]), t[Date] <= MAX(t[Date])))` is
+  only correct while `t[Date]` is the axis. Put a coarser same-table column on the axis — a month-start
+  column you added so the report can reproduce a Tableau `mn`/`tmn` bin — and the surviving `t[Month]`
+  filter still restricts the fact rows, so the "running total" silently collapses to **that bucket's own
+  total**: a plausible-looking, non-cumulative line that no structural validation flags. Fix:
+  `VAR _asOf = MAX(t[Date]) RETURN CALCULATE(SUM(t[v]), FILTER(ALL(t[Date], t[Month]), t[Date] <= _asOf))`
+  — `ALL()` takes several columns of one table, and the `VAR` pins the as-of date in the outer context.
+  Measured on a 730-row table: old form returned exactly the month total for all 24 months, new form
+  accumulated to the grand total to the cent, and the two agreed on **0 of 730 days** of difference at the
+  daily grain (strict superset). Generalizes to any measure that removes a filter by naming one column.
+
+**Month/quarter binning is a MODEL job, and it lands on you mid-migration:**
+- Power BI cannot bin a date to month in the **report** layer when the model has no date table, no
+  `variation` blocks and `__PBI_TimeIntelligenceEnabled = 0` — `HierarchyLevel`/`GroupRef` are unavailable
+  and `DateSpan` is for filter `Where` conditions, not projections. So a source `mn`/`tmn` date-part shelf
+  becomes a **date-typed month-start calculated column** per table:
+  `IF(ISBLANK(t[D]), BLANK(), DATE(YEAR(t[D]), MONTH(t[D]), 1))`, `dataType: dateTime`,
+  `formatString: mmm yyyy`. Never a text label ("Jan 2022" sorts alphabetically and scrambles the axis);
+  if you do ship a label column, give it an explicit `sortByColumn`.
+- **Per-table, not a shared calendar**, when the sources were independent in the workbook (`joins: []`,
+  one source per worksheet) — a shared date dimension invents relationships the source never had and
+  changes cross-filter semantics. Two disconnected month columns are the faithful shape.
+- Note the source-tool nuance in `limitations_encountered`: Tableau's `mn` is the MONTH **date part**
+  (cycles Jan–Dec), `tmn` is the truncated month (month start). A multi-year trend line means month-start;
+  say which reading you implemented rather than letting it pass silently.
 
 **Cross-agent — the report builder needs these FROM you (decide at model-design time):**
 - **Azure Map route/great-circle maps (Tableau `MAKELINE`/`MAKEPOINT`): build an endpoint-unpivoted PATH
@@ -180,6 +206,15 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   only render a static placeholder card for a metric that has no backing field (seen: 3 Airline tiles).
 - **Dimension-flavored Field Parameters need the `ParameterMetadata` marker**, or the report can't native-
   swap the dimension (measure-flavored FPs switch fine via `SELECTEDVALUE` wrapper measures).
+- **A re-runnable `_gen/gen_model.py` will clobber the report builder's work on your NEXT fix pass**
+  [seen, LogisticsLive]. Model generators typically also emit a one-page report *placeholder* so the
+  `.pbip` can be opened in Desktop at all. Re-run that generator for a model-only fix after
+  `pbi-report-builder` has replaced the folder, and it silently rewrites `pages.json` back to
+  `pageOrder: ["p_placeholder"]`, orphaning every built page — a cross-layer clobber no validator catches.
+  Guard the scaffold (`if a real report exists: skip`) *before* re-running, and confirm afterwards that
+  Desktop still enumerates the real pages. The same applies to `cultures/en-US.tmdl`: a generator re-run
+  resets it to a bare scaffold, so re-stamp `set_ai_instructions.py` or the model silently loses its AI
+  instructions.
 
 **Modeling at scale / fidelity:**
 - **Reconcile near-duplicate data sources by WORKSHEET BINDING, not row content** — byte-identical CSVs in
@@ -264,3 +299,26 @@ Source = Sql.Database(ServerName, DatabaseName)
 Your only move is to **ask** — naming the system, the server, what you tried, and the two options
 (sign in interactively in Desktop, or supply a PAT/key). A credential is the canonical thing only a
 human can provide; no amount of retrying or cleverness conjures one.
+
+### Why you cannot just run `SELECT 1` from the shell
+
+The obvious idea — "run a one-row query against the warehouse and see if it works" — tests the **wrong
+credential**, and that failure mode is worse than no test.
+
+`databricks sql`, an ODBC call, or an `az` token all authenticate as **you**, the agent's shell
+identity. Power BI does not use any of them. It uses a credential cached **per-Windows-user in
+Desktop's DPAPI store, keyed by data source**, and there is no `powerbi test-connection` verb that
+reaches it. So a shell probe can return a happy row from a warehouse Power BI still cannot open — a
+green light that means nothing. (This was exactly the setup measured 2026-08-01: the `databricks` CLI
+was fully authenticated and could query the warehouse, while Power BI had never authenticated to it at
+all.)
+
+The test must therefore go **through Power BI**, and the smallest thing Power BI can execute is a
+model. Hence: one table, `Table.FirstN(…, 1)`, refresh, require `DATA_OK`. That is the `SELECT 1` — it
+just has to be expressed as a partition rather than a shell command.
+
+**Do not build a separate throwaway "canary" PBIP for this.** That was tried and abandoned: a
+hand-authored PBIP needs five exactly-correct `$schema` URLs plus a `.platform` file, and getting any
+of them wrong makes Desktop throw a modal crash dialog that looks *identical* to an unreachable source.
+You are already building a model — build its **first table only**, refresh that, and continue only on
+`DATA_OK`. No new file-format surface, no new failure mode.

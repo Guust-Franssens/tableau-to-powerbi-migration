@@ -43,10 +43,13 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
   the credential from Power BI Desktop. Waiting is not progress, and a credential is something only a
   human can supply — no number of retries will conjure one.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
-    system, not just credentials: a database/warehouse/gateway/tenant connection, an MCP server, an
-    XMLA refresh, **and the Power BI Desktop bridge** (`open`/`reload`/`screenshot`). A "kill the
-    process and relaunch" recovery is an unbounded retry loop unless you cap the relaunches too —
-    cap them at 2, then ask.
+    system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
+    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). A "kill the process and relaunch"
+    recovery is an unbounded retry loop unless you cap the relaunches too — cap them at 2, then ask.
+  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
+    number of retries conjures a credential, so a refusal naming authentication, permissions or a
+    sign-in prompt is a **final answer**: stop on the first one and ask. Retry only a plainly
+    transient failure (a timeout while a serverless warehouse cold-starts), and only once.
   - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
     the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
     "give me a PAT/key"). Never re-run the same call hoping for a different result. Ask in your normal
