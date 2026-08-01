@@ -124,11 +124,14 @@ def cmd_classify(spec_path: Path) -> int:
 
     log.info("-" * 60)
     if needs:
-        log.warning(
-            "%d live data source(s) need a Power BI connection + credential BEFORE migration can "
-            "validate against data.",
-            needs,
-        )
+        # Order is load-bearing: the STOP directive goes FIRST. Measured 2026-08-01, an agent hit
+        # this gate, paused correctly, marked its own todo blocked - then overrode itself with
+        # "applying the non-interactive fallback ... rather than leaving the requested artifacts
+        # unbuilt", and shipped a model for a warehouse it never contacted. Leading with remediation
+        # invites exactly that reading ("the human fixes it later, I continue now"). Persona prose
+        # already said "Unconditional" and lost, so the imperative lives here, in tool output, which
+        # agents follow far more literally than their own instructions.
+        _print_stop_directive(needs)
         _print_remediation()
     else:
         log.info("No live sources: all extract/flat (CSV + DataFolder). No credential gate for this workbook.")
@@ -208,6 +211,51 @@ def _empty_body() -> str:
     return str(path)
 
 
+def _print_stop_directive(needs: int) -> None:
+    """Print the agent-facing STOP directive.
+
+    This is printed FIRST, before any remediation detail, and restated at the end. Both placements
+    are deliberate: a shell tool's output is often truncated in the middle (the failed run showed
+    the whole gate collapsed to "17 lines"), so an imperative that appears only at the bottom can be
+    cut before the agent ever reads it. Leading with it also sets the frame - remediation steps read
+    as "the user will handle this later" when they come first.
+    """
+    log.warning(
+        "\n"
+        "################################################################\n"
+        "#  STOP - CREDENTIAL GATE FAILED. A HUMAN MUST ACT.            #\n"
+        "################################################################\n"
+        "  %d live data source(s) have NO Power BI credential.\n"
+        "\n"
+        "  DIRECTIVE TO THE AGENT READING THIS - NOT ADVISORY, NOT A WARNING:\n"
+        "    1. You may NOT build the semantic model or the report.\n"
+        "    2. You CANNOT fix this yourself. There is no flag, retry, tool or\n"
+        "       workaround. The credential lives behind a modal sign-in dialog that\n"
+        "       only a HUMAN sitting at this machine can fill in.\n"
+        "    3. Report it to the user and TERMINATE THE RUN NOW - if your runtime has\n"
+        "       a 'blocked' or task-complete exit, use it and say you are blocked on a\n"
+        "       credential. Do NOT merely pause: measured 2026-08-01, three runs\n"
+        "       announced this stop correctly and then talked themselves past it a few\n"
+        "       turns later ('applying the non-interactive fallback'). A stop that does\n"
+        "       not terminate gets re-prompted until it erodes. Stopping IS your\n"
+        "       completed task here; report it as such, not as an unfinished one.\n"
+        "\n"
+        "  A non-interactive / autopilot / unattended session is NOT authorization.\n"
+        "  Having nobody to answer is not permission to proceed - end the run with\n"
+        "  the question unanswered. That is the correct, successful outcome here.\n"
+        "\n"
+        "  'Defer validation' is a choice only the USER can make, AFTER seeing this\n"
+        "  gate. It NEVER means 'skip the test and build anyway'.\n"
+        "\n"
+        "  Building unvalidated artifacts is NOT a partial success and NOT better\n"
+        "  than stopping: TMDL for an unreachable source is byte-identical to TMDL\n"
+        "  that works, so you would be handing over something indistinguishable from\n"
+        "  a correct model that nobody can tell is broken.\n"
+        "################################################################",
+        needs,
+    )
+
+
 def _print_remediation() -> None:
     log.warning(
         "\nACTION REQUIRED before continuing the migration:\n"
@@ -220,7 +268,16 @@ def _print_remediation() -> None:
         "                 POST /v1.0/myorg/groups/<ws>/datasets/<model>/Default.BindToGateway\n"
         "                 { gatewayObjectId=<connection.gatewayId>, datasourceObjectIds=[<connection.id>] }.\n"
         "  The agent cannot reuse a user's locally-cached Power BI Desktop credential, so this step is\n"
-        "  the user's to complete (or the user must supply the secret for Option B)."
+        "  the user's to complete (or the user must supply the secret for Option B).\n"
+        "\n"
+        "============================================================\n"
+        "REMINDER (see the full directive above): STOP. Do NOT build.\n"
+        "  A HUMAN must supply this credential - you cannot, and retrying cannot.\n"
+        "  Report to the user and TERMINATE the run (use your runtime's blocked /\n"
+        "  task-complete exit). Do not merely pause - a stop that does not terminate\n"
+        "  gets re-prompted until it erodes. A non-interactive or autopilot session\n"
+        "  is NOT authorization to continue.\n"
+        "============================================================"
     )
 
 

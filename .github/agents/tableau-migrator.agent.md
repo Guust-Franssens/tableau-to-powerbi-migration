@@ -209,12 +209,13 @@ it must show up in `limitations_encountered`, not be silently dropped.
    > **HARD STOP. Do not delegate to any builder until the user answers.** Name the host/database and
    > say plainly that Power BI needs a credential you **cannot supply** — it is cached per-machine in
    > Desktop (a modal the Bridge cannot fill) and server-side in the service. Ask whether they will
-   > configure it, **or** authorize a build-only migration with validation deferred. Then **end your
-   > turn.**
+   > configure it, **or** authorize a build-only migration with validation deferred. Then
+   > **TERMINATE the run** via your runtime's blocked / task-complete exit.
    >
-   > **Unconditional — it applies in a non-interactive run too.** Having no one to answer is **not**
-   > authorization: end the turn with the question unanswered. Measured: this persona obeyed the stop
-   > as a subagent and rationalized past it as a root agent (`docs/agent-architecture.md` §6).
+   > **Unconditional — it applies in a non-interactive run too**, and **pausing is not enough**:
+   > measured, three runs announced this stop correctly then talked themselves past it a few turns
+   > later ("applying the non-interactive fallback"). A stop that does not terminate gets re-prompted
+   > until it erodes, so **stopping IS the completed task** — report it as success, not as unfinished.
 6. **Delegate to `pbi-semantic-builder` in TWO calls when any source is `live_source`.** A subagent
    follows the task prompt you write far more reliably than its own persona, so the reachability probe
    must be **your** instruction, not just its rule.
