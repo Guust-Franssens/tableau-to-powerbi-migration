@@ -204,24 +204,29 @@ it must show up in `limitations_encountered`, not be silently dropped.
 5. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
    `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`. If it
    reports **only** extract/flat sources, there is no credential gate (data comes from CSV + a
-   `DataFolder`); proceed. If it flags any **live database** source (`needs-credential`), STOP and tell
-   the user up front: Power BI needs a credential for that source (name the host/database), which is
-   **not in the model files** and which **you cannot supply** — it is cached per-machine in Desktop
-   (a modal Sign-in/PAT prompt the Desktop Bridge cannot fill) and stored server-side in the service.
-   The migration can be *built*, but it cannot *refresh or be validated against data* until the user
-   configures the credential. See `docs/data-source-credentials.md` for the exact local (Desktop) and
-   cloud (service `ModelRefreshFailed_CredentialsNotSpecified`) gates and remediation. Get the user's
-   acknowledgement (and, if publishing, their plan to enter creds) before delegating the build. For the
-   local Desktop loop you can check whether a credential is already cached (so you only prompt when
-   needed) with `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` (`CREDENTIAL_PRESENT` vs
-   `CREDENTIAL_MISSING`), then confirm data actually flows with `python scripts/probe_desktop_query.py
-   --pid <pid>` (a 1-row DAX probe against the Desktop local Analysis Services -> `PREFLIGHT: DATA_OK`).
-   **The 1-row data probe is the gate of record** — trust it over the modal probe, which can return a
-   false `CREDENTIAL_PRESENT` for a *serverless* source that cold-starts and shows the sign-in modal only
-   after the probe's timeout (confirmed 2026-07). It proves credentials + source reachability + valid M
-   in one shot, entirely locally (no publish needed).
-   **TIME-BOX EVERY ATTEMPT: ~2 minutes or 3 tries, then STOP and ask** — see the shared convention
-   above; a credential is the canonical case where only a human can unblock you.
+   `DataFolder`); proceed. If it flags any **live database** source (`needs-credential`):
+
+   > **HARD STOP. Do not delegate to any builder until the user answers.** Name the host/database and
+   > say plainly that Power BI needs a credential you **cannot supply** — it is cached per-machine in
+   > Desktop (a modal Sign-in/PAT prompt the Desktop Bridge cannot fill) and stored server-side in the
+   > service. Ask whether they will configure it, **or** explicitly authorize a build-only migration
+   > with data validation deferred. Then **end your turn.**
+   >
+   > **Unconditional — it applies in a non-interactive run too.** Having no one to answer is **not**
+   > authorization: end the turn with the question unanswered. "Build it anyway and report the blocker
+   > at the end" is the user's call, not yours — you would spend capacity on a model whose grain and
+   > types cannot be verified against the real source. Measured: this persona obeyed the stop as a
+   > subagent and rationalized past it as a root agent (`docs/agent-architecture.md` §6).
+
+   The migration *can* be built without data, and that is often the right call — but only once the user
+   has said so. `docs/data-source-credentials.md` has the local (Desktop) and cloud (service
+   `ModelRefreshFailed_CredentialsNotSpecified`) gates and remediation. To check whether a credential is
+   already cached (so you only prompt when needed): `scripts/probe_desktop_credential.ps1 -DesktopPid
+   <pid>` → `CREDENTIAL_PRESENT`/`_MISSING`, then `python scripts/probe_desktop_query.py --pid <pid>`
+   → `PREFLIGHT: DATA_OK`. **The 1-row data probe is the gate of record** — it proves credentials +
+   reachability + valid M in one shot, locally, with no publish. Trust it over the modal probe, which
+   returns a false `CREDENTIAL_PRESENT` for a *serverless* source that cold-starts and shows the
+   sign-in modal only after the probe times out (confirmed 2026-07).
 6. **Delegate to `pbi-semantic-builder`** with: the path to `migration-spec.json`, the target Fabric
    workspace/workspace-to-be, and **the connection target for every data source**
    (`connection.powerbi_target`). Be explicit: a **`live_source`** model must CONNECT to the upstream

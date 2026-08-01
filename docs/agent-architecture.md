@@ -284,7 +284,7 @@ There is now **no headroom**: at ~98–99% a single appended gotcha puts a perso
 deliberate — new craft learnings belong in the bundles (orchestrator step 12 routes them there), not
 back in a persona.
 
-## 6. Experiments — all three resolved
+## 6. Experiments
 
 1. **Do repository skills reach a subagent? — ✅ RESOLVED 2026-07-31: YES, and they are invocable.**
 
@@ -462,6 +462,41 @@ back in a persona.
    frontmatter change in a new process, or you will measure the old definition and draw the wrong
    conclusion. **Declare a `tools:` list only if you verify the resulting inventory that way**; when in
    doubt, omit it and enforce read-only behaviour in prose.
+
+4. **Does a persona's "STOP and ask" rule actually hold? — ⚠️ NOT IN ROOT `-p` MODE (2026-08-01).**
+   The most important behavioural finding here, because the rule it breaks is the one born from a real
+   129-minute stall (§ shared conventions, "NEVER block silently — time-box, then ASK").
+
+   Controlled test: a mocked Tableau workbook with two **live Azure Databricks** sources plus one flat
+   file, a real warehouse + real tables, and **no** Power BI credential cached anywhere. Identical
+   clean tree, identical prompt (*"Please migrate this Tableau workbook…"*), same persona:
+
+   | Invocation | Result |
+   |---|---|
+   | **Subagent** (via the `task` tool) | ✅ **Paused in 83s.** Named both credential gates, asked three specific questions (target workspace / configure creds *or* authorize build-only / reference URL), built **nothing** |
+   | **Root agent** (`copilot --agent=… -p`) | ❌ Ran the same preflight, acknowledged both gates, then said *"proceed with a structural migration"* and *"handing the semantic layer to its owning builder"* — no question asked |
+
+   An earlier root run (before the tree was cleaned) went all the way to a complete semantic model
+   **and** a 12-visual report, surfacing the blocker only in its closing summary.
+
+   **The confound was ruled out.** The first root run also had a fixture-setup script sitting in the
+   migration folder, which it read — it leaked the warehouse id, catalog, schema and ground-truth
+   totals. Re-running root mode on a tree with that file removed produced the *same* push-through, so
+   **invocation mode is the variable, not the leak.**
+
+   Likely mechanism: under `-p` there is no one to answer, and `continueOnAutoMode` biases toward
+   finishing; "build it structurally and report the blocker" reads as the helpful move. It is not — it
+   spends capacity on a model whose grain and types cannot be verified against the real source, and it
+   takes a decision that belongs to the user.
+
+   **Consequences, both applied:**
+   - Step 5 of `tableau-migrator` is now an explicit **HARD STOP** that says the stop is
+     *unconditional in a non-interactive run*, that having no one to answer is **not** authorization,
+     and that build-only is the user's call. A rule that only says "STOP and ask" is not enough — it
+     must pre-empt the rationalization the model actually reaches for.
+   - **Test personas as a subagent AND as a root agent.** They are different behavioural regimes, and
+     a convention verified in one can silently fail in the other. Every stop/ask rule in this repo was
+     previously only ever exercised as a subagent.
 
 ## 7. Things the docs genuinely do not say
 
