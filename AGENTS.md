@@ -118,14 +118,15 @@ settings, if you edit `~/.copilot/settings.json` by hand:
 }
 ```
 
-⚠️ **The plugin copy SHADOWS `.github/skills/`.** Where both supply the same name, a subagent
-invoking it by name gets the **plugin** copy (measured — the loaded base directory was under
-`~/.copilot/installed-plugins/`, even with the repo copy present and the cwd inside this repo). So
-editing `.github/skills/` without re-publishing serves subagents stale guidance, and nothing in the
-skill registry or the tool output flags it. `scripts/preflight.ps1` hashes every shipped bundle and
-fails on **either** failure shape — `STALE in plugin` (edited but not published) or `NOT INSTALLED`
-(published but not re-installed). That check is the only thing standing between you and a silently
-stale skill.
+⚠️ **The plugin copy SHADOWS `.github/skills/`.** Where both supply the same name, the registry lists
+it **once** (measured: one entry per name, no duplicates) and a subagent invoking it gets the
+**plugin** copy — the loaded base directory was under `~/.copilot/installed-plugins/`, even with the
+repo copy present and the cwd inside this repo. So there is no "installed twice" problem; the problem
+is the reverse. Editing `.github/skills/` without re-publishing serves subagents stale guidance from
+the copy you did *not* edit, and nothing in the skill registry or the tool output flags it.
+`scripts/preflight.ps1` hashes every shipped bundle and fails on **either** failure shape —
+`STALE in plugin` (edited but not published) or `NOT INSTALLED` (published but not re-installed). That
+check is the only thing standing between you and a silently stale skill.
 
 > Do **not** use the deprecated `RuiRomano/powerbi-agentic-plugins` marketplace — it is superseded by
 > `powerbi-authoring@fabric-collection`.

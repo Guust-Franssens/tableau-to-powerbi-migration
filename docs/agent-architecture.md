@@ -328,13 +328,24 @@ back in a persona.
    omits `skill`. Reading `.github/skills/<x>/SKILL.md` by path also still works and is the more
    conservative option; prefer invoke-by-name for brevity, path-read when the exact file matters.
 
-   ⚠️ **Publishing introduces shadowing.** Where a name exists both in `.github/skills/` and in an
-   installed plugin, the **plugin copy wins** (measured: `powerbi-ai-readiness` resolved to
-   `.copilot\installed-plugins\`, with the cwd inside this repo and the repo copy present). Both pairs
-   hashed identical on 2026-07-31 (`BCBD9DD3…` / `CF619036…`), so nothing is lost *today* — but the
-   plugin is a downstream snapshot, so a repo-side edit that is never re-published is served stale and
-   **silently**. `scripts/preflight.ps1` hashes every shipped bundle and fails on **either** shape:
-   `STALE in plugin` (edited but not published) or `NOT INSTALLED` (published but not re-installed).
+   ⚠️ **Publishing introduces shadowing — but NOT duplicate registry entries.** Where a name exists
+   both in `.github/skills/` and in an installed plugin, the registry lists it **once** and the
+   **plugin copy wins**. Measured twice: `powerbi-ai-readiness` resolved to
+   `.copilot\installed-plugins\` with the cwd inside this repo and the repo copy present; and after
+   v0.2.0 made all four bundles exist in both places, a subagent counted **exactly one** entry per name
+   (`powerbi-ai-readiness = 1`, `pbip-model-refresh = 1`, `powerbi-report-gotchas = 1`,
+   `powerbi-semantic-model-gotchas = 1`). The registry total moved **92 → 94**, i.e. **+2 for the two
+   new bundles, not +4** — independent corroboration that de-duplication is by name, not a coincidence
+   of counting. Entries carry a `<location>plugin</location>`-style marker, so the winning source is
+   visible in the registry itself.
+
+   So there is no "installed twice" hazard and no ambiguity about which copy runs. The real hazard is
+   the opposite one: because the plugin is a downstream *snapshot*, a repo-side edit that is never
+   re-published is served stale and **silently** — the single registry entry points at the plugin,
+   which is exactly the copy you did not edit. All four pairs hash identical today
+   (`preflight.ps1`: `4 bundle(s) in sync`); that script hashes every shipped bundle and fails on
+   **either** shape: `STALE in plugin` (edited but not published) or `NOT INSTALLED` (published but
+   not re-installed).
 
    **Publishing works — proven, with the plugin copy isolated (2026-07-31):**
 
