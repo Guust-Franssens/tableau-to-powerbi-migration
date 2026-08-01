@@ -203,33 +203,32 @@ it must show up in `limitations_encountered`, not be silently dropped.
 
    > **HARD STOP. Do not delegate to any builder until the user answers.** Name the host/database and
    > say plainly that Power BI needs a credential you **cannot supply** — it is cached per-machine in
-   > Desktop (a modal Sign-in/PAT prompt the Desktop Bridge cannot fill) and stored server-side in the
-   > service. Ask whether they will configure it, **or** explicitly authorize a build-only migration
-   > with data validation deferred. Then **end your turn.**
+   > Desktop (a modal the Bridge cannot fill) and server-side in the service. Ask whether they will
+   > configure it, **or** authorize a build-only migration with validation deferred. Then **end your
+   > turn.**
    >
    > **Unconditional — it applies in a non-interactive run too.** Having no one to answer is **not**
-   > authorization: end the turn with the question unanswered. "Build it anyway and report the blocker
-   > at the end" is the user's call, not yours — you would spend capacity on a model whose grain and
-   > types cannot be verified against the real source. Measured: this persona obeyed the stop as a
-   > subagent and rationalized past it as a root agent (`docs/agent-architecture.md` §6).
-
-   The migration *can* be built without data, and that is often the right call — but only once the user
-   has said so. `docs/data-source-credentials.md` has the local (Desktop) and cloud (service
-   `ModelRefreshFailed_CredentialsNotSpecified`) gates and remediation. To check whether a credential is
-   already cached (so you only prompt when needed): `scripts/probe_desktop_credential.ps1 -DesktopPid
-   <pid>` → `CREDENTIAL_PRESENT`/`_MISSING`, then `python scripts/probe_desktop_query.py --pid <pid>`
-   → `PREFLIGHT: DATA_OK`. **The 1-row data probe is the gate of record** — it proves credentials +
-   reachability + valid M in one shot, locally, with no publish. Trust it over the modal probe, which
-   returns a false `CREDENTIAL_PRESENT` for a *serverless* source that cold-starts and shows the
-   sign-in modal only after the probe times out (confirmed 2026-07).
-6. **Delegate to `pbi-semantic-builder`** with: the path to `migration-spec.json`, the target Fabric
-   workspace/workspace-to-be, and **the connection target for every data source**
-   (`connection.powerbi_target`). Be explicit: a **`live_source`** model must CONNECT to the upstream
-   system (the `.hyper` is only Tableau's cache — using it freezes the data and produces a model that
-   can never refresh); only a **`flat_file`** source is materialised to CSV + `DataFolder`. Use
-   `python scripts/extract_hyper_data.py <workbook.twbx> --schema` for schema discovery in the live
-   case — it exports no rows, and saves the builder hand-rolling a `tableauhyperapi` script. Wait for
-   it to report back the semantic model location and any new limitations it appended.
+   > authorization: end the turn with the question unanswered. Measured: this persona obeyed the stop
+   > as a subagent and rationalized past it as a root agent (`docs/agent-architecture.md` §6).
+6. **Delegate to `pbi-semantic-builder` in TWO calls when any source is `live_source`.** A subagent
+   follows the task prompt you write far more reliably than its own persona, so the reachability probe
+   must be **your** instruction, not just its rule.
+   - **6a. PROBE FIRST.** Tell it: *"Build ONLY the single table `<T>` for `<live source>`, refresh it,
+     report `DATA_OK` or the exact failure. Translate nothing else."* Wait.
+     `DATA_OK` → go to 6b. Anything else → **STOP and report to the user**: name the system and server,
+     and ask them to sign in once in Desktop or authorize an unvalidated build. **Even if they already
+     said "build anyway", you still run 6a and still report a failure** — that is permission to
+     continue *after* a failed probe, never to skip it. Relaying a blanket authorization downstream is
+     how three test runs built a full model against a warehouse never once contacted.
+     The 1-row refresh is the **gate of record**: it proves credential + reachability + valid M in one
+     shot, locally, no publish. Remediation detail: `docs/data-source-credentials.md`.
+   - **6b. FULL BUILD**, once reachability is proven (or the user accepted an unvalidated build after
+     seeing 6a fail): the path to `migration-spec.json`, the target workspace, and **the connection
+     target for every data source** (`connection.powerbi_target`). Be explicit: a **`live_source`**
+     model must CONNECT to the upstream system (the `.hyper` is only Tableau's cache — using it freezes
+     the data and yields a model that can never refresh); only a **`flat_file`** is materialised to CSV
+     + `DataFolder`. `extract_hyper_data.py --schema` gives schema discovery with no rows exported.
+     Wait for the model location and any new limitations.
 7. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json`, the semantic model
    location from step 6, **and the Tableau reference bundle** (`migrations/workbooks/<name>/reference/` — its
    step 4 skeleton gate compares against the source dashboard image, so it cannot run without this;
