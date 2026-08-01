@@ -339,12 +339,11 @@ throwing an error" is necessary but not sufficient:
 2. **No stale banners.** Desktop shows no pending "columns need refresh" banner (see the skill's §3) —
    confirmed via a screenshot or an explicit `RefreshWithXMLA` Calculate followed by a re-check.
 3. **Every non-trivial translated measure has a numeric ground-truth check**, not just a
-   does-it-error check — run `EVALUATE` filtered to one concrete dimension value (e.g. one city) and
-   compare the result against the same value read directly off the Tableau workbook. "It returned a
-   number" is not verification; "it returned the *right* number" is.
-4. **No orphaned/junk artifacts** — every measure and calculated column is either referenced by a
-   report visual, referenced by another measure, or explicitly documented as a deliberate
-   forward-looking addition.
+   does-it-error check — run `EVALUATE` filtered to one concrete dimension value and compare against
+   the same value read off the Tableau workbook. "It returned a number" is not verification; "it
+   returned the *right* number" is.
+4. **No orphaned/junk artifacts** — every measure and calculated column is referenced by a visual, by
+   another measure, or documented as a deliberate forward-looking addition.
 5. **Every calculated field's fate is recorded** — for each `data_sources[].fields[]` entry with
    `kind: "calculated"`, your report back to the orchestrator (and `limitations_encountered`) states
    whether it became a measure, a calculated column, or was simplified away (parameter-equality →
@@ -371,12 +370,12 @@ throwing an error" is necessary but not sufficient:
    model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
    deserialize. A migrated model without AI instructions is not done.
 11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 10).** The
-   report builder must receive a model that already holds data; otherwise every visual it builds
-   renders empty and reads as a binding bug. Run
-   `python scripts/refresh_pbip_model.py --pid <desktop-pid>` and require exactly
-   **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
+   report builder must receive a model that already holds data; otherwise every visual renders empty
+   and reads as a binding bug. Run `python scripts/refresh_pbip_model.py --pid <desktop-pid>` and
+   require exactly **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
    `<Name>.SemanticModel/.pbi/cache.abf` advanced (`--verify-only` re-checks). **Ordering is part of
    the gate:** Desktop discards the cache when `definition/*.tmdl` is newer, so this is the **last**
-   action after every edit, including `set_data_folder.py --sanitize`. A model handed over without
-   `DATA_OK + PERSISTED` is not done — and for a live source this must not be the *first* time you
-   discover you cannot reach it (step 3).
+   action after every edit, including `set_data_folder.py --sanitize`.
+   ⚠️ **`PERSISTED` alone does NOT prove the live source loaded** — a partial refresh caches whatever
+   tables *did* load (`powerbi-semantic-model-gotchas` §5). For a live source confirm **per-table**:
+   `EVALUATE ROW("n", COUNTROWS('<LiveTable>'))` must be non-zero for each.

@@ -322,3 +322,23 @@ hand-authored PBIP needs five exactly-correct `$schema` URLs plus a `.platform` 
 of them wrong makes Desktop throw a modal crash dialog that looks *identical* to an unreachable source.
 You are already building a model — build its **first table only**, refresh that, and continue only on
 `DATA_OK`. No new file-format surface, no new failure mode.
+
+### `PERSISTED` does not prove the live source loaded
+
+The hand-off gate requires `REFRESH: DATA_OK + PERSISTED`. For a **live** source that is necessary but
+not sufficient, because **a partial refresh still writes a cache**.
+
+Measured 2026-08-01: a migration with two Databricks tables plus one CSV finished with a 62 KB
+`.pbi/cache.abf` on disk — while the SQL warehouse had never left `STOPPED` with
+`num_active_sessions = 0`. The cache was real; it just held the **CSV table only**. Both live tables
+were empty. The model looked refreshed, persisted and validated, and was none of those things where it
+mattered.
+
+So for every live table, assert rows explicitly:
+
+```
+EVALUATE ROW("n", COUNTROWS('Shipment'))     -- must be non-zero, per live table
+```
+
+And prefer evidence from the **source system** when you can get it: for a serverless warehouse,
+`STOPPED` + `num_active_sessions = 0` proves no query ever arrived, whatever your own logs suggest.
