@@ -11,6 +11,7 @@ that only affects the two-level user trees is invisible to every other test in t
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -242,3 +243,33 @@ def test_customer_data_is_gitignored_in_every_tree() -> None:
         assert re.search(rf"^/migrations/{tree}/\*/reference/\s*$", ignore_text, re.MULTILINE), (
             f"customer reference screenshots not ignored for migrations/{tree}/"
         )
+
+
+def test_every_script_is_documented_in_the_scripts_readme() -> None:
+    """`scripts/` is 20+ files; an undocumented one is a file nobody can find.
+
+    This is not pedantry - it is a regression test. Five scripts had drifted to zero references
+    anywhere in the repo (two of them a coherent corpus-harvesting workflow, two the only way to
+    regenerate committed docs artifacts, one genuinely superseded and now deleted). Nothing failed;
+    they were simply invisible. The README is the index that fixes that, and this keeps it honest -
+    otherwise the next script added is undocumented from birth and the index rots into a lie.
+    """
+    readme = REPO_ROOT / "scripts" / "README.md"
+    assert readme.is_file(), "scripts/README.md is missing - it is the index for this folder"
+    listed = readme.read_text(encoding="utf-8")
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "scripts"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    scripts = [Path(p) for p in tracked if Path(p).name != "README.md"]
+    assert scripts, "no tracked scripts found - this guard now proves nothing"
+
+    undocumented = sorted(p.name for p in scripts if p.name not in listed)
+    assert not undocumented, (
+        f"{undocumented} are tracked in scripts/ but absent from scripts/README.md - "
+        "add a row describing what each does and when it runs"
+    )

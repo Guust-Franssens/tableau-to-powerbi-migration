@@ -39,6 +39,10 @@ pylint <path>                # must meet fail-under = 10 (config in pyproject.to
 - Python 3.11+, PEP 604 unions (`int | None`, not `Optional[int]`), `pathlib`, f-strings, `logging`,
   `argparse`. Every script in `scripts/` starts with a `purpose:` / `usage:` header docstring.
 - Ruff replaces black/isort/flake8/pyupgrade — do not add those.
+- **Adding a script? Add a row to [`scripts/README.md`](scripts/README.md).** That file is the index
+  for a 20+ file folder, and `tests/test_repo_layout.py` fails if a tracked script is missing from it.
+  The gate exists because five scripts had quietly drifted to zero references anywhere in the repo —
+  nothing failed, they were just invisible.
 
 ### Where code lives (and the one exception)
 
