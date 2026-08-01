@@ -369,3 +369,36 @@ Then stop the refresh and confirm the negative three ways before reporting: `pro
 → `PREFLIGHT: NO_DATA` (the model loads and the DAX runs — 13 columns bound — it just has 0 rows), **no
 `.pbi/cache.abf` written**, and the warehouse still `STOPPED` / `num_active_sessions = 0`. That trio
 distinguishes "no credential" from "broken M or TMDL", which is the only ambiguity that matters here.
+
+### The live-source failure is a CRASH, not an error message (measured 2026-08-01)
+
+When Power BI Desktop has no cached credential for a live source, the refresh does not return a clean
+"authentication failed". Two independent agents, on separate models, produced the same sequence:
+
+1. XMLA refresh blocks for minutes (the sign-in modal is waiting on a human).
+2. `msmdsrv.exe` dies with an unhandled `System.IO.IOException` in
+   `PipeStream.WriteCore` → `MessageSerializer.Serialize` → `GlobalExceptionHandler.HandleException`
+   (Windows Application log, **event 1026** — verified independently at 16:21:25 and 16:26:24).
+3. The client sees only `AdomdConnectionException` / `SocketException (10054) forcibly closed`.
+
+So the mashup engine raises the credential exception and then **crashes while posting it back over the
+named pipe** — the real error text is destroyed in transit. Consequences:
+
+- **Do not read a socket error as "the source rejected us".** It is the local host dying; the source
+  may never have been contacted at all. Say "reachability unproven", not "credential refused".
+- **A ~5-minute block is diagnostic.** A genuine refusal returns in seconds; a multi-minute hang is the
+  shape of a modal waiting on a human. That is what the refresh `CommandTimeout` converts into a
+  bounded, explainable `NO_DATA`.
+- **The crash takes down SIBLING Desktop instances**, not just yours. In a parallel batch this shows up
+  as an unrelated agent's mysterious failure at the same timestamp. Check event 1026 before blaming
+  their model.
+
+### ⚠️ `powerbi-desktop open` can return the WRONG pid
+
+Measured 2026-08-01, with two Desktop instances open: `open` reported a `pid` belonging to a **sibling
+agent's** instance. Binding to it would have refreshed and `ImageSave`-d into *another model's*
+`cache.abf` — silent cross-contamination, and the exact `WRONG_MODEL` hazard the pid-binding rule
+exists to prevent.
+
+**Trust `powerbi-desktop status` + `currentFilePath`, never the pid `open` hands back.** Match the
+instance to your own `.pbip` path before you touch it.
