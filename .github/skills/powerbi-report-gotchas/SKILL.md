@@ -62,6 +62,19 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   bottom, and draws a stray vertical overflow mark at the right edge — `validate` says 0 errors. Fix:
   emit **two paragraphs** (heading run, then descriptor run) and size the box for both lines; a
   single-run wrap is not deterministic against the box width.
+- **`scatterChart` projecting the SAME column into both `Category` and `Series` with an identical
+  `nativeQueryRef` renders "Error fetching data for this visual"** (LogisticsLive migration,
+  `powerbi-report-author` CLI 0.1.4). 🟢 render-verified — a 4-category-point scatter (`Category` =
+  `Discount Band`, `Series` = the same `Discount Band` column for the legend) passed `validate` with 0
+  errors/warnings but Desktop showed the error glyph with no further detail. Root cause: both
+  projections shared `nativeQueryRef: "Discount Band"` even though their `queryRef`s were correctly
+  disambiguated (`Superstore Orders.Discount Band` vs `...Discount Band1`) — per
+  `references/expressions.md` "if duplicated across roles, append a number", this applies to
+  **`nativeQueryRef` too, not just `queryRef`**. Fix: give the second projection a distinct
+  `nativeQueryRef` (e.g. `"Discount Band1"`); re-validate and reload — the error disappears and the
+  scatter renders normally. This is a second, independent instance of a validation-invisible bug class
+  (§1's core warning) — always reload+screenshot a scatter/chart that legends by the same field it
+  categorizes by, even after a clean `validate`.
 
 ## 2. Data colours and conditional formatting
 
