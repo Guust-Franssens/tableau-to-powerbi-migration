@@ -62,6 +62,24 @@ Anything that rewrites TMDL afterwards invalidates it, including the host repo's
 (here, `set_data_folder.py --sanitize`, which must run before committing). If you sanitize last, you
 have thrown the cache away; re-run this script after.
 
+**It is the CONTENT that invalidates it, not the mtime — you cannot win this by ordering.** Measured
+2026-08-01 on `logistics-live-dbx`: sanitize rewrote `expressions.tmdl` at 12:24:08, `ImageSave` wrote
+`cache.abf` at 12:24:23 (15 s *newer*, 57.5 KB) — and a cold reopen still came back `NO_DATA`.
+Re-localizing, reopening, refreshing and saving again produced a cache that **did** survive a
+`Stop-Process -Force` + reopen (`PREFLIGHT: DATA_OK`, no refresh). So "refresh last, after sanitize"
+does not rescue the cache: Desktop keys the cache to the definition it was built from.
+
+> **Hand-off rule:** leave the model **localized + refreshed + persisted** so the next agent gets data,
+> and tell whoever commits to run the sanitize step (which knowingly discards the cache).
+
+**`powerbi-desktop reload` does NOT re-read edited TMDL.** Measured 2026-08-01: after editing two
+measures on disk, `reload` returned `{"success": true}` and `INFO.MEASURES()` still showed the **old**
+expressions — the reload refreshes the report, not the model definition. Only closing Desktop
+(`Stop-Process -Id <literal pid> -Force`) and reopening the `.pbip` picks up a model change. This is
+easy to miss precisely because the reload reports success, so **verify a model edit landed** with
+`EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "Name", [Name], "Expr", [Expression])` before trusting any
+number you read back.
+
 ## How persistence actually works
 
 | Path | What it is | Status |
@@ -107,6 +125,16 @@ tables against the TMDL that owns the destination cache; a mismatch aborts with 
 metadata fundamentally cannot tell you whose rows are in a blob, only the model's own contents can. In
 a parallel batch **always pass `--pid`** (`powerbi-desktop status` maps pid to open file); with
 several instances open the scripts refuse to guess.
+
+**Sweep for orphans before you build, not just siblings while you build.** Measured 2026-08-01: a
+Desktop instance was already running on the *exact `.pbip` path* about to be generated, left over from
+an earlier, since-deleted attempt. `same_model()` would not have caught it — its TMDL tables matched —
+but `INFO.MEASURES()` showed measures the new build never defines, i.e. a **different model held in
+memory on your path**, one Save away from overwriting the files you are generating. So at the start of
+a build, list `Get-Process PBIDesktop`, read each one's command line
+(`Get-CimInstance Win32_Process -Filter "ProcessId=<pid>"`), and force-close any instance already bound
+to your own `.pbip` before writing to it. Identify by `MainWindowTitle` + command line, never by "the
+one instance that is running".
 
 ## Reusing this in another migration repo
 

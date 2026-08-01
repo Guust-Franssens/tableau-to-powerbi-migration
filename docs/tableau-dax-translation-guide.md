@@ -24,6 +24,24 @@ weren't present in any workbook yet — keep them here because real-world workbo
 | `str(x)` (implicit in concatenation) | Not needed — DAX `&` auto-converts; use `FORMAT(x, "0")` for explicit control | **[seen]** |
 | `ATTR(x)` | In a calculated **column** (row context) it's just `[x]`. In a **measure** (aggregated context), emulate with `IF(HASONEVALUE('T'[x]), VALUES('T'[x]), "*")` | **[seen]** used inside a row-level text-building calc, so becomes a plain column ref |
 | `SUM(x) * k` | `SUM('T'[x]) * k` as a **measure** | **[seen]** `SUM([CDD_0_1])*100` → `[CDD Scaled] := SUM('T'[CDD_0_1]) * 100` |
+| `DATEDIFF('hour', start, end)` | `DATEDIFF(start, end, HOUR)` | **[seen, LogisticsLive]** **Same argument order** — only the interval moves from first to last. Guard the operands: `IF(ISBLANK([start]) \|\| ISBLANK([end]), BLANK(), DATEDIFF(...))`, because DAX reads a blank date as 1899-12-30 and returns a huge number instead of a blank. See the sign note below. |
+
+### DATEDIFF sign — verify what the source workbook actually meant [seen, LogisticsLive]
+
+Tableau's `DATEDIFF('hour', [actual_ship_date], [expected_ship_date])` for a field *named* **Delay
+Hours** is `expected − actual`, so a **late** shipment comes out **negative**. DAX preserves this
+exactly, because the operand order is identical — which is the right default (translate bug-for-bug,
+then flag it), but it is invisible unless you look.
+
+Two things worth knowing, both **verified live** (2026-08-01, Desktop `EVALUATE`):
+
+- **DAX `DATEDIFF` does not error when `start > end`** — it returns a negative number:
+  `DATEDIFF(DATE(2024,1,10), DATE(2024,1,1), HOUR)` = `-216`. Older guidance that it throws is wrong
+  for current engines, so no `ABS`/swap workaround is needed and none should be added silently.
+- Therefore a literal translation is safe; **report the sign convention to the customer** rather than
+  "fixing" it. If they confirm the field should be positive-when-late, swap the two operands — a
+  one-token change.
+
 
 ### Worked example — CASE/WHEN [seen]
 
@@ -207,7 +225,7 @@ you can't verify them.
 | Tableau | DAX equivalent (offline-verifiable) |
 |---|---|
 | `RANK(SUM([Sales]))` | `RANKX(ALL('T'[Category]), [Sales Measure])` |
-| `RUNNING_SUM(SUM([Sales]))` | `CALCULATE(SUM('T'[Sales]), FILTER(ALL('T'[Date]), 'T'[Date] <= MAX('T'[Date])))` |
+| `RUNNING_SUM(SUM([Sales]))` | `VAR _asOf = MAX('T'[Date]) RETURN CALCULATE(SUM('T'[Sales]), FILTER(ALL('T'[Date], 'T'[Month]), 'T'[Date] <= _asOf))` — list **every** date-ish column of `'T'` in the `ALL()`; see the axis-grain warning below |
 | `INDEX()` (1-based running position in a partition) | calc column `CALCULATE(COUNTROWS('T'), FILTER(ALLEXCEPT('T',[part]), 'T'[order] <= EARLIER('T'[order])))` |
 | `LOOKUP(agg, FIRST())` / `LOOKUP(agg, LAST())` | hidden helper calc column `CALCULATE(agg, ALLEXCEPT('T',[part]), 'T'[Date] = CALCULATE(MIN/MAX('T'[Date]), ALLEXCEPT('T',[part])))`, then "growth of $X" measures divide by it |
 | `IF MIN([Date]) = LOOKUP(MIN([Date]), LAST()) THEN <expr> END` (is-last-row guard) | `IF(MAX('T'[Date]) = CALCULATE(MAX('T'[Date]), ALLEXCEPT('T',[part])), <expr>)`; OR-FIRST variant adds `\|\| MAX(...) = CALCULATE(MIN(...), ...)`; Tableau `END`-without-`ELSE` → omit the DAX else (BLANK on non-endpoint rows) |
@@ -217,7 +235,28 @@ you can't verify them.
 `.iloc`/`cumcount`, and a literal DAX-mechanics replica via boolean masks over the raw table); two
 independent codings agreeing is far stronger than restating one formula.
 
-**Faithful-translation-of-source-quirks [seen, Shipping]:** `datediff('unit',[a],[b])` computes
+**Running totals break silently when the visual's axis is coarser than the accumulation column
+[seen, LogisticsLive]:** the familiar `CALCULATE(SUM('T'[v]), FILTER(ALL('T'[Date]), 'T'[Date] <=
+MAX('T'[Date])))` clears only `'T'[Date]`. Put a coarser column of the **same table** on the axis —
+typically the month-start column you added so the report could reproduce a Tableau `mn`/`tmn` bin — and
+that column's filter survives `ALL('T'[Date])` and still restricts the fact rows, so each point shows
+**that bucket's own total** instead of the cumulative one. The line looks plausible (it rises and falls
+like a normal series) and every structural check passes. Name every date-ish column in the `ALL()` and
+pin the as-of value in a `VAR`. Ground-truthed on a 730-row/24-month table: the old form returned exactly
+the month total for all 24 months; the new form accumulated to the CSV grand total to the cent; and at the
+original **daily** grain the two forms differed on **0 of 730 days**, i.e. the fix is a strict superset.
+
+**Date-part shelf derivations (`mn`, `tmn`, `qr`, `yr`) are a MODEL-layer job, not a report one
+[seen, LogisticsLive]:** Power BI cannot bin a date to month in PBIR when the model has no date table
+and `__PBI_TimeIntelligenceEnabled = 0`. Emit a date-typed month-start calculated column per table —
+`IF(ISBLANK('T'[D]), BLANK(), DATE(YEAR('T'[D]), MONTH('T'[D]), 1))`, `dataType: dateTime`,
+`formatString: mmm yyyy` — never a text label (alphabetical sort scrambles the axis) unless you also set
+`sortByColumn`. Keep it **per table** when the sources are independent (`joins: []`): a shared calendar
+would invent relationships Tableau never had. And record which reading you implemented: `mn` is strictly
+the MONTH *date part* (cycles Jan–Dec across years), `tmn` the truncated month; a multi-year trend line
+means month-start.
+
+
 **b − a**. A source workbook with swapped arguments silently makes "late" durations negative and
 inverts any threshold KPI built on it. Translate exactly as authored and **flag it to the customer**
 as a probable source bug — don't silently "fix" it.
