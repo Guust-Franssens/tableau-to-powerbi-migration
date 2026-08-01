@@ -273,3 +273,39 @@ def test_every_script_is_documented_in_the_scripts_readme() -> None:
         f"{undocumented} are tracked in scripts/ but absent from scripts/README.md - "
         "add a row describing what each does and when it runs"
     )
+
+
+def test_no_committed_file_leaks_an_absolute_user_path() -> None:
+    """`ABSOLUTE_USER_PATH_RE` was only ever unit-tested against a synthetic string - never applied
+    to the repo it is meant to protect. This applies it.
+
+    Why it matters, measured 2026-08-01: an agent building ONE migration ran the localize step
+    repo-wide and rewrote the `DataFolder` of all 16 committed example models from the portable
+    `<REPO_ROOT>\\...` placeholder to `C:\\Users\\<name>\\...`. The full suite still passed. Committing
+    that would have broken every example for every other contributor and published a local username
+    path. A migration-scoped operation escaping to repo scope is invisible without this gate.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "*.tmdl", "*.json", "*.pbism", "*.pbir", "*.pbip"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    files = [REPO_ROOT / rel for rel in sorted(filter(None, tracked.split("\0")))]
+    assert files, "no tracked model files found - this guard now proves nothing"
+
+    leaks = []
+    for path in files:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        hit = ABSOLUTE_USER_PATH_RE.search(content)
+        if hit:
+            leaks.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {hit.group(0)!r}")
+
+    assert not leaks, (
+        "committed file(s) contain an absolute user path; run `python scripts/set_data_folder.py "
+        "--sanitize` (scoped to the migration you touched) before committing:\n  " + "\n  ".join(leaks)
+    )

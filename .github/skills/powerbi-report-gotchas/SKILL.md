@@ -13,6 +13,10 @@ sufficient**. It passes structurally-valid-but-wrong encodings, and it **silentl
 checks** when it cannot fetch the visualContainer schema (`PBIR_SCHEMA_UNREACHABLE` — it still prints
 "0 errors"). Only a live Desktop render catches the class of bug in §1.
 
+**Treat `PBIR_SCHEMA_UNREACHABLE` as "schema validation did NOT run."** The declared `2.11.0` schema
+404s; `2.9.0` is the newest published. Confirm instead with a Desktop open-test (a schema violation
+raises an error dialog on open) or an offline `ajv` harness against the real 2.9.0-family schemas.
+
 > **Scope note:** the mechanisms here are pure Power BI, so this folder ports to a Qlik or Cognos
 > migration unchanged. A handful of entries name the source-tool idiom that led to the discovery
 > (Tableau shelves, `MAKELINE`); read those as examples, not as prerequisites. Cross-references to

@@ -30,20 +30,12 @@ examples, not hypothetical ones.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
   PBIR/visuals, `pbi-migration-validator` is read-only and never edits. A subagent never "just fixes"
   a finding another agent owns — it reports; the orchestrator routes.
-- **Research first, then a human in the loop for uncertain PBIR.** For any visual/encoding whose PBIR
-  JSON is undocumented, verify feasibility against Microsoft Learn + the `powerbi-report-author` CLI
-  first; if the exact JSON is still unknown, ask the human to build it once in Desktop and reuse the
-  resulting `visual.json` as ground truth (see `pbi-report-builder.agent.md`). Do not guess-and-iterate
-  blindly — `validate` passes structurally-valid-but-wrong encodings.
-- **Structural validation is necessary, not sufficient.** `powerbi-report-author validate` and TMDL
-  deserialization pass many defects that only surface in Desktop (field-parameter `sourceColumn`
-  brackets, the `'Table'[Col]=[Measure]` PLACEHOLDER error, flat-lined trend measures). Verify in
-  Desktop with data before declaring a page done. **Worse: `validate` SILENTLY SKIPS all JSON-schema
-  checks when it can't fetch the visualContainer schema** — it prints `PBIR_SCHEMA_UNREACHABLE` and
-  still reports "0 errors" even for structurally broken PBIR (the declared `2.11.0` schema 404s; `2.9.0`
-  is the newest published). Treat that warning as "schema validation did NOT run" and confirm with a
-  Desktop open-test (a schema violation shows an error dialog on open) or an offline `ajv` harness
-  against the real 2.9.0-family schemas.
+- **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
+  correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
+  specifics — the `PBIR_SCHEMA_UNREACHABLE` silent skip, field-parameter `sourceColumn` brackets, the
+  `'Table'[Col]=[Measure]` PLACEHOLDER error — live in the `powerbi-report-gotchas` and
+  `powerbi-semantic-model-gotchas` skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -180,14 +172,20 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    Record the decision and its reason in `limitations_encountered` (`stage: "semantic_build"`).
    Never silently fabricate data. A structure-only stub is acceptable ONLY if the user explicitly
    chooses it, and must be labelled as such.
-3. **Credentials: time-box, then ask — never retry forever.** A live source needs a credential you
-   cannot supply. Run `python scripts/preflight_source_credentials.py --spec <spec>` first. If a
-   connection/refresh/connectivity test does not succeed within **~2 minutes or 3 attempts**, STOP
-   and ask the user, naming the system + server + what you tried + the options (sign in interactively
-   in Desktop, or provide a PAT/key). If Desktop already has the credential cached, that is usually
-   the fastest unblock — `python scripts/probe_desktop_query.py --pid <pid>` is the definitive check
-   (`DATA_OK`). Retrying a blocked connection is not progress: a real user lost **129 minutes** to
-   this exact loop.
+3. **PROVE the live source is reachable BEFORE you build — then time-box, then ask.**
+   `preflight_source_credentials.py` is a **static spec check that never opens a connection**. Run it
+   for the inventory, then **actually read one row** from each live source *before* you translate a
+   single calculation. If you cannot, STOP and ask.
+
+   ⛔ **NEVER supply the credential yourself.** Do not read `.databrickscfg`/env vars/keyrings, reuse
+   your own `az`/`databricks` token, embed a PAT/key in TMDL or M (a committed secret **and** a model
+   only you can refresh), or drive Desktop's sign-in modal. Correct M defers to Power BI's own
+   credential store: `Databricks.Catalogs(host, httpPath, …)`, `Sql.Database(server, db)`.
+
+   **"Validation deferred" NEVER means "skip the test."** It means the user accepted the risk *after*
+   a probe failed. Cap at **~2 min or 3 attempts**, then STOP and ask, naming system + server + what
+   you tried + options. Full procedure and the two war stories behind this rule:
+   `powerbi-semantic-model-gotchas` §5.
 4. **Create tables and columns** via `semantic-model-authoring` for every non-hidden field. Preserve
    `caption` as the TMDL display name (never ship raw internal names like `Calculation_5871029` to the
    model).
@@ -371,8 +369,8 @@ throwing an error" is necessary but not sufficient:
    renders empty and reads as a binding bug. Run
    `python scripts/refresh_pbip_model.py --pid <desktop-pid>` and require exactly
    **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
-   `<Name>.SemanticModel/.pbi/cache.abf` advanced. Re-check any time with `--verify-only`
-   (`DATA_OK` / `NO_DATA`). **The ordering is part of the gate:** Desktop discards the cache when
-   `definition/*.tmdl` is newer than it, so this must be the **last** action after every model edit,
-   including `set_data_folder.py --sanitize`. A model handed over without `DATA_OK + PERSISTED` is
-   not done.
+   `<Name>.SemanticModel/.pbi/cache.abf` advanced (`--verify-only` re-checks). **Ordering is part of
+   the gate:** Desktop discards the cache when `definition/*.tmdl` is newer, so this is the **last**
+   action after every edit, including `set_data_folder.py --sanitize`. A model handed over without
+   `DATA_OK + PERSISTED` is not done — and for a live source this must not be the *first* time you
+   discover you cannot reach it (step 3).

@@ -25,20 +25,12 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
   PBIR/visuals, `pbi-migration-validator` is read-only and never edits. A subagent never "just fixes"
   a finding another agent owns — it reports; the orchestrator routes.
-- **Research first, then a human in the loop for uncertain PBIR.** For any visual/encoding whose PBIR
-  JSON is undocumented, verify feasibility against Microsoft Learn + the `powerbi-report-author` CLI
-  first; if the exact JSON is still unknown, ask the human to build it once in Desktop and reuse the
-  resulting `visual.json` as ground truth (see `pbi-report-builder.agent.md`). Do not guess-and-iterate
-  blindly — `validate` passes structurally-valid-but-wrong encodings.
-- **Structural validation is necessary, not sufficient.** `powerbi-report-author validate` and TMDL
-  deserialization pass many defects that only surface in Desktop (field-parameter `sourceColumn`
-  brackets, the `'Table'[Col]=[Measure]` PLACEHOLDER error, flat-lined trend measures). Verify in
-  Desktop with data before declaring a page done. **Worse: `validate` SILENTLY SKIPS all JSON-schema
-  checks when it can't fetch the visualContainer schema** — it prints `PBIR_SCHEMA_UNREACHABLE` and
-  still reports "0 errors" even for structurally broken PBIR (the declared `2.11.0` schema 404s; `2.9.0`
-  is the newest published). Treat that warning as "schema validation did NOT run" and confirm with a
-  Desktop open-test (a schema violation shows an error dialog on open) or an offline `ajv` harness
-  against the real 2.9.0-family schemas.
+- **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
+  correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
+  specifics — the `PBIR_SCHEMA_UNREACHABLE` silent skip, field-parameter `sourceColumn` brackets, the
+  `'Table'[Col]=[Measure]` PLACEHOLDER error — live in the `powerbi-report-gotchas` and
+  `powerbi-semantic-model-gotchas` skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.

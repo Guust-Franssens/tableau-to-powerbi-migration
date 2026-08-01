@@ -198,3 +198,69 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   numerics visible with `summarizeBy=sum` (Tableau exposed them as draggable measures); don't "fix" it.
   The bundled `bpa.ps1` runs Tabular Editor with `-G` (silent stdout, exit 0 even on violations) — to see
   the human-readable list, run `TabularEditor.exe <def> -A <rules>` **without** `-G`.
+
+## 5. Live sources: prove reachability first, and never self-supply a credential
+
+A live-source model (Databricks, Snowflake, SQL Server, BigQuery…) is the one case where a model can
+be **structurally perfect and completely unverified**. The TMDL of a model whose warehouse was never
+contacted is byte-identical to one that refreshes fine — nothing on disk tells you which you have.
+
+### The failure this section exists to prevent (measured 2026-08-01)
+
+An agent was told to migrate a workbook with two live Databricks sources and *"treat data validation
+as deferred if it turns out you cannot reach the source."* It ran **45 minutes / 178 tool calls** and
+produced a complete, well-formed model — Databricks partitions, correct host and HTTP path, honest
+column descriptions — for a warehouse it had **never once contacted**. Proof: the SQL warehouse was
+still `STOPPED` with `num_active_sessions = 0` (a serverless warehouse auto-starts on the first real
+query), and no `.pbi/cache.abf` existed. It never came back to ask.
+
+Two distinct root causes, both worth naming:
+
+1. **The only real connectivity test lived at the END.** `preflight_source_credentials.py` is a
+   *static* read of `migration-spec.json` — it reports "this looks like a live source that will need a
+   credential" and never opens a socket. The genuine test was the handoff refresh gate, *after* the
+   whole model was built. So nothing could fail fast.
+2. **"Deferred" was read as "skip".** The agent took permission-to-continue-if-unreachable as
+   permission to never find out. Those are different: deferral is a decision made **after** a probe
+   fails, and it needs the probe result to be an informed one.
+
+### The rule
+
+**Read one row from every live source before translating a single calculation.** A ~30-second probe
+replaces a 45-minute build you would have to throw away. Order matters more than the mechanism:
+
+```bash
+python scripts/preflight_source_credentials.py --spec <spec>   # inventory only - opens NO connection
+# ... then a REAL read, before any table/measure work:
+python scripts/probe_desktop_query.py --pid <pid>              # -> PREFLIGHT: DATA_OK
+```
+
+Cheapest honest probe: author a **canary** — one table, one live partition, `Table.FirstN(…, 1)` —
+open it in Desktop, refresh, require a row. If it returns data, build for real; if it does not, you
+have your answer in seconds. Cap at **~2 minutes or 3 attempts**, then stop and ask.
+
+**Independent confirmation is available and worth taking.** For a serverless warehouse, `STOPPED` with
+`num_active_sessions = 0` proves no query ever arrived, regardless of what any log claims. Prefer
+evidence from the *source system* over the absence of an error on your side.
+
+### ⛔ Never obtain or supply the credential yourself
+
+You do not have it, and every route to getting it is a defect:
+
+| Tempting shortcut | Why it is wrong |
+|---|---|
+| Read `.databrickscfg`, `~/.aws`, env vars, a keyring | Exfiltrates a user secret into your context |
+| Reuse your own `az` / `databricks` CLI token | Builds a model **only you** can refresh; breaks for every real user |
+| Embed a PAT/key in TMDL or M | A committed secret — the worst outcome, and it survives in git history |
+| Drive Desktop's sign-in modal | The Desktop bridge cannot fill it; automating a credential UI is not yours to do |
+
+Correct M **defers to Power BI's own credential store** and names no secret at all:
+
+```
+Source = Databricks.Catalogs(DatabricksHost, DatabricksHttpPath, [Catalog=null, Database=null])
+Source = Sql.Database(ServerName, DatabaseName)
+```
+
+Your only move is to **ask** — naming the system, the server, what you tried, and the two options
+(sign in interactively in Desktop, or supply a PAT/key). A credential is the canonical thing only a
+human can provide; no amount of retrying or cleverness conjures one.
