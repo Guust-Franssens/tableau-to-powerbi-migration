@@ -205,15 +205,23 @@ if ($migrationPlugin) {
     # they actually are:
     #   NOT INSTALLED -> 'recommended' (blocks). A shipped bundle absent locally is a real capability
     #                    loss: the agent cannot invoke that skill by name at all.
-    #   STALE         -> 'optional' (warns). The agent still gets the skill, just an older revision -
-    #                    a degradation, not a correctness break, and often unfixable until you restart.
+    #   STALE         -> 'recommended' (blocks). This was 'optional' until 2026-08-01, on the theory
+    #                    that an older revision is "a degradation, not a correctness break". That is
+    #                    FALSE, and it cost a whole experiment. The plugin copy SHADOWS .github/skills,
+    #                    so a stale bundle means the agent silently executes DIFFERENT CODE than the
+    #                    repo shows - with no diff to notice. Measured: refresh_pbip_model.py had just
+    #                    gained an XMLA CommandTimeout in the repo; the plugin copy had none, the agent
+    #                    ran the copy without it, and the resulting timing was used to "prove" a
+    #                    conclusion about behaviour the executed code did not even contain.
+    #                    Unfixable mid-session is exactly WHY it must block at session start, when it
+    #                    is still fixable, rather than warn once and be scrolled past.
     $detail = if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" } else { "$($shipped.Count) bundle(s) present" }
     Add-Check 'skill bundles installed' 'recommended' ($missing.Count -eq 0) $detail `
         'copilot plugin install powerbi-migration-skills@powerbi-migration-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
 
-    Add-Check 'skill bundles match published plugin' 'optional' ($drift.Count -eq 0) `
+    Add-Check 'skill bundles match published plugin' 'recommended' ($drift.Count -eq 0) `
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
-        'Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then re-install BETWEEN sessions. Until then the agent gets an older revision of that skill.'
+        'The plugin copy SHADOWS .github/skills, so agents are running the OLDER code, not what this repo shows. Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then re-install BETWEEN sessions. Do not trust a measurement taken against a stale bundle.'
 }
 
 # --- MCP servers ---

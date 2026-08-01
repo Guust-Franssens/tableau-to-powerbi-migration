@@ -388,10 +388,15 @@ named pipe** — the real error text is destroyed in transit. Consequences:
   may never have been contacted at all. Say "reachability unproven", not "credential refused".
 - **A ~5-minute block is diagnostic.** A genuine refusal returns in seconds; a multi-minute hang is the
   shape of a modal waiting on a human. **Do not expect the XMLA `CommandTimeout` to cut it short.**
-  Measured both ways: the setting is honoured precisely for a *query* (a slow `EVALUATE` aborted at
-  1.2 s under `CommandTimeout = 1`), yet a credential-blocked *refresh* sailed past a 90 s timeout and
-  only ended when `msmdsrv` died. ⚠️ Inferred: the mashup engine sits in a synchronous wait on a UI
-  dialog in another process, which the server cannot preempt. **Run your own clock; stop at ~2 min.**
+  Measured 2026-08-01 both ways, timeout verified on readback each time: it is honoured precisely for a
+  *query* (a slow `EVALUATE` aborted at 1.2 s under `CommandTimeout = 1`), yet a credential-blocked
+  *refresh* under `CommandTimeout = 45` ran **past 150 s** and never returned. ⚠️ Inferred: the mashup
+  engine sits in a synchronous wait on a UI dialog in another process, which the server cannot
+  preempt. **Run your own clock; stop at ~2 min.**
+- **Never take a timing measurement against a bundle preflight calls STALE.** The plugin copy shadows
+  `.github/skills/`, so the code that runs is the published one, not the one you just edited. An
+  earlier attempt at the measurement above ran a plugin copy with no timeout in it at all and produced
+  a confident, wrong conclusion. `preflight.ps1` now blocks on STALE for exactly this reason.
 - **The crash takes down SIBLING Desktop instances**, not just yours. In a parallel batch this shows up
   as an unrelated agent's mysterious failure at the same timestamp. Check event 1026 before blaming
   their model.

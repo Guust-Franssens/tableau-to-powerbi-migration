@@ -46,9 +46,9 @@ PBIR files yourself.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
     system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
     Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **YOU run the clock; a library timeout
-    will not save you** — measured, a refresh blocked on a sign-in modal sailed past its own 90 s
-    `CommandTimeout` (that setting aborts a slow *query* fine, but not a wait on a human). "Kill it
-    and relaunch" is an unbounded loop unless you cap the relaunches too — cap them at 2, then ask.
+    will not save you** — measured, a credential-blocked refresh under `CommandTimeout = 45` ran past
+    150 s (that setting aborts a slow *query* fine, but not a wait on a human). "Kill it and relaunch"
+    is an unbounded loop unless you cap the relaunches too — cap them at 2, then ask.
   - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
     number of retries conjures a credential, so a refusal naming authentication, permissions or a
     sign-in prompt is a **final answer**. Retry only a plainly transient timeout (a serverless

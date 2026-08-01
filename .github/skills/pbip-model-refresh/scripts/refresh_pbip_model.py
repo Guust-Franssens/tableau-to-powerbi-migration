@@ -112,20 +112,26 @@ def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIME
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
     minutes on a large table that no report even uses.
 
-    **The timeout is real, but it is a BACKSTOP, not the bound that saves you.** Measured
-    2026-08-01, both halves:
+    **The timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
+    both halves, each with the timeout verified on readback:
 
-    - It genuinely works at the XMLA layer. A deliberately expensive `EVALUATE` with
-      `CommandTimeout = 1` / `5` raised `AdomdErrorResponseException: The XML for Analysis request
-      timed out ... Timeout value: N sec` after 1.2 s / 6.0 s. It is honoured, and precisely.
-    - It did **not** bound the case it exists for. A refresh blocked on a Desktop sign-in modal ran
-      **>150 s** with `CommandTimeout = 90`; other runs hung ~5 min until `msmdsrv.exe` crashed
-      (event 1026). ⚠️ Inferred mechanism: the mashup engine is parked in a synchronous wait on a UI
-      dialog in another process, which the server cannot preempt the way it aborts a running query.
+    - ✅ It works at the XMLA layer. An expensive `EVALUATE` under `CommandTimeout = 1` / `5` raised
+      `AdomdErrorResponseException: The XML for Analysis request timed out ... Timeout value: N sec`
+      after 1.2 s / 6.0 s. Honoured, and precisely.
+    - ❌ It does not interrupt a credential wait. A one-table refresh against a Databricks source with
+      no cached credential, `CommandTimeout = 45`, ran **past 150 s** (hard wall-clock guard hit, call
+      never returned). Desktop stayed `Responding` throughout and no `cache.abf` was written.
+      ⚠️ Inferred mechanism: the mashup engine parks in a synchronous wait on a UI dialog in another
+      process, which the server cannot preempt the way it aborts a running query.
 
-    So it will cut short a source that is merely *slow*, and will not cut short one that is waiting
-    on a human. **The caller must run its own clock** — the agent-side "~2 minutes then stop and ask"
-    rule is what actually bounded the successful run.
+    So it cuts short a source that is merely *slow*, and never one that is waiting on a human.
+    **The caller must run its own clock** — that agent-side "~2 minutes then stop and ask" rule is the
+    only thing that actually bounds this.
+
+    Historical note, because it nearly went in the other direction: an earlier attempt to measure this
+    was run against the *stale plugin copy* of this file, which had no timeout at all. It "ran past
+    90 s" because there was no 90. Never take a timing measurement against a bundle preflight reports
+    as STALE.
     """
     adomd_connection = _load_adomd()
     conn = adomd_connection(f"Data Source=localhost:{port}")

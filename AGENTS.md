@@ -124,9 +124,15 @@ it **once** (measured: one entry per name, no duplicates) and a subagent invokin
 repo copy present and the cwd inside this repo. So there is no "installed twice" problem; the problem
 is the reverse. Editing `.github/skills/` without re-publishing serves subagents stale guidance from
 the copy you did *not* edit, and nothing in the skill registry or the tool output flags it.
-`scripts/preflight.ps1` hashes every shipped bundle and fails on **either** failure shape —
-`STALE in plugin` (edited but not published) or `NOT INSTALLED` (published but not re-installed). That
-check is the only thing standing between you and a silently stale skill.
+`scripts/preflight.ps1` hashes every shipped bundle and **blocks** on either failure shape —
+`STALE in plugin` (edited but not published) or `NOT INSTALLED` (published but not re-installed).
+That check is the only thing standing between you and a silently stale skill.
+
+**STALE blocks rather than warns because it silently invalidates measurements, not just guidance**
+(2026-08-01): a timeout was added to `refresh_pbip_model.py` in the repo, an agent ran the *plugin*
+copy that did not have it, and the resulting timing was used to draw a confident conclusion about
+behaviour the executed code did not contain. **Never trust a measurement taken against a STALE
+bundle** — the code that ran is not the code you are reading.
 
 > Do **not** use the deprecated `RuiRomano/powerbi-agentic-plugins` marketplace — it is superseded by
 > `powerbi-authoring@fabric-collection`.
@@ -274,9 +280,9 @@ cloning to confirm the machine is configured.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
     system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
     Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **YOU run the clock; a library timeout
-    will not save you** — measured, a refresh blocked on a sign-in modal sailed past its own 90 s
-    `CommandTimeout` (that setting aborts a slow *query* fine, but not a wait on a human). "Kill it
-    and relaunch" is an unbounded loop unless you cap the relaunches too — cap them at 2, then ask.
+    will not save you** — measured, a credential-blocked refresh under `CommandTimeout = 45` ran past
+    150 s (that setting aborts a slow *query* fine, but not a wait on a human). "Kill it and relaunch"
+    is an unbounded loop unless you cap the relaunches too — cap them at 2, then ask.
   - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
     number of retries conjures a credential, so a refusal naming authentication, permissions or a
     sign-in prompt is a **final answer**. Retry only a plainly transient timeout (a serverless
