@@ -98,7 +98,7 @@ if ($SkipInstall) {
 }
 
 # --- 2. Re-install --------------------------------------------------------------------------------
-Write-Step "Re-installing $plugin"
+Write-Step "Updating $plugin"
 
 $copilot = (Get-Command copilot -ErrorAction SilentlyContinue).Source
 if (-not $copilot) {
@@ -106,13 +106,23 @@ if (-not $copilot) {
     exit 1
 }
 
-# A failed install can leave the plugin half-removed, so uninstall-then-install is more reliable
-# than install-over-the-top. Both are best-effort; the verify step below is the real check.
-& $copilot plugin uninstall $plugin 2>&1 | Out-Host
-& $copilot plugin install   $plugin 2>&1 | Out-Host
+# Order matters. `marketplace update` refreshes the cached catalog/clone; without it `plugin update`
+# happily reinstalls the same old commit and reports success. Measured: `marketplace update` does NOT
+# need the lock and works mid-session, only `plugin update` does - so if you are ever stuck, that
+# first call is safe to run from anywhere.
+& $copilot plugin marketplace update powerbi-migration-collection 2>&1 | Out-Host
+& $copilot plugin update $plugin 2>&1 | Out-Host
+
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "`n   INSTALL FAILED. If it still says 'Access is denied. (os error 5)', a Copilot" -ForegroundColor Red
-    Write-Host '   process survived - re-run this script, or reboot if it persists.' -ForegroundColor Red
+    # A half-removed plugin can make `update` fail where a clean re-add succeeds.
+    Write-Host '   update failed - retrying as uninstall + install' -ForegroundColor DarkYellow
+    & $copilot plugin uninstall $plugin 2>&1 | Out-Host
+    & $copilot plugin install   $plugin 2>&1 | Out-Host
+}
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`n   FAILED. If it still says 'Access is denied. (os error 5)', a Copilot process" -ForegroundColor Red
+    Write-Host '   survived - re-run this script, or reboot if it persists.' -ForegroundColor Red
     exit 1
 }
 
