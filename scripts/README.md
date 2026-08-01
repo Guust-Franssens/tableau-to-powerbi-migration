@@ -54,6 +54,7 @@ personas already use. Deleting them would make every persona *longer* — see
 | Script | What it does |
 |---|---|
 | `build_plugin.py` | Generates the `powerbi-migration-skills` marketplace plugin from `.github/skills/`. `--check` fails on drift. **Re-run and re-publish after editing any shipped bundle** — the plugin copy shadows the repo copy for a subagent, so an unpublished edit is served stale and silently. |
+| `update_migration_skills.ps1` | Kills every Copilot CLI process (and its children) so the plugin directory unlocks, then re-installs `powerbi-migration-skills` and verifies with `preflight.ps1`. **Run from a plain PowerShell window, not from inside Copilot** — it kills the session you would be typing into. PowerShell on purpose: Windows process-tree management, and it must run with no venv. |
 | `probe_lab.py` | Agent-behaviour test harness. `make` generates **minimal** Tableau fixtures (one live source, two columns, no calculations) so the "probe the source before building" decision is reached in ~2 min instead of ~20; `watch` polls a running migration and returns PASS/FAIL/TIMEOUT so a deviation can be killed on sight. Writes to the gitignored `_probe-lab/`. Use when changing any instruction whose effect is only visible in agent behaviour. |
 | `hooks/probe_subagent_start.ps1` | `subagentStart` hook probe — logs the payload and injects a sentinel. Measured working; see [`docs/agent-architecture.md`](../docs/agent-architecture.md) §6. |
 
