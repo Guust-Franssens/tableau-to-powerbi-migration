@@ -342,3 +342,30 @@ EVALUATE ROW("n", COUNTROWS('Shipment'))     -- must be non-zero, per live table
 
 And prefer evidence from the **source system** when you can get it: for a serverless warehouse,
 `STOPPED` + `num_active_sessions = 0` proves no query ever arrived, whatever your own logs suggest.
+
+### A missing credential looks like a HANG, not an error — read the modal, don't wait it out
+
+Measured 2026-08-01 (`logistics-live-dbx`, Databricks `.../warehouses/764e5801f0e0fac8`, one-table
+probe): `refresh_pbip_model.py --pid <pid>` produced **no output for ~7 minutes**. There is no error to
+wait for — the mashup engine is parked on Desktop's credential modal, which only a human can answer, so
+the XMLA refresh never returns. Waiting longer cannot change the outcome; **diagnose in seconds
+instead**, and note the modal is *in-app*, so a top-level-window scan finds nothing (`FindAll(Children)`
+returns only the main `LogisticsLive` window). Scan **descendants** of the Desktop window:
+
+```powershell
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, <pid>)
+$win  = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
+$win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) |
+  ForEach-Object { $_.Current.Name } | Where-Object { $_ -match "signed in|Personal Access|httpPath|incomplete or no data" }
+```
+
+It returns the verdict *and* the exact data source the credential is keyed to:
+`You aren't signed in.` / `{"host":"adb-….azuredatabricks.net","httpPath":"/sql/1.0/warehouses/…"}` /
+`Some of the tables have incomplete or no data.` — quotable evidence for the user, in ~10 seconds.
+
+Then stop the refresh and confirm the negative three ways before reporting: `probe_desktop_query.py`
+→ `PREFLIGHT: NO_DATA` (the model loads and the DAX runs — 13 columns bound — it just has 0 rows), **no
+`.pbi/cache.abf` written**, and the warehouse still `STOPPED` / `num_active_sessions = 0`. That trio
+distinguishes "no credential" from "broken M or TMDL", which is the only ambiguity that matters here.

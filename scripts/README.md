@@ -54,6 +54,7 @@ personas already use. Deleting them would make every persona *longer* — see
 | Script | What it does |
 |---|---|
 | `build_plugin.py` | Generates the `powerbi-migration-skills` marketplace plugin from `.github/skills/`. `--check` fails on drift. **Re-run and re-publish after editing any shipped bundle** — the plugin copy shadows the repo copy for a subagent, so an unpublished edit is served stale and silently. |
+| `probe_lab.py` | Agent-behaviour test harness. `make` generates **minimal** Tableau fixtures (one live source, two columns, no calculations) so the "probe the source before building" decision is reached in ~2 min instead of ~20; `watch` polls a running migration and returns PASS/FAIL/TIMEOUT so a deviation can be killed on sight. Writes to the gitignored `_probe-lab/`. Use when changing any instruction whose effect is only visible in agent behaviour. |
 | `hooks/probe_subagent_start.ps1` | `subagentStart` hook probe — logs the payload and injects a sentinel. Measured working; see [`docs/agent-architecture.md`](../docs/agent-architecture.md) §6. |
 
 ## Corpus harvesting (occasional, not part of a migration)

@@ -271,7 +271,9 @@ def test_every_script_is_documented_in_the_scripts_readme() -> None:
     undocumented = sorted(p.name for p in scripts if p.name not in listed)
     assert not undocumented, (
         f"{undocumented} are tracked in scripts/ but absent from scripts/README.md - "
-        "add a row describing what each does and when it runs"
+        "add a row describing what each does and when it runs. "
+        "NOTE: this reads `git ls-files`, so a brand-new script is invisible to it until you "
+        "`git add` it - run pytest AFTER staging, or CI will catch what your local run did not."
     )
 
 
