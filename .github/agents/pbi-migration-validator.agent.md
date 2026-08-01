@@ -83,10 +83,10 @@ reasoning or self-report of success.
   human can supply — no number of retries will conjure one.
   - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
     system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
-    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **Bound the CALL, not just your
-    patience:** a blocked refresh does not error, it hangs waiting on a human (hence the XMLA
-    `CommandTimeout` in `refresh_pbip_model.py`). A "kill the process and relaunch" recovery is an
-    unbounded retry loop unless you cap the relaunches too — cap them at 2, then ask.
+    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **YOU run the clock; a library timeout
+    will not save you** — measured, a refresh blocked on a sign-in modal sailed past its own 90 s
+    `CommandTimeout` (that setting aborts a slow *query* fine, but not a wait on a human). "Kill it
+    and relaunch" is an unbounded loop unless you cap the relaunches too — cap them at 2, then ask.
   - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
     number of retries conjures a credential, so a refusal naming authentication, permissions or a
     sign-in prompt is a **final answer**. Retry only a plainly transient timeout (a serverless

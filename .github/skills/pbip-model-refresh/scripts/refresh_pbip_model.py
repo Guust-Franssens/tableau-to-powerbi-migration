@@ -112,12 +112,20 @@ def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIME
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
     minutes on a large table that no report even uses.
 
-    **The timeout is load-bearing, not hygiene.** When a live source has no cached credential,
-    Power BI Desktop raises a modal sign-in dialog *inside the UI* and the XMLA refresh simply never
-    returns. Without `CommandTimeout` an agent waits forever on a dialog it cannot see or fill, and
-    the operator sees a migration that looks busy while it is permanently stuck (measured 2026-08-01:
-    two agents sat on exactly this, and the Desktop window was showing "You aren't signed in").
-    A bounded failure that names the cause is infinitely more useful than an unbounded wait.
+    **The timeout is real, but it is a BACKSTOP, not the bound that saves you.** Measured
+    2026-08-01, both halves:
+
+    - It genuinely works at the XMLA layer. A deliberately expensive `EVALUATE` with
+      `CommandTimeout = 1` / `5` raised `AdomdErrorResponseException: The XML for Analysis request
+      timed out ... Timeout value: N sec` after 1.2 s / 6.0 s. It is honoured, and precisely.
+    - It did **not** bound the case it exists for. A refresh blocked on a Desktop sign-in modal ran
+      **>150 s** with `CommandTimeout = 90`; other runs hung ~5 min until `msmdsrv.exe` crashed
+      (event 1026). ⚠️ Inferred mechanism: the mashup engine is parked in a synchronous wait on a UI
+      dialog in another process, which the server cannot preempt the way it aborts a running query.
+
+    So it will cut short a source that is merely *slow*, and will not cut short one that is waiting
+    on a human. **The caller must run its own clock** — the agent-side "~2 minutes then stop and ask"
+    rule is what actually bounded the successful run.
     """
     adomd_connection = _load_adomd()
     conn = adomd_connection(f"Data Source=localhost:{port}")

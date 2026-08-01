@@ -387,8 +387,11 @@ named pipe** — the real error text is destroyed in transit. Consequences:
 - **Do not read a socket error as "the source rejected us".** It is the local host dying; the source
   may never have been contacted at all. Say "reachability unproven", not "credential refused".
 - **A ~5-minute block is diagnostic.** A genuine refusal returns in seconds; a multi-minute hang is the
-  shape of a modal waiting on a human. That is what the refresh `CommandTimeout` converts into a
-  bounded, explainable `NO_DATA`.
+  shape of a modal waiting on a human. **Do not expect the XMLA `CommandTimeout` to cut it short.**
+  Measured both ways: the setting is honoured precisely for a *query* (a slow `EVALUATE` aborted at
+  1.2 s under `CommandTimeout = 1`), yet a credential-blocked *refresh* sailed past a 90 s timeout and
+  only ended when `msmdsrv` died. ⚠️ Inferred: the mashup engine sits in a synchronous wait on a UI
+  dialog in another process, which the server cannot preempt. **Run your own clock; stop at ~2 min.**
 - **The crash takes down SIBLING Desktop instances**, not just yours. In a parallel batch this shows up
   as an unrelated agent's mysterious failure at the same timestamp. Check event 1026 before blaming
   their model.
