@@ -198,15 +198,22 @@ if ($migrationPlugin) {
         if (-not (Test-Path $theirs)) { $missing += $name; continue }
         if ((Test-Path $mine) -and ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash)) { $drift += $name }
     }
-    $detail = if ($missing.Count -or $drift.Count) {
-        (@(
-            $(if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" })
-            $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" })
-        ) | Where-Object { $_ }) -join '; '
-    }
-    else { "$($shipped.Count) bundle(s) in sync" }
-    Add-Check 'skill bundles match published plugin' 'recommended' (-not ($missing.Count -or $drift.Count)) $detail `
-        'Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then `copilot plugin install powerbi-migration-skills@powerbi-migration-collection` (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
+    # TIERING MATTERS, and the first version got it wrong: a single 'recommended' check made preflight
+    # exit 1 on drift, which BLOCKED every migration - and the fix (reinstall the plugin) is impossible
+    # while a Copilot session is running, because the session file-locks the plugin directory. A gate
+    # you cannot satisfy at the moment it fires is a bad gate. So the two shapes are split by how bad
+    # they actually are:
+    #   NOT INSTALLED -> 'recommended' (blocks). A shipped bundle absent locally is a real capability
+    #                    loss: the agent cannot invoke that skill by name at all.
+    #   STALE         -> 'optional' (warns). The agent still gets the skill, just an older revision -
+    #                    a degradation, not a correctness break, and often unfixable until you restart.
+    $detail = if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" } else { "$($shipped.Count) bundle(s) present" }
+    Add-Check 'skill bundles installed' 'recommended' ($missing.Count -eq 0) $detail `
+        'copilot plugin install powerbi-migration-skills@powerbi-migration-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
+
+    Add-Check 'skill bundles match published plugin' 'optional' ($drift.Count -eq 0) `
+        $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
+        'Re-publish: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push there, then re-install BETWEEN sessions. Until then the agent gets an older revision of that skill.'
 }
 
 # --- MCP servers ---
