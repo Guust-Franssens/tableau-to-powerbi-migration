@@ -149,6 +149,45 @@ def test_authorize_is_refused_from_inside_an_agent_session(migration: Path) -> N
     assert not (migration / ".credential-gate-AUTHORIZED").exists()
 
 
+def test_the_probe_can_build_while_the_deliverable_stays_blocked(migration: Path) -> None:
+    """The regression that got v1 reverted off master: the gate deadlocked the SUCCESS path.
+
+    The way an agent EARNS the right to build is the one-row reachability probe - but the probe is
+    itself a PBIP, and v1 denied all of `fabric/`, so the probe was blocked by the gate it exists to
+    satisfy. Every live-source migration dead-ended at "a human must authorize an unvalidated build",
+    working credentials or not. Only the negative case had been tested, where "nothing was built" is
+    the pass condition, so a gate that blocked everything passed perfectly.
+    """
+    run_gate("block", str(migration), "--sources", "shipment")
+
+    probe = migration / "fabric" / "_probe" / "Probe.SemanticModel" / "definition" / "tables"
+    probe.mkdir(parents=True, exist_ok=True)
+    (probe / "shipment.tmdl").write_text("table shipment", encoding="utf-8")
+    assert (probe / "shipment.tmdl").exists(), "the probe must be able to build, or the gate deadlocks"
+
+    with pytest.raises(PermissionError):
+        (migration / "fabric" / "Deliverable.tmdl").write_text("table x", encoding="utf-8")
+
+
+def test_clearing_after_a_successful_probe_lets_the_build_proceed(migration: Path) -> None:
+    """The other half of the positive path: DATA_OK -> clear -> build."""
+    run_gate("block", str(migration), "--sources", "shipment")
+    run_gate("clear", str(migration), "--reason", "probe-data-ok")
+    (migration / "fabric" / "Model.tmdl").write_text("table x", encoding="utf-8")
+    assert (migration / "fabric" / "Model.tmdl").exists()
+
+
+def test_the_hook_never_denies_when_its_own_config_is_broken() -> None:
+    """A hook that errors takes the whole CLI down, because preToolUse fails CLOSED on error.
+
+    Measured 2026-08-02: deleting the hook script while a session still had the config loaded denied
+    EVERY tool call in that session - no shell, no edit, no read - and the only recovery was a
+    restart. So the hook must degrade to allow-everything rather than raise, whatever it is handed.
+    """
+    for payload in ({}, {"toolName": None}, {"toolName": "create", "toolArgs": None}):
+        assert run_hook(payload) == {}, f"hook must return {{}} for {payload}, never raise"
+
+
 def test_lineage_check_fails_closed_on_an_unknown_chain() -> None:
     """The bug that let a forged authorization through, locked down.
 

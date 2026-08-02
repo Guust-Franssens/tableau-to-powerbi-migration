@@ -94,8 +94,37 @@ def _user() -> str:
     return os.environ.get("USERNAME") or os.environ.get("USER") or ""
 
 
+PROBE_DIR = "_probe"
+
+
+def probe_dir(migration: Path) -> Path:
+    """The one writable place while the gate is up: where the reachability probe builds.
+
+    This exists because the first version of this gate DEADLOCKED the success path, and that is the
+    single most important thing to understand about it.
+
+    The rule is "no semantic model for a source you never reached". The way you *earn* the right to
+    build is the one-row probe: a minimal PBIP with a single table that refreshes and returns a row.
+    But the probe is itself a PBIP, and the first version denied writes to all of `fabric/` - so the
+    probe was blocked by the gate it exists to satisfy, and EVERY live-source migration dead-ended
+    at "a human must authorize an unvalidated build", credentials or not. Verified: the probe's
+    write raised PermissionError. That shipped to master and had to be reverted.
+
+    So the probe gets its own un-gated sandbox, `fabric/_probe/`. It is safe to leave open because
+    the probe is not a deliverable: it is one table, it is thrown away, and a `verify` that finds
+    artifacts only ever looks at the real output paths. Meanwhile the deliverable model and report
+    stay denied until the probe proves reachability.
+    """
+    d = migration / "fabric" / PROBE_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def output_dirs(migration: Path) -> list[Path]:
-    """Directories whose contents are the harm: the built model and report."""
+    """Directories whose contents are the harm: the built model and report.
+
+    `fabric/_probe/` is excluded deliberately - see `probe_dir`.
+    """
     fabric = migration / "fabric"
     fabric.mkdir(parents=True, exist_ok=True)
     return [fabric]
@@ -131,6 +160,12 @@ def apply_block(migration: Path, sources: list[str]) -> int:
         _audit(migration, "block-marker-only", "non-windows")
         return 0
 
+    # Create the probe sandbox BEFORE applying the deny. Once the parent carries an inherited
+    # (OI)(CI) deny, creating a subfolder is itself a denied write - so a probe_dir() call after the
+    # deny fails with Access denied and the sandbox never appears. Measured: that left the gate
+    # deadlocked exactly as before the fix, with the ordering as the only difference.
+    probe = probe_dir(migration)
+
     failed = 0
     for d in output_dirs(migration):
         code, out = _icacls([str(d), "/deny", f"{_user()}:{DENY_RIGHTS}"])
@@ -139,6 +174,17 @@ def apply_block(migration: Path, sources: list[str]) -> int:
             failed += 1
         else:
             log.info("ENFORCED: write denied on %s", d)
+
+    # Re-open the probe sandbox. The deny above is inherited (OI)(CI), so it reaches this subfolder
+    # too; an explicit grant here restores write on it alone. Without this the probe cannot run,
+    # which is precisely the deadlock that got the first version reverted off master.
+    code, out = _icacls([str(probe), "/grant", f"{_user()}:(OI)(CI)F"])
+    if code != 0:
+        log.error("Could not re-open the probe sandbox %s: %s", probe, out)
+        failed += 1
+    else:
+        log.info("PROBE SANDBOX OPEN: %s (build the 1-table reachability probe here)", probe)
+
     _audit(migration, "block", f"sources={sources}")
     return 1 if failed else 0
 
