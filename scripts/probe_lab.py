@@ -37,6 +37,9 @@ LAB = REPO_ROOT / "_probe-lab"
 HOST = "adb-4224091552383811.11.azuredatabricks.net"
 HTTP_PATH = "/sql/1.0/warehouses/764e5801f0e0fac8"
 WAREHOUSE_ID = "764e5801f0e0fac8"
+# A second SQL warehouse in the same workspace, deliberately never authenticated in Power BI
+# Desktop. See SF_WAREHOUSE_UNCREDENTIALED below - the same trick, for the same measured reason.
+HTTP_PATH_UNCREDENTIALED = "/sql/1.0/warehouses/bf33a4ef3dd147e9"
 CATALOG = "dbx_workspace"
 SCHEMA = "tableau_migration"
 TABLE = "shipment"
@@ -66,9 +69,7 @@ _CONN_DATABRICKS = """        <named-connections>
           </named-connection>
         </named-connections>
         <relation connection='databricks.probe0conn0001' name='{table}'
-          table='[{catalog}].[{schema}].[{table}]' type='table' />""".format(
-    host=HOST, catalog=CATALOG, schema=SCHEMA, http_path=HTTP_PATH, table=TABLE
-)
+          table='[{catalog}].[{schema}].[{table}]' type='table' />"""
 
 _CONN_SNOWFLAKE = """        <named-connections>
           <named-connection caption='{host}' name='snowflake.probe0conn0001'>
@@ -78,9 +79,7 @@ _CONN_SNOWFLAKE = """        <named-connections>
           </named-connection>
         </named-connections>
         <relation connection='snowflake.probe0conn0001' name='{table}'
-          table='[{database}].[{schema}].[{table}]' type='table' />""".format(
-    host=SF_HOST, database=SF_DATABASE, schema=SF_SCHEMA, warehouse=SF_WAREHOUSE, table=SF_TABLE
-)
+          table='[{database}].[{schema}].[{table}]' type='table' />"""
 
 _TWB_SKELETON = """<?xml version='1.0' encoding='utf-8' ?>
 <workbook source-build='2024.1.0' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
@@ -143,33 +142,41 @@ _TWB_SKELETON = """<?xml version='1.0' encoding='utf-8' ?>
 """
 
 
-def build_twb(flavor: str) -> str:
+def build_twb(flavor: str, unhappy: bool = False) -> str:
     """Render the fixture workbook for one source flavor.
 
-    Column case is not cosmetic: Snowflake folds unquoted identifiers to UPPERCASE, so the columns
-    Power BI gets back are `CUSTOMER`/`BILL_AMOUNT`. `Table.SelectColumns` is case-sensitive on
-    those names, so a lowercase fixture would fail against a perfectly healthy Snowflake table -
+    `unhappy` swaps in a compute path Power BI Desktop has never authenticated to. It is a REAL,
+    resolvable source, not a bogus address - measured 2026-08-02, Power BI keys a credential per
+    connector data-source PATH (Databricks host+httpPath, Snowflake server+warehouse), so a second
+    warehouse in the same account is genuinely uncredentialed while destroying nothing. That matters:
+    the alternative, revoking a working credential, wrecks a fixture a human had to set up by hand.
+
+    Column case is not cosmetic either: Snowflake folds unquoted identifiers to UPPERCASE, so the
+    columns Power BI gets back are `CUSTOMER`/`BILL_AMOUNT`. `Table.SelectColumns` is case-sensitive
+    on those names, so a lowercase fixture would fail against a perfectly healthy Snowflake table -
     and the failure would look like a source problem rather than a fixture bug.
     """
     if flavor == "snowflake":
-        return _TWB_SKELETON.format(
-            flavor="Snowflake", conn=_CONN_SNOWFLAKE, table=SF_TABLE, c1="CUSTOMER", c2="BILL_AMOUNT"
+        warehouse = SF_WAREHOUSE_UNCREDENTIALED if unhappy else SF_WAREHOUSE
+        conn = _CONN_SNOWFLAKE.format(
+            host=SF_HOST, database=SF_DATABASE, schema=SF_SCHEMA, warehouse=warehouse, table=SF_TABLE
         )
-    return _TWB_SKELETON.format(
-        flavor="Databricks", conn=_CONN_DATABRICKS, table=TABLE, c1="customer", c2="bill_amount"
-    )
+        return _TWB_SKELETON.format(flavor="Snowflake", conn=conn, table=SF_TABLE, c1="CUSTOMER", c2="BILL_AMOUNT")
+    http_path = HTTP_PATH_UNCREDENTIALED if unhappy else HTTP_PATH
+    conn = _CONN_DATABRICKS.format(host=HOST, catalog=CATALOG, schema=SCHEMA, http_path=http_path, table=TABLE)
+    return _TWB_SKELETON.format(flavor="Databricks", conn=conn, table=TABLE, c1="customer", c2="bill_amount")
 
 
 TWB = build_twb("databricks")
 
 
-def make(variants: list[str], flavor: str = "databricks") -> int:
+def make(variants: list[str], flavor: str = "databricks", unhappy: bool = False) -> int:
     """Create one throwaway migration tree per variant."""
     for v in variants:
         root = LAB / f"variant-{v}"
         (root / "source").mkdir(parents=True, exist_ok=True)
         twb = root / "source" / "Probe.twb"
-        twb.write_text(build_twb(flavor), encoding="utf-8")
+        twb.write_text(build_twb(flavor, unhappy), encoding="utf-8")
         spec = root / "migration-spec.json"
         proc = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "parse_tableau.py"), str(twb), "-o", str(spec)],
@@ -286,6 +293,11 @@ def main() -> int:
     m = sub.add_parser("make", help="generate minimal fixtures")
     m.add_argument("--variants", nargs="+", default=["a"])
     m.add_argument("--flavor", choices=["databricks", "snowflake"], default="databricks")
+    m.add_argument(
+        "--unhappy",
+        action="store_true",
+        help="point at a real but never-authenticated compute path (second warehouse / http path)",
+    )
 
     w = sub.add_parser("watch", help="watch one variant and report a verdict")
     w.add_argument("--variant", required=True)
@@ -294,7 +306,7 @@ def main() -> int:
 
     args = ap.parse_args()
     if args.cmd == "make":
-        return make(args.variants, args.flavor)
+        return make(args.variants, args.flavor, args.unhappy)
     return watch(args.variant, args.timeout_sec, args.poll_sec)
 
 

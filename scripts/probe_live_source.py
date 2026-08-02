@@ -408,7 +408,7 @@ def _open_desktop(pbip: Path) -> int:
     raise SystemExit(1)
 
 
-def _wait_for_catalog(pid: int, timeout_sec: int = 90) -> bool:
+def _wait_for_catalog(pid: int, timeout_sec: int = 240) -> bool:
     """Block until Desktop has actually loaded a model catalog, or give up.
 
     `powerbi-desktop open` waits for the BRIDGE to answer, which happens well before the model is
@@ -421,10 +421,22 @@ def _wait_for_catalog(pid: int, timeout_sec: int = 90) -> bool:
     Waiting removes the race, so anything still reporting "no catalog" afterwards genuinely failed
     to load and can be classified honestly.
 
+    ⚠️ The timeout is a FALSE-VERDICT budget, not a convenience. Timing out here reports
+    UNREACHABLE - a definitive "your address is wrong" - so a value that is merely too short
+    manufactures exactly the misdiagnosis this script exists to prevent. Measured 2026-08-02: at 90s
+    the FIRST cell of a four-cell batch reported UNREACHABLE for a known-good Databricks warehouse
+    that returned DATA_OK on the very next run of the identical spec. A cold Desktop start (or
+    contention right after a sibling instance closed) simply exceeded the budget. Raised to 240s:
+    the cost of waiting on a genuinely dead host is a couple of idle minutes, while the cost of
+    being too eager is a confident wrong answer sending someone to fix an address that was fine.
+    The DNS pre-check in `_probe_one` already catches the truly-unresolvable case in under a second,
+    so almost nothing legitimate reaches this timeout anyway.
+
     Uses the skill's documented CLI rather than importing its internals - the readiness signal is
     "does this stop saying no catalog", which its exit output already carries.
     """
     deadline = time.monotonic() + timeout_sec
+    waited = 0.0
     while time.monotonic() < deadline:
         proc = subprocess.run(
             [sys.executable, str(SKILL_SCRIPTS / "probe_desktop_query.py"), "--pid", str(pid)],
@@ -433,8 +445,15 @@ def _wait_for_catalog(pid: int, timeout_sec: int = 90) -> bool:
             check=False,
         )
         if "no catalog" not in (proc.stdout + proc.stderr).lower():
+            if waited:
+                log.info("model catalog ready after %.0fs", waited)
             return True
         time.sleep(3)
+        waited += 3
+        # Surface a slow load rather than letting it look like a hang - the shared conventions
+        # require reporting elapsed time on anything past ~60s.
+        if waited % 60 == 0:
+            log.info("still waiting for Desktop to load the probe model (%.0fs)", waited)
     return False
 
 
@@ -668,9 +687,11 @@ def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts:
         if not _wait_for_catalog(pid):
             log.error(
                 "PROBE: UNREACHABLE Power BI Desktop never finished loading the probe model. After "
-                "waiting, the Analysis Services instance still has no catalog - the data source did "
-                "not resolve (unknown host, wrong HTTP path, or no network route). Check server and "
-                "http_path in the spec before treating this as a credential problem."
+                "waiting, the Analysis Services instance still has no catalog. The likeliest cause "
+                "is that the data source did not resolve (wrong HTTP path / warehouse, or no "
+                "network route) - but note the host DID resolve in DNS, so a very slow Desktop "
+                "start can also land here. Re-run once before editing the spec; if it repeats, "
+                "check server and http_path."
             )
             return 1, "UNREACHABLE"
         log.info("model loaded - refreshing")
