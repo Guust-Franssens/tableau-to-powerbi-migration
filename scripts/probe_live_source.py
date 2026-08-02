@@ -372,8 +372,11 @@ def _wait_for_catalog(pid: int, timeout_sec: int = 90) -> bool:
     return False
 
 
-def _refresh_and_classify(pid: int, table: str, timeout_sec: int, migration: Path) -> int:
-    """Refresh the probe table, turn the result into a verdict, and lift the gate if it passed.
+def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> int:
+    """Refresh the probe table and turn the result into a verdict.
+
+    Deliberately does NOT lift the gate - the caller does that, and only once EVERY live source has
+    passed. Lifting per-source would re-open the multi-source hole this was written to close.
 
     YOU run the clock. Measured: a credential-blocked refresh sails past the XMLA CommandTimeout,
     because the mashup engine is parked on a modal in another process that the server cannot
@@ -409,14 +412,13 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, migration: Pat
     text = (refresh.stdout + refresh.stderr).strip()
     if "DATA_OK" in text:
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
-        _lift_gate(migration, table)
         return 0
     verdict, detail = _classify_failure(text)
     log.error("PROBE: %s %s", verdict, detail[-400:] or "refresh returned no data")
     return 1
 
 
-def _lift_gate(migration: Path, table: str) -> None:
+def _lift_gate(migration: Path, what: str) -> None:
     subprocess.run(
         [
             sys.executable,
@@ -424,7 +426,7 @@ def _lift_gate(migration: Path, table: str) -> None:
             "clear",
             str(migration),
             "--reason",
-            f"probe-cleared: DATA_OK from {table}",
+            f"probe-cleared: DATA_OK from {what}",
             "--earned",
         ],
         capture_output=True,
@@ -448,8 +450,42 @@ def _host_resolves(server: str) -> bool:
         return False
 
 
-def run_probe(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) -> int:
-    """Build the one-table probe, refresh it, and report whether real rows came back."""
+def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep: bool) -> int:
+    """Probe every live source (or one, if `source_index` is given). Gate lifts only if ALL pass.
+
+    Probing a single source was a real hole, not a convenience limit: the guarantee is "no model for
+    a source you never reached", and it is plural. With `--source-index 0` as the default, a
+    two-source workbook whose first source worked would lift the gate and build against a second
+    source nobody had ever contacted - precisely the failure this tool exists to prevent, just
+    harder to see.
+    """
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    sources = spec.get("data_sources", [])
+    live = [
+        i
+        for i, s in enumerate(sources)
+        if ((s.get("connection", {}) or {}).get("powerbi_target") or "") == "live_source"
+    ]
+    if source_index is not None:
+        live = [source_index]
+    if not live:
+        log.info("PROBE: SKIPPED no live sources in this spec - nothing to probe")
+        return 0
+
+    log.info("probing %d live source(s): %s", len(live), live)
+    for idx in live:
+        rc = _probe_one(spec_path, idx, timeout_sec, keep)
+        if rc != 0:
+            log.error("PROBE: source index %d failed - not lifting the gate", idx)
+            return rc
+
+    _lift_gate(spec_path.parent, f"{len(live)} live source(s)")
+    log.info("PROBE: DATA_OK all %d live source(s) reachable", len(live))
+    return 0
+
+
+def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) -> int:
+    """Build and run the one-table probe for a single data source."""
     target = _resolve_probe_target(spec_path, source_index)
     if target is None:
         return 0
@@ -488,7 +524,7 @@ def run_probe(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) 
             )
             return 1
         log.info("model loaded - refreshing")
-        return _refresh_and_classify(pid, table, timeout_sec, spec_path.parent)
+        return _refresh_and_classify(pid, table, timeout_sec)
     finally:
         if pid and not keep:
             _close(pid)
@@ -499,7 +535,9 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--spec", type=Path, required=True)
-    parser.add_argument("--source-index", type=int, default=0)
+    parser.add_argument(
+        "--source-index", type=int, default=None, help="probe only this source (default: all live sources)"
+    )
     parser.add_argument("--timeout-sec", type=int, default=180)
     parser.add_argument("--keep", action="store_true", help="leave Desktop open for inspection")
     args = parser.parse_args(argv)

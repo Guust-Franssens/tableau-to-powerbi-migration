@@ -93,19 +93,28 @@ def _clear_was_earned(migration: Path) -> str | None:
 
     This exists because `clear` was callable by anyone with any excuse - measured 2026-08-02, a
     single `credential_gate.py clear --reason "I decided it is fine"` lifted the ACL and the build
-    proceeded with no probe ever run. That is the whole guarantee gone, via the front door. The hook
-    does deny that command, but the hook is the weak layer (pattern matching, already proven
-    defeatable), so the real defence has to be evidence-based: the probe clears the gate itself, as
-    a consequence of measuring, and anything else is visible here.
+    proceeded with no probe ever run. That is the whole guarantee gone, via the front door.
+
+    ⚠️ KNOWN LIMIT, stated plainly: the audit log is a text file, so at same-user privilege an agent
+    can append a fake `probe-cleared` entry - measured, and it passed. Ordering below (evidence must
+    post-date the most recent `block`, by timestamp as well as position) defeats naive forgery, but
+    not a careful one. No file-based receipt can be unforgeable here.
+
+    **The real oracle is the source system.** A genuine probe leaves a `... limit 1` query in the
+    warehouse's query history; a forged receipt leaves nothing. `verify` prints the recorded
+    timestamp precisely so that claim is cheap to check externally. Treat the audit log as an
+    accountability trail, not as proof.
     """
     try:
-        earned = None
+        earned: str | None = None
+        blocked_at = ""
         for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
-            action = json.loads(line).get("action")
-            if action in {"probe-cleared", "authorize"}:
+            entry = json.loads(line)
+            action, ts = entry.get("action"), entry.get("ts", "")
+            if action == "block":
+                earned, blocked_at = None, ts  # a re-arm invalidates any earlier evidence
+            elif action in {"probe-cleared", "authorize"} and ts >= blocked_at:
                 earned = action
-            elif action == "block":
-                earned = None  # a re-arm invalidates any earlier evidence
         return earned
     except (OSError, ValueError):
         return None

@@ -207,6 +207,70 @@ def test_the_probe_sandbox_is_a_sibling_of_the_denied_folder(migration: Path) ->
     assert (migration / "_probe" / "canary.txt").exists()
 
 
+def test_a_bare_clear_earns_nothing_and_verify_says_so(migration: Path) -> None:
+    """The front-door bypass. Measured: `clear --reason "I decided it is fine"` lifted the ACL and
+    the build proceeded with no probe run - the whole guarantee gone without touching the ACL.
+    """
+    run_gate("block", str(migration), "--sources", "x")
+    run_gate("clear", str(migration), "--reason", "I decided it is fine")
+    (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
+    assert run_gate("verify", str(migration)).returncode == 1, "an unearned clear must be reported"
+
+
+def test_an_earned_clear_passes_verify(migration: Path) -> None:
+    """Paired control for the test above.
+
+    Without it, `verify` could satisfy that test by always returning 1, and both would look green
+    while the gate was useless. Every "must be caught" needs a "must NOT be caught" beside it.
+    """
+    run_gate("block", str(migration), "--sources", "x")
+    run_gate("clear", str(migration), "--reason", "probe-cleared: DATA_OK from t", "--earned")
+    (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
+    assert run_gate("verify", str(migration)).returncode == 0
+
+
+def test_evidence_predating_the_most_recent_block_does_not_count(migration: Path) -> None:
+    """Naive forgery: append a `probe-cleared` line with an old timestamp.
+
+    The audit log is a text file and cannot be made unforgeable at same-user privilege - that is
+    documented, not hidden. Ordering at least means stale or backdated evidence earns nothing.
+    """
+    import json as _json
+
+    run_gate("block", str(migration), "--sources", "x")
+    run_gate("clear", str(migration), "--reason", "sneaky")
+    audit = migration / ".credential-gate-audit.log"
+    forged = _json.dumps({"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "forged"})
+    audit.write_text(audit.read_text(encoding="utf-8") + forged + "\n", encoding="utf-8")
+    (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
+    assert run_gate("verify", str(migration)).returncode == 1, "backdated evidence must not count"
+
+
+def test_dns_precheck_separates_a_bad_address_from_a_missing_credential() -> None:
+    """`a hang means a sign-in modal` is only true once the host resolves.
+
+    Measured: an unresolvable host loaded into Desktop fine (the M query is not evaluated at load)
+    and then hung for the full timeout, landing on NO_CREDENTIAL - a 200s wrong answer. Also
+    measured, and the reason the original fixture was invalid: *.azuredatabricks.net wildcards to a
+    real Azure IP, so a made-up workspace RESOLVES and genuinely has no credential.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _host_resolves  # noqa: PLC0415
+
+    assert _host_resolves("no-such-host-98765.invalid") is False
+    assert _host_resolves("adb-0000000000000000.00.azuredatabricks.net") is True
+
+
+def test_failure_classification_distinguishes_the_causes() -> None:
+    """Conflating verdicts is the defect class this whole script exists to remove."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _classify_failure  # noqa: PLC0415
+
+    assert _classify_failure("Exception: no catalog found on the instance")[0] == "UNREACHABLE"
+    assert _classify_failure("The credential was not provided; please sign in")[0] == "NO_CREDENTIAL"
+    assert _classify_failure("something else entirely went wrong")[0] == "UNREACHABLE"
+
+
 def test_lineage_check_fails_closed_on_an_unknown_chain() -> None:
     """The bug that let a forged authorization through, locked down.
 
