@@ -109,6 +109,22 @@ Each phase gates the next.
 
 Gate: `ruff` clean, `pylint` 10.00, existing gate tests pass.
 
+#### Phase 1 outcome (2026-08-02)
+
+**F1 was deleted rather than fixed.** The sandbox moved from `fabric/_probe/` to a *sibling*
+`_probe/`. Inside the denied tree it inherited the deny, which needed a grant, a create-before-deny
+ordering rule, and a heal path — three fragile mechanisms, all measured failing. Outside it, none of
+them exist. A regression test asserts the placement so nobody re-introduces the deadlock.
+
+**F3 fixed and verified** on all four discriminations: forging the override → DENY, stripping the
+ACE → DENY, read-only `verify` → allow, deliverable write → DENY. The hook also only defends the
+control surface while a gate is actually applied, so it stays out of the way in unrelated repos.
+
+**F4 is not a defect — it is the gate working.** A gated `fabric/` genuinely cannot be deleted,
+because denying write also blocks removal. Weakening the ACL to allow teardown would weaken the
+guarantee. **Always `credential_gate.py clear <dir>` before deleting a migration folder**, including
+in test teardown.
+
 ### Phase 2 — component tests
 
 Stop at the first failure, fix it, re-run that test only.

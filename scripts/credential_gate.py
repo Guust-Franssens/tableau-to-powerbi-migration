@@ -98,24 +98,27 @@ PROBE_DIR = "_probe"
 
 
 def probe_dir(migration: Path) -> Path:
-    """The one writable place while the gate is up: where the reachability probe builds.
+    """The writable sandbox where the reachability probe builds. A SIBLING of `fabric/`, not a child.
 
-    This exists because the first version of this gate DEADLOCKED the success path, and that is the
-    single most important thing to understand about it.
+    That placement is the whole design, and it is the fix for the flaw that got v1 reverted off
+    master.
 
     The rule is "no semantic model for a source you never reached". The way you *earn* the right to
     build is the one-row probe: a minimal PBIP with a single table that refreshes and returns a row.
-    But the probe is itself a PBIP, and the first version denied writes to all of `fabric/` - so the
-    probe was blocked by the gate it exists to satisfy, and EVERY live-source migration dead-ended
-    at "a human must authorize an unvalidated build", credentials or not. Verified: the probe's
-    write raised PermissionError. That shipped to master and had to be reverted.
+    But the probe is itself a PBIP, and v1 denied writes to all of `fabric/` - so the probe was
+    blocked by the gate it exists to satisfy, and EVERY live-source migration dead-ended at "a human
+    must authorize an unvalidated build", credentials or not.
 
-    So the probe gets its own un-gated sandbox, `fabric/_probe/`. It is safe to leave open because
-    the probe is not a deliverable: it is one table, it is thrown away, and a `verify` that finds
-    artifacts only ever looks at the real output paths. Meanwhile the deliverable model and report
-    stay denied until the probe proves reachability.
+    The obvious patch - a sub-folder of `fabric/` re-granted after the deny - works but is fragile in
+    three separate ways, all measured: the deny is inherited so the grant must come after it, the
+    folder cannot be recreated once deleted, and healing it means briefly lifting the gate. Putting
+    the sandbox OUTSIDE the denied tree removes all three at once. There is no inheritance, no
+    ordering dependency, and no window where the gate is open.
+
+    Safe to leave writable because the probe is not a deliverable: one table, thrown away, and
+    `verify` only ever inspects the real output paths under `fabric/`.
     """
-    d = migration / "fabric" / PROBE_DIR
+    d = migration / PROBE_DIR
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -160,10 +163,8 @@ def apply_block(migration: Path, sources: list[str]) -> int:
         _audit(migration, "block-marker-only", "non-windows")
         return 0
 
-    # Create the probe sandbox BEFORE applying the deny. Once the parent carries an inherited
-    # (OI)(CI) deny, creating a subfolder is itself a denied write - so a probe_dir() call after the
-    # deny fails with Access denied and the sandbox never appears. Measured: that left the gate
-    # deadlocked exactly as before the fix, with the ordering as the only difference.
+    # The sandbox is a SIBLING of fabric/, so it needs no grant and no particular ordering - see
+    # probe_dir(). Created here only so the path exists for the message below.
     probe = probe_dir(migration)
 
     failed = 0
@@ -175,16 +176,7 @@ def apply_block(migration: Path, sources: list[str]) -> int:
         else:
             log.info("ENFORCED: write denied on %s", d)
 
-    # Re-open the probe sandbox. The deny above is inherited (OI)(CI), so it reaches this subfolder
-    # too; an explicit grant here restores write on it alone. Without this the probe cannot run,
-    # which is precisely the deadlock that got the first version reverted off master.
-    code, out = _icacls([str(probe), "/grant", f"{_user()}:(OI)(CI)F"])
-    if code != 0:
-        log.error("Could not re-open the probe sandbox %s: %s", probe, out)
-        failed += 1
-    else:
-        log.info("PROBE SANDBOX OPEN: %s (build the 1-table reachability probe here)", probe)
-
+    log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
     _audit(migration, "block", f"sources={sources}")
     return 1 if failed else 0
 

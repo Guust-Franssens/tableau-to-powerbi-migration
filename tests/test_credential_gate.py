@@ -160,7 +160,9 @@ def test_the_probe_can_build_while_the_deliverable_stays_blocked(migration: Path
     """
     run_gate("block", str(migration), "--sources", "shipment")
 
-    probe = migration / "fabric" / "_probe" / "Probe.SemanticModel" / "definition" / "tables"
+    # SIBLING of fabric/, not a child - that placement is the fix. A sandbox inside the denied tree
+    # inherits the deny, which is what caused the deadlock in the first place.
+    probe = migration / "_probe" / "Probe.SemanticModel" / "definition" / "tables"
     probe.mkdir(parents=True, exist_ok=True)
     (probe / "shipment.tmdl").write_text("table shipment", encoding="utf-8")
     assert (probe / "shipment.tmdl").exists(), "the probe must be able to build, or the gate deadlocks"
@@ -186,6 +188,23 @@ def test_the_hook_never_denies_when_its_own_config_is_broken() -> None:
     """
     for payload in ({}, {"toolName": None}, {"toolName": "create", "toolArgs": None}):
         assert run_hook(payload) == {}, f"hook must return {{}} for {payload}, never raise"
+
+
+def test_the_probe_sandbox_is_a_sibling_of_the_denied_folder(migration: Path) -> None:
+    """Placement is the fix, so assert the placement.
+
+    A sandbox INSIDE `fabric/` inherits the deny, which is what deadlocked v1 and then needed a
+    grant, a create-before-deny ordering rule, and a heal path - three fragile things measured
+    failing. Outside the denied tree, none of them exist. If someone moves it back under `fabric/`,
+    this fails before the deadlock can reach a user.
+    """
+    run_gate("block", str(migration), "--sources", "x")
+    assert (migration / "_probe").is_dir(), "the sandbox must be a sibling of fabric/"
+    assert not (migration / "fabric" / "_probe").exists(), "the sandbox must NOT be inside the denied tree"
+
+    # And it must be writable with the gate up - the whole point.
+    (migration / "_probe" / "canary.txt").write_text("ok", encoding="utf-8")
+    assert (migration / "_probe" / "canary.txt").exists()
 
 
 def test_lineage_check_fails_closed_on_an_unknown_chain() -> None:
