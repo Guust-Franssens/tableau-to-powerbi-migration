@@ -181,6 +181,30 @@ workspace* is a real, resolvable source that Power BI has never authenticated to
 (serverless, auto-stop) and leaves the happy-path credential untouched. This is strictly better than
 revoking a PAT, which destroys a fixture a human had to set up by hand.
 
+**The same rule holds for Snowflake, and it generalises** (measured 2026-08-02). Power BI's
+credential key is the connector's **data-source path**, which includes every *required* identity
+parameter — not just the host:
+
+| Connector | M function | Credential keyed on |
+|---|---|---|
+| Databricks | `Databricks.Catalogs(host, httpPath, …)` | host **+ HTTP path** |
+| Snowflake | `Snowflake.Databases(server, warehouse, …)` | server **+ warehouse** |
+
+Desktop's *Data source settings* shows the Snowflake entry literally as
+`eqeiljh-qo26899.snowflakecomputing.com;COMPUTE_WH`. Confirmed independently by probe: with
+`COMPUTE_WH` authenticated, a probe against `PROBE_WH` — **same account, same user** — still returned
+`NO_CREDENTIAL`, while `COMPUTE_WH` returned `DATA_OK` in 16 s.
+
+⚠️ Worth recording *how* this was nearly got wrong: the per-account claim was asserted from the
+Databricks result without being measured, and stated to the user as fact. The user pushed back
+("I need to specify a warehouse in Snowflake options, so it would surprise me") and was right. The
+lesson is the branch's own thesis applied to itself — **a plausible inference about an external
+system is not a measurement**, and the cost of checking was one 16-second probe.
+
+So every supported connector gets a free, non-destructive unhappy fixture: keep one
+warehouse/path credentialed, leave a second untouched. Never revoke a working credential to
+manufacture a failure.
+
 **T7 ran twice, and the two runs are why the taxonomy exists:**
 
 | Fixture | Verdict | What the agent told the user |

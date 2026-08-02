@@ -44,8 +44,15 @@ TABLE = "shipment"
 # Snowflake equivalent of the same fixture - same table, same two columns, same 400 rows (see
 # scripts/snowflake_fixture.sql). Kept here so the Snowflake connector path is exercised by the
 # identical agent-behaviour test, rather than only ever being reasoned about.
+#
+# MEASURED 2026-08-02: Power BI keys a Snowflake credential per (SERVER, WAREHOUSE), not per
+# account. Desktop's Data source settings lists the entry literally as
+# `eqeiljh-qo26899.snowflakecomputing.com;COMPUTE_WH`, and a probe against PROBE_WH returned
+# NO_CREDENTIAL while the same account+user was authenticated for COMPUTE_WH. So Snowflake gets the
+# same free non-destructive unhappy fixture Databricks does: a second warehouse.
 SF_HOST = "EQEILJH-QO26899.snowflakecomputing.com"
-SF_WAREHOUSE = "PROBE_WH"
+SF_WAREHOUSE = "COMPUTE_WH"
+SF_WAREHOUSE_UNCREDENTIALED = "PROBE_WH"
 SF_DATABASE = "TABLEAU_MIGRATION"
 SF_SCHEMA = "PROBE"
 SF_TABLE = "SHIPMENT"

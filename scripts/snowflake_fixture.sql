@@ -29,14 +29,17 @@
 --   1. BEFORE signing in  -> probe should return NO_CREDENTIAL  (the unhappy path, free to test)
 --   2. AFTER signing in   -> probe should return DATA_OK        (the happy path)
 --
--- ⚠️ UNVERIFIED: whether Power BI keys a Snowflake credential per ACCOUNT HOST or per
--- (HOST, WAREHOUSE) is NOT yet measured. For Databricks it is measured to be per (host, HTTP path),
--- which is what makes a second warehouse a free uncredentialed fixture there. Snowflake's connector
--- takes `warehouse` as a REQUIRED parameter of Snowflake.Databases(), so it may well be part of the
--- credential's data-source path too - do not assume it is not. PROBE_WH_2 exists to settle this by
--- experiment: after signing in with PROBE_WH, probe PROBE_WH_2. DATA_OK means per-account;
--- NO_CREDENTIAL means per-warehouse (and then Snowflake gets a permanent non-destructive unhappy
--- fixture, exactly like Databricks).
+-- MEASURED 2026-08-02: Power BI keys a Snowflake credential per (SERVER, WAREHOUSE), NOT per
+-- account. Desktop's "Data source settings" lists the entry literally as
+-- `eqeiljh-qo26899.snowflakecomputing.com;COMPUTE_WH` - the warehouse is part of the data-source
+-- path, exactly as `Snowflake.Databases(server, warehouse)` taking warehouse as a REQUIRED
+-- parameter implies. Confirmed independently by probe: with COMPUTE_WH authenticated, a probe
+-- against PROBE_WH (same account, same user) still returned NO_CREDENTIAL, while COMPUTE_WH
+-- returned DATA_OK in 16s.
+--
+-- So Snowflake gets the same free, non-destructive unhappy fixture Databricks does: keep ONE
+-- warehouse credentialed for the happy path and leave a second one untouched for the unhappy path.
+-- Never revoke a working credential to manufacture a failure - a second warehouse costs nothing.
 
 CREATE WAREHOUSE IF NOT EXISTS PROBE_WH
     WAREHOUSE_SIZE = 'XSMALL'
