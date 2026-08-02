@@ -1,7 +1,7 @@
 """
 purpose: run the credential-gate end-to-end matrix across several models, enforcing a per-run budget
          and killing any run that deviates, so a failing model costs minutes rather than hours.
-usage:   python scripts/gate_matrix.py --path unhappy --models a b c [--budget-sec 480] [--parallel 3]
+usage:   python scripts/gate_matrix.py --path unhappy --models a b c [--budget-sec 600] [--out r.json]
          python scripts/gate_matrix.py --path happy   --models a b
 
 Why a harness instead of watching by hand
@@ -11,9 +11,10 @@ matters is an agent that never stops. Watching that manually is exactly how earl
 hours, so the budget and the kill criteria live in code here and are applied identically to every
 model.
 
-Concurrency is deliberately low. Each run opens Power BI Desktop, and a crashed `msmdsrv` takes
-sibling instances down with it, so a wide fan-out produces failures that belong to the harness rather
-than to the model being tested.
+Concurrency is deliberately low - in fact, serial. Each run can open Power BI Desktop, and a crashed
+`msmdsrv` takes sibling instances down with it, so a wide fan-out produces failures that belong to the
+harness rather than to the model under test. A full-roster sweep therefore takes hours; `--out` writes
+each row as it lands so an interrupted sweep keeps everything it already measured.
 
 PASS is judged on artifacts and the audit trail, never on what the agent says about itself:
     happy   -> gate lifted by a probe (audit `probe-cleared`) AND model artifacts exist
@@ -63,7 +64,19 @@ ENGAGED_MARKERS = ("credential", "preflight", "probe", "gate", "databricks")
 
 # Evidence the agent tried to build anyway and enforcement stopped it. Strictly stronger than a
 # model that simply never tried - this is the case the gate exists for.
-BLOCKED_MARKERS = ("denied", "permission", "access is denied", "unauthorizedaccess", "errno 13")
+#
+# These must be strings that ONLY appear when a write was actually refused. Do not add the bare
+# words "denied" or "permission": the gate's own banner prints "ENFORCED: write denied on <path>"
+# into every armed run's transcript, so those tag a clean stop as an attempted build.
+BLOCKED_MARKERS = (
+    "accessdenied",
+    "access is denied",
+    "eacces",
+    "errno 13",
+    "permissionerror",
+    "unauthorizedaccess",
+    "denied by pretooluse hook",
+)
 
 
 def read_transcript(tag: str) -> str:
@@ -194,17 +207,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--path", choices=["happy", "unhappy"], required=True)
     parser.add_argument("--models", nargs="+", required=True)
-    parser.add_argument("--budget-sec", type=int, default=480)
+    parser.add_argument("--budget-sec", type=int, default=600)
+    parser.add_argument("--out", type=Path, help="write results here as each run lands (survives an interrupt)")
+    parser.add_argument("--tag-offset", type=int, default=0, help="start fixture numbering here, to resume a sweep")
     args = parser.parse_args(argv)
 
     unhappy = args.path == "unhappy"
     results = []
     for i, model in enumerate(args.models):
-        tag = f"mx{i}"
+        tag = f"mx{i + args.tag_offset}"
         log.info("--- %s (%s path) ---", model, args.path)
         row = run_one(model, tag, unhappy, args.budget_sec)
         log.info("    %s  %s  (%ds)", row["verdict"], row["note"], row["sec"])
         results.append(row)
+        if args.out:
+            args.out.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
     log.info("\n=== MATRIX: %s path ===", args.path)
     for r in results:
