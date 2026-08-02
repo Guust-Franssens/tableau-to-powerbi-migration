@@ -5,9 +5,19 @@
 --
 -- Why you run this by hand rather than the agent running it:
 --   Snowflake PAT authentication refuses with "390432: Network policy is required" until a network
---   policy is attached to the user, which needs ACCOUNTADMIN. Pasting this is faster than granting
---   that, and it keeps the PAT unused - which matters, because the probe deliberately CANNOT use a
---   PAT anyway (it must exercise Power BI Desktop's own credential store, not the agent's).
+--   policy is attached to the USER (not merely the account). Pasting this script is faster than
+--   granting that, and it keeps the PAT unused - which matters, because the probe deliberately
+--   CANNOT use a PAT anyway (it must exercise Power BI Desktop's own credential store, not the
+--   agent's).
+--
+--   If you DO want the PAT to work for automation, run as SECURITYADMIN/ACCOUNTADMIN:
+--       CREATE NETWORK POLICY IF NOT EXISTS PAT_POLICY
+--           ALLOWED_IP_LIST = ('<your.public.ip>');
+--       ALTER USER IDENTIFIER(CURRENT_USER()) SET NETWORK_POLICY = PAT_POLICY;
+--   Scope it to the USER, never the account: an account-wide policy also governs Power BI Desktop's
+--   own connection and can lock you out of the interactive sign-in the happy path depends on. The
+--   IP is typically dynamic (ISP rotation, VPN), so a PAT that suddenly fails with 390432 again
+--   usually means the address moved, not that the token expired.
 --
 -- After running this, sign in to Snowflake ONCE in Power BI Desktop. Note the ordering:
 --   1. BEFORE signing in  -> probe should return NO_CREDENTIAL  (the unhappy path, free to test)
