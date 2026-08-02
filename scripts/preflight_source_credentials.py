@@ -102,6 +102,59 @@ def classify_source(connection: dict) -> tuple[str, str]:
     return "review", f"unrecognised connection class '{klass}' (mode='{mode}'); review manually"
 
 
+GATE_MARKER = ".credential-gate-BLOCKED.json"
+GATE_OVERRIDE = ".credential-gate-AUTHORIZED"
+
+
+def _write_gate_marker(spec_path: Path, sources: list[str]) -> Path | None:
+    """Apply the FILESYSTEM gate for this migration, and return the marker path.
+
+    Delegates to scripts/credential_gate.py, which denies write access to the migration's output
+    folder at the OS level. That indirection is the whole point: prose could not make the stop
+    stick, and neither could a tool-call hook that matches command text - an agent beat the latter
+    by writing through `python -c` with the extension split into `'R3' + '.' + 'tmdl'`, so no
+    literal ever appeared to match. A kernel-enforced ACL does not care how the write is attempted.
+
+    Skipped when the user has explicitly authorized a build-only run: that is a legitimate choice
+    once a human has seen the gate, and removing it would make the toolkit unusable for a customer
+    who genuinely wants a structural-only pass.
+    """
+    migration = spec_path.parent
+    if (migration / GATE_OVERRIDE).exists():
+        log.warning("Gate OVERRIDDEN by %s - build-only run authorized by the user.", GATE_OVERRIDE)
+        return None
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parent / "credential_gate.py"),
+            "block",
+            str(migration),
+            "--sources",
+            *sources,
+        ],
+        check=False,
+    )
+    marker = migration / GATE_MARKER
+    return marker if marker.exists() else None
+
+
+def _clear_gate_marker(spec_path: Path) -> None:
+    """Release the gate: no live source needs a credential."""
+    migration = spec_path.parent
+    if (migration / GATE_MARKER).exists():
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).parent / "credential_gate.py"),
+                "clear",
+                str(migration),
+                "--reason",
+                "no-live-sources",
+            ],
+            check=False,
+        )
+
+
 def cmd_classify(spec_path: Path) -> int:
     """Classify every data source in a migration-spec.json for credential needs."""
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -112,6 +165,7 @@ def cmd_classify(spec_path: Path) -> int:
 
     needs = 0
     review = 0
+    blocked_names: list[str] = []
     log.info("Data-source credential preflight for %s", spec_path)
     for i, src in enumerate(sources):
         conn = src.get("connection", {}) or {}
@@ -121,6 +175,8 @@ def cmd_classify(spec_path: Path) -> int:
         log.info("%s %-28s %s", marker, str(name)[:28], reason)
         needs += verdict == "needs-credential"
         review += verdict == "review"
+        if verdict == "needs-credential":
+            blocked_names.append(str(name))
 
     log.info("-" * 60)
     if needs:
@@ -131,9 +187,22 @@ def cmd_classify(spec_path: Path) -> int:
         # invites exactly that reading ("the human fixes it later, I continue now"). Persona prose
         # already said "Unconditional" and lost, so the imperative lives here, in tool output, which
         # agents follow far more literally than their own instructions.
+        written = _write_gate_marker(spec_path, blocked_names)
         _print_stop_directive(needs)
         _print_remediation()
+        if written:
+            log.warning(
+                "\nENFORCED AT THE FILESYSTEM: %s exists and the migration's output folder is now\n"
+                "  DENIED write access at the OS level. This is not advice you can reason around and\n"
+                "  not a pattern you can route around - the kernel refuses the write however it is\n"
+                "  attempted (verified against python ctypes and split-string paths).\n"
+                "  Clear it with a successful probe:  python scripts/credential_gate.py clear <dir>\n"
+                "  Or the USER may authorize an unvalidated build by creating %s.",
+                written,
+                GATE_OVERRIDE,
+            )
     else:
+        _clear_gate_marker(spec_path)
         log.info("No live sources: all extract/flat (CSV + DataFolder). No credential gate for this workbook.")
     if review:
         log.warning("%d source(s) need manual review (unrecognised class).", review)

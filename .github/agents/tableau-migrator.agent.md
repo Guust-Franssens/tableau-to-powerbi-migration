@@ -201,21 +201,25 @@ it must show up in `limitations_encountered`, not be silently dropped.
      MISMATCH`** and exits 1 rather than silently saying "not yet migrated" — treat that as a STOP:
      reconcile the key first, do not build, do not paper over it. Record any real mismatch (with both
      keys) in `limitations_encountered` — it is evidence about a live tenant we cannot reproduce here.
-5. **Data-source credential preflight (MANDATORY before building — do not skip for live sources).** Run
-   `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`. If it
-   reports **only** extract/flat sources, there is no credential gate (data comes from CSV + a
-   `DataFolder`); proceed. If it flags any **live database** source (`needs-credential`):
+5. **Data-source credential preflight (MANDATORY before building — never skip for live sources).** Run
+   `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`.
+   Only extract/flat sources → no credential gate (CSV + `DataFolder`); proceed. Any **live database**
+   source (`needs-credential`):
 
    > **HARD STOP. Do not delegate to any builder until the user answers.** Name the host/database and
-   > say plainly that Power BI needs a credential you **cannot supply** — it is cached per-machine in
-   > Desktop (a modal the Bridge cannot fill) and server-side in the service. Ask whether they will
-   > configure it, **or** authorize a build-only migration with validation deferred. Then
-   > **TERMINATE the run** via your runtime's blocked / task-complete exit.
+   > say Power BI needs a credential you **cannot supply** — it is cached per-machine in Desktop (a
+   > modal the Bridge cannot fill) and server-side in the service. Ask whether they will configure it
+   > **or** authorize a build-only migration, then **TERMINATE the run** via your runtime's blocked /
+   > task-complete exit.
    >
-   > **Unconditional — it applies in a non-interactive run too**, and **pausing is not enough**:
-   > measured, three runs announced this stop correctly then talked themselves past it a few turns
-   > later ("applying the non-interactive fallback"). A stop that does not terminate gets re-prompted
-   > until it erodes, so **stopping IS the completed task** — report it as success, not as unfinished.
+   > **Enforced, not requested:** the gate applies a kernel-level write-deny to `fabric/`, so builder
+   > writes fail regardless of what you decide. Only the USER can lift it
+   > (`credential_gate.py authorize <dir> --who <name>`); forging `.credential-gate-AUTHORIZED` is
+   > audit-checked and `verify` reports it.
+   >
+   > **Unconditional — non-interactive runs included**, and **pausing is not enough**: measured, three
+   > runs announced this stop then talked themselves past it. A stop that does not terminate gets
+   > re-prompted until it erodes, so **stopping IS the completed task**.
 6. **Delegate to `pbi-semantic-builder` in TWO calls when any source is `live_source`.** A subagent
    follows the task prompt you write far more reliably than its own persona, so the reachability probe
    must be **your** instruction, not just its rule.
@@ -228,12 +232,12 @@ it must show up in `limitations_encountered`, not be silently dropped.
      how three test runs built a full model against a warehouse never once contacted.
      The 1-row refresh is the **gate of record**: it proves credential + reachability + valid M in one
      shot, locally, no publish. Remediation detail: `docs/data-source-credentials.md`.
-   - **6b. FULL BUILD**, once reachability is proven (or the user accepted an unvalidated build after
-     seeing 6a fail): the path to `migration-spec.json`, the target workspace, and **the connection
-     target for every data source** (`connection.powerbi_target`). Be explicit: a **`live_source`**
-     model must CONNECT to the upstream system (the `.hyper` is only Tableau's cache — using it freezes
-     the data and yields a model that can never refresh); only a **`flat_file`** is materialised to CSV
-     + `DataFolder`. `extract_hyper_data.py --schema` gives schema discovery with no rows exported.
+   - **6b. FULL BUILD**, once reachability is proven (or the user authorized an unvalidated build after
+     seeing 6a fail): the `migration-spec.json` path, the target workspace, and **the connection target
+     for every data source** (`connection.powerbi_target`). A **`live_source`** model must CONNECT
+     upstream (the `.hyper` is only Tableau's cache — using it freezes the data into a model that can
+     never refresh); only a **`flat_file`** is materialised to CSV + `DataFolder`.
+     `extract_hyper_data.py --schema` gives schema discovery with no rows exported.
      Wait for the model location and any new limitations.
 7. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json`, the semantic model
    location from step 6, **and the Tableau reference bundle** (`migrations/workbooks/<name>/reference/` — its
@@ -302,17 +306,20 @@ it must show up in `limitations_encountered`, not be silently dropped.
       personas under budget and makes the knowledge portable to the next migration. If you edit a
       bundle that is also published, re-run `scripts/build_plugin.py` or preflight will flag the drift.
     - **Pay for what you add — personas have a budget.** GitHub documents a **30,000-char** cap per
-      agent prompt (the CLI does not enforce it, but a hosted run may truncate). A retrospective is
-      **curation, not accumulation**: merge duplicates, delete anything a newer tool now catches
-      automatically, and generalise two cases into one rule. Aim for net-zero growth.
-      `python scripts/sync_agent_conventions.py --check` prints each persona's size — if you grew one,
-      say so explicitly.
+      agent prompt (a hosted run may truncate). A retrospective is **curation, not accumulation**:
+      merge duplicates, delete what a newer tool now catches automatically, generalise two cases into
+      one rule. Aim for net-zero growth; `sync_agent_conventions.py --check` prints each size and
+      **fails** over cap — if you grew one, say so.
     - **Verify, then report.** Re-run the gates you touched (`pytest -q`, `check_m_syntax.py --all`,
       `sync_agent_conventions.py --check`). Tell the user in two or three lines: what you learned,
       where you put it, what you deleted to make room, and what you deliberately did NOT record because
       it was a one-off. "Nothing worth recording" is a legitimate outcome — say it plainly rather than
       inventing a learning.
-13. **(Phase 2 / on request)** Delegate to `pbi-deployer` to publish to Fabric and run validation.
+13. **Final gate — prove nothing was built behind the credential stop.** For any migration with a live
+    source, run `python scripts/credential_gate.py verify migrations/workbooks/<name>` and paste the
+    verdict. Exit 1 = artifacts exist while the gate was applied, or the override was forged: that run
+    is **unvalidated and must not ship**.
+14. **(Phase 2 / on request)** Delegate to `pbi-deployer` to publish to Fabric and run validation.
     Not in the default flow until that agent exists.
 
 ## Delegating to subagents
@@ -336,33 +343,31 @@ the same context you would have.
 
 ## Gotchas
 
-- **Clean up the Desktop batch (yours and orphans').** Your subagents each open a Power BI Desktop
-  instance, and in a parallel batch these pile up: orphans from *finished* subagents (+ their child
-  `msmdsrv`) hold the bridge and block later agents (`BRIDGE_ERROR "Host is not ready"`). The shared
-  convention tells each subagent to close its own, but some don't — so **sweep between parallel waves
-  and again before you summarize**: `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"` →
-  map each PID to a migration by `MainWindowTitle` → `Stop-Process -Id <literal pid> -Force` the
-  finished ones only (never one an agent still needs, e.g. mid validator↔builder handoff). Literal PIDs
-  only — the shell guard rejects looped/variable `-Id`. Also confirm no scratch is staged in git.
+- **Clean up the Desktop batch (yours and orphans').** Subagents each open a Desktop instance, and in
+  a parallel batch these pile up: orphans from *finished* subagents (+ their child `msmdsrv`) hold the
+  bridge and block later agents (`BRIDGE_ERROR "Host is not ready"`). The shared convention tells each
+  subagent to close its own, but some don't — so **sweep between waves and before you summarize**:
+  `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"` → map each PID to a migration by
+  `MainWindowTitle` → `Stop-Process -Id <literal pid> -Force` the finished ones only (never one an
+  agent still needs, e.g. mid validator↔builder handoff). Literal PIDs only — the shell guard rejects
+  looped/variable `-Id`. Also confirm no scratch is staged in git.
 - **Keep this repo customer-agnostic.** Never hardcode a customer name into generated code, agent
   files or script identifiers — customer context belongs in `migrations/workbooks/<name>/` only.
 - **Never fabricate row data.** Extract-based (`.hyper`) sources have no live connection; don't invent
-  numbers to fill gaps. Materializing real data (`tableauhyperapi` or a real upstream connection) is a
-  decision for the user, never a silent approximation.
-- **`.twbx` source files are gitignored** (`**/source/*.twbx`) — they can contain customer
-  data. The `migration-spec.json` they produce is the shareable artifact.
+  numbers to fill gaps. Materializing real data is the user's decision, never a silent approximation.
+- **`.twbx` source files are gitignored** (`**/source/*.twbx`) — they can contain customer data. The
+  `migration-spec.json` they produce is the shareable artifact.
 - **Route fixes through the owning subagent, not ad hoc.** When a bug turns up in an already-built
   model/report — whether you found it or `pbi-migration-validator` reported it — re-delegate to the
   subagent that owns that layer (`pbi-semantic-builder` for DAX/TMDL, `pbi-report-builder` for
-  PBIR/visuals) instead of making a direct MCP/file edit yourself, even for a trivial-looking one-line
-  fix. An earlier session's single biggest process gap was exactly this: a long string of real bugs
-  fixed by direct edits that bypassed both subagents' skill chains and validation. The fixes were
-  correct, but nothing that made them *safe* ever ran against them.
-- **Check installed skill versions once per session.** Run the Power BI skills' `check-updates` at the
-  start of a migration. More than one copy of a skill can be installed at different capability levels —
-  this repo hit a real case where an older, less-capable copy was used all session while a newer one
-  (with the `validate` CLI and Desktop Bridge support) sat installed but unused. Prefer the newest, and
-  flag it to the user if you can't tell which is active.
+  PBIR/visuals) rather than editing directly, even for a trivial one-liner. An earlier session's
+  biggest process gap was exactly this: a string of real bugs fixed by direct edits that bypassed both
+  subagents' skill chains and validation. The fixes were correct, but nothing that made them *safe*
+  ever ran against them.
+- **Check installed skill versions once per session.** `preflight.ps1` covers plugin/bundle drift, but
+  also run the Power BI skills' `check-updates`: more than one copy of a skill can be installed at
+  different capability levels, and this repo hit a real case where an older copy was used all session
+  while a newer one sat installed but unused.
 
 ## Frontmatter hardening — status
 
