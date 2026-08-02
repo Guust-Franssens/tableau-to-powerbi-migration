@@ -163,10 +163,34 @@ Stop at the first failure, fix it, re-run that test only.
 T6 is the test that was never run, and the one the deadlock hid.
 
 T7 needs a source Desktop has never authenticated to. **Do not revoke a working PAT to manufacture
-it** (I3) — if no such source exists, T7 stands on previously measured evidence and must be labelled
-as such rather than presented as a fresh run.
+it** (I3) — see the second-warehouse trick below, which costs nothing and destroys nothing.
 
 Repeat T6/T7 across several models only *after* a single-model pass.
+
+#### Phase 3 outcome (2026-08-02) — all pass
+
+**T6, credentialed.** Audit order was finally correct: `block` → `probe-cleared: DATA_OK` → *then*
+artifacts. The model refreshed with **400 real rows** and persisted an 18 KB cache. The oracle is the
+part that matters: Databricks logged `select customer, bill_amount from …shipment` — **two columns,
+i.e. the model's own refresh**, not the probe's one-column `limit 1`. That closes the open question of
+whether the probe's credential path predicts the model's. It does.
+
+**Creating the uncredentialed fixture without breaking anything.** Power BI keys credentials **per
+warehouse (host + HTTP path), not per host** — measured. So a *second warehouse in the same
+workspace* is a real, resolvable source that Power BI has never authenticated to. It costs nothing
+(serverless, auto-stop) and leaves the happy-path credential untouched. This is strictly better than
+revoking a PAT, which destroys a fixture a human had to set up by hand.
+
+**T7 ran twice, and the two runs are why the taxonomy exists:**
+
+| Fixture | Verdict | What the agent told the user |
+|---|---|---|
+| Wrong/placeholder address | `UNREACHABLE` | "correct the server and HTTP path in migration-spec.json" |
+| Second warehouse, no credential | `NO_CREDENTIAL` | "sign in to Databricks through Power BI, then rerun" |
+
+Both correct, and usefully different — a user sent hunting for a sign-in they do not need is a real
+cost. In both runs: zero artifacts, gate never lifted, `verify` exit 0, and the agent **ran the probe
+rather than guessing**, then checked itself with `credential_gate.py verify` unprompted.
 
 ### Phase 4 — merge
 
