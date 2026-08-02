@@ -161,7 +161,9 @@ def probe_dir(migration: Path) -> Path:
 def output_dirs(migration: Path) -> list[Path]:
     """Directories whose contents are the harm: the built model and report.
 
-    `fabric/_probe/` is excluded deliberately - see `probe_dir`.
+    Only `fabric/` is denied. The probe sandbox is `<migration>/_probe/`, a SIBLING that is never
+    in this list and so is never touched by the deny - see `probe_dir` for why it sits outside the
+    denied tree rather than inside it.
     """
     fabric = migration / "fabric"
     fabric.mkdir(parents=True, exist_ok=True)
