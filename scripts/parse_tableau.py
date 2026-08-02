@@ -12,8 +12,6 @@ import argparse
 import json
 import logging
 import re
-import subprocess
-import sys
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1173,26 +1171,6 @@ def main() -> None:
         len(spec["dashboards"]),
         len(spec["limitations_encountered"]),
     )
-    _arm_credential_gate(args.output)
-
-
-def _arm_credential_gate(spec_path: Path) -> None:
-    """Apply the live-source credential gate the moment the spec exists.
-
-    Timing is the point: measured 2026-08-02, an agent built the model BEFORE running the
-    orchestrator's step-5 preflight, so the gate arrived 95s too late to protect anything. Parsing is
-    the earliest moment we know a live source exists, and it precedes any builder. Idempotent, a
-    no-op for extract-only workbooks, and never fatal - see scripts/credential_gate.py for the why.
-    """
-    try:
-        subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "preflight_source_credentials.py"), "--spec", str(spec_path)],
-            capture_output=True,
-            check=False,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("Could not arm the credential gate: %s", exc)
 
 
 if __name__ == "__main__":
