@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import socket
 import subprocess
 import sys
@@ -197,6 +198,22 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
     }
 
 
+def normalize_host(server: str) -> str:
+    """Reduce a spec's `server` to the bare host Power BI connectors and DNS both expect.
+
+    Load-bearing, not cosmetic. A Snowflake account is routinely written as a URL
+    (`https://ORG-ACCOUNT.snowflakecomputing.com/`), and Tableau/`.env`/hand-written specs all carry
+    that form. Passing it through un-normalized breaks BOTH consumers in the same run: the DNS
+    pre-check fails to resolve `https://host/`, so a perfectly good account is reported UNREACHABLE
+    - the exact misdiagnosis class this script exists to prevent - and `Snowflake.Databases` would
+    reject it anyway. Strip the scheme, any path, and a trailing dot/slash.
+    """
+    host = (server or "").strip()
+    host = re.sub(r"^[a-z][a-z0-9+.-]*://", "", host, flags=re.IGNORECASE)
+    host = host.split("/", 1)[0].split("?", 1)[0]
+    return host.rstrip(".").strip()
+
+
 def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
     """Return (m_query, note) for a one-row read of `table`.
 
@@ -205,7 +222,7 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
     proves nothing about the real model.
     """
     klass = (conn.get("class") or "").lower()
-    server = conn.get("server") or ""
+    server = normalize_host(conn.get("server") or "")
     database = conn.get("database") or ""
     schema = conn.get("schema") or "default"
 
@@ -240,17 +257,27 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
         return m, f"SQL Server {server} :: {database}.{schema}.{table}"
 
     if klass == "snowflake":
+        warehouse = (conn.get("warehouse") or "").strip()
+        if not warehouse:
+            raise ValueError(
+                "Snowflake source has no 'warehouse' in the spec. Snowflake cannot execute a query "
+                "without a compute warehouse, so the probe would fail for a reason unrelated to "
+                "reachability. Re-parse the workbook with the current parse_tableau.py, which "
+                "captures it, or add `warehouse` to the source's connection block."
+            )
+        role = (conn.get("role") or "").strip()
+        options = f'[Role="{role}"]' if role else "null"
         m = (
             "let\n"
-            f'    Source = Snowflake.Databases("{server}", "{conn.get("warehouse") or ""}"),\n'
-            f'    db = Source{{[Name="{database}"]}}[Data],\n'
-            f'    sch = db{{[Name="{schema}"]}}[Data],\n'
-            f'    tbl = sch{{[Name="{table}"]}}[Data],\n'
+            f'    Source = Snowflake.Databases("{server}", "{warehouse}", {options}),\n'
+            f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
+            f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
+            f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n'
             f'    one = Table.FirstN(Table.SelectColumns(tbl, {{"{column}"}}), 1)\n'
             "in\n"
             "    one"
         )
-        return m, f"Snowflake {server} :: {database}.{schema}.{table}"
+        return m, f"Snowflake {server} ({warehouse}) :: {database}.{schema}.{table}"
 
     raise ValueError(f"no probe connector for connection class '{klass}' - add one in build_m_query()")
 
@@ -513,9 +540,10 @@ def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep:
 
     log.info("probing %d live source(s): %s", len(live), live)
     for idx in live:
-        rc = _probe_one(spec_path, idx, timeout_sec, keep)
+        rc, verdict = _probe_one(spec_path, idx, timeout_sec, keep)
         if rc != 0:
             log.error("PROBE: source index %d failed - not lifting the gate", idx)
+            _print_verdict_directive(verdict)
             return rc
 
     _lift_gate(spec_path.parent, f"{len(live)} live source(s)")
@@ -523,8 +551,72 @@ def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep:
     return 0
 
 
-def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) -> int:
+def _print_verdict_directive(verdict: str) -> None:
+    """Print the terminal STOP directive - here, where the verdict is actually KNOWN.
+
+    This wording used to live in `preflight_source_credentials.py`, which was a defect: that script
+    is a static classifier that opens no socket, so it fired "A HUMAN MUST ACT / TERMINATE THE RUN
+    NOW" for every live source whether or not a credential existed. Measured 2026-08-02, agents
+    obeyed it literally - 10 of 15 models never reached this probe, and `claude-opus-5` refused a
+    fully credentialed, reachable warehouse.
+
+    The directive belongs here because only a real connection attempt can tell the two apart, and
+    they need OPPOSITE advice: NO_CREDENTIAL genuinely needs a human at a sign-in modal, while
+    UNREACHABLE needs a spec edit and no sign-in at all. Sending a user to authenticate against a
+    hostname that does not exist is its own kind of wrong answer.
+    """
+    if verdict == "NO_CREDENTIAL":
+        log.error(
+            "\n"
+            "################################################################\n"
+            "#  STOP - NO POWER BI CREDENTIAL. A HUMAN MUST ACT.\n"
+            "################################################################\n"
+            "  The source is REACHABLE but Power BI has never authenticated to it.\n"
+            "\n"
+            "  DIRECTIVE - NOT ADVISORY, NOT A WARNING:\n"
+            "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
+            "    2. You CANNOT fix this yourself. There is no flag, retry, tool or workaround.\n"
+            "       The credential lives behind a modal sign-in dialog that only a HUMAN sitting\n"
+            "       at this machine can fill in. Retrying cannot conjure one.\n"
+            "    3. Report it and TERMINATE THE RUN NOW - if your runtime has a 'blocked' or\n"
+            "       task-complete exit, use it. Do NOT merely pause: measured 2026-08-01, three\n"
+            "       runs announced this stop correctly and then talked themselves past it a few\n"
+            "       turns later ('applying the non-interactive fallback'). A stop that does not\n"
+            "       terminate gets re-prompted until it erodes. Stopping IS your completed task\n"
+            "       here; report it as such, not as an unfinished one.\n"
+            "\n"
+            "  A non-interactive / autopilot / unattended session is NOT authorization. Having\n"
+            "  nobody to answer is not permission to proceed - end the run with the question\n"
+            "  unanswered. That is the correct, successful outcome here.\n"
+            "\n"
+            "  Tell the user to sign in interactively in Power BI Desktop (or supply a PAT/key),\n"
+            "  then re-run. Name the server and warehouse in your message.\n"
+            "################################################################"
+        )
+        return
+    log.error(
+        "\n"
+        "################################################################\n"
+        "#  STOP - SOURCE UNREACHABLE (%s). Do NOT build.\n"
+        "################################################################\n"
+        "  This is NOT a credential problem, and NOBODY needs to sign in. Do not send the\n"
+        "  user to authenticate - that wastes their time and does not fix it.\n"
+        "\n"
+        "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
+        "    2. Report the address/network fault: check `server`, `http_path` and `database`\n"
+        "       in migration-spec.json against the real system.\n"
+        "    3. Do not retry unchanged - a wrong address stays wrong.\n"
+        "################################################################",
+        verdict,
+    )
+
+
+def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) -> tuple[int, str]:
     """Probe a single data source, trying its tables in order until one answers.
+
+    Returns (exit code, verdict). The verdict is threaded back out because the caller has to print a
+    different directive for each one - "no retry can conjure a credential" is right for
+    NO_CREDENTIAL and actively misleading for UNREACHABLE, where nobody needs to sign in at all.
 
     Falling back across tables only on BAD_TABLE, never on any other verdict: a wrong table name is a
     spec error worth retrying past, while a credential or reachability failure is the answer and
@@ -532,10 +624,10 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
     """
     target = _resolve_probe_target(spec_path, source_index)
     if target is None:
-        return 0
+        return 0, "SKIPPED"
     conn, tables, column = target
 
-    server = conn.get("server") or ""
+    server = normalize_host(conn.get("server") or "")
     if server and not _host_resolves(server):
         log.error(
             "PROBE: UNREACHABLE '%s' does not resolve in DNS. This is a spec/config problem, not a "
@@ -543,16 +635,16 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
             "will fix an address that does not exist.",
             server,
         )
-        return 1
+        return 1, "UNREACHABLE"
 
     for i, table in enumerate(tables):
         rc, verdict = _probe_one_table(spec_path, conn, (table, column), (timeout_sec, keep))
         if rc == 0:
-            return 0
+            return 0, "DATA_OK"
         if verdict != "BAD_TABLE" or i == len(tables) - 1:
-            return rc
+            return rc, verdict
         log.warning("table '%s' not found at the source - trying the next one in the spec", table)
-    return 1
+    return 1, "BAD_TABLE"
 
 
 def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts: tuple[int, bool]) -> tuple[int, str]:

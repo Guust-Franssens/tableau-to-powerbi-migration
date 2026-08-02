@@ -41,12 +41,16 @@ CATALOG = "dbx_workspace"
 SCHEMA = "tableau_migration"
 TABLE = "shipment"
 
-TWB = """<?xml version='1.0' encoding='utf-8' ?>
-<workbook source-build='2024.1.0' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
-  <datasources>
-    <datasource caption='Shipment (Databricks)' inline='true' name='federated.probe0live0001' version='18.1'>
-      <connection class='federated'>
-        <named-connections>
+# Snowflake equivalent of the same fixture - same table, same two columns, same 400 rows (see
+# scripts/snowflake_fixture.sql). Kept here so the Snowflake connector path is exercised by the
+# identical agent-behaviour test, rather than only ever being reasoned about.
+SF_HOST = "EQEILJH-QO26899.snowflakecomputing.com"
+SF_WAREHOUSE = "PROBE_WH"
+SF_DATABASE = "TABLEAU_MIGRATION"
+SF_SCHEMA = "PROBE"
+SF_TABLE = "SHIPMENT"
+
+_CONN_DATABRICKS = """        <named-connections>
           <named-connection caption='{host}' name='databricks.probe0conn0001'>
             <connection authentication='oauth' authentication-type='' class='databricks' dbname='{catalog}'
               instanceurl='https://{host}/oidc' oauth-config-id='default' odbc-connect-string-extras=''
@@ -55,28 +59,49 @@ TWB = """<?xml version='1.0' encoding='utf-8' ?>
           </named-connection>
         </named-connections>
         <relation connection='databricks.probe0conn0001' name='{table}'
-          table='[{catalog}].[{schema}].[{table}]' type='table' />
+          table='[{catalog}].[{schema}].[{table}]' type='table' />""".format(
+    host=HOST, catalog=CATALOG, schema=SCHEMA, http_path=HTTP_PATH, table=TABLE
+)
+
+_CONN_SNOWFLAKE = """        <named-connections>
+          <named-connection caption='{host}' name='snowflake.probe0conn0001'>
+            <connection authentication='Username and Password' class='snowflake' dbname='{database}'
+              odbc-connect-string-extras='' one-time-sql='' schema='{schema}' server='{host}'
+              service='' username='probe@example.com' warehouse='{warehouse}' />
+          </named-connection>
+        </named-connections>
+        <relation connection='snowflake.probe0conn0001' name='{table}'
+          table='[{database}].[{schema}].[{table}]' type='table' />""".format(
+    host=SF_HOST, database=SF_DATABASE, schema=SF_SCHEMA, warehouse=SF_WAREHOUSE, table=SF_TABLE
+)
+
+_TWB_SKELETON = """<?xml version='1.0' encoding='utf-8' ?>
+<workbook source-build='2024.1.0' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource caption='Shipment ({flavor})' inline='true' name='federated.probe0live0001' version='18.1'>
+      <connection class='federated'>
+{conn}
         <cols>
-          <map key='[customer]' value='[{table}].[customer]' />
-          <map key='[bill_amount]' value='[{table}].[bill_amount]' />
+          <map key='[{c1}]' value='[{table}].[{c1}]' />
+          <map key='[{c2}]' value='[{table}].[{c2}]' />
         </cols>
         <metadata-records>
           <metadata-record class='column'>
-            <remote-name>customer</remote-name><local-name>[customer]</local-name>
-            <parent-name>[{table}]</parent-name><remote-alias>customer</remote-alias>
+            <remote-name>{c1}</remote-name><local-name>[{c1}]</local-name>
+            <parent-name>[{table}]</parent-name><remote-alias>{c1}</remote-alias>
             <local-type>string</local-type><aggregation>Count</aggregation>
           </metadata-record>
           <metadata-record class='column'>
-            <remote-name>bill_amount</remote-name><local-name>[bill_amount]</local-name>
-            <parent-name>[{table}]</parent-name><remote-alias>bill_amount</remote-alias>
+            <remote-name>{c2}</remote-name><local-name>[{c2}]</local-name>
+            <parent-name>[{table}]</parent-name><remote-alias>{c2}</remote-alias>
             <local-type>real</local-type><aggregation>Sum</aggregation>
           </metadata-record>
         </metadata-records>
       </connection>
-      <column caption='Customer' datatype='string' name='[customer]' role='dimension' type='nominal' />
-      <column caption='Bill Amount' datatype='real' name='[bill_amount]' role='measure' type='quantitative' />
-      <column-instance column='[customer]' derivation='None' name='[none:customer:nk]' pivot='key' type='nominal' />
-      <column-instance column='[bill_amount]' derivation='Sum' name='[sum:bill_amount:qk]' pivot='key'
+      <column caption='Customer' datatype='string' name='[{c1}]' role='dimension' type='nominal' />
+      <column caption='Bill Amount' datatype='real' name='[{c2}]' role='measure' type='quantitative' />
+      <column-instance column='[{c1}]' derivation='None' name='[none:{c1}:nk]' pivot='key' type='nominal' />
+      <column-instance column='[{c2}]' derivation='Sum' name='[sum:{c2}:qk]' pivot='key'
         type='quantitative' />
     </datasource>
   </datasources>
@@ -85,7 +110,7 @@ TWB = """<?xml version='1.0' encoding='utf-8' ?>
       <table>
         <view>
           <datasources>
-            <datasource caption='Shipment (Databricks)' name='federated.probe0live0001' />
+            <datasource caption='Shipment ({flavor})' name='federated.probe0live0001' />
           </datasources>
         </view>
         <panes>
@@ -93,8 +118,8 @@ TWB = """<?xml version='1.0' encoding='utf-8' ?>
             <mark class='Bar' />
           </pane>
         </panes>
-        <rows>[federated.probe0live0001].[none:customer:nk]</rows>
-        <cols>[federated.probe0live0001].[sum:bill_amount:qk]</cols>
+        <rows>[federated.probe0live0001].[none:{c1}:nk]</rows>
+        <cols>[federated.probe0live0001].[sum:{c2}:qk]</cols>
       </table>
     </worksheet>
   </worksheets>
@@ -108,16 +133,36 @@ TWB = """<?xml version='1.0' encoding='utf-8' ?>
     </dashboard>
   </dashboards>
 </workbook>
-""".format(host=HOST, catalog=CATALOG, schema=SCHEMA, http_path=HTTP_PATH, table=TABLE)
+"""
 
 
-def make(variants: list[str]) -> int:
+def build_twb(flavor: str) -> str:
+    """Render the fixture workbook for one source flavor.
+
+    Column case is not cosmetic: Snowflake folds unquoted identifiers to UPPERCASE, so the columns
+    Power BI gets back are `CUSTOMER`/`BILL_AMOUNT`. `Table.SelectColumns` is case-sensitive on
+    those names, so a lowercase fixture would fail against a perfectly healthy Snowflake table -
+    and the failure would look like a source problem rather than a fixture bug.
+    """
+    if flavor == "snowflake":
+        return _TWB_SKELETON.format(
+            flavor="Snowflake", conn=_CONN_SNOWFLAKE, table=SF_TABLE, c1="CUSTOMER", c2="BILL_AMOUNT"
+        )
+    return _TWB_SKELETON.format(
+        flavor="Databricks", conn=_CONN_DATABRICKS, table=TABLE, c1="customer", c2="bill_amount"
+    )
+
+
+TWB = build_twb("databricks")
+
+
+def make(variants: list[str], flavor: str = "databricks") -> int:
     """Create one throwaway migration tree per variant."""
     for v in variants:
         root = LAB / f"variant-{v}"
         (root / "source").mkdir(parents=True, exist_ok=True)
         twb = root / "source" / "Probe.twb"
-        twb.write_text(TWB, encoding="utf-8")
+        twb.write_text(build_twb(flavor), encoding="utf-8")
         spec = root / "migration-spec.json"
         proc = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "parse_tableau.py"), str(twb), "-o", str(spec)],
@@ -233,6 +278,7 @@ def main() -> int:
 
     m = sub.add_parser("make", help="generate minimal fixtures")
     m.add_argument("--variants", nargs="+", default=["a"])
+    m.add_argument("--flavor", choices=["databricks", "snowflake"], default="databricks")
 
     w = sub.add_parser("watch", help="watch one variant and report a verdict")
     w.add_argument("--variant", required=True)
@@ -241,7 +287,7 @@ def main() -> int:
 
     args = ap.parse_args()
     if args.cmd == "make":
-        return make(args.variants)
+        return make(args.variants, args.flavor)
     return watch(args.variant, args.timeout_sec, args.poll_sec)
 
 

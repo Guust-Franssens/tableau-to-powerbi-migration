@@ -134,8 +134,18 @@ def _capture_connect_details(connection: dict[str, Any], conn_el: etree._Element
     A Databricks M query needs the SQL-warehouse HTTP path and most warehouses need the schema;
     dropping these forced the reachability probe to re-read the raw `.twb`. Empty values are skipped
     because Tableau writes `attr=''` for unset options.
+
+    `warehouse` and `role` are Snowflake's equivalents: a Snowflake query cannot run without a
+    compute warehouse, and corporate accounts commonly require an explicit role because the user's
+    default has no grants on the target database. Both are plain connection attributes, never
+    secrets.
     """
-    for spec_key, attr in (("http_path", "v-http-path"), ("schema", "schema"), ("warehouse", "warehouse")):
+    for spec_key, attr in (
+        ("http_path", "v-http-path"),
+        ("schema", "schema"),
+        ("warehouse", "warehouse"),
+        ("role", "role"),
+    ):
         value = (conn_el.get(attr) or "").strip()
         if value:
             connection[spec_key] = value

@@ -394,3 +394,145 @@ def test_a_genuinely_refused_write_is_still_recognised(migration: Path) -> None:
     verdict, note = _judge_with(migration, real)
     assert verdict == "PASS"
     assert "enforcement blocked it" in note
+
+
+def _classifier_output(tmp_path: Path) -> str:
+    """Run the static classifier over a one-live-source spec and return everything it printed."""
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "id": "ds.x",
+                        "connection": {
+                            "class": "databricks",
+                            "mode": "live",
+                            "server": "adb-1.1.azuredatabricks.net",
+                            "database": "db",
+                            "http_path": "/sql/1.0/warehouses/abc",
+                            "powerbi_target": "live_source",
+                        },
+                        "tables": [{"name": "t"}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "fabric").mkdir(exist_ok=True)
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "preflight_source_credentials.py"), "--spec", str(spec)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    run_gate("clear", str(tmp_path), "--reason", "test-teardown")
+    return (proc.stdout + proc.stderr).lower()
+
+
+def test_the_classifier_sends_the_agent_to_the_probe_instead_of_terminating(tmp_path: Path) -> None:
+    """The defect that shipped to this branch, pinned.
+
+    `preflight_source_credentials.py` opens no socket - it cannot know whether a credential exists.
+    It nonetheless printed an unconditional "STOP - A HUMAN MUST ACT / TERMINATE THE RUN NOW" for
+    every live source. Measured 2026-08-02: 10 of 15 models obeyed it literally and never reached
+    `probe_live_source.py`, and claude-opus-5 refused a FULLY CREDENTIALED, reachable warehouse on
+    the happy path - a migration that would have succeeded in seconds.
+
+    The classifier must withhold judgement and hand off to the measurement.
+    """
+    out = _classifier_output(tmp_path)
+
+    assert "probe_live_source.py" in out, "the classifier must name the probe as the next action"
+
+    forbidden = ["terminate the run", "a human must act", "you cannot fix this yourself"]
+    present = [p for p in forbidden if p in out]
+    assert not present, f"a socket-less classifier must not issue a terminal stop; found {present}"
+
+
+def test_the_classifier_still_forbids_building(tmp_path: Path) -> None:
+    """Paired control: softening the directive must not soften the actual prohibition."""
+    out = _classifier_output(tmp_path)
+    assert "may not build" in out
+    assert "proof required" in out
+
+
+def test_the_terminal_stop_lives_in_the_probe_where_the_verdict_is_known() -> None:
+    """The strong wording is not deleted - it moves to the component that can tell the difference.
+
+    NO_CREDENTIAL and UNREACHABLE need OPPOSITE advice: one needs a human at a sign-in modal, the
+    other needs a spec edit and no sign-in at all. Only a real connection attempt separates them.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import probe_live_source  # noqa: PLC0415
+
+    src = Path(probe_live_source.__file__).read_text(encoding="utf-8").lower()
+    assert "a human must act" in src
+    assert "nobody needs to sign in" in src, "UNREACHABLE must not send the user to authenticate"
+
+
+SNOWFLAKE_CONN = {
+    "class": "snowflake",
+    "server": "EQEILJH-QO26899.snowflakecomputing.com",
+    "database": "TABLEAU_MIGRATION",
+    "schema": "PROBE",
+    "warehouse": "PROBE_WH",
+}
+
+
+def _m(**overrides) -> str:
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import build_m_query  # noqa: PLC0415
+
+    return build_m_query({**SNOWFLAKE_CONN, **overrides}, "SHIPMENT", "CUSTOMER")[0]
+
+
+def test_a_snowflake_account_written_as_a_url_still_resolves(tmp_path: Path) -> None:
+    """A URL-shaped account must not be misdiagnosed as UNREACHABLE.
+
+    Snowflake accounts are routinely written as `https://ORG-ACCOUNT.snowflakecomputing.com/` - that
+    is the form Snowsight shows and the form a .env carries. Un-normalized it breaks BOTH consumers
+    at once: the DNS pre-check cannot resolve `https://host/`, so a perfectly good account is
+    reported UNREACHABLE, and Snowflake.Databases would reject it too.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _host_resolves, normalize_host  # noqa: PLC0415
+
+    bare = "EQEILJH-QO26899.snowflakecomputing.com"
+    for written in (f"https://{bare}", f"https://{bare}/", bare, f"  {bare}.  ", f"https://{bare}/some/path"):
+        assert normalize_host(written) == bare, f"failed to normalize {written!r}"
+    assert _host_resolves(normalize_host(f"https://{bare}/")) is True
+    assert f'Snowflake.Databases("{bare}"' in _m(server=f"https://{bare}/")
+
+
+def test_snowflake_without_a_warehouse_fails_loudly_not_silently() -> None:
+    """Snowflake cannot execute a query with no compute warehouse.
+
+    Passing "" produced a refresh failure that the taxonomy would read as a reachability or
+    credential problem - a wrong verdict for a spec bug. Databricks already raised for a missing
+    http_path; Snowflake must match.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import build_m_query  # noqa: PLC0415
+
+    conn = {k: v for k, v in SNOWFLAKE_CONN.items() if k != "warehouse"}
+    with pytest.raises(ValueError, match="warehouse"):
+        build_m_query(conn, "SHIPMENT", "CUSTOMER")
+
+
+def test_snowflake_navigation_is_kind_qualified_like_power_bis_own_m() -> None:
+    """Power BI's generated Snowflake M qualifies every navigation step with Kind.
+
+    Without it a database and schema sharing a name navigate ambiguously. Databricks was already
+    Kind-qualified; Snowflake silently was not.
+    """
+    m = _m()
+    for kind in ("Database", "Schema", "Table"):
+        assert f'Kind="{kind}"' in m, f"missing Kind={kind} in Snowflake navigation"
+
+
+def test_snowflake_role_is_passed_through_when_the_spec_has_one() -> None:
+    """Corporate accounts often need an explicit role - the user's default may have no grants."""
+    assert 'Snowflake.Databases("EQEILJH-QO26899.snowflakecomputing.com", "PROBE_WH", null)' in _m()
+    assert '"PROBE_WH", [Role="ANALYST"]' in _m(role="ANALYST")

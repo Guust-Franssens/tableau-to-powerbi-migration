@@ -281,45 +281,55 @@ def _empty_body() -> str:
 
 
 def _print_stop_directive(needs: int) -> None:
-    """Print the agent-facing STOP directive.
+    """Print the agent-facing PROOF-REQUIRED directive.
 
     This is printed FIRST, before any remediation detail, and restated at the end. Both placements
     are deliberate: a shell tool's output is often truncated in the middle (the failed run showed
     the whole gate collapsed to "17 lines"), so an imperative that appears only at the bottom can be
     cut before the agent ever reads it. Leading with it also sets the frame - remediation steps read
     as "the user will handle this later" when they come first.
+
+    This directive must NOT tell the agent to terminate. It once did, and that was a defect
+    (measured 2026-08-02): this script is a *static classifier* - it opens no socket and cannot know
+    whether a credential exists - yet it fired an unconditional "STOP - A HUMAN MUST ACT / TERMINATE
+    THE RUN NOW" for every live source. Agents obeyed it literally: 10 of 15 models never reached
+    `probe_live_source.py` at all, and `claude-opus-5` refused a FULLY CREDENTIALED, reachable
+    warehouse on the happy path - a migration that would have succeeded in seconds.
+
+    That is the prose analogue of the v1 filesystem deadlock: the step that decides was never
+    allowed to run. The terminal "a human must act" wording now lives in the PROBE, the only
+    component that actually knows. Here we say: do not build, and go measure.
     """
     log.warning(
         "\n"
         "################################################################\n"
-        "#  STOP - CREDENTIAL GATE FAILED. A HUMAN MUST ACT.            #\n"
+        "#  PROOF REQUIRED - %d live source(s) UNPROVEN. Do NOT build.\n"
         "################################################################\n"
-        "  %d live data source(s) have NO Power BI credential.\n"
-        "\n"
         "  DIRECTIVE TO THE AGENT READING THIS - NOT ADVISORY, NOT A WARNING:\n"
-        "    1. You may NOT build the semantic model or the report.\n"
-        "    2. You CANNOT fix this yourself. There is no flag, retry, tool or\n"
-        "       workaround. The credential lives behind a modal sign-in dialog that\n"
-        "       only a HUMAN sitting at this machine can fill in.\n"
-        "    3. Report it to the user and TERMINATE THE RUN NOW - if your runtime has\n"
-        "       a 'blocked' or task-complete exit, use it and say you are blocked on a\n"
-        "       credential. Do NOT merely pause: measured 2026-08-01, three runs\n"
-        "       announced this stop correctly and then talked themselves past it a few\n"
-        "       turns later ('applying the non-interactive fallback'). A stop that does\n"
-        "       not terminate gets re-prompted until it erodes. Stopping IS your\n"
-        "       completed task here; report it as such, not as an unfinished one.\n"
+        "    1. You may NOT build the semantic model or the report YET. TMDL for an\n"
+        "       unreachable source is byte-identical to TMDL that works, so building now\n"
+        "       hands over something indistinguishable from a correct model that nobody\n"
+        "       can tell is broken.\n"
+        "    2. This check opened NO connection. It is a classifier, not a test. It does\n"
+        "       NOT know whether a credential exists, so it is NOT telling you to stop.\n"
+        "    3. Your NEXT action is the measurement. Run it now:\n"
+        "         python scripts/probe_live_source.py --spec <this spec>\n"
+        "       It builds a one-table model, opens Power BI Desktop, and reads one real\n"
+        "       row. It lifts the gate itself on DATA_OK.\n"
         "\n"
-        "  A non-interactive / autopilot / unattended session is NOT authorization.\n"
-        "  Having nobody to answer is not permission to proceed - end the run with\n"
-        "  the question unanswered. That is the correct, successful outcome here.\n"
+        "  DO NOT stop and ask the user yet. A verdict of 'only a human can fix this' is the\n"
+        "  PROBE's to give, not this script's - and only the probe can tell a missing credential\n"
+        "  (a human IS needed) from a wrong hostname (nobody needs to sign in). Reporting\n"
+        "  'credential required' without probing sends the user hunting for a sign-in they\n"
+        "  may not need, and refuses migrations that would have worked.\n"
         "\n"
-        "  'Defer validation' is a choice only the USER can make, AFTER seeing this\n"
-        "  gate. It NEVER means 'skip the test and build anyway'.\n"
+        "  Then let the RESULT decide:\n"
+        "    DATA_OK        -> gate lifts automatically; build for real.\n"
+        "    NO_CREDENTIAL  -> STOP and ask a human. No retry can conjure a credential.\n"
+        "    UNREACHABLE    -> STOP; report the address/network fault. Do not build.\n"
         "\n"
-        "  Building unvalidated artifacts is NOT a partial success and NOT better\n"
-        "  than stopping: TMDL for an unreachable source is byte-identical to TMDL\n"
-        "  that works, so you would be handing over something indistinguishable from\n"
-        "  a correct model that nobody can tell is broken.\n"
+        "  'Defer validation' is a choice only the USER can make, AFTER a probe result.\n"
+        "  It NEVER means 'skip the test and build anyway'.\n"
         "################################################################",
         needs,
     )
@@ -327,10 +337,10 @@ def _print_stop_directive(needs: int) -> None:
 
 def _print_remediation() -> None:
     log.warning(
-        "\nACTION REQUIRED before continuing the migration:\n"
-        "  A live source has no Power BI credential yet. Configure it once, then re-run the gate:\n"
+        "\nIF the probe comes back NO_CREDENTIAL, this is how a human fixes it:\n"
         "  Option A (UI): Power BI service > the semantic model > Settings > Data source credentials\n"
         "                 > Edit credentials > enter the token/login. Power BI stores it server-side.\n"
+        "                 Locally: sign in interactively once in Power BI Desktop.\n"
         "  Option B (API): create a Fabric cloud connection with the credential and bind the model:\n"
         "                 POST /v1/connections (connectivityType=ShareableCloud, the matching\n"
         "                 creationMethod + parameters, credentialType=Key/Basic/OAuth2), then\n"
@@ -340,12 +350,10 @@ def _print_remediation() -> None:
         "  the user's to complete (or the user must supply the secret for Option B).\n"
         "\n"
         "============================================================\n"
-        "REMINDER (see the full directive above): STOP. Do NOT build.\n"
-        "  A HUMAN must supply this credential - you cannot, and retrying cannot.\n"
-        "  Report to the user and TERMINATE the run (use your runtime's blocked /\n"
-        "  task-complete exit). Do not merely pause - a stop that does not terminate\n"
-        "  gets re-prompted until it erodes. A non-interactive or autopilot session\n"
-        "  is NOT authorization to continue.\n"
+        "REMINDER (see the full directive above): do NOT build yet, and do NOT\n"
+        "  report a credential problem yet either - none has been observed. This\n"
+        "  check never opened a connection. Run the probe; it decides:\n"
+        "      python scripts/probe_live_source.py --spec <this spec>\n"
         "============================================================"
     )
 

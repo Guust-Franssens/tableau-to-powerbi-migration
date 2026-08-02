@@ -1,0 +1,46 @@
+-- purpose: create the Snowflake test fixture for the credential-gate probe, mirroring the
+--          Databricks fixture (same table, same columns, same 400 rows) so the two connectors
+--          produce directly comparable probe results.
+-- usage:   paste into a Snowsight worksheet and Run All. Takes a few seconds.
+--
+-- Why you run this by hand rather than the agent running it:
+--   Snowflake PAT authentication refuses with "390432: Network policy is required" until a network
+--   policy is attached to the user, which needs ACCOUNTADMIN. Pasting this is faster than granting
+--   that, and it keeps the PAT unused - which matters, because the probe deliberately CANNOT use a
+--   PAT anyway (it must exercise Power BI Desktop's own credential store, not the agent's).
+--
+-- After running this, sign in to Snowflake ONCE in Power BI Desktop. Note the ordering:
+--   1. BEFORE signing in  -> probe should return NO_CREDENTIAL  (the unhappy path, free to test)
+--   2. AFTER signing in   -> probe should return DATA_OK        (the happy path)
+-- Power BI keys Snowflake credentials per ACCOUNT HOST, not per warehouse, so a second warehouse
+-- would share the credential - which is why the unhappy path has to be tested first.
+
+CREATE WAREHOUSE IF NOT EXISTS PROBE_WH
+    WAREHOUSE_SIZE = 'XSMALL'
+    AUTO_SUSPEND = 60          -- seconds; costs nothing while idle
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+
+CREATE DATABASE IF NOT EXISTS TABLEAU_MIGRATION;
+CREATE SCHEMA   IF NOT EXISTS TABLEAU_MIGRATION.PROBE;
+
+USE WAREHOUSE PROBE_WH;
+USE SCHEMA TABLEAU_MIGRATION.PROBE;
+
+CREATE OR REPLACE TABLE SHIPMENT (
+    CUSTOMER    STRING,
+    BILL_AMOUNT NUMBER(12, 2)
+);
+
+-- 400 rows across 8 customers, deterministic so the probe and any later fidelity check agree.
+INSERT INTO SHIPMENT (CUSTOMER, BILL_AMOUNT)
+SELECT
+    'Customer ' || TO_CHAR(MOD(SEQ4(), 8) + 1),
+    ROUND(100 + (MOD(SEQ4() * 37, 900)) + (MOD(SEQ4(), 100) / 100.0), 2)
+FROM TABLE(GENERATOR(ROWCOUNT => 400));
+
+-- Verify: expect 400 rows and 8 distinct customers.
+SELECT COUNT(*) AS ROW_COUNT,
+       COUNT(DISTINCT CUSTOMER) AS CUSTOMERS,
+       ROUND(SUM(BILL_AMOUNT), 2) AS TOTAL_BILL
+FROM SHIPMENT;
