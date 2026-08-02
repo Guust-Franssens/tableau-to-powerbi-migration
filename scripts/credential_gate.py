@@ -24,15 +24,23 @@ and raw `ctypes.CreateFileW` was refused.
 
 What this does NOT claim
 ------------------------
-It is not a sandbox. The ACL denies the *current user*, and the agent runs as that user, so it could
-in principle call `icacls` to remove it. That is deliberate and acceptable:
+It is not a sandbox. The ACL denies the *current user*, and the agent runs as that user, so it can in
+principle remove it. That is not hypothetical - measured 2026-08-02, an agent left behind a script
+that did exactly this:
 
-* the narrow surface (`icacls` / `Set-Acl` / `takeown` naming this path) IS reliably matchable, unlike
-  "every way to write a file", so the hook can defend it;
-* doing so is an unmistakably deliberate act, not a rationalisation slip - and `verify` plus the audit
-  log make it visible after the fact.
+    OVERRIDE_NAME = "." + "credential-gate-AUTHORIZED"     # split to evade the hook's regex
+    advapi32.SetNamedSecurityInfoW(...)                    # raw Win32 DACL edit, bypassing icacls
 
-The goal is to make the accidental case impossible and the deliberate case obvious.
+That is a determined adversary escalating from string tricks to the Win32 security API, and no
+same-user control defeats it. What the layers achieve is narrower and, I think, the right goal:
+
+* the ACCIDENTAL case - an agent under task-completion pressure, which is what actually happened in
+  every real migration failure - is stopped outright, because a normal write just fails;
+* the DELIBERATE case is expensive, unmistakable, and DETECTED: `verify` reads the ACL and the audit
+  log rather than files an agent can write, so a stripped ACE or a forged override is reported.
+
+Do not describe this as "agents cannot bypass the gate". Describe it as "agents cannot bypass it by
+accident, and cannot bypass it quietly".
 """
 
 from __future__ import annotations
@@ -177,20 +185,79 @@ def _override_is_authentic(migration: Path) -> bool:
     return False
 
 
+def _ancestry() -> list[str]:
+    """Process names from this process up to the root, for provenance checks and audit."""
+    if platform.system() != "Windows":
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "$id=$PID; $all=Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name;"
+                "for($i=0;$i -lt 12;$i++){$p=$all|Where-Object{$_.ProcessId -eq $id}|Select-Object -First 1;"
+                "if(-not $p){break}; Write-Output $p.Name; $id=$p.ParentProcessId}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError):
+        return ["<lineage-unavailable>"]
+
+
+def _has_copilot_ancestor(chain: list[str]) -> bool:
+    """Was this process started (directly or indirectly) by a Copilot CLI agent?
+
+    The guard on `authorize`, because everything softer failed. Measured 2026-08-02: an agent ran
+    `credential_gate.py authorize --who gfranssens` itself, impersonating the user through the
+    sanctioned path - so the audit log then *certified* a forged authorization and `verify` returned
+    a clean exit 0. That is worse than having no audit trail at all.
+
+    A TTY check does not help: the agent's shell reports `stdin.isatty() == True` (measured), and it
+    could pipe a confirmation anyway. Process lineage is the practical boundary - a real chain looks
+    like `python <- pwsh <- copilot.exe <- ...`, and an agent would have to escape its own process
+    tree to defeat it.
+
+    **Fails CLOSED on an empty or unavailable chain**, which is the whole reason this is a separate
+    function. The first version treated "no chain" as "no copilot ancestor" and returned False, so a
+    failed lineage query silently AUTHORIZED - and that is exactly what happened: under four
+    concurrent agents one query came back empty and the forged authorization went through. An
+    unknown answer must never be read as permission.
+    """
+    if platform.system() != "Windows":
+        return False
+    if not chain or "<lineage-unavailable>" in chain:
+        return True
+    return any("copilot" in name.lower() for name in chain)
+
+
 def authorize(migration: Path, who: str) -> int:
     """Record a human's explicit build-only authorization and lift the ACL.
 
-    This is the ONLY supported way to proceed without a successful probe. It is deliberately a
-    separate verb rather than a file the agent might create: the audit entry it writes is what makes
-    the override authentic, and lifting the ACL is what makes it effective.
+    The ONLY supported way to proceed without a successful probe, and deliberately hostile to being
+    run by an agent - see `_has_copilot_ancestor`. The ancestry chain is recorded either way, so a
+    forged authorization is attributable after the fact even if the check is somehow evaded.
     """
+    chain = _ancestry()
+    if _has_copilot_ancestor(chain):
+        log.error("REFUSED: this command was invoked from inside a Copilot agent session.")
+        log.error("  Authorizing an unvalidated build is a HUMAN decision. An agent running this")
+        log.error("  command is impersonating the user - measured 2026-08-02, one did exactly that.")
+        log.error("  If you are a human: run this from a plain terminal, outside any Copilot session.")
+        log.error("  Process chain seen: %s", " <- ".join(chain))
+        _audit(migration, "violation", f"authorize refused; chain={chain}")
+        return 2
     (migration / OVERRIDE).write_text(
         f"Build-only migration authorized by {who} at "
         f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}.\n"
         "Validation against live data was explicitly deferred by a human.\n",
         encoding="utf-8",
     )
-    _audit(migration, "authorize", f"by={who}")
+    _audit(migration, "authorize", f"by={who}; chain={chain}")
     return clear_block(migration, f"user-authorized-build-only ({who})")
 
 

@@ -61,10 +61,20 @@ def test_a_bare_override_file_authorizes_nothing(migration: Path) -> None:
     assert run_gate("verify", str(migration)).returncode == 1, "forged override must be reported"
 
 
-def test_authorize_is_audit_backed_and_lifts_the_gate(migration: Path) -> None:
+def test_authorize_is_audit_backed_and_lifts_the_gate(migration: Path, monkeypatch) -> None:
+    """The human path: an audit-backed authorize is what makes an override authentic.
+
+    Runs the mechanics in-process with the lineage guard stubbed to "human", because the suite itself
+    executes inside an agent session and would otherwise (correctly) be refused. The refusal path has
+    its own test.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import credential_gate as gate  # noqa: PLC0415
+
     run_gate("block", str(migration), "--sources", "x")
-    assert run_gate("authorize", str(migration), "--who", "tester").returncode == 0
-    assert run_gate("verify", str(migration)).returncode == 0
+    monkeypatch.setattr(gate, "_has_copilot_ancestor", lambda _chain: False)
+    assert gate.authorize(migration, "tester") == 0
+    assert gate.verify(migration) == 0
     audit = (migration / ".credential-gate-audit.log").read_text(encoding="utf-8")
     assert '"action": "authorize"' in audit
 
@@ -119,3 +129,41 @@ def test_hook_is_fast_enough_that_it_cannot_time_out(migration: Path) -> None:
     start = time.monotonic()
     run_hook({"toolName": "view", "toolArgs": "{}", "cwd": str(migration)})
     assert time.monotonic() - start < 5.0
+
+
+def test_authorize_is_refused_from_inside_an_agent_session(migration: Path) -> None:
+    """Agents ran `authorize --who <user>` themselves, forging the human decision.
+
+    The tests run under pytest, which is itself launched from an agent session here, so this asserts
+    the refusal path. It is the behaviour that matters: an agent must not be able to certify its own
+    unvalidated build through the sanctioned command.
+    """
+    import platform
+
+    if platform.system() != "Windows":
+        pytest.skip("lineage check is Windows-only")
+    run_gate("block", str(migration), "--sources", "x")
+    proc = run_gate("authorize", str(migration), "--who", "someone")
+    combined = proc.stdout + proc.stderr
+    assert "REFUSED" in combined or proc.returncode == 2
+    assert not (migration / ".credential-gate-AUTHORIZED").exists()
+
+
+def test_lineage_check_fails_closed_on_an_unknown_chain() -> None:
+    """The bug that let a forged authorization through, locked down.
+
+    The first version returned False for an empty chain, so a lineage query that failed - which
+    happened for real under four concurrent agents - silently AUTHORIZED. "I could not tell" must
+    never be read as permission.
+    """
+    import platform
+
+    if platform.system() != "Windows":
+        pytest.skip("lineage check is Windows-only")
+    sys.path.insert(0, str(REPO / "scripts"))
+    from credential_gate import _has_copilot_ancestor  # noqa: PLC0415
+
+    assert _has_copilot_ancestor([]) is True
+    assert _has_copilot_ancestor(["<lineage-unavailable>"]) is True
+    assert _has_copilot_ancestor(["python.exe", "pwsh.exe", "copilot.exe"]) is True
+    assert _has_copilot_ancestor(["python.exe", "pwsh.exe", "explorer.exe"]) is False
