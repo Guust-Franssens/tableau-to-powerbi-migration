@@ -75,6 +75,22 @@ warehouse happily while Power BI had never authenticated to it at all. So the pr
 Power BI, and the smallest thing Power BI executes is a model — one table, `Table.FirstN(…, 1)`,
 refresh, require a row.
 
+### Why it is not an M *native* query either
+
+The obvious refinement — `Value.NativeQuery(db, "SELECT 1")`, so the probe needs no real table and
+cannot fail on a wrong table name in the spec — is rejected for two reasons:
+
+1. **Native queries raise their own approval modal in Desktop.** That is a *second* human-in-the-loop
+   dependency, on the one code path whose entire job is to distinguish "needs a human" from
+   "reachable". It would hang and land on a false `NO_CREDENTIAL`.
+2. **It may not exercise the same credential path.** Power BI can key credentials per connector
+   function, so a native query passing would not prove the model the builder generates can connect.
+
+The probe therefore mirrors the builder deliberately: `pbi-semantic-builder` is instructed to emit
+`Databricks.Catalogs(host, httpPath, …)` / `Sql.Database(server, db)`, and the probe uses exactly
+those, so a pass predicts the real model rather than merely resembling it. **If the builder's
+connector shape ever changes, change the probe with it** — that alignment is the point.
+
 ### Failure taxonomy
 
 | Signature | Verdict | Retry? |

@@ -201,43 +201,39 @@ it must show up in `limitations_encountered`, not be silently dropped.
      MISMATCH`** and exits 1 rather than silently saying "not yet migrated" — treat that as a STOP:
      reconcile the key first, do not build, do not paper over it. Record any real mismatch (with both
      keys) in `limitations_encountered` — it is evidence about a live tenant we cannot reproduce here.
-5. **Data-source credential preflight (MANDATORY before building — never skip for live sources).** Run
-   `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`.
-   Only extract/flat sources → no credential gate (CSV + `DataFolder`); proceed. Any **live database**
-   source (`needs-credential`):
-
-   > **HARD STOP. Do not delegate to any builder until the user answers.** Name the host/database and
-   > say Power BI needs a credential you **cannot supply** — it is cached per-machine in Desktop (a
-   > modal the Bridge cannot fill) and server-side in the service. Ask whether they will configure it
-   > **or** authorize a build-only migration, then **TERMINATE the run** via your runtime's blocked /
-   > task-complete exit.
+5. **Live-source reachability (MANDATORY before building — never skip).** Run
+   `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`
+   to see *which* sources are live. It is a **classifier, not a connectivity test** — it opens no
+   socket, so it can never tell you whether a source actually works. Only extract/flat sources → no
+   gate; proceed. Any **live database** source → step 5b, which is where the decision is made.
+5b. **PROVE reachability with a real query, then let the result decide.**
+   `python scripts/probe_live_source.py --spec <spec>` builds a one-table model, opens Desktop,
+   refreshes, and requires a row back — the `SELECT 1`, executed *through Power BI* (a shell query
+   authenticates as you, not as Power BI, so it proves nothing). It probes **every** live source.
+   - **`DATA_OK`** → it lifts the credential gate itself. Continue to step 6.
+   - **`NO_CREDENTIAL`** → **HARD STOP.** Name host/database, say Power BI needs a credential you
+     **cannot supply**, offer: sign in once in Desktop, or authorize a build-only migration
+     (`credential_gate.py authorize <dir> --who <name>` — a human, from a plain terminal). Then
+     **TERMINATE the run** via your runtime's blocked / task-complete exit.
+   - **`UNREACHABLE`** → a **spec/config** problem (bad server or `http_path`), not a credential one.
+     Report the address; do not send the user hunting for a sign-in they do not need.
    >
-   > **Enforced, not requested:** the gate applies a kernel-level write-deny to `fabric/`, so builder
-   > writes fail regardless of what you decide. Only the USER can lift it
-   > (`credential_gate.py authorize <dir> --who <name>`); forging `.credential-gate-AUTHORIZED` is
-   > audit-checked and `verify` reports it.
+   > **Never decide this yourself, in either direction.** Do not declare a source unreachable without
+   > probing — measured, an agent reported `CANNOT CONNECT` for a warehouse it had never contacted,
+   > right for the wrong reason. And do not clear the gate by hand: `clear` earns nothing, and
+   > `verify` reports artifacts built after an unearned clear as UNVALIDATED.
    >
-   > **Unconditional — non-interactive runs included**, and **pausing is not enough**: measured, three
-   > runs announced this stop then talked themselves past it. A stop that does not terminate gets
-   > re-prompted until it erodes, so **stopping IS the completed task**.
-6. **Delegate to `pbi-semantic-builder` in TWO calls when any source is `live_source`.** A subagent
-   follows the task prompt you write far more reliably than its own persona, so the reachability probe
-   must be **your** instruction, not just its rule.
-   - **6a. PROBE FIRST.** Tell it: *"Build ONLY the single table `<T>` for `<live source>`, refresh it,
-     report `DATA_OK` or the exact failure. Translate nothing else."* Wait.
-     `DATA_OK` → go to 6b. Anything else → **STOP and report to the user**: name the system and server,
-     and ask them to sign in once in Desktop or authorize an unvalidated build. **Even if they already
-     said "build anyway", you still run 6a and still report a failure** — that is permission to
-     continue *after* a failed probe, never to skip it. Relaying a blanket authorization downstream is
-     how three test runs built a full model against a warehouse never once contacted.
-     The 1-row refresh is the **gate of record**: it proves credential + reachability + valid M in one
-     shot, locally, no publish. Remediation detail: `docs/data-source-credentials.md`.
-   - **6b. FULL BUILD**, once reachability is proven (or the user authorized an unvalidated build after
-     seeing 6a fail): the `migration-spec.json` path, the target workspace, and **the connection target
-     for every data source** (`connection.powerbi_target`). A **`live_source`** model must CONNECT
-     upstream (the `.hyper` is only Tableau's cache — using it freezes the data into a model that can
-     never refresh); only a **`flat_file`** is materialised to CSV + `DataFolder`.
-     `extract_hyper_data.py --schema` gives schema discovery with no rows exported.
+   > **Unconditional — non-interactive runs included**, and **pausing is not enough**: measured,
+   > three runs announced this stop then talked themselves past it. Stopping IS the completed task.
+6. **Delegate to `pbi-semantic-builder`.** Reachability is already proven by step 5b, so this is a
+   single call: the `migration-spec.json` path, the target workspace, and **the connection target for
+   every data source** (`connection.powerbi_target`). A **`live_source`** model must CONNECT upstream
+   (the `.hyper` is only Tableau's cache — using it freezes the data into a model that can never
+   refresh); only a **`flat_file`** is materialised to CSV + `DataFolder`.
+   `extract_hyper_data.py --schema` gives schema discovery with no rows exported.
+   Tell it to emit the same connector functions the probe validated —
+   `Databricks.Catalogs(host, httpPath, …)` / `Sql.Database(server, db)` — so the model uses the
+   credential path that was actually proven.
      Wait for the model location and any new limitations.
 7. **Delegate to `pbi-report-builder`** with: the path to `migration-spec.json`, the semantic model
    location from step 6, **and the Tableau reference bundle** (`migrations/workbooks/<name>/reference/` — its

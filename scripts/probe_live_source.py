@@ -28,6 +28,22 @@ So the probe has to go *through* Power BI, and the smallest thing Power BI can e
 Hence: one table, `Table.FirstN(..., 1)`, refresh, require a row. That IS the `SELECT 1` - it just
 has to be spelled as a partition instead of a shell command.
 
+Why not an M native query either
+--------------------------------
+`Value.NativeQuery(db, "SELECT 1")` looks strictly better - no dependency on a real table, so no
+false failure from a wrong table name in the spec. It is rejected for two measured reasons:
+
+1. **Desktop raises its own approval modal for native queries.** That is a second human-in-the-loop
+   dependency, on the one code path whose whole job is to tell "needs a human" apart from
+   "reachable". It would hang and land on a false NO_CREDENTIAL.
+2. **It may not exercise the same credential path.** Power BI can key credentials per connector
+   function, so a native query passing would not prove the model the builder generates can connect.
+
+The probe mirrors the builder on purpose: `pbi-semantic-builder` is instructed to emit
+`Databricks.Catalogs(host, httpPath, ...)` / `Sql.Database(server, db)`, and `build_m_query` below
+uses exactly those. A pass therefore predicts the real model rather than merely resembling it. If the
+builder's connector shape changes, change this with it - the alignment is the point, not a detail.
+
 Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
 -------------------------------------------------------------
     PROBE: DATA_OK <n> row(s) from <table>     the source is genuinely reachable, build for real
@@ -62,6 +78,19 @@ SKILL_SCRIPTS = Path(__file__).parent.parent / ".github" / "skills" / "pbip-mode
 _SCHEMA_BASE = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/"
 _PLATFORM_SCHEMA = (
     "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json"
+)
+
+# A "table not found" is a SPEC error, not a reachability one - the connection plainly worked well
+# enough for the server to tell us the object is missing. Classifying it as UNREACHABLE would send a
+# user hunting for a sign-in they do not need, which is the same mistake as the bad-host case.
+BAD_TABLE_MARKERS = (
+    "not found",
+    "does not exist",
+    "cannot be found",
+    "invalid object name",
+    "table_or_view_not_found",
+    "unknown table",
+    "no such table",
 )
 
 CREDENTIAL_MARKERS = (
@@ -243,6 +272,11 @@ def _classify_failure(text: str) -> tuple[str, str]:
             "Check server and http_path in the spec before treating this as a credential problem. "
             "Raw: " + text[-200:],
         )
+    # Order matters: check BAD_TABLE before NO_CREDENTIAL. A "not found" message proves the server
+    # answered us, so it can never be a credential problem, but the text often also mentions the
+    # connection and would otherwise trip a credential marker.
+    if any(marker in low for marker in BAD_TABLE_MARKERS):
+        return "BAD_TABLE", text
     if any(marker in low for marker in CREDENTIAL_MARKERS):
         return "NO_CREDENTIAL", text
     return "UNREACHABLE", text
@@ -278,8 +312,13 @@ def _close(pid: int) -> None:
     )
 
 
-def _resolve_probe_target(spec_path: Path, source_index: int) -> tuple[dict, str, str] | None:
-    """Pick the source, table and column to probe. Returns None when there is nothing to probe."""
+def _resolve_probe_target(spec_path: Path, source_index: int) -> tuple[dict, list[str], str] | None:
+    """Pick the source, its candidate tables and a column to probe. None when nothing to probe.
+
+    Returns ALL tables, not just the first: a "table not found" is a spec error, and the workbook
+    usually names several, so the probe can move on to the next rather than declaring the whole
+    source unreachable over one bad name.
+    """
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     sources = spec.get("data_sources", [])
     if source_index >= len(sources):
@@ -296,12 +335,12 @@ def _resolve_probe_target(spec_path: Path, source_index: int) -> tuple[dict, str
         log.info("PROBE: SKIPPED not a live source ('%s') - nothing to probe", conn.get("powerbi_target"))
         return None
 
-    tables = source.get("tables") or []
+    tables = [t["name"] for t in (source.get("tables") or []) if t.get("name")]
     fields = [f for f in source.get("fields", []) if f.get("kind") == "column"]
     if not tables or not fields:
         log.error("PROBE: ERROR source has no table/column to probe")
         raise SystemExit(1)
-    return conn, tables[0]["name"], fields[0]["internal_name"].strip("[]")
+    return conn, tables, fields[0]["internal_name"].strip("[]")
 
 
 def _write_probe_model(spec_path: Path, m_query: str, table: str, column: str) -> Path:
@@ -372,8 +411,8 @@ def _wait_for_catalog(pid: int, timeout_sec: int = 90) -> bool:
     return False
 
 
-def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> int:
-    """Refresh the probe table and turn the result into a verdict.
+def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> tuple[int, str]:
+    """Refresh the probe table and turn the result into a verdict. Returns (exit code, verdict).
 
     Deliberately does NOT lift the gate - the caller does that, and only once EVERY live source has
     passed. Lifting per-source would re-open the multi-source hole this was written to close.
@@ -406,16 +445,16 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> int:
             "human can answer.",
             timeout_sec,
         )
-        return 1
+        return 1, "NO_CREDENTIAL"
 
     log.info("refresh finished in %.0fs", time.monotonic() - started)
     text = (refresh.stdout + refresh.stderr).strip()
     if "DATA_OK" in text:
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
-        return 0
+        return 0, "DATA_OK"
     verdict, detail = _classify_failure(text)
     log.error("PROBE: %s %s", verdict, detail[-400:] or "refresh returned no data")
-    return 1
+    return 1, verdict
 
 
 def _lift_gate(migration: Path, what: str) -> None:
@@ -485,11 +524,16 @@ def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep:
 
 
 def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) -> int:
-    """Build and run the one-table probe for a single data source."""
+    """Probe a single data source, trying its tables in order until one answers.
+
+    Falling back across tables only on BAD_TABLE, never on any other verdict: a wrong table name is a
+    spec error worth retrying past, while a credential or reachability failure is the answer and
+    retrying it would just cost another Desktop launch per table.
+    """
     target = _resolve_probe_target(spec_path, source_index)
     if target is None:
         return 0
-    conn, table, column = target
+    conn, tables, column = target
 
     server = conn.get("server") or ""
     if server and not _host_resolves(server):
@@ -501,11 +545,25 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
         )
         return 1
 
+    for i, table in enumerate(tables):
+        rc, verdict = _probe_one_table(spec_path, conn, (table, column), (timeout_sec, keep))
+        if rc == 0:
+            return 0
+        if verdict != "BAD_TABLE" or i == len(tables) - 1:
+            return rc
+        log.warning("table '%s' not found at the source - trying the next one in the spec", table)
+    return 1
+
+
+def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts: tuple[int, bool]) -> tuple[int, str]:
+    """Run the probe against one specific table. Returns (exit code, verdict)."""
+    table, column = target
+    timeout_sec, keep = opts
     try:
         m_query, note = build_m_query(conn, table, column)
     except ValueError as exc:
         log.error("PROBE: ERROR %s", exc)
-        return 1
+        return 1, "ERROR"
 
     probe_root = _write_probe_model(spec_path, m_query, table, column)
     log.info("probe model built: %s", probe_root)
@@ -522,7 +580,7 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
                 "not resolve (unknown host, wrong HTTP path, or no network route). Check server and "
                 "http_path in the spec before treating this as a credential problem."
             )
-            return 1
+            return 1, "UNREACHABLE"
         log.info("model loaded - refreshing")
         return _refresh_and_classify(pid, table, timeout_sec)
     finally:

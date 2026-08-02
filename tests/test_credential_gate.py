@@ -262,13 +262,26 @@ def test_dns_precheck_separates_a_bad_address_from_a_missing_credential() -> Non
 
 
 def test_failure_classification_distinguishes_the_causes() -> None:
-    """Conflating verdicts is the defect class this whole script exists to remove."""
+    """Conflating verdicts is the defect class this whole script exists to remove.
+
+    BAD_TABLE is checked before NO_CREDENTIAL on purpose: a "not found" message proves the server
+    answered us, so it cannot be a credential problem - but the text often also mentions the
+    connection and would otherwise trip a credential marker and send a user hunting for a sign-in
+    they do not need.
+    """
     sys.path.insert(0, str(REPO / "scripts"))
     from probe_live_source import _classify_failure  # noqa: PLC0415
 
-    assert _classify_failure("Exception: no catalog found on the instance")[0] == "UNREACHABLE"
-    assert _classify_failure("The credential was not provided; please sign in")[0] == "NO_CREDENTIAL"
-    assert _classify_failure("something else entirely went wrong")[0] == "UNREACHABLE"
+    cases = [
+        ("Table or view not found: shipment", "BAD_TABLE"),
+        ("[TABLE_OR_VIEW_NOT_FOUND] the table cannot be found", "BAD_TABLE"),
+        ("Invalid object name 'dbo.orders'", "BAD_TABLE"),
+        ("The credential was not provided; please sign in", "NO_CREDENTIAL"),
+        ("Exception: no catalog found on the instance", "UNREACHABLE"),
+        ("something else entirely went wrong", "UNREACHABLE"),
+    ]
+    for text, expected in cases:
+        assert _classify_failure(text)[0] == expected, f"{text!r} should classify as {expected}"
 
 
 def test_lineage_check_fails_closed_on_an_unknown_chain() -> None:
