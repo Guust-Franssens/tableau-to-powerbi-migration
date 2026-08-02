@@ -31,6 +31,7 @@ has to be spelled as a partition instead of a shell command.
 Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
 -------------------------------------------------------------
     PROBE: DATA_OK <n> row(s) from <table>     the source is genuinely reachable, build for real
+    PROBE: SKIPPED <reason>                    not a live source - nothing to prove
     PROBE: NO_CREDENTIAL <detail>              a human must sign in; no retry can fix this
     PROBE: UNREACHABLE <detail>                refresh failed for a non-credential reason
     PROBE: ERROR <detail>                      the probe itself could not run
@@ -289,7 +290,11 @@ def _resolve_probe_target(spec_path: Path, source_index: int) -> tuple[dict, str
     conn = source.get("connection", {}) or {}
 
     if (conn.get("powerbi_target") or "") != "live_source":
-        log.info("PROBE: DATA_OK not a live source ('%s') - nothing to probe", conn.get("powerbi_target"))
+        # SKIPPED, not DATA_OK. Exit 0 either way, but the verdicts mean different things - "nothing
+        # to prove" is not "proven reachable" - and conflating two verdicts into one word is exactly
+        # the defect class this script exists to fix. An orchestrator reading the last line would
+        # otherwise report a CSV source as a verified live connection.
+        log.info("PROBE: SKIPPED not a live source ('%s') - nothing to probe", conn.get("powerbi_target"))
         return None
 
     tables = source.get("tables") or []
