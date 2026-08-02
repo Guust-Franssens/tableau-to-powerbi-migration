@@ -503,6 +503,27 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> tuple[int, 
     return 1, verdict
 
 
+def _record_attempt(migration: Path, verdict: str, what: str) -> None:
+    """Append the probe's verdict to the audit log, whatever it was.
+
+    Without this the audit only ever recorded SUCCESS (`probe-cleared`), so "never measured" and
+    "measured, and the source refused us" were indistinguishable after the fact - a real gap in the
+    enforcement record, since the whole promise of the gate is that a decision came from a
+    measurement.
+
+    It also fixes a false negative measured 2026-08-02: the harness inferred "did this agent probe?"
+    from the presence of the `_probe/` sandbox, but the shared conventions REQUIRE agents to clean up
+    scratch directories. `claude-opus-5` probed correctly (136s, NO_CREDENTIAL, and even
+    distinguished that from UNREACHABLE), deleted the sandbox as instructed, and was scored "never
+    probed". Inferring behaviour from an artifact a well-behaved actor is told to remove punishes
+    exactly the behaviour we want.
+    """
+    sys.path.insert(0, str(Path(__file__).parent))
+    from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    _audit(migration, f"probe-{verdict.lower()}", what)
+
+
 def _lift_gate(migration: Path, what: str) -> None:
     subprocess.run(
         [
@@ -560,6 +581,7 @@ def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep:
     log.info("probing %d live source(s): %s", len(live), live)
     for idx in live:
         rc, verdict = _probe_one(spec_path, idx, timeout_sec, keep)
+        _record_attempt(spec_path.parent, verdict, f"source[{idx}] -> {verdict}")
         if rc != 0:
             log.error("PROBE: source index %d failed - not lifting the gate", idx)
             _print_verdict_directive(verdict)
