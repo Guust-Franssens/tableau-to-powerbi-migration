@@ -85,6 +85,32 @@ def _audit(migration: Path, action: str, detail: str) -> None:
         pass
 
 
+def _clear_was_earned(migration: Path) -> str | None:
+    """Return the action that legitimately lifted the gate, or None if nothing did.
+
+    Only two things earn a lift: a successful reachability probe, or an audit-backed human
+    authorization. A bare `clear` earns nothing.
+
+    This exists because `clear` was callable by anyone with any excuse - measured 2026-08-02, a
+    single `credential_gate.py clear --reason "I decided it is fine"` lifted the ACL and the build
+    proceeded with no probe ever run. That is the whole guarantee gone, via the front door. The hook
+    does deny that command, but the hook is the weak layer (pattern matching, already proven
+    defeatable), so the real defence has to be evidence-based: the probe clears the gate itself, as
+    a consequence of measuring, and anything else is visible here.
+    """
+    try:
+        earned = None
+        for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
+            action = json.loads(line).get("action")
+            if action in {"probe-cleared", "authorize"}:
+                earned = action
+            elif action == "block":
+                earned = None  # a re-arm invalidates any earlier evidence
+        return earned
+    except (OSError, ValueError):
+        return None
+
+
 def _icacls(args: list[str]) -> tuple[int, str]:
     proc = subprocess.run(["icacls", *args], capture_output=True, text=True, check=False)
     return proc.returncode, (proc.stdout + proc.stderr).strip()
@@ -181,8 +207,14 @@ def apply_block(migration: Path, sources: list[str]) -> int:
     return 1 if failed else 0
 
 
-def clear_block(migration: Path, reason: str) -> int:
-    """Remove the ACL and marker. Called after a successful probe, or by an authorized override."""
+def clear_block(migration: Path, reason: str, earned: bool = False) -> int:
+    """Remove the ACL and marker.
+
+    `earned=True` is for the probe only: it records `probe-cleared`, which is the evidence `verify`
+    looks for. A bare clear is recorded as `manual-clear` and earns nothing, so artifacts built
+    after one are reported as UNVALIDATED. The verb has to keep existing for teardown, but it must
+    never quietly confer the guarantee.
+    """
     if platform.system() == "Windows":
         for d in output_dirs(migration):
             code, out = _icacls([str(d), "/remove:d", _user()])
@@ -194,7 +226,7 @@ def clear_block(migration: Path, reason: str) -> int:
     if marker.exists():
         marker.unlink()
     log.info("credential gate CLEARED (%s)", reason)
-    _audit(migration, "clear", reason)
+    _audit(migration, "probe-cleared" if earned else "manual-clear", reason)
     return 0
 
 
@@ -296,7 +328,7 @@ def authorize(migration: Path, who: str) -> int:
         encoding="utf-8",
     )
     _audit(migration, "authorize", f"by={who}; chain={chain}")
-    return clear_block(migration, f"user-authorized-build-only ({who})")
+    return clear_block(migration, f"user-authorized-build-only ({who})", earned=True)
 
 
 def status(migration: Path) -> int:
@@ -350,6 +382,22 @@ def verify(migration: Path) -> int:
         log.error("GATE VERIFY: ENFORCEMENT REMOVED - marker present but the write-deny ACE is gone.")
         violations += 1
 
+    # A gate that is down must have been EARNED - by a successful probe or a human authorization.
+    # Measured: `clear --reason "I decided it is fine"` lifted the ACL and the build proceeded with
+    # no probe ever run. Enforcement cannot prevent that (clear has to exist for teardown), but it
+    # must never pass silently, or the guarantee is gone via the front door.
+    built_any = any(
+        p.is_file() and p.suffix.lower() in {".tmdl", ".pbism", ".pbir", ".pbip"}
+        for d in output_dirs(migration)
+        for p in d.rglob("*")
+    )
+    if built_any and not deny and not _clear_was_earned(migration):
+        log.error("GATE VERIFY: UNEARNED CLEAR - artifacts exist, but no successful probe and no")
+        log.error("  human authorization is recorded in the audit log. The gate was lifted without")
+        log.error("  proving the source is reachable, so this model is UNVALIDATED. Do not ship it.")
+        _audit(migration, "violation", "artifacts built after an unearned clear")
+        violations += 1
+
     if (marker or deny) and not authentic:
         built = [
             p
@@ -387,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--sources", nargs="*", default=[])
         if name == "clear":
             p.add_argument("--reason", default="manual")
+            p.add_argument("--earned", action="store_true", help=argparse.SUPPRESS)
         if name == "authorize":
             p.add_argument("--who", required=True, help="who is authorizing this unvalidated build")
     args = parser.parse_args(argv)
@@ -399,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "block":
         return apply_block(migration, args.sources)
     if args.cmd == "clear":
-        return clear_block(migration, args.reason)
+        return clear_block(migration, args.reason, earned=args.earned)
     if args.cmd == "authorize":
         return authorize(migration, args.who)
     if args.cmd == "verify":

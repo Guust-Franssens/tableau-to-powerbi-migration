@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import socket
 import subprocess
 import sys
 import time
@@ -233,16 +234,14 @@ def _classify_failure(text: str) -> tuple[str, str]:
     on something only a person can fix, or gives up on a warehouse that was merely cold-starting.
     """
     low = text.lower()
-    # Measured 2026-08-02 against an unknown workspace: Desktop cannot even LOAD a model whose
-    # source is unresolvable, so the refresh dies with "no catalog found" - the wrapper's error,
-    # never the connection's. Reporting that verbatim is doubly wrong: it hides the real cause AND
-    # looks identical to a broken probe. A model that will not load is itself the evidence.
+    # "no catalog" reaching here means the model failed to load DESPITE the readiness wait, so it is
+    # a genuine load failure rather than the race it used to be confused with.
     if "no catalog" in low or "no model folder resolved" in low:
         return (
             "UNREACHABLE",
-            "Power BI Desktop could not load the probe model at all - the data source did not "
-            "resolve (unknown host, wrong HTTP path, or no network route). Verify server and "
-            "http_path in the spec before treating this as a credential problem. Raw: " + text[-200:],
+            "the probe model failed to load even after waiting - the data source did not resolve. "
+            "Check server and http_path in the spec before treating this as a credential problem. "
+            "Raw: " + text[-200:],
         )
     if any(marker in low for marker in CREDENTIAL_MARKERS):
         return "NO_CREDENTIAL", text
@@ -343,8 +342,38 @@ def _open_desktop(pbip: Path) -> int:
     raise SystemExit(1)
 
 
-def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> int:
-    """Refresh the probe table and turn the result into a PROBE verdict.
+def _wait_for_catalog(pid: int, timeout_sec: int = 90) -> bool:
+    """Block until Desktop has actually loaded a model catalog, or give up.
+
+    `powerbi-desktop open` waits for the BRIDGE to answer, which happens well before the model is
+    loaded into the Analysis Services instance. Refreshing in that window fails with "no catalog
+    found on the Desktop Analysis Services instance" - not a connection error at all, but a race.
+
+    That race cost a wrong conclusion, which is why this exists: an unresolvable host produced the
+    same "no catalog" message as a merely-slow load, so a bad-host test appeared to pass while a
+    known-good source intermittently failed. Two very different causes were indistinguishable.
+    Waiting removes the race, so anything still reporting "no catalog" afterwards genuinely failed
+    to load and can be classified honestly.
+
+    Uses the skill's documented CLI rather than importing its internals - the readiness signal is
+    "does this stop saying no catalog", which its exit output already carries.
+    """
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        proc = subprocess.run(
+            [sys.executable, str(SKILL_SCRIPTS / "probe_desktop_query.py"), "--pid", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if "no catalog" not in (proc.stdout + proc.stderr).lower():
+            return True
+        time.sleep(3)
+    return False
+
+
+def _refresh_and_classify(pid: int, table: str, timeout_sec: int, migration: Path) -> int:
+    """Refresh the probe table, turn the result into a verdict, and lift the gate if it passed.
 
     YOU run the clock. Measured: a credential-blocked refresh sails past the XMLA CommandTimeout,
     because the mashup engine is parked on a modal in another process that the server cannot
@@ -380,10 +409,43 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> int:
     text = (refresh.stdout + refresh.stderr).strip()
     if "DATA_OK" in text:
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
+        _lift_gate(migration, table)
         return 0
     verdict, detail = _classify_failure(text)
     log.error("PROBE: %s %s", verdict, detail[-400:] or "refresh returned no data")
     return 1
+
+
+def _lift_gate(migration: Path, table: str) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parent / "credential_gate.py"),
+            "clear",
+            str(migration),
+            "--reason",
+            f"probe-cleared: DATA_OK from {table}",
+            "--earned",
+        ],
+        capture_output=True,
+        check=False,
+    )
+
+
+def _host_resolves(server: str) -> bool:
+    """Cheap DNS check, run before any Desktop work.
+
+    Load-bearing for the taxonomy, not just an optimisation. Measured 2026-08-02: an unresolvable
+    host loads into Desktop perfectly happily - the M query is not evaluated at load time - and then
+    the refresh HANGS exactly like a missing credential does, for the full timeout. So "a hang means
+    a sign-in modal" is only true once the host is known to resolve. Checking here separates the two
+    causes definitively, and turns a 200-second wrong answer into a sub-second right one.
+    """
+    try:
+        socket.getaddrinfo(server, None)
+        return True
+    except (socket.gaierror, UnicodeError, ValueError):
+        return False
 
 
 def run_probe(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) -> int:
@@ -392,6 +454,16 @@ def run_probe(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) 
     if target is None:
         return 0
     conn, table, column = target
+
+    server = conn.get("server") or ""
+    if server and not _host_resolves(server):
+        log.error(
+            "PROBE: UNREACHABLE '%s' does not resolve in DNS. This is a spec/config problem, not a "
+            "credential one - check `server` (and `http_path`) in migration-spec.json. No credential "
+            "will fix an address that does not exist.",
+            server,
+        )
+        return 1
 
     try:
         m_query, note = build_m_query(conn, table, column)
@@ -407,7 +479,16 @@ def run_probe(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) 
     try:
         pid = _open_desktop(probe_root / "Probe.pbip")
         log.info("desktop pid %d", pid)
-        return _refresh_and_classify(pid, table, timeout_sec)
+        if not _wait_for_catalog(pid):
+            log.error(
+                "PROBE: UNREACHABLE Power BI Desktop never finished loading the probe model. After "
+                "waiting, the Analysis Services instance still has no catalog - the data source did "
+                "not resolve (unknown host, wrong HTTP path, or no network route). Check server and "
+                "http_path in the spec before treating this as a credential problem."
+            )
+            return 1
+        log.info("model loaded - refreshing")
+        return _refresh_and_classify(pid, table, timeout_sec, spec_path.parent)
     finally:
         if pid and not keep:
             _close(pid)
