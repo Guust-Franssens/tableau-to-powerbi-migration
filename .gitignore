@@ -72,11 +72,15 @@ candidates.json
 # Credential material. `.env` alone was not enough: a real secret arrived as a loose
 # `PAT-snowflake-secret.txt` in the repo root and a `git add -A` staged it (caught before commit,
 # 2026-08-02). These patterns make that class of accident impossible rather than merely unlikely.
+secrets/
 *secret*.txt
 *secret*.json
 *.pat
 *.pem
 *.key
+*.p8
+*.p12
+*.pfx
 *credential*.txt
 !scripts/credential_gate.py
 

@@ -18,6 +18,9 @@ screenshots = [
 showcase = [
     "pillow>=10.3",
 ]
+snowflake = [
+    "snowflake-connector-python>=3.12",
+]
 dev = [
     "pytest>=8.2",
     "ruff>=0.6",
