@@ -69,6 +69,21 @@ candidates.json
 .env.local
 *.log
 
+# Ad-hoc test scaffolding. These exist to test the toolkit, not to ship with it: multi-model gate
+# sweeps, throwaway Tableau fixtures, and test-account provisioning. They are hard-wired to one
+# person's Databricks/Snowflake tenant (account ids, warehouse ids), so committing them puts private
+# infrastructure identifiers in a public repo AND presents an end user with scripts that cannot work
+# for them. Kept on disk, out of the repo.
+scripts/gate_matrix.py
+scripts/probe_lab.py
+scripts/provision_snowflake_fixture.py
+scripts/setup_snowflake_keypair.py
+scripts/snowflake_fixture.sql
+scripts/hooks/probe_subagent_start.ps1
+tests/test_gate_matrix.py
+_probe-lab/
+_matrix/
+
 # Credential material. `.env` alone was not enough: a real secret arrived as a loose
 # `PAT-snowflake-secret.txt` in the repo root and a `git add -A` staged it (caught before commit,
 # 2026-08-02). These patterns make that class of accident impossible rather than merely unlikely.
