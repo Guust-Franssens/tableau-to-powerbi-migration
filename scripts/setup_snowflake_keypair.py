@@ -1,17 +1,19 @@
 """
-purpose: one-time setup for Snowflake key-pair authentication - generate an RSA key pair, register
-         the public key on the Snowflake user, and verify the key actually authenticates.
-usage:   python scripts/setup_snowflake_keypair.py            # generate + register + verify
+purpose: one-time setup for Snowflake key-pair authentication - generate an RSA key pair, print the
+         statement that registers the public key, and verify the key actually authenticates.
+usage:   python scripts/setup_snowflake_keypair.py            # generate + print SQL + verify
          python scripts/setup_snowflake_keypair.py --verify   # verify an existing key only
 
-Why key-pair rather than the PAT: Snowflake refuses PAT auth with `390432: Network policy is
-required` until a network policy is ATTACHED to the user (creating one is not enough - a very easy
-step to miss, because CREATE NETWORK POLICY succeeds on its own and the PAT keeps returning the
-identical error). Key-pair auth has no such requirement, and it does not break when the
-workstation's public IP rotates, which an IP allow-list does.
+Why key-pair rather than a PAT: Snowflake refuses PAT auth with `390432: Network policy is required`
+until a network policy is ATTACHED to the user - and creating one is not enough, which is easy to
+miss because CREATE NETWORK POLICY succeeds on its own while the PAT keeps returning the identical
+error. Key-pair auth has no such requirement, and it does not break when the workstation's public IP
+rotates, which an IP allow-list does.
 
-Registering the public key needs an existing authenticated route, so the first run uses the PAT from
-`.env`. After that the PAT is unnecessary.
+Registering the key is a printed SQL statement rather than an automated call, on purpose: it needs
+an already-working credential, so automating it would mean keeping a second credential (the PAT,
+plus its whole network-policy procedure) solely to bootstrap the first. Pasting one line into
+Snowsight is faster and leaves nothing to maintain.
 
 ⚠️ The private key lands in `secrets/`, which is gitignored, and is INFRASTRUCTURE credential only -
 never a Power BI credential. The probe must exercise Power BI Desktop's own per-user credential
@@ -22,10 +24,8 @@ from __future__ import annotations
 
 import argparse
 import base64
-import json
 import logging
 import sys
-import urllib.request
 from pathlib import Path
 
 # The remaining imports in this file are deliberately lazy and pylint is told so once, here:
@@ -72,38 +72,25 @@ def generate() -> str:
 
 
 def register(pub_body: str) -> None:
-    """Attach the public key to the Snowflake user, authenticating with the PAT from `.env`."""
+    """Print the one SQL statement that attaches the public key to the Snowflake user.
+
+    Deliberately NOT automated. Registering the key needs an already-working credential, so an
+    automated path here would exist solely to bootstrap itself - and the only candidate was the
+    PAT, which is precisely what key-pair auth replaces. Snowflake refuses PAT auth with
+    `390432: Network policy is required` until a policy is ATTACHED to the user, so that bootstrap
+    carried a whole second setup procedure (create policy, attach to user, keep an IP allow-list
+    current) purely to run one ALTER USER.
+
+    Pasting one statement into Snowsight is faster than any of that, needs no network policy, and
+    does not require the repo to hold a second credential it would otherwise never use.
+    """
     from provision_snowflake_fixture import account_and_user, read_env  # noqa: PLC0415
 
     env = read_env()
     _, user = account_and_user(env)
-    pat = env.get("PAT_SNOWFLAKE")
-    if not pat:
-        raise SystemExit(
-            "no PAT_SNOWFLAKE in .env to register the key with. Register it by hand instead:\n"
-            f"  ALTER USER {user} SET RSA_PUBLIC_KEY='<contents of {PUB_PATH.name} without the "
-            "BEGIN/END lines>';"
-        )
-    host = env["SNOWFLAKE_URL"].split("://", 1)[-1].split("/", 1)[0].rstrip(".")
-    req = urllib.request.Request(  # noqa: S310  (fixed https scheme, host from .env)
-        f"https://{host}/api/v2/statements",
-        data=json.dumps(
-            {
-                "statement": f"ALTER USER {user} SET RSA_PUBLIC_KEY='{pub_body}'",
-                "timeout": 60,
-                "role": env.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
-            }
-        ).encode(),
-        headers={
-            "Authorization": f"Bearer {pat}",
-            "X-Snowflake-Authorization-Token-Type": "PROGRAMMATIC_ACCESS_TOKEN",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120):  # noqa: S310
-        log.info("registered public key on user %s", user)
+    log.info("\nRun this once in Snowsight (or any SQL client) as ACCOUNTADMIN/SECURITYADMIN:\n")
+    log.info("ALTER USER %s SET RSA_PUBLIC_KEY='%s';\n", user, pub_body)
+    log.info("Then verify with:  python scripts/setup_snowflake_keypair.py --verify")
 
 
 def verify() -> int:
@@ -130,13 +117,19 @@ def verify() -> int:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--verify", action="store_true", help="skip generate/register; just test the key")
+    parser.add_argument("--verify", action="store_true", help="skip generate; just test the key")
     args = parser.parse_args(argv)
 
     sys.path.insert(0, str(Path(__file__).parent))
-    if not args.verify:
-        register(generate())
-    return verify()
+    if args.verify:
+        return verify()
+
+    register(generate())
+    # Verifying here would fail on a genuinely fresh machine, because the key is not registered
+    # until a human has run the printed statement. Attempting it anyway would end a successful setup
+    # on a red error, which reads like the script broke.
+    log.info("\nRun the statement above, then verify.")
+    return 0
 
 
 if __name__ == "__main__":
