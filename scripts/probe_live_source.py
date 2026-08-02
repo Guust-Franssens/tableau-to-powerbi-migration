@@ -282,14 +282,37 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
     raise ValueError(f"no probe connector for connection class '{klass}' - add one in build_m_query()")
 
 
-def _classify_failure(text: str) -> tuple[str, str]:
-    """Map a refresh failure to NO_CREDENTIAL vs UNREACHABLE.
+def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
+    """Map a refresh failure to a verdict.
 
     The distinction is the point of the whole script: NO_CREDENTIAL is final and needs a human, while
     UNREACHABLE may be transient and is worth one retry. Getting it backwards either stalls forever
     on something only a person can fix, or gives up on a warehouse that was merely cold-starting.
+
+    ERROR is checked FIRST, and it is not a verdict about the source at all - it means the probe
+    could not run, so nothing was learned. Measured 2026-08-02 in a serial sweep: two of six runs on
+    an identical, known-good address reported UNREACHABLE because the refresh returned
+    "model identity unverified / no catalog found on the Desktop Analysis Services instance". That is
+    the pid-binding guard refusing to touch a Desktop instance it could not confirm was ours - a
+    LOCAL tooling failure - but "no catalog" matched the load-failure branch and came out as a
+    confident claim about the customer's data source, telling them to fix a server and http_path that
+    were correct. Same conflation this whole script exists to prevent: "I could not measure" is not
+    "I measured, and your source is broken".
+
+    One branch per verdict, and the ORDER is load-bearing - ERROR before load-failure before
+    BAD_TABLE before NO_CREDENTIAL - because each later marker also appears in the earlier cases'
+    text. A dispatch table would hide exactly that.
     """
+    # pylint: disable=too-many-return-statements
     low = text.lower()
+    if "model identity unverified" in low or "wrong_model" in low:
+        return (
+            "ERROR",
+            "the probe could not confirm which Power BI Desktop instance it was bound to, so it "
+            "never queried the source. This is a LOCAL tooling failure, not a fact about the data "
+            "source - do not report a connection or credential problem from it. Usually another "
+            "Desktop instance was open; close them and re-run. Raw: " + text[-200:],
+        )
     # "no catalog" reaching here means the model failed to load DESPITE the readiness wait, so it is
     # a genuine load failure rather than the race it used to be confused with.
     if "no catalog" in low or "no model folder resolved" in low:
@@ -387,12 +410,50 @@ def _write_probe_model(spec_path: Path, m_query: str, table: str, column: str) -
     return probe_root
 
 
+def _pid_for_file(pbip: Path) -> int | None:
+    """Find the Desktop instance that has OUR file open, via the bridge's own status report.
+
+    Preferred over set-difference on the pid list, for two independent reasons:
+
+    1. Set-difference is not concurrency-safe. Two probes starting together both snapshot an empty
+       `before`, both see both new pids, and each pops an arbitrary one - so a probe can bind to a
+       sibling's Desktop and refresh someone else's model while every downstream signal still looks
+       healthy. That is the WRONG_MODEL hazard, and it is what kept the sweep serial.
+    2. It is what the bridge actually offers: `status` reports `currentFilePath` per instance, so the
+       binding can be *verified* rather than inferred. The gotchas skill states the rule directly -
+       trust `status` + `currentFilePath`, never the pid `open` hands back.
+    """
+    code, out = _npx(["status"], timeout=60)
+    if code != 0:
+        return None
+    try:
+        payload = json.loads(out[out.index("{") : out.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    target = str(pbip.resolve()).lower()
+    # The migration directory, NOT the probe folder. Every probe builds into a folder called
+    # `_probe`, so matching on that name binds to whichever instance answers first - measured
+    # 2026-08-02, two concurrent probes both bound to pid 15220 and the UNHAPPY one reported
+    # DATA_OK because it read the other model. The migration directory is unique per run.
+    owner = pbip.resolve().parent.parent.name.lower()
+    instances = payload.get("instances") or payload.get("Instances") or []
+    for inst in instances if isinstance(instances, list) else []:
+        current = str(inst.get("currentFilePath") or inst.get("CurrentFilePath") or "").lower()
+        pid = inst.get("pid") or inst.get("Pid")
+        if not current or not pid:
+            continue
+        # Desktop reports the .pbip, or a path inside its folder, depending on load stage.
+        if current == target or f"\\{owner}\\" in current:
+            return int(pid)
+    return None
+
+
 def _open_desktop(pbip: Path) -> int:
     """Open the probe in Desktop and return OUR instance's pid.
 
-    Resolved by set difference rather than by trusting what `open` reports: measured, with two
-    instances running it returned a SIBLING agent's pid, and binding to that would refresh somebody
-    else's model while every downstream signal still looked healthy.
+    Never trusts the pid `open` reports: measured, with two instances running it returned a SIBLING
+    agent's pid, and binding to that would refresh somebody else's model while every downstream
+    signal still looked healthy.
     """
     before = _desktop_pids()
     code, out = _npx(["open", str(pbip), "--timeout", "120"], timeout=240)
@@ -400,11 +461,17 @@ def _open_desktop(pbip: Path) -> int:
         log.error("PROBE: ERROR could not open Power BI Desktop: %s", out.strip()[:300])
         raise SystemExit(1)
     for _ in range(20):
+        # Identity first - it is verifiable and concurrency-safe. Set-difference is only a fallback
+        # for the window before Desktop reports a currentFilePath, and it is narrowed to pids that
+        # did not exist before we started.
+        pid = _pid_for_file(pbip)
+        if pid:
+            return pid
         new = _desktop_pids() - before
-        if new:
+        if len(new) == 1:
             return new.pop()
         time.sleep(2)
-    log.error("PROBE: ERROR Desktop did not start a new instance")
+    log.error("PROBE: ERROR Desktop did not start an identifiable new instance for %s", pbip.name)
     raise SystemExit(1)
 
 
@@ -606,6 +673,25 @@ def _print_verdict_directive(verdict: str) -> None:
     UNREACHABLE needs a spec edit and no sign-in at all. Sending a user to authenticate against a
     hostname that does not exist is its own kind of wrong answer.
     """
+    if verdict == "ERROR":
+        log.error(
+            "\n"
+            "################################################################\n"
+            "#  STOP - THE PROBE COULD NOT RUN. Nothing was learned.\n"
+            "################################################################\n"
+            "  This is NOT a verdict about the data source. The measurement did not happen, so\n"
+            "  you know nothing about reachability or credentials either way.\n"
+            "\n"
+            "    1. You may NOT build. The gate stays armed - an unproven source is unproven\n"
+            "       whether the probe failed or merely never ran.\n"
+            "    2. Do NOT report a connection or credential problem. Saying 'unreachable' here\n"
+            "       sends the user to fix a server address that may be perfectly correct.\n"
+            "    3. Usually another Power BI Desktop instance was open and the probe could not\n"
+            "       confirm which one was ours. Close all Desktop instances and re-run ONCE.\n"
+            "       If it repeats, report the tooling failure itself and stop.\n"
+            "################################################################"
+        )
+        return
     if verdict == "NO_CREDENTIAL":
         log.error(
             "\n"
