@@ -174,6 +174,13 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
 - **Measured 2026-07-31:** a custom subagent can invoke these **by name** — repo-local ones included —
   unless its persona declares a `tools:` allow-list that omits `skill`. See
   [`docs/agent-architecture.md`](docs/agent-architecture.md) §6.
+- **A live source with no credential is enforced, not requested.** When a workbook connects to a live
+  database (Databricks, Snowflake, SQL Server…) and Power BI has no credential for it, the pipeline
+  applies a **kernel-level write-deny** to that migration's output folder, so a semantic model for an
+  unreachable source physically cannot be written. It exists because asking did not work: measured
+  across four blind migrations, every agent announced the credential stop correctly and three then
+  built anyway. See [`docs/credential-gate.md`](docs/credential-gate.md) — including an honest threat
+  model, since this stops the *accidental* case outright but only *detects* deliberate circumvention.
 
 In Copilot CLI, install the plugins once with `/plugin` (add marketplaces `microsoft/skills-for-fabric`
 and `Guust-Franssens/powerbi-migration-skills`, enable `powerbi-authoring` and
@@ -247,9 +254,10 @@ Three migration trees, split by **what they produce** — so our examples never 
 
 ```
 .github/agents/          Four custom Copilot CLI agents (orchestrator + 3 subagents)
+.github/hooks/           preToolUse/permissionRequest hooks (the credential gate; loaded at CLI start)
 .github/pbi.kb/          PBIR visual cookbook (visual-cookbook.md + 27 visual.json templates)
 scripts/                 Python automation (parser, .hyper extractor, AI-readiness, showcase) + preflight.ps1
-docs/                    migration-spec schema, Tableau->DAX guide, capabilities & limitations, showcase
+docs/                    migration-spec schema, Tableau->DAX guide, credential gate, capabilities & limitations, showcase
 examples/<name>/              OUR 16 worked examples - reference material, read-only
 migrations/workbooks/<name>/  YOUR workbook migrations (.twbx -> semantic model + report). Starts empty.
 migrations/datasources/<name>/ YOUR published-data-source migrations (.tds -> shared semantic model). Starts empty.
