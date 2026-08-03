@@ -174,6 +174,16 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
 - **Measured 2026-07-31:** a custom subagent can invoke these **by name** — repo-local ones included —
   unless its persona declares a `tools:` allow-list that omits `skill`. See
   [`docs/agent-architecture.md`](docs/agent-architecture.md) §6.
+- **A live source must be PROVEN reachable before a model is built — enforced, not requested.** When a
+  workbook connects to a live database (Databricks, Snowflake, SQL Server…), the pipeline applies a
+  **kernel-level write-deny** to that migration's output folder until a real one-row query, run
+  *through Power BI Desktop*, returns data. So a semantic model for a source nothing ever contacted
+  physically cannot be written. It exists because asking did not work: measured across four blind
+  migrations, every agent announced the stop correctly and three then built anyway. The gate is about
+  **reachability, not credentials** — only the probe can tell a missing sign-in (a human must act)
+  from a wrong hostname (nobody needs to sign in). See
+  [`docs/credential-gate.md`](docs/credential-gate.md) — including an honest threat model, since this
+  stops the *accidental* case outright but only *detects* deliberate circumvention.
 
 In Copilot CLI, install the plugins once with `/plugin` (add marketplaces `microsoft/skills-for-fabric`
 and `Guust-Franssens/powerbi-migration-skills`, enable `powerbi-authoring` and
@@ -247,9 +257,10 @@ Three migration trees, split by **what they produce** — so our examples never 
 
 ```
 .github/agents/          Four custom Copilot CLI agents (orchestrator + 3 subagents)
+.github/hooks/           preToolUse/permissionRequest hooks (the credential gate; loaded at CLI start)
 .github/pbi.kb/          PBIR visual cookbook (visual-cookbook.md + 27 visual.json templates)
 scripts/                 Python automation (parser, .hyper extractor, AI-readiness, showcase) + preflight.ps1
-docs/                    migration-spec schema, Tableau->DAX guide, capabilities & limitations, showcase
+docs/                    migration-spec schema, Tableau->DAX guide, credential gate, capabilities & limitations, showcase
 examples/<name>/              OUR 16 worked examples - reference material, read-only
 migrations/workbooks/<name>/  YOUR workbook migrations (.twbx -> semantic model + report). Starts empty.
 migrations/datasources/<name>/ YOUR published-data-source migrations (.tds -> shared semantic model). Starts empty.

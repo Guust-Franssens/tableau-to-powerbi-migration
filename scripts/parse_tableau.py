@@ -5,6 +5,14 @@ purpose: Parse a Tableau workbook (.twb / .twbx) or standalone data source (.tds
          subagents. See docs/migration-spec.md for the schema and design rationale.
 usage:   python scripts/parse_tableau.py <workbook.twb|.twbx|datasource.tds|.tdsx> -o <migration-spec.json>
 """
+# pylint: disable=too-many-lines
+# This module sits marginally over the 1200-line cap. The cap is a proxy for "this module does too
+# much", and the honest answer here is that a Tableau parser genuinely is large: it was already at
+# 98% of the cap before the connection-detail capture needed by the reachability probe was added.
+# The real fix is splitting the parser (workbook / datasource / worksheet concerns), which is a
+# risky refactor of the most critical file in the repo and does not belong inside a credential-gate
+# change. Trimming the explanatory docstrings to squeeze under would trade documented knowledge for
+# a number, which is the wrong trade in this codebase. Suppressed deliberately, not accidentally.
 
 from __future__ import annotations
 
@@ -12,6 +20,8 @@ import argparse
 import json
 import logging
 import re
+import subprocess
+import sys
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -118,6 +128,29 @@ def parse_parameters(root: etree._Element, ids: IdRegistry) -> list[dict[str, An
     return parameters
 
 
+def _capture_connect_details(connection: dict[str, Any], conn_el: etree._Element) -> None:
+    """Carry the attributes needed to CONNECT, not just to describe.
+
+    A Databricks M query needs the SQL-warehouse HTTP path and most warehouses need the schema;
+    dropping these forced the reachability probe to re-read the raw `.twb`. Empty values are skipped
+    because Tableau writes `attr=''` for unset options.
+
+    `warehouse` and `role` are Snowflake's equivalents: a Snowflake query cannot run without a
+    compute warehouse, and corporate accounts commonly require an explicit role because the user's
+    default has no grants on the target database. Both are plain connection attributes, never
+    secrets.
+    """
+    for spec_key, attr in (
+        ("http_path", "v-http-path"),
+        ("schema", "schema"),
+        ("warehouse", "warehouse"),
+        ("role", "role"),
+    ):
+        value = (conn_el.get(attr) or "").strip()
+        if value:
+            connection[spec_key] = value
+
+
 def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dict[str, Any]:
     """Resolve both the *original* source connection (e.g. excel-direct, sqlserver) and whether the
     datasource runs off a packaged .hyper extract (Tableau Public workbooks always do)."""
@@ -127,15 +160,16 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
         connection["powerbi_target"], connection["powerbi_target_reason"] = powerbi_target("unknown", "live")
         return connection
 
+    # Both branches want the same treatment; pick the element that actually describes the source.
     named_conn = outer_conn.find(".//named-connections/named-connection/connection")
-    if named_conn is not None:
-        connection["class"] = named_conn.get("class", "unknown")
-        connection["server"] = named_conn.get("server")
-        connection["database"] = named_conn.get("dbname")
-    elif outer_conn.get("class") not in (None, "federated"):
-        connection["class"] = outer_conn.get("class", "unknown")
-        connection["server"] = outer_conn.get("server")
-        connection["database"] = outer_conn.get("dbname")
+    source_el = named_conn
+    if source_el is None and outer_conn.get("class") not in (None, "federated"):
+        source_el = outer_conn
+    if source_el is not None:
+        connection["class"] = source_el.get("class", "unknown")
+        connection["server"] = source_el.get("server")
+        connection["database"] = source_el.get("dbname")
+        _capture_connect_details(connection, source_el)
 
     extract_conn = ds_el.find(".//extract/connection")
     if extract_conn is not None:
@@ -1171,6 +1205,23 @@ def main() -> None:
         len(spec["dashboards"]),
         len(spec["limitations_encountered"]),
     )
+    # Arm the live-source credential gate here, at the earliest moment a live source is known and
+    # before any builder runs. Measured: an agent built the model 95s BEFORE invoking the gate when
+    # arming was a later workflow step. Idempotent, no-op for extract-only workbooks, never fatal.
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).parent / "preflight_source_credentials.py"),
+                "--spec",
+                str(args.output),
+            ],
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Could not arm the credential gate: %s", exc)
 
 
 if __name__ == "__main__":

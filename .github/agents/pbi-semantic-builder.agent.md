@@ -181,21 +181,22 @@ field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the
    Never silently fabricate data. A structure-only stub is acceptable ONLY if the user explicitly
    chooses it, and must be labelled as such.
 3. **PROVE the live source is reachable BEFORE you build — ONE attempt, then ask.**
-   `preflight_source_credentials.py` is a **static spec check that never opens a connection**. Run it
-   for the inventory, then actually **read one row** before translating a single calculation: build
-   **one** table for the live source, open it, run `python scripts/refresh_pbip_model.py --pid <pid>`,
-   require `DATA_OK`. One table costs a minute; the whole model costs an hour you may throw away.
-   (Try-once and the autopilot exception: shared conventions above.)
+   Normally the orchestrator already did this (its step 5b) and you inherit a lifted gate. If invoked
+   directly, run it yourself — do **not** hand-roll a probe:
+   `python scripts/probe_live_source.py --spec <spec>`. It reads one real row through Power BI for
+   **every** live source and lifts the credential gate itself on `DATA_OK`.
+   `preflight_source_credentials.py` is only a **static classifier** — it can tell you a source *is*
+   live, never that it *works*. (Try-once and the autopilot exception: shared conventions above.)
 
-   ⛔ **NEVER supply the credential yourself** — no reading `.databrickscfg`/env/keyrings, no reusing
-   your own `az`/`databricks` token, no PAT in TMDL or M (a committed secret **and** a model only you
-   can refresh), no driving Desktop's sign-in modal. Correct M defers to Power BI's credential store:
-   `Databricks.Catalogs(host, httpPath, …)`, `Sql.Database(server, db)`.
+   ⛔ **NEVER supply the credential yourself** — no `.databrickscfg`/env/keyring reads, no reusing your
+   own `az`/`databricks` token, no PAT in TMDL or M (a committed secret **and** a model only you can
+   refresh), no driving Desktop's sign-in modal. Emit the connectors the probe validated, so the model
+   uses the credential path actually proven: `Databricks.Catalogs(host, httpPath, …)`,
+   `Sql.Database(server, db)`.
 
-   **Stopping is the deliverable.** Say *"I cannot connect to `<system>` at `<server>` — Power BI has
-   no credential and I cannot supply one"*, offer (a) sign in once in Desktop or (b) authorize
-   build-only, and **end your turn**. "Deferred" NEVER means "skip the test": it is the user's choice
-   *after* a probe failed. Full procedure: `powerbi-semantic-model-gotchas` §5.
+   **Stopping is the deliverable.** Name the system and server, offer (a) sign in once in Desktop or
+   (b) authorize build-only, and **end your turn**. "Deferred" NEVER means "skip the test": it is the
+   user's choice *after* a probe failed. Full procedure: `powerbi-semantic-model-gotchas` §5.
 4. **Create tables and columns** via `semantic-model-authoring` for every non-hidden field. Preserve
    `caption` as the TMDL display name (never ship raw internal names like `Calculation_5871029` to the
    model).

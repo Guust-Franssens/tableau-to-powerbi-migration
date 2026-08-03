@@ -1,6 +1,6 @@
 # `scripts/` — what each one is for
 
-23 files is a lot to scan, so this is the index. **Every tracked file in this folder appears below**,
+28 files is a lot to scan, so this is the index. **Every tracked file in this folder appears below**,
 and `tests/test_repo_layout.py` fails if one is missing — an undocumented script is one nobody can
 find, which is how five of these ended up unreferenced before this file existed.
 
@@ -19,13 +19,17 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 
 | Script | What it does | Called by |
 |---|---|---|
-| `preflight_source_credentials.py` | Flags live-database sources that need a credential **a human must supply**, before a build starts and stalls on it. | `tableau-migrator` step 5 |
+| `preflight_source_credentials.py` | Classifies which data sources are **live** (and so need a reachability probe) and arms the credential gate. It is a *classifier*, not a connectivity test — it opens no socket, and deliberately no longer decides GO/STOP on its own. | `parse_tableau.py`, at parse time |
+| `probe_live_source.py` | **The measurement.** Builds a one-table PBIP from the spec, opens it in Power BI Desktop, refreshes, and requires a real row back — emitting `DATA_OK` / `SKIPPED` / `NO_CREDENTIAL` / `UNREACHABLE` / `ERROR`. This is the `SELECT 1`, and it must go *through* Power BI: a shell query authenticates as the agent, while Power BI uses Desktop's per-user credential store, so a shell probe can pass against a source Power BI cannot open. | `tableau-migrator`, before any build |
+| `credential_gate.py` | Enforces that gate at the **filesystem** level: denies write access to the migration's `fabric/` folder while a live source is unproven. `block` / `clear` / `authorize` / `verify` / `status`. Prose and tool-call hooks both lost to agents that rationalized or pattern-evaded; a kernel ACL does not care how a write is attempted. **`verify` is the authoritative pre-ship check** — it reads the ACL and audit log, not files an agent can forge. Full rationale + threat model: [`docs/credential-gate.md`](../docs/credential-gate.md) | `parse_tableau.py` (armed at parse time) and `tableau-migrator` step 13 |
+| `hooks/credential_gate.py` | `preToolUse`/`permissionRequest` hook wired by [`.github/hooks/credential-gate.json`](../.github/hooks/credential-gate.json). Turns the ACL's opaque `PermissionError` into an explanation plus `interrupt: true`, and defends the gate's own narrow control surface. **Explanation layer, not the enforcement** — never rely on it alone. | every tool call |
 | `published_datasource_registry.py` | Matches a workbook's `published_datasource.key` against already-migrated data sources, so one shared Tableau datasource becomes **one** semantic model with many reports bound to it — not N near-identical models. | `tableau-migrator` step 4 |
 | `tableau_lineage.py` | Queries the Tableau Metadata API for `publishedDatasources { downstreamWorkbooks }` and prints a model-first, two-phase migration plan for a whole estate. `--download` pulls each `.tdsx`. | `tableau-migrator` step 1 (estate migrations) |
 | `extract_hyper_data.py` | Materializes `.hyper` extract data to CSV so a migrated model has real rows. Extracts have no live connection — this is the only honest alternative to fabricating data. | `pbi-semantic-builder` |
 | `connection_target.py` | Resolves what a Power Query partition should actually connect to (extract folder vs live source). | `pbi-semantic-builder`, CI gate |
 | `set_data_folder.py` | Points a model's `DataFolder` at the local extract path; `--sanitize` rewrites it to a portable form before committing. **Invalidates `cache.abf`** (it rewrites TMDL), so run it *before* the final refresh. | `pbi-semantic-builder` |
 | `capture_tableau_reference.py` | Acquires a **provenance-stamped** reference image of the source dashboard, so the builder can mimic it and the validator can grade against immutable ground truth. Providers resolved by fitness, not availability. Design: [`docs/reference-capture.md`](../docs/reference-capture.md). | `tableau-migrator`, `pbi-migration-validator` |
+| `build_synthetic_reference.py` | Renders an **honestly-labeled SYNTHETIC** reference (HTML/CSS bar chart from real queried data, screenshotted via Playwright) when no real Tableau capture exists - e.g. the `_probe-lab/` credential-gate fixtures, whose `.twb` is a generated skeleton with nothing to screenshot. Tagged `provider: synthetic_data_chart`, `capabilities: []`, `synthetic: true` - never claims layout/validation fidelity. Deliberately **not** wired into `capture_tableau_reference.py`'s fail-closed provider chain (see its docstring). | manual / test-harness use only |
 
 ## Forwarding shims into skill bundles
 
