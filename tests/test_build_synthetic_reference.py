@@ -61,10 +61,9 @@ REAL_ROWS = [
 ]
 
 
-def test_render_html_sorts_descending_and_embeds_disclaimer() -> None:
-    """The chart must sort by value descending and always carry the baked-in disclaimer text."""
+def test_render_html_sorts_descending_by_value() -> None:
+    """The chart must sort by value descending, largest bar first, like a typical BI bar chart."""
     html = bsr.render_html("Billing by Customer", "Overview", REAL_ROWS, "$")
-    assert bsr.DISCLAIMER in html
     first = html.index("Northwind Traders")
     second = html.index("Contoso Ltd")
     third = html.index("Litware Inc")

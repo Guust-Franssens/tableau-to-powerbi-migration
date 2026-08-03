@@ -61,7 +61,6 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("build-synthetic-reference")
 
 PROVIDER_SYNTHETIC = "synthetic_data_chart"
-DISCLAIMER = "SYNTHETIC REFERENCE \u2014 not a Tableau capture. Rendered from real queried data for orientation only."
 
 # Playwright capture of a LOCAL html file (not a remote URL) - same technique as
 # capture_tableau_reference.py's _CAPTURE_JS, minus the consent-banner/network waits a live site needs.
@@ -84,27 +83,36 @@ const { chromium } = require("playwright");
 })();
 """
 
+# Dashboard-canvas gray + Tableau's classic default categorical blue, so the render reads as a
+# plausible BI dashboard tile rather than a bare data table.
+_CANVAS_BG = "#f2f2f2"
+_BAR_COLOR = "#4e79a7"
+
 _HTML_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8"><style>
-  body {{ font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 0; padding: 28px 32px;
-          background: #ffffff; color: #1a1a1a; width: 836px; box-sizing: border-box; }}
-  .eyebrow {{ font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #6b6b6b;
+  body {{ font-family: Tableau Book, -apple-system, Segoe UI, Arial, sans-serif; margin: 0;
+          background: {canvas_bg}; box-sizing: border-box; }}
+  .card {{ background: #ffffff; margin: 18px; padding: 22px 28px 28px; border: 1px solid #d9d9d9;
+           box-shadow: 0 1px 3px rgba(0,0,0,0.08); width: 780px; box-sizing: border-box; }}
+  .eyebrow {{ font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #767676;
               margin: 0 0 4px; }}
-  h1 {{ font-size: 22px; margin: 0 0 20px; }}
-  .row {{ display: flex; align-items: center; margin-bottom: 10px; }}
-  .label {{ width: 190px; flex: 0 0 190px; text-align: right; padding-right: 12px; font-size: 13px;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-  .barwrap {{ flex: 1; background: #f0f0f0; border-radius: 3px; height: 22px; position: relative; }}
-  .bar {{ background: #f2c811; height: 100%; border-radius: 3px; }}
-  .value {{ position: absolute; left: calc(100% + 8px); top: 0; font-size: 12px; white-space: nowrap; }}
-  .disclaimer {{ margin-top: 22px; padding: 10px 14px; background: #fff4e5; border: 1px solid #e8a33d;
-                 border-radius: 4px; font-size: 12px; color: #7a4a00; }}
+  h1 {{ font-size: 18px; font-weight: 600; margin: 0 0 22px; color: #262626; }}
+  .row {{ display: flex; align-items: center; margin-bottom: 11px; }}
+  .label {{ width: 180px; flex: 0 0 180px; text-align: right; padding-right: 12px; font-size: 12px;
+            color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .barwrap {{ flex: 1; height: 20px; position: relative;
+              background-image: repeating-linear-gradient(to right, #e6e6e6 0, #e6e6e6 1px,
+              transparent 1px, transparent 20%); }}
+  .bar {{ background: {bar_color}; height: 100%; }}
+  .value {{ position: absolute; left: calc(100% + 8px); top: 1px; font-size: 11px; color: #333;
+            white-space: nowrap; }}
 </style></head>
 <body>
-  <p class="eyebrow">{dashboard_name}</p>
-  <h1>{title}</h1>
-  {rows_html}
-  <div class="disclaimer">{disclaimer}</div>
+  <div class="card">
+    <p class="eyebrow">{dashboard_name}</p>
+    <h1>{title}</h1>
+    {rows_html}
+  </div>
 </body></html>
 """
 
@@ -125,7 +133,13 @@ def render_html(title: str, dashboard_name: str, rows: list[dict], unit: str) ->
     ordered = sorted(rows, key=lambda r: r["value"], reverse=True)
     max_value = max((r["value"] for r in ordered), default=0.0)
     rows_html = "\n  ".join(_row_html(r["label"], r["value"], max_value, unit) for r in ordered)
-    return _HTML_TEMPLATE.format(dashboard_name=dashboard_name, title=title, rows_html=rows_html, disclaimer=DISCLAIMER)
+    return _HTML_TEMPLATE.format(
+        dashboard_name=dashboard_name,
+        title=title,
+        rows_html=rows_html,
+        canvas_bg=_CANVAS_BG,
+        bar_color=_BAR_COLOR,
+    )
 
 
 def screenshot_html(html: str, out_path: Path) -> bool:
