@@ -554,6 +554,22 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> tuple[int, 
     because the mashup engine is parked on a modal in another process that the server cannot
     preempt. Only this outer bound reliably ends it.
     """
+    # Announce the bound BEFORE the long wait. Measured 2026-08-03 (gpt-5.6-sol, unhappy path): the
+    # agent applied AGENTS.md's "cap an unresponsive external system at ~2 minutes" rule to THIS
+    # script, killed it at ~120s, and so recorded NO verdict at all - the gate held and nothing was
+    # built, but the audit log could not show a probe had ever run. A sibling (claude-opus-5) let it
+    # finish and got a proper NO_CREDENTIAL entry. The cap is a good rule aimed at an agent's own
+    # unbounded waiting; it misfires here because this script IS the bounded timer. Saying so in the
+    # output is what actually reaches the agent - the same reason the classifier's STOP directive
+    # lives in tool output rather than in persona prose.
+    log.info(
+        "PROBE: refreshing (bounded: this script self-terminates at %ds and ALWAYS prints a verdict).\n"
+        "  DO NOT kill this process to satisfy a 2-minute external-system cap - that cap is about "
+        "YOUR OWN unbounded waiting, and this is the timer. A hang here IS the measurement: it is "
+        "what a modal sign-in dialog looks like from outside. Killing it early destroys the evidence "
+        "and records no verdict, which is strictly worse than waiting.",
+        timeout_sec,
+    )
     started = time.monotonic()
     try:
         refresh = subprocess.run(

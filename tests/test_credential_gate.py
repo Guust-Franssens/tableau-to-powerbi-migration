@@ -762,6 +762,66 @@ def _audit_actions(migration: Path) -> list[str]:
     return [json.loads(line)["action"] for line in text.splitlines() if line.strip()]
 
 
+def test_the_probe_tells_the_agent_not_to_kill_it_for_the_2_minute_cap() -> None:
+    """A measured conflict between two pieces of this repo's own guidance, pinned.
+
+    `AGENTS.md` says to cap an unresponsive external system at ~2 minutes. `probe_live_source.py`
+    defaults to a 180s refresh timeout (plus up to 240s waiting for the catalog), so an agent
+    applying that cap literally kills the probe BEFORE it can reach a verdict.
+
+    Measured 2026-08-03 running the same fixture on two models:
+      * gpt-5.6-sol  - killed the probe at ~120s citing the 2-minute rule. Gate held and nothing was
+        built (safe), but the audit log recorded NO probe verdict at all, so afterwards there was no
+        evidence a probe had ever run.
+      * claude-opus-5 - let it finish, got `PROBE: NO_CREDENTIAL`, and the audit log recorded
+        `probe-no_credential`.
+
+    Both outcomes were safe; only one was accountable. The cap is a good rule aimed at an agent's own
+    unbounded waiting, and it misfires here because this script IS the bounded timer.
+
+    The fix has to reach the agent at the moment it would otherwise start its own clock, so it lives
+    in the probe's OUTPUT, not only in persona prose - the same reasoning that put the classifier's
+    STOP directive in tool output. This pins that the message is actually emitted before the wait.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    source = (REPO / "scripts" / "probe_live_source.py").read_text(encoding="utf-8")
+
+    body = source.split("def _refresh_and_classify", 1)[1].split("\n    started = time.monotonic()", 1)[0]
+    assert "DO NOT kill this process" in body, (
+        "the probe must warn against being killed BEFORE it starts the long refresh wait - "
+        "an agent applying the 2-minute cap has no way to know this script is itself the timer"
+    )
+    assert "self-terminates" in body and "ALWAYS prints a verdict" in body
+
+
+def test_agents_md_deliberately_does_NOT_carry_the_probe_exemption() -> None:
+    """The exemption lives in the probe's OUTPUT, not in the personas. That is a deliberate choice.
+
+    Two reasons, both concrete:
+
+    * **Budget.** The cap rule sits inside the `<!-- BEGIN:shared-conventions -->` block, which
+      `sync_agent_conventions.py` copies verbatim into all four personas - three of which sit at ~99%
+      of the 30,000-char cap. Measured: adding the exemption there pushed `pbi-semantic-builder` to
+      30,045 chars, OVER cap, and `--check` failed. Persona text is the scarcest resource here.
+    * **Reach.** Tool output is what actually lands. This repo already measured that agents follow
+      tool output far more literally than their own persona prose - it is why the classifier's STOP
+      directive lives in its printed output. The probe prints its warning the instant the long wait
+      begins, which is exactly when an agent would otherwise start its own 2-minute clock.
+
+    This test exists so nobody "helpfully" adds it back to AGENTS.md without re-checking the budget.
+    If it ever SHOULD live in the personas, delete this test deliberately and offset the characters.
+    """
+    agents_md = (REPO / "AGENTS.md").read_text(encoding="utf-8")
+    assert (
+        "probe_live_source.py"
+        not in agents_md.split("BEGIN:shared-conventions", 1)[1].split("END:shared-conventions", 1)[0]
+    ), (
+        "the probe exemption was added to the shared-conventions block - that syncs into all four "
+        "personas, which are at ~99% of the 30,000-char cap. Keep it in the probe's output instead, "
+        "or offset the characters and delete this test on purpose."
+    )
+
+
 def test_rearming_an_already_probe_cleared_gate_is_a_no_op(tmp_path: Path) -> None:
     """The idempotency hole that INVITED a real bypass, pinned.
 
