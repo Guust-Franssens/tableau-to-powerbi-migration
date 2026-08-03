@@ -360,6 +360,35 @@ def test_the_classifier_sends_the_agent_to_the_probe_instead_of_terminating(tmp_
     assert not present, f"a socket-less classifier must not issue a terminal stop; found {present}"
 
 
+def test_the_classifier_ACTUALLY_ARMS_the_gate_not_just_talks_about_it(tmp_path: Path) -> None:
+    """End-to-end: the classifier must ARM the ACL, not merely print a warning about it.
+
+    Measured 2026-08-03, and this one shipped to master: merging the credential-gate branch back
+    into master auto-merged `preflight_source_credentials.py` with NO conflict, and in doing so
+    silently took master's reverted version of one contiguous block - deleting `_write_gate_marker`,
+    `_clear_gate_marker` and both call sites. Every other file in that merge conflicted visibly and
+    was reviewed; this one did not, because the branch's later edits never textually overlapped the
+    reverted hunk.
+
+    The result was the worst possible failure shape: the classifier still printed the whole STOP
+    directive, still exited 1, and still *looked* correct in every log - while arming nothing at all.
+    The gate was completely inert on master and four freshly created fixtures came up unarmed.
+
+    Every existing classifier test asserted only on its printed TEXT, so the entire suite stayed
+    green. This test asserts the SIDE EFFECT instead - the marker on disk and the `block` entry in
+    the audit log - which is the only thing that actually protects anything.
+    """
+    _classifier_output(tmp_path)  # runs the classifier, then tears the gate down
+
+    audit = tmp_path / ".credential-gate-audit.log"
+    assert audit.is_file(), (
+        "the classifier produced NO audit log - it never invoked credential_gate.py at all, "
+        "so nothing was armed no matter what it printed"
+    )
+    actions = [json.loads(line)["action"] for line in audit.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert "block" in actions, f"classifier must record a 'block'; got {actions}"
+
+
 def test_the_classifier_still_forbids_building(tmp_path: Path) -> None:
     """Paired control: softening the directive must not soften the actual prohibition."""
     out = _classifier_output(tmp_path)
