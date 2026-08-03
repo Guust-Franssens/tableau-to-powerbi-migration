@@ -129,13 +129,61 @@ _CONTROL_FILE_MUTATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Lifting or authorizing the gate is never the agent's call, however it is spelled.
-_GATE_VERB_RE = re.compile(r"credential_gate\.py\s+(?:clear|authorize)", re.IGNORECASE)
+# `credential_gate.py clear` has NO internal defense against being run unearned: `clear_block()`
+# lifts the ACL unconditionally and only labels the audit entry differently (`manual-clear` vs
+# `probe-cleared`) for `verify` to flag AFTERWARDS - detection, not prevention. `authorize` DOES
+# self-defend via `_has_copilot_ancestor`, but `clear` does not, so THIS hook is the only thing
+# stopping a subagent from lifting its own armed gate by invoking the documented teardown verb
+# directly. An earlier edit to this file deleted the match for both verbs, reasoning that
+# credential_gate.py "checks the caller lineage and audit evidence" for both - true for `authorize`,
+# false for `clear`. Restored here, but made TARGET-AWARE (see `_targets_an_armed_gate`) so it does
+# not reintroduce the tree-wide false positive that motivated the bad fix in the first place.
+_CLEAR_OR_AUTHORIZE_RE = re.compile(
+    r"credential_gate\.py\s+(?:clear|authorize)\s+(\"[^\"]+\"|'[^']+'|[^\s;|&]+)",
+    re.IGNORECASE,
+)
+_ICACLS_TARGET_RE = re.compile(r"icacls\s+(\"[^\"]+\"|'[^']+'|[^\s;|&]+)", re.IGNORECASE)
+_MARKER_PATH_RE = re.compile(rf"([^\"'\s;|&]*?[\\/])?({re.escape(OVERRIDE)}|{re.escape(MARKER)})", re.IGNORECASE)
+
+
+def _command_targets(text: str, cwd: Path) -> list[Path]:
+    """Best-effort extraction of the directory a control-surface command is aimed at."""
+    targets: list[Path] = []
+    for rx in (_CLEAR_OR_AUTHORIZE_RE, _ICACLS_TARGET_RE):
+        match = rx.search(text)
+        if match:
+            raw = match.group(1).strip("\"'")
+            candidate = Path(raw)
+            targets.append(candidate if candidate.is_absolute() else (cwd / candidate))
+    for match in _MARKER_PATH_RE.finditer(text):
+        dirpart = (match.group(1) or "").rstrip("\\/")
+        candidate = Path(dirpart) if dirpart else cwd
+        targets.append(candidate if candidate.is_absolute() else (cwd / candidate))
+    return targets
 
 
 def _mutates_control_surface(text: str) -> bool:
     """Does this command CHANGE the gate's control surface, rather than merely name it?"""
-    return bool(_ACL_MUTATION_RE.search(text) or _CONTROL_FILE_MUTATION_RE.search(text) or _GATE_VERB_RE.search(text))
+    return bool(
+        _ACL_MUTATION_RE.search(text) or _CONTROL_FILE_MUTATION_RE.search(text) or _CLEAR_OR_AUTHORIZE_RE.search(text)
+    )
+
+
+def _targets_an_armed_gate(text: str, cwd: Path) -> bool:
+    """Is the SPECIFIC migration this command names currently gated?
+
+    Target-aware on purpose. Its predecessor, `_any_marker_under(cwd)`, armed the guard for the
+    WHOLE cwd tree whenever ANY leftover marker existed anywhere beneath it. Measured 2026-08-03,
+    that blocked legitimate teardown of one finished fixture merely because a DIFFERENT, unrelated
+    fixture nearby was still gated - and once blocked, the edit that would have fixed the hook was
+    denied too, by the very same over-broad check. Falls back to the tree-wide check only when no
+    specific target can be parsed from the command text, which keeps the conservative default for
+    shapes this cannot recognise.
+    """
+    targets = _command_targets(text, cwd)
+    if not targets:
+        return _any_marker_under(cwd)
+    return any(_blocking_marker(t) is not None for t in targets)
 
 
 def _writes_a_control_file(payload: dict, tool: str, cwd: Path) -> bool:
@@ -362,32 +410,30 @@ def main() -> int:
     text = _extract_args_text(payload)
 
     # 1. Defend the gate's own control files FIRST, before any override is honoured. Write tools are
-    #    judged on their TARGET PATH; shell commands on whether they MUTATE. So creating, copying,
-    #    renaming or deleting a control file is denied however it is spelled, while READING one - or
-    #    writing a test whose source merely quotes its name - is not.
-    touches = (tool_l in WRITE_TOOLS and _writes_a_control_file(payload, str(tool), cwd)) or (
-        tool_l in SHELL_TOOLS and _mutates_control_surface(text)
+    #    judged on their TARGET PATH alone (unconditional - there is no legitimate reason to create a
+    #    file literally named after the marker/override, gated or not). Shell commands are judged on
+    #    whether they MUTATE, and denied only when the SPECIFIC migration they name is currently
+    #    armed - see `_targets_an_armed_gate` for why target-awareness matters here.
+    control_hit = (tool_l in WRITE_TOOLS and _writes_a_control_file(payload, str(tool), cwd)) or (
+        tool_l in SHELL_TOOLS and _mutates_control_surface(text) and _targets_an_armed_gate(text, cwd)
     )
-    if touches:
-        # Only defend the control surface while a gate is actually applied somewhere beneath cwd -
-        # otherwise this would block legitimate icacls/ACL work in an unrelated repo.
-        if _any_marker_under(cwd):
-            return _deny(
-                "DENIED - that touches the credential gate's own control surface.\n"
-                f"  Creating '{OVERRIDE}', deleting '{MARKER}', clearing the gate, or changing the\n"
-                "  output folder's ACL (icacls / Set-Acl / takeown) is not something an agent may do.\n"
-                "\n"
-                "  The override exists so a HUMAN can authorize an unvalidated build AFTER seeing the\n"
-                "  gate. Writing it yourself forges that authorization, and every downstream signal\n"
-                "  would then wrongly report that the user approved this.\n"
-                "\n"
-                "  Measured: an agent read this hook's source, created the override itself, and\n"
-                "  shipped an unvalidated model. Knowing the mechanism does not help - the denial\n"
-                "  does not depend on you not knowing about it, and the gate is ALSO enforced by a\n"
-                "  kernel-level ACL that no write method gets around.\n"
-                "\n"
-                "  STOP NOW and ask the user. Stopping IS the correct, completed outcome."
-            )
+    if control_hit:
+        return _deny(
+            "DENIED - that touches the credential gate's own control surface.\n"
+            f"  Creating '{OVERRIDE}', deleting '{MARKER}', clearing the gate, or changing the\n"
+            "  output folder's ACL (icacls / Set-Acl / takeown) is not something an agent may do.\n"
+            "\n"
+            "  The override exists so a HUMAN can authorize an unvalidated build AFTER seeing the\n"
+            "  gate. Writing it yourself forges that authorization, and every downstream signal\n"
+            "  would then wrongly report that the user approved this.\n"
+            "\n"
+            "  Measured: an agent read this hook's source, created the override itself, and\n"
+            "  shipped an unvalidated model. Knowing the mechanism does not help - the denial\n"
+            "  does not depend on you not knowing about it, and the gate is ALSO enforced by a\n"
+            "  kernel-level ACL that no write method gets around.\n"
+            "\n"
+            "  STOP NOW and ask the user. Stopping IS the correct, completed outcome."
+        )
 
     # 2. Then the artifact rule: no model/report files for an unreachable source.
     for raw in _candidate_paths(str(tool), payload):

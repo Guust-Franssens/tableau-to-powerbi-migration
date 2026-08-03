@@ -573,3 +573,47 @@ def test_the_hook_config_fails_open_when_the_script_is_broken() -> None:
                 cmd = entry[shell]
                 assert "LASTEXITCODE" in cmd or "$?" in cmd, f"{event}/{shell} does not check the exit code"
                 assert "'{}'" in cmd, f"{event}/{shell} has no allow-fallback"
+
+
+def test_the_hook_still_denies_a_subagent_clearing_its_own_armed_gate(migration: Path) -> None:
+    """The regression this whole fix exists to close, pinned.
+
+    `clear_block()` has NO internal defense against being run unearned - it lifts the ACL
+    unconditionally and only labels the audit entry `manual-clear` (vs `probe-cleared`) for
+    `verify` to flag AFTERWARDS. `authorize` self-defends via `_has_copilot_ancestor`; `clear` does
+    not. So this hook is the ONLY thing stopping a subagent from lifting its own armed gate by
+    invoking the documented teardown verb directly.
+
+    Measured 2026-08-03: an edit removed the match for `clear`/`authorize` entirely, reasoning
+    (incorrectly) that credential_gate.py enforces both itself - true only for `authorize`. That
+    reopened the simplest possible bypass: no ctypes, no ACL API, just the ordinary command.
+    """
+    run_gate("block", str(migration), "--sources", "shipment")
+    cmd = f'python scripts/credential_gate.py clear {migration} --reason "self-clear attempt"'
+    out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(migration)})
+    assert out.get("permissionDecision") == "deny", "a subagent must not be able to clear its own armed gate"
+
+
+def test_the_hook_does_not_block_teardown_of_an_unrelated_cleared_fixture(tmp_path: Path) -> None:
+    """The false positive that caused today's real deadlock, pinned as a paired control.
+
+    Without this control, tightening the test above could be satisfied by reverting to the
+    tree-wide `_any_marker_under(cwd)` check - which is precisely what produced the deadlock: ANY
+    leftover marker anywhere under cwd armed the guard for the WHOLE tree, so tearing down one
+    finished, already-cleared fixture was denied merely because a DIFFERENT, unrelated fixture
+    nearby was still gated. A human had to clear fixtures by hand before the hook's own fix could
+    even be written.
+    """
+    armed = tmp_path / "variant-still-armed"
+    cleared = tmp_path / "variant-already-cleared"
+    (armed / "fabric").mkdir(parents=True)
+    (cleared / "fabric").mkdir(parents=True)
+    run_gate("block", str(armed), "--sources", "shipment")
+    run_gate("block", str(cleared), "--sources", "shipment")
+    run_gate("clear", str(cleared), "--reason", "already earned")
+
+    cmd = f"python scripts/credential_gate.py clear {cleared} --reason teardown"
+    out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(tmp_path)})
+    assert out.get("permissionDecision") != "deny", "teardown of an unrelated, already-cleared fixture must be allowed"
+
+    run_gate("clear", str(armed), "--reason", "test-teardown")
