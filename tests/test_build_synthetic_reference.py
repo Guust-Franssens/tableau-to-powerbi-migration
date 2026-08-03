@@ -78,6 +78,23 @@ def test_render_html_escapes_label_html() -> None:
     assert "A &amp; B &lt;script&gt;" in html
 
 
+def test_render_html_keeps_the_value_label_inside_the_row_flow() -> None:
+    """Regression: the value used to render OUTSIDE the card, on the canvas background.
+
+    `.value` was absolutely positioned at `left: calc(100% + 8px)` relative to `.barwrap`, which
+    already spans to the row's own right edge - so any value string rendered past the card's
+    padding/border onto the gray canvas (visually confirmed, reported by the user). The fix makes
+    `.value` a normal flex SIBLING of `.barwrap` (not nested inside it, not absolutely positioned),
+    so the three columns always sum to the row's own width regardless of string length. This pins
+    both halves of that fix: no more absolute overlay, and the value markup sits beside - not
+    inside - the bar-track element.
+    """
+    html = bsr.render_html("T", "D", [{"label": "Some Customer", "value": 1_848_268.86}], "$")
+    assert "position: absolute" not in html
+    assert 'class="barwrap"><div class="bar" style="width:100.00%"></div></div><div class="value">' in html
+    assert "$1,848,268.86" in html
+
+
 def test_load_rows_rejects_non_list(tmp_path: Path) -> None:
     """A data file that isn't a JSON array must fail loudly, not silently produce zero rows."""
     path = tmp_path / "rows.json"

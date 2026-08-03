@@ -100,12 +100,9 @@ _HTML_TEMPLATE = """<!doctype html>
   .row {{ display: flex; align-items: center; margin-bottom: 11px; }}
   .label {{ width: 180px; flex: 0 0 180px; text-align: right; padding-right: 12px; font-size: 12px;
             color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-  .barwrap {{ flex: 1; height: 20px; position: relative;
-              background-image: repeating-linear-gradient(to right, #e6e6e6 0, #e6e6e6 1px,
-              transparent 1px, transparent 20%); }}
+  .barwrap {{ flex: 1 1 auto; min-width: 30px; height: 20px; position: relative; }}
   .bar {{ background: {bar_color}; height: 100%; }}
-  .value {{ position: absolute; left: calc(100% + 8px); top: 1px; font-size: 11px; color: #333;
-            white-space: nowrap; }}
+  .value {{ flex: 0 0 auto; padding-left: 10px; font-size: 11px; color: #333; white-space: nowrap; }}
 </style></head>
 <body>
   <div class="card">
@@ -121,10 +118,13 @@ def _row_html(label: str, value: float, max_value: float, unit: str) -> str:
     pct = 0.0 if max_value <= 0 else max(1.0, 100.0 * value / max_value)
     formatted = f"{unit}{value:,.2f}" if unit else f"{value:,.2f}"
     safe_label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # `.value` is a normal flex SIBLING of `.barwrap` (not an absolutely-positioned overlay inside
+    # it) so the row's three columns (label / bar / value) always sum to the row's own width - a
+    # long formatted value can never render past the card's edge, regardless of string length.
     return (
         f'<div class="row"><div class="label">{safe_label}</div>'
-        f'<div class="barwrap"><div class="bar" style="width:{pct:.2f}%"></div>'
-        f'<span class="value">{formatted}</span></div></div>'
+        f'<div class="barwrap"><div class="bar" style="width:{pct:.2f}%"></div></div>'
+        f'<div class="value">{formatted}</div></div>'
     )
 
 
