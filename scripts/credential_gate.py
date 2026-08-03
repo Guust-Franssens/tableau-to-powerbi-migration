@@ -469,11 +469,12 @@ def verify(migration: Path) -> int:
 
     This is the compensating control for everything enforcement cannot guarantee, and it is
     deliberately based on the ACL and the audit log rather than on the marker or override files -
-    because those are files, and an agent can write files. Three distinct violations are reported:
+    because those are files, and an agent can write files. Four distinct violations are reported:
 
       1. artifacts exist while the gate is still applied;
       2. an override file exists with no matching `authorize` audit entry (forged);
-      3. the ACL is gone while the marker remains (someone lifted enforcement out of band).
+      3. the ACL is gone while the marker remains (someone lifted enforcement out of band);
+      4. artifacts were built after a bare `clear` that earned nothing (UNEARNED CLEAR).
     """
     marker = (migration / MARKER).exists()
     override_file = (migration / OVERRIDE).exists()
