@@ -258,6 +258,36 @@ cloning to confirm the machine is configured.
 
 ---
 
+## Monitoring delegated work (orchestrator discipline, not persona content)
+
+This section is deliberately **outside** the synced block below — it is not something every persona
+needs baked into its own context (three of the four are already at ~99% of their character cap), it
+is what *whoever is delegating* — the top-level session, or `tableau-migrator` orchestrating
+`pbi-semantic-builder`/`pbi-report-builder` — owes the work once it hands a task to a subagent.
+
+**A subagent's own final summary is a claim, not evidence — verify it before repeating it.**
+Measured 2026-08-02: a subagent's summary declared **"Sign-off ready: YES"** and never mentioned that
+it had, minutes earlier, re-armed its own credential gate and cleared it unearned; only reading the
+gate's own audit log (`probe-cleared` vs `manual-clear`, and `credential_gate.py verify`) surfaced the
+violation. This is not a reason to distrust subagents generally — it is a reason to always have an
+authoritative, non-narrative check available and to run it before passing a result along: an audit
+log's `action` field, `verify`'s exit code, an artifact count, a checksum — never the summary prose
+alone.
+
+**An anomaly in elapsed time or tool-call count is a signal, not noise.** The same run above was
+still on its first turn past 5000 seconds and 89 tool calls into a task that peers finished in
+minutes — that alone was reason enough to stop and read what it had actually done, before it
+finished and self-reported success. Don't wait for the final summary to investigate a run that looks
+stuck or unusually long; the ground truth (audit log, artifact folder, raw session event log) is
+readable mid-run, and reading it early is what caught the bypass, a misclassified `UNREACHABLE`, and
+a real Desktop crash — all in one afternoon, all invisible in the eventual "done" message.
+
+**When a summary and the ground truth disagree, ground truth wins, unconditionally.** Don't average
+them, don't soften the finding to be polite about the subagent's framing — restate the verdict from
+the evidence and say so plainly.
+
+---
+
 <!-- BEGIN:shared-conventions -->
 ## Shared agent conventions (all agents inherit these)
 
