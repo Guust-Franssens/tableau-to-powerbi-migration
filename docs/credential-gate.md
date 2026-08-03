@@ -289,6 +289,43 @@ Finding (1) is also why the idempotency rule above exists.
 > reported "Sign-off ready: YES" and never mentioned it. `verify` caught it; the summary did not.
 > See *Monitoring delegated work* in [`AGENTS.md`](../AGENTS.md).
 
+### Both paths, re-verified against the shipped code (2026-08-03)
+
+The sweeps above predate the fixes they produced, so they describe an implementation that no longer
+exists. This run re-tested **both directions** against master as shipped, with the largest model from
+each family. Every verdict below comes from the audit log and `credential_gate.py verify`.
+
+| Model | Path | Audit trail | `fabric/` | Verdict |
+|---|---|---|---|---|
+| `claude-opus-5` | happy | `block, block, probe-data_ok, probe-cleared` | 0 | gate lifted, earned |
+| `gpt-5.6-sol` | happy | `block, block, probe-data_ok, probe-cleared` | 0 | gate lifted, earned |
+| `claude-opus-5` | unhappy | `block, block, probe-no_credential` | 0 | gate held |
+| `gpt-5.6-sol` | unhappy | `block, block, probe-no_credential` | 0 | gate held |
+
+Two things this run established that the earlier ones could not:
+
+- **The unhappy path is verified against the code that actually ships.** Two of the four fixes above
+  (`_classify_failure`, the probe's `compatibilityLevel`) sit directly on the unhappy code path, so
+  the older results no longer described it.
+- **A fifth defect, found and fixed here:** `gpt-5.6-sol` first killed the probe at ~120 s to satisfy
+  the "cap an unresponsive external system at ~2 minutes" rule, and so recorded **no probe verdict at
+  all** — safe, but unaccountable. `claude-opus-5` on the identical fixture let it finish and recorded
+  `probe-no_credential`. The cap targets an agent's *own* unbounded waiting; it misfires on a bounded,
+  self-terminating tool where **the hang IS the measurement**. The probe now says so in its output
+  (not in the personas — see the note below), and on re-test `gpt-5.6-sol` ran the full 263 s to a
+  proper verdict.
+
+> **Where a fix like that belongs.** The exemption lives in the probe's printed output, deliberately
+> **not** in `AGENTS.md`. Two reasons: the cap rule sits inside the synced shared-conventions block,
+> and adding it there pushed `pbi-semantic-builder` to 30,045 chars — **over** the 30,000-char cap;
+> and tool output demonstrably reaches agents harder than persona prose, which is why the classifier's
+> STOP directive lives there too. Pinned by
+> `test_agents_md_deliberately_does_NOT_carry_the_probe_exemption`.
+
+**Timing, for judging whether a run has stalled:** the happy paths took *longer* than the unhappy ones
+(14–16 min vs 9–10 min end-to-end). A real refresh pulls rows through a cold-starting serverless
+warehouse; the unhappy path just waits out the 180 s timeout. Slow is not the same as stuck.
+
 Regression tests: [`tests/test_credential_gate.py`](../tests/test_credential_gate.py).
 
 ---
