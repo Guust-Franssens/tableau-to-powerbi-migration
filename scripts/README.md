@@ -1,6 +1,6 @@
 # `scripts/` — what each one is for
 
-23 files is a lot to scan, so this is the index. **Every tracked file in this folder appears below**,
+28 files is a lot to scan, so this is the index. **Every tracked file in this folder appears below**,
 and `tests/test_repo_layout.py` fails if one is missing — an undocumented script is one nobody can
 find, which is how five of these ended up unreferenced before this file existed.
 
@@ -29,6 +29,7 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 | `connection_target.py` | Resolves what a Power Query partition should actually connect to (extract folder vs live source). | `pbi-semantic-builder`, CI gate |
 | `set_data_folder.py` | Points a model's `DataFolder` at the local extract path; `--sanitize` rewrites it to a portable form before committing. **Invalidates `cache.abf`** (it rewrites TMDL), so run it *before* the final refresh. | `pbi-semantic-builder` |
 | `capture_tableau_reference.py` | Acquires a **provenance-stamped** reference image of the source dashboard, so the builder can mimic it and the validator can grade against immutable ground truth. Providers resolved by fitness, not availability. Design: [`docs/reference-capture.md`](../docs/reference-capture.md). | `tableau-migrator`, `pbi-migration-validator` |
+| `build_synthetic_reference.py` | Renders an **honestly-labeled SYNTHETIC** reference (HTML/CSS bar chart from real queried data, screenshotted via Playwright) when no real Tableau capture exists - e.g. the `_probe-lab/` credential-gate fixtures, whose `.twb` is a generated skeleton with nothing to screenshot. Tagged `provider: synthetic_data_chart`, `capabilities: []`, `synthetic: true` - never claims layout/validation fidelity. Deliberately **not** wired into `capture_tableau_reference.py`'s fail-closed provider chain (see its docstring). | manual / test-harness use only |
 
 ## Forwarding shims into skill bundles
 
