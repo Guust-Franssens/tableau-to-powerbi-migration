@@ -725,3 +725,83 @@ def test_the_probe_template_never_downgrades_the_tabular_compatibility_level() -
     match = re.search(r"compatibilityLevel:\s*(\d+)", db_tmdl)
     assert match, "database.tmdl must declare a compatibilityLevel"
     assert int(match.group(1)) >= 1702, f"probe template compat level {match.group(1)} is below this repo's 1702+ floor"
+
+
+def _audit_actions(migration: Path) -> list[str]:
+    """The ordered `action` sequence from a migration's audit log."""
+    text = (migration / ".credential-gate-audit.log").read_text(encoding="utf-8")
+    return [json.loads(line)["action"] for line in text.splitlines() if line.strip()]
+
+
+def test_rearming_an_already_probe_cleared_gate_is_a_no_op(tmp_path: Path) -> None:
+    """The idempotency hole that INVITED a real bypass, pinned.
+
+    Measured 2026-08-03 (`claude-haiku-4.5`, variant-m5c): a legitimate probe had cleared the gate
+    and the model was built. The agent then re-ran the classifier, which re-armed unconditionally.
+    Faced with its own freshly re-armed gate on a source it had already proven reachable minutes
+    earlier, it bypassed rather than re-probed (`cd variant-m5c; clear .`). Re-arming a gate that a
+    probe has already satisfied does not add safety - it manufactures the dead end.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    run_gate("block", str(mig), "--sources", "shipment")
+    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+
+    run_gate("block", str(mig), "--sources", "shipment")
+
+    assert not (mig / ".credential-gate-BLOCKED.json").exists(), "gate must NOT re-arm for already-proven sources"
+    assert _audit_actions(mig)[-1] == "block-skipped"
+    assert "GATE VERIFY: OK" in (run_gate("verify", str(mig)).stdout + run_gate("verify", str(mig)).stderr)
+
+
+def test_rearming_after_a_BARE_clear_still_arms(tmp_path: Path) -> None:
+    """Control: an UNEARNED clear must not buy permanent immunity from the gate.
+
+    Without this, the idempotency fix would launder `clear` (which earns nothing - it only labels
+    the audit entry `manual-clear`) into "this migration can never be gated again", handing the
+    bypass a far better tool than the one it replaced.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    run_gate("block", str(mig), "--sources", "shipment")
+    run_gate("clear", str(mig), "--reason", "I decided it is fine")  # NOT --earned
+
+    run_gate("block", str(mig), "--sources", "shipment")
+    try:
+        assert (mig / ".credential-gate-BLOCKED.json").exists(), "a bare manual-clear must NOT prevent re-arming"
+        assert _audit_actions(mig)[-1] == "block"
+    finally:
+        run_gate("clear", str(mig), "--reason", "test-teardown")
+
+
+def test_rearming_with_a_NEW_source_still_arms(tmp_path: Path) -> None:
+    """Control: a source that was never probed must still be gated.
+
+    The skip is keyed on the source list, not merely on "was previously cleared". If the spec gains
+    a live source, that source has no reachability evidence at all, so the gate must re-arm even
+    though a DIFFERENT source was legitimately proven earlier.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    run_gate("block", str(mig), "--sources", "shipment")
+    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+
+    run_gate("block", str(mig), "--sources", "shipment", "orders")
+    try:
+        assert (mig / ".credential-gate-BLOCKED.json").exists(), "a newly-added live source must re-arm the gate"
+        assert _audit_actions(mig)[-1] == "block"
+    finally:
+        run_gate("clear", str(mig), "--reason", "test-teardown")
+
+
+def test_the_rearm_skip_is_order_insensitive_on_sources(tmp_path: Path) -> None:
+    """Source ORDER is a classifier implementation detail, not a change in what was proven."""
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    run_gate("block", str(mig), "--sources", "shipment", "orders")
+    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+
+    run_gate("block", str(mig), "--sources", "orders", "shipment")
+
+    assert not (mig / ".credential-gate-BLOCKED.json").exists(), "reordered but identical sources must not re-arm"
+    assert _audit_actions(mig)[-1] == "block-skipped"

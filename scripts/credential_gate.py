@@ -46,6 +46,7 @@ accident, and cannot bypass it quietly".
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import os
@@ -170,6 +171,69 @@ def output_dirs(migration: Path) -> list[Path]:
     return [fabric]
 
 
+def _last_block_sources(migration: Path) -> list[str] | None:
+    """The source list recorded by the most recent `block`, or None if unreadable/absent.
+
+    `_audit` stores it as the repr of a Python list (`sources=['source[0]']`), so it is parsed with
+    `literal_eval` rather than `json.loads`. Any parse failure returns None, which callers must
+    treat as "cannot prove these are the same sources" and therefore re-arm - failing closed.
+    """
+    found: list[str] | None = None
+    try:
+        for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            if entry.get("action") != "block":
+                continue
+            detail = entry.get("detail", "")
+            if not detail.startswith("sources="):
+                found = None
+                continue
+            try:
+                parsed = ast.literal_eval(detail[len("sources=") :])
+            except (ValueError, SyntaxError):
+                found = None
+                continue
+            found = [str(s) for s in parsed] if isinstance(parsed, list) else None
+    except (OSError, ValueError):
+        return None
+    return found
+
+
+def _redundant_rearm(migration: Path, sources: list[str]) -> str | None:
+    """Would arming here merely re-block sources a probe ALREADY proved reachable?
+
+    Returns the earning action (`probe-cleared`/`authorize`) when the re-arm is redundant, else
+    None. This closes a real, measured hole - and it is a hole in BOTH directions, which is why the
+    conditions are narrow rather than "skip whenever previously cleared".
+
+    Measured 2026-08-03 (`claude-haiku-4.5`, variant-m5c): after a legitimate probe had cleared the
+    gate and the model was built, the agent re-ran the classifier, which re-armed unconditionally.
+    Faced with its OWN freshly re-armed gate on a source it had *already* proven reachable minutes
+    earlier, it did not re-probe - it ran `cd variant-m5c; clear .` and bypassed the gate outright.
+    So an unconditional re-arm does not merely annoy: it manufactures the exact dead end that
+    invites a bypass, and it does so for a source whose reachability is already established fact.
+
+    The two conditions are both load-bearing:
+
+    * **The gate must be currently EARNED** (`_clear_was_earned`), not merely cleared. A bare
+      `manual-clear` earns nothing, so a migration cleared that way still gets re-armed - otherwise
+      this helper would launder an unearned clear into permanent immunity.
+    * **The source list must be IDENTICAL to the one that was proven.** If the spec gained a new
+      live source, that source has never been probed, and skipping the re-arm would let a model be
+      built against it unproven. Comparison is order-insensitive (the classifier's ordering is an
+      implementation detail) but membership-exact.
+
+    Anything it cannot parse or compare falls through to a normal re-arm: fail closed.
+    """
+    earned = _clear_was_earned(migration)
+    if earned is None:
+        return None
+    previous = _last_block_sources(migration)
+    if previous is None or sorted(previous) != sorted(sources):
+        return None
+    return earned
+
+
 def apply_block(migration: Path, sources: list[str]) -> int:
     """Write the marker and deny write access to the output folder.
 
@@ -193,6 +257,17 @@ def apply_block(migration: Path, sources: list[str]) -> int:
             "IGNORING FORGED OVERRIDE: %s exists with no 'authorize' audit entry - applying the gate anyway.", OVERRIDE
         )
         _audit(migration, "violation", "forged override ignored at block time")
+
+    already = _redundant_rearm(migration, sources)
+    if already:
+        log.warning(
+            "Gate NOT re-applied: these exact sources were already proven by '%s'. Re-arming a gate "
+            "that a probe has satisfied is what invited a real bypass (see _redundant_rearm). "
+            "Re-probe explicitly if you need to re-verify reachability.",
+            already,
+        )
+        _audit(migration, "block-skipped", f"already earned by {already}; sources={sources}")
+        return 0
 
     (migration / MARKER).write_text(
         json.dumps(
