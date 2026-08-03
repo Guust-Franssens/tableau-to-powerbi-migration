@@ -77,6 +77,9 @@ SKILL_SCRIPTS = Path(__file__).parent.parent / ".github" / "skills" / "pbip-mode
 # a socket error and the real text is destroyed in transit. These fragments are what actually
 # reaches us, across both the clean and the crashed path.
 _SCHEMA_BASE = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/"
+_DEFINITION_PROPERTIES_SCHEMA = (
+    "https://developer.microsoft.com/json-schemas/fabric/item/report/definitionProperties/2.0.0/schema.json"
+)
 _PLATFORM_SCHEMA = (
     "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json"
 )
@@ -167,13 +170,17 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
             indent=2,
         ),
         f"{name}.Report/definition.pbir": json.dumps(
-            {"version": "4.0", "datasetReference": {"byPath": {"path": f"../{name}.SemanticModel"}}},
+            {
+                "$schema": _DEFINITION_PROPERTIES_SCHEMA,
+                "version": "4.0",
+                "datasetReference": {"byPath": {"path": f"../{name}.SemanticModel"}},
+            },
             indent=2,
         ),
         f"{name}.Report/definition/version.json": json.dumps(
             {
                 "$schema": _SCHEMA_BASE + "versionMetadata/1.0.0/schema.json",
-                "version": "4.0",
+                "version": "2.0.0",
             },
             indent=2,
         ),
@@ -183,7 +190,6 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
                 "themeCollection": {},
                 "layoutOptimization": "None",
                 "resourcePackages": [],
-                "reportVersionAtImport": "5.55",
             },
             indent=2,
         ),

@@ -29,8 +29,16 @@ powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update
 floor check, not a blind `@latest`, so at or above the floor it costs nothing.
 
 **Why a floor:** `powerbi-report-author` **>= 0.1.4** is a *correctness* floor. Older builds returned
-`errorCount: 0` for PBIR that Power BI Desktop cannot open (e.g. a `report.json` missing the
-schema-required `reportVersionAtImport`) — a stale CLI silently green-lights a broken report.
+`errorCount: 0` for PBIR that Power BI Desktop cannot open, so a stale CLI silently green-lights a
+broken report.
+
+> ⚠️ **This example used to name `reportVersionAtImport` as "schema-required". That is now WRONG** and
+> is corrected here because it actively misled a real change. Measured 2026-08-03 against the
+> known-good **0.1.4** itself, the current schema **forbids** it:
+> `/ must NOT have additional properties (property: "reportVersionAtImport")`. `definition.pbir` now
+> also requires a `$schema`, and `version.json`'s `/version` must match `^[1-9][0-9]*\.(0|[1-9][0-9]*)\.0$`
+> (so `2.0.0`, not `4.0`). The PBIR contract moves under a *fixed* CLI version — treat any specific
+> field claim in this repo as a snapshot, and re-run `validate` before trusting it.
 
 **Above the known-good matrix is a WARN, not an error.** It means the version-specific Gotchas in
 `.github/agents/` were verified against an older build and may be stale — re-verify the prose; never
