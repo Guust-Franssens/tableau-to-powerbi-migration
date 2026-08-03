@@ -584,6 +584,14 @@ def _record_attempt(migration: Path, verdict: str, what: str) -> None:
     distinguished that from UNREACHABLE), deleted the sandbox as instructed, and was scored "never
     probed". Inferring behaviour from an artifact a well-behaved actor is told to remove punishes
     exactly the behaviour we want.
+
+    ⚠️ CALL THIS THE INSTANT THE VERDICT IS KNOWN, never from an outer frame. It first lived in
+    `run_probe`, one level up - which put it AFTER `_probe_one_table`'s `finally: _close(pid)`, a
+    Desktop shutdown that takes tens of seconds. Measured 2026-08-03: `claude-opus-4.8` ran the
+    probe against its own spec and reported NO_CREDENTIAL, yet its audit log held only `block`
+    entries, because the run ended somewhere in that shutdown window. The measurement happened and
+    left no trace, which for every later reader is indistinguishable from never having probed.
+    Evidence written after slow cleanup is evidence you can lose.
     """
     sys.path.insert(0, str(Path(__file__).parent))
     from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
@@ -648,7 +656,6 @@ def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep:
     log.info("probing %d live source(s): %s", len(live), live)
     for idx in live:
         rc, verdict = _probe_one(spec_path, idx, timeout_sec, keep)
-        _record_attempt(spec_path.parent, verdict, f"source[{idx}] -> {verdict}")
         if rc != 0:
             log.error("PROBE: source index %d failed - not lifting the gate", idx)
             _print_verdict_directive(verdict)
@@ -762,6 +769,7 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
             "will fix an address that does not exist.",
             server,
         )
+        _record_attempt(spec_path.parent, "UNREACHABLE", f"{server} -> UNREACHABLE (DNS)")
         return 1, "UNREACHABLE"
 
     for i, table in enumerate(tables):
@@ -801,9 +809,15 @@ def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts:
                 "start can also land here. Re-run once before editing the spec; if it repeats, "
                 "check server and http_path."
             )
+            # Recorded HERE, not by the caller. Everything below this line - the `finally` that
+            # shuts Desktop down - is slow, and a measurement that is not written down did not
+            # happen as far as any later reader is concerned.
+            _record_attempt(spec_path.parent, "UNREACHABLE", f"{table} -> UNREACHABLE (no catalog)")
             return 1, "UNREACHABLE"
         log.info("model loaded - refreshing")
-        return _refresh_and_classify(pid, table, timeout_sec)
+        rc, verdict = _refresh_and_classify(pid, table, timeout_sec)
+        _record_attempt(spec_path.parent, verdict, f"{table} -> {verdict}")
+        return rc, verdict
     finally:
         if pid and not keep:
             _close(pid)
