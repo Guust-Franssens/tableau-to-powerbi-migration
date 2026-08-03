@@ -171,7 +171,19 @@ def output_dirs(migration: Path) -> list[Path]:
 
 
 def apply_block(migration: Path, sources: list[str]) -> int:
-    """Write the marker and deny write access to the output folder."""
+    """Write the marker and deny write access to the output folder.
+
+    ⚠️ The marker states a STATE, never a VERDICT, and the distinction is load-bearing. This runs at
+    PARSE time, from a static classifier that opens no socket - it knows only that a live source
+    EXISTS. It cannot know whether a credential is present, whether the host resolves, or whether a
+    single row could be read.
+
+    It used to claim `"reason": "live data source(s) have no Power BI credential"`. Measured
+    2026-08-03: `claude-opus-4.6` read that, reasonably treated it as an established fact, reported
+    "no credential" to the user, and never ran the probe. It behaved correctly on false input. The
+    same conflation was fixed in the classifier's console output first; the file kept the old claim,
+    so the two disagreed and the file won.
+    """
     if (migration / OVERRIDE).exists():
         if _override_is_authentic(migration):
             log.warning("Override present and audit-backed: gate NOT applied - human authorized a build-only run.")
@@ -185,8 +197,19 @@ def apply_block(migration: Path, sources: list[str]) -> int:
     (migration / MARKER).write_text(
         json.dumps(
             {
-                "blocked": True,
-                "reason": "live data source(s) have no Power BI credential",
+                "writes_blocked": True,
+                "reachability": "UNPROVEN",
+                "credential_status": "UNKNOWN - nothing has contacted this source yet",
+                "reason": "live data source(s) detected; reachability has NOT been measured",
+                "next_step": "python scripts/probe_live_source.py --spec <this-migration>/migration-spec.json",
+                "read_this_before_reporting": (
+                    "This file was written at PARSE time by a static check that opens NO connection. "
+                    "It does NOT mean a credential is missing - only that nothing has proven the "
+                    "source is reachable. Do NOT report a credential or connection problem from this "
+                    "file alone: run the probe and let its verdict (DATA_OK / NO_CREDENTIAL / "
+                    "UNREACHABLE) decide. Only the probe can tell a missing credential (a human must "
+                    "act) from a wrong hostname (nobody needs to sign in)."
+                ),
                 "sources": sources,
                 "applied": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             },

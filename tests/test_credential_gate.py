@@ -444,3 +444,132 @@ def test_snowflake_role_is_passed_through_when_the_spec_has_one() -> None:
     """Corporate accounts often need an explicit role - the user's default may have no grants."""
     assert 'Snowflake.Databases("MYORG-ACCT001.snowflakecomputing.com", "PROBE_WH", null)' in _m()
     assert '"PROBE_WH", [Role="ANALYST"]' in _m(role="ANALYST")
+
+
+MUTATION_CASES = [
+    ("icacls C:\\repo\\fabric", False),
+    ("icacls C:\\repo\\fabric /deny gfranssens:(W)", True),
+    ("icacls C:\\repo\\fabric /remove:d gfranssens", True),
+    ("Get-Content .credential-gate-audit.log", False),
+    ("cat .credential-gate-BLOCKED.json", False),
+    ("Remove-Item .credential-gate-BLOCKED.json", True),
+    ("Set-Content .credential-gate-AUTHORIZED -Value x", True),
+    ("python scripts/credential_gate.py clear _probe-lab/v1", True),
+    ("python scripts/credential_gate.py verify _probe-lab/v1", False),
+    ("python scripts/credential_gate.py status _probe-lab/v1", False),
+    ("takeown /f C:\\repo\\fabric", True),
+    ("pytest tests/test_credential_gate.py", False),
+]
+
+
+def load_hook_module():
+    """Import the HOOK by file path, under a name that cannot collide.
+
+    `scripts/credential_gate.py` and `scripts/hooks/credential_gate.py` share a module name, and
+    other tests here put `scripts/` on sys.path first - so a plain `import credential_gate` inside a
+    test silently resolves to the WRONG module and every assertion fails on a missing attribute.
+    """
+    import importlib.util  # noqa: PLC0415
+
+    path = REPO / "scripts" / "hooks" / "credential_gate.py"
+    spec = importlib.util.spec_from_file_location("_gate_hook_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(("command", "should_deny"), MUTATION_CASES)
+def test_the_hook_matches_mutations_not_mentions(command: str, should_deny: bool) -> None:
+    """The guard must distinguish CHANGING its control surface from merely NAMING it.
+
+    The first version matched the bare word `icacls` and the control files' names anywhere in the
+    payload. Measured 2026-08-03, that denied: a read-only `icacls <path>`, any command that READ
+    the audit log, tearing down finished fixtures, and writing a test whose source quotes a control
+    file's name. It ended in a real deadlock - a leftover marker armed the guard repo-wide, and the
+    guard then blocked the edit that fixes the guard, so a human had to intervene by hand.
+
+    Every False case below is work that was wrongly denied; every True case is the behaviour that
+    must stay denied. Both halves matter: widening the matcher until the False cases pass is only
+    safe while the True cases still fail.
+    """
+    sys.path.insert(0, str(REPO / "scripts" / "hooks"))
+    assert load_hook_module()._mutates_control_surface(command) is should_deny
+
+
+def test_a_write_tool_is_judged_on_its_path_not_its_content(migration: Path) -> None:
+    """Writing a test ABOUT the gate must not be confused with forging the override.
+
+    This is the case that produced the deadlock: `tests/test_credential_gate.py` necessarily quotes
+    the override's filename, so a content match denied the very suite that defends the gate - and,
+    worse, denied the edit that repairs the guard.
+
+    Driven through the real hook rather than its internals, so the payload shapes are the ones the
+    runtime actually sends.
+    """
+    run_gate("block", str(migration), "--sources", "shipment")
+
+    a_test_file = migration / "tests" / "test_credential_gate.py"
+    body = "assert '.credential-gate-AUTHORIZED' and '.credential-gate-BLOCKED.json'"
+    allowed = run_hook(
+        {
+            "toolName": "create",
+            "toolArgs": json.dumps({"path": str(a_test_file), "file_text": body}),
+            "cwd": str(migration),
+        }
+    )
+    assert allowed.get("permissionDecision") != "deny", "writing a test that quotes the names must be allowed"
+
+    forged = run_hook(
+        {
+            "toolName": "create",
+            "toolArgs": json.dumps({"path": str(migration / ".credential-gate-AUTHORIZED")}),
+            "cwd": str(migration),
+        }
+    )
+    assert forged.get("permissionDecision") == "deny", "forging the override must still be denied"
+
+    deleted = run_hook(
+        {
+            "toolName": "powershell",
+            "toolArgs": json.dumps({"command": f"Remove-Item {migration / '.credential-gate-BLOCKED.json'}"}),
+            "cwd": str(migration),
+        }
+    )
+    assert deleted.get("permissionDecision") == "deny", "deleting the marker must still be denied"
+
+
+def test_the_hook_lets_the_agent_inspect_the_gate_it_is_under(migration: Path) -> None:
+    """Reading the audit log and the ACL is how an agent reports honestly - never deny it.
+
+    Measured 2026-08-03: a read-only `icacls <path>` and a plain `Get-Content` of the audit log were
+    both denied, which blocked legitimate inspection AND `credential_gate.py verify`, whose whole
+    job is to read that log.
+    """
+    run_gate("block", str(migration), "--sources", "shipment")
+    for command in (
+        f"icacls {migration / 'fabric'}",
+        f"Get-Content {migration / '.credential-gate-audit.log'}",
+        f"python scripts/credential_gate.py verify {migration}",
+    ):
+        out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": command}), "cwd": str(migration)})
+        assert out.get("permissionDecision") != "deny", f"inspection wrongly denied: {command}"
+
+
+def test_the_hook_config_fails_open_when_the_script_is_broken() -> None:
+    """A CRASHED guard must not brick the CLI - existence is not validity.
+
+    Measured 2026-08-03: the script existed but raised NameError mid-edit. `Test-Path` was true, so
+    the hook ran, crashed, and preToolUse failed CLOSED - denying every write and shell call,
+    including the edit that would repair it. A restart could not fix it because the file was still
+    there. A human had to edit it by hand.
+
+    Failing open on a crash is the right trade: the ACL is the enforcement and this hook is only the
+    explanation layer, so a crashed hook protects nothing while blocking everything.
+    """
+    cfg = json.loads((REPO / ".github" / "hooks" / "credential-gate.json").read_text(encoding="utf-8"))
+    for event in ("preToolUse", "permissionRequest"):
+        for entry in cfg["hooks"][event]:
+            for shell in ("powershell", "bash"):
+                cmd = entry[shell]
+                assert "LASTEXITCODE" in cmd or "$?" in cmd, f"{event}/{shell} does not check the exit code"
+                assert "'{}'" in cmd, f"{event}/{shell} has no allow-fallback"

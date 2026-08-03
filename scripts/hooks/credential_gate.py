@@ -102,24 +102,92 @@ SHELL_WRITE_HINTS = (
     "pathlib",
 )
 
-# Any path-ish token ending in a guarded suffix, however it is quoted or escaped.
-_PATH_RE = re.compile(
-    r"[A-Za-z]:[\\/][^\"'\s,;)]+?(?:\.tmdl|\.pbism|\.pbir|\.pbip|\.platform)"
-    r"|[^\"'\s,;)]*?(?:\.tmdl|\.pbism|\.pbir|\.pbip|\.platform)",
+# The gate's own control surface. Small and enumerable, which is exactly why matching works HERE and
+# not on "every way to write a file": there are only so many ways to spell "remove this ACE".
+#
+# ⚠️ These match MUTATIONS, never MENTIONS. The first version matched the bare word `icacls`, plus
+# the control files' names anywhere in the payload. Measured 2026-08-03, that denied a great deal of
+# legitimate work: a read-only `icacls <path>` with no flags, any shell command that merely READ the
+# audit log, tearing down finished test fixtures - and, worst, writing a TEST FILE whose source text
+# quotes a control file's name. It ended in a genuine deadlock: with a leftover marker anywhere under
+# the repo, the guard was armed repo-wide and blocked the edit that fixes the guard. A human had to
+# clear the fixtures by hand. Same shape as the v1 sandbox deadlock: a guard that forbids the action
+# needed to satisfy it.
+_ACL_MUTATION_RE = re.compile(
+    r"icacls\b[^\n;|]*?/(?:grant|deny|remove|setowner|inheritance|reset|restore|substitute)"
+    r"|Set-Acl"
+    r"|takeown",
     re.IGNORECASE,
 )
 
-# The gate's own control surface. Small and enumerable, which is exactly why matching works HERE and
-# not on "every way to write a file": there are only so many ways to spell "remove this ACE".
-_CONTROL_RE = re.compile(
-    r"\.credential-gate-AUTHORIZED"
-    r"|\.credential-gate-BLOCKED\.json"
-    r"|icacls"
-    r"|Set-Acl"
-    r"|takeown"
-    r"|credential_gate\.py\s+clear",
+# A control FILE is defended only against commands that would create, destroy or overwrite it.
+# Reading one is not merely harmless, it is encouraged - the agent SHOULD see that it is gated.
+_MUTATE_VERB = r"(?:Remove-Item|Rename-Item|Move-Item|Copy-Item|Set-Content|Add-Content|Out-File|New-Item|del|erase|rm)"
+_CONTROL_FILE = rf"(?:{re.escape(OVERRIDE)}|{re.escape(MARKER)})"
+_CONTROL_FILE_MUTATION_RE = re.compile(
+    rf"{_MUTATE_VERB}[^\n;|]*{_CONTROL_FILE}|{_CONTROL_FILE}[^\n;|]*?(?:>|\|\s*{_MUTATE_VERB})",
     re.IGNORECASE,
 )
+
+# Lifting or authorizing the gate is never the agent's call, however it is spelled.
+_GATE_VERB_RE = re.compile(r"credential_gate\.py\s+(?:clear|authorize)", re.IGNORECASE)
+
+
+def _mutates_control_surface(text: str) -> bool:
+    """Does this command CHANGE the gate's control surface, rather than merely name it?"""
+    return bool(_ACL_MUTATION_RE.search(text) or _CONTROL_FILE_MUTATION_RE.search(text) or _GATE_VERB_RE.search(text))
+
+
+def _writes_a_control_file(payload: dict, tool: str, cwd: Path) -> bool:
+    """Is a file-writing tool aimed AT a gate control file? Judged on the PATH ARGUMENT alone.
+
+    This is the distinction that produced the deadlock: creating the override IS forgery, while
+    creating `tests/test_credential_gate.py` - whose text necessarily quotes that name - is the
+    suite that defends it. So the path argument is extracted structurally and the file BODY is never
+    consulted; matching anywhere in the payload text would deny writing any file that merely
+    mentions a control file, including this hook's own tests and its own repair.
+
+    Deliberately NOT built on `_candidate_paths`: that filters to model/report suffixes (.tmdl,
+    .pbip, ...) for the artifact rule, so a control file - which has no such suffix - can never come
+    back from it. Reusing it silently allowed the override to be forged (caught by test, 2026-08-03).
+    """
+    if tool.lower() not in WRITE_TOOLS:
+        return False
+    for value in _path_arguments(payload):
+        target = Path(value)
+        target = target if target.is_absolute() else (cwd / target)
+        if target.name in (OVERRIDE, MARKER):
+            return True
+    return False
+
+
+def _path_arguments(payload: dict) -> list[str]:
+    """Pull just the path-shaped ARGUMENTS out of a hook payload, never free text or file bodies."""
+    keys = ("path", "file_path", "filePath", "notebook_path", "target", "destination")
+    found: list[str] = []
+    candidates: list[dict] = []
+
+    args = payload.get("toolInput") or payload.get("tool_input")
+    if isinstance(args, dict):
+        candidates.append(args)
+
+    raw = payload.get("toolArgs") or payload.get("tool_args")
+    if isinstance(raw, dict):
+        candidates.append(raw)
+    elif isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            candidates.append(parsed)
+
+    for block in candidates:
+        for key in keys:
+            value = block.get(key)
+            if isinstance(value, str) and value.strip():
+                found.append(value.strip())
+    return found
 
 
 def _blocking_marker(target: Path) -> Path | None:
@@ -197,6 +265,14 @@ def _candidate_paths(tool: str, payload: dict) -> list[Path]:
 
 
 def _deny_reason(marker: Path, target: Path) -> str:
+    """Explain the denial without asserting anything the gate has not measured.
+
+    This text used to say the sources "have no Power BI credential", and told the agent a credential
+    was the blocker. The gate cannot know that - it arms at parse time, having opened no connection.
+    Measured 2026-08-03: a model read the equivalent claim in the marker file, reported "no
+    credential" to the user, and never probed. The denial must say what is true (writes are blocked
+    because reachability is unproven) and point at the measurement.
+    """
     try:
         info = json.loads(marker.read_text(encoding="utf-8"))
         sources = ", ".join(info.get("sources", [])) or "live source(s)"
@@ -206,14 +282,23 @@ def _deny_reason(marker: Path, target: Path) -> str:
         f"DENIED BY THE CREDENTIAL GATE - this is enforcement, not advice.\n"
         f"  Blocked write: {target}\n"
         f"  Gate marker:   {marker}\n"
-        f"  Reason:        {sources} have no Power BI credential, so reachability is UNPROVEN.\n"
+        f"  Reason:        reachability of {sources} is UNPROVEN - nothing has contacted it yet.\n"
         f"\n"
         f"  You cannot build a semantic model or report for a source that was never contacted.\n"
         f"  Retrying, renaming the file, or writing it from a shell will also be denied.\n"
-        f"  A credential is something only a HUMAN can supply - no amount of persistence helps.\n"
         f"\n"
-        f"  STOP NOW and report to the user. Stopping here IS the correct, completed outcome;\n"
-        f"  it is not an unfinished task. Their options:\n"
+        f"  This is NOT a statement that a credential is missing - the gate has not measured\n"
+        f"  anything. Your next action is the measurement, and its result decides:\n"
+        f"      python scripts/probe_live_source.py --spec <this-migration>/migration-spec.json\n"
+        f"    DATA_OK        -> the gate lifts itself; build for real.\n"
+        f"    NO_CREDENTIAL  -> stop and ask a human; no retry can conjure a credential.\n"
+        f"    UNREACHABLE    -> stop; report the address/network fault. Nobody needs to sign in.\n"
+        f"\n"
+        f"  Do NOT report a credential problem before the probe has returned one. Sending the\n"
+        f"  user to fix a sign-in they do not need is its own wrong answer.\n"
+        f"\n"
+        f"  If the probe returns NO_CREDENTIAL, stopping IS the correct, completed outcome;\n"
+        f"  it is not an unfinished task. The user's options are then:\n"
         f"    1. Sign in to the source once in Power BI Desktop, then re-run the probe.\n"
         f"    2. Supply a PAT / service-principal secret to bind the connection.\n"
         f"    3. Explicitly authorize an unvalidated build by creating the file\n"
@@ -276,11 +361,14 @@ def main() -> int:
     cwd = Path(payload.get("cwd") or ".")
     text = _extract_args_text(payload)
 
-    # 1. Defend the gate's own control files FIRST, before any override is honoured. Checked on
-    #    every write-capable tool and by NAME, so creating, copying, renaming or deleting one is
-    #    denied no matter how it is spelled. Reads stay allowed: the agent SHOULD be able to see
-    #    that it is blocked and why.
-    if (tool_l in WRITE_TOOLS or tool_l in SHELL_TOOLS) and _CONTROL_RE.search(text):
+    # 1. Defend the gate's own control files FIRST, before any override is honoured. Write tools are
+    #    judged on their TARGET PATH; shell commands on whether they MUTATE. So creating, copying,
+    #    renaming or deleting a control file is denied however it is spelled, while READING one - or
+    #    writing a test whose source merely quotes its name - is not.
+    touches = (tool_l in WRITE_TOOLS and _writes_a_control_file(payload, str(tool), cwd)) or (
+        tool_l in SHELL_TOOLS and _mutates_control_surface(text)
+    )
+    if touches:
         # Only defend the control surface while a gate is actually applied somewhere beneath cwd -
         # otherwise this would block legitimate icacls/ACL work in an unrelated repo.
         if _any_marker_under(cwd):
