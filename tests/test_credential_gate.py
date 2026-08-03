@@ -8,6 +8,7 @@ file must authorize NOTHING, because agents demonstrably create it themselves.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -700,3 +701,27 @@ def test_a_genuine_no_catalog_failure_still_classifies_as_unreachable() -> None:
 
     verdict, _ = _classify_failure("no catalog found on the Desktop Analysis Services instance")
     assert verdict == "UNREACHABLE"
+
+
+def test_the_probe_template_never_downgrades_the_tabular_compatibility_level() -> None:
+    """A real Power BI Desktop crash, pinned.
+
+    Measured 2026-08-03 ("Frown" feedback, a genuine Desktop crash mid-batch): "Tabular databases
+    do not support CompatibilityLevel downgrade. Current CompatibilityLevel: '1606'. Requested
+    CompatibilityLevel: '1567'." The probe's throwaway PBIP template requested 1567 - a value that
+    appears NOWHERE else in this repo's real migrations, and lower even than the 1606 TOM already
+    had cached for the AS instance the probe was opened into.
+
+    This repo's own documented convention (superstore-sales-performance/migration-spec.json:
+    "below this skill's own documented guidance of 1702+ for newly created models") is 1702+.
+    Pinning the floor rather than the exact value, so a future bump to an even newer level does
+    not fail this test for the wrong reason.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _pbip_files  # noqa: PLC0415
+
+    files = _pbip_files("Probe", "let\n    one = 1\nin\n    one", "t", "c")
+    db_tmdl = files["Probe.SemanticModel/definition/database.tmdl"]
+    match = re.search(r"compatibilityLevel:\s*(\d+)", db_tmdl)
+    assert match, "database.tmdl must declare a compatibilityLevel"
+    assert int(match.group(1)) >= 1702, f"probe template compat level {match.group(1)} is below this repo's 1702+ floor"

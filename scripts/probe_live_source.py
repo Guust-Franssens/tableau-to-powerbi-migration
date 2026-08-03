@@ -127,7 +127,18 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
             indent=2,
         ),
         f"{name}.SemanticModel/definition.pbism": json.dumps({"version": "4.0", "settings": {}}, indent=2),
-        f"{name}.SemanticModel/definition/database.tmdl": "database\n\tcompatibilityLevel: 1567\n",
+        f"{name}.SemanticModel/definition/database.tmdl": (
+            # 1702, never lower. Measured 2026-08-03 (a real Power BI Desktop crash, "Frown"
+            # feedback): TOM refuses to load a model that requests a LOWER compatibilityLevel than
+            # whatever Desktop's current AS instance already has cached ("Tabular databases do not
+            # support CompatibilityLevel downgrade"). This template used 1567 - a value that does
+            # not appear ANYWHERE else in this repo's real migrations, and is lower even than the
+            # 1606 that triggered the crash. This repo's own documented convention (superstore-
+            # sales-performance/migration-spec.json) is 1702+ for newly created models; matching it
+            # here means the probe's throwaway model can only ever be requesting an UPGRADE
+            # relative to whatever baseline Desktop already initialized, never a downgrade.
+            "database\n\tcompatibilityLevel: 1702\n"
+        ),
         f"{name}.SemanticModel/definition/model.tmdl": (
             "model Model\n"
             "\tculture: en-US\n"
