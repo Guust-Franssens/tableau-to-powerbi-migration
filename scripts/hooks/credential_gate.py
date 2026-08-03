@@ -145,20 +145,55 @@ _CLEAR_OR_AUTHORIZE_RE = re.compile(
 _ICACLS_TARGET_RE = re.compile(r"icacls\s+(\"[^\"]+\"|'[^']+'|[^\s;|&]+)", re.IGNORECASE)
 _MARKER_PATH_RE = re.compile(rf"([^\"'\s;|&]*?[\\/])?({re.escape(OVERRIDE)}|{re.escape(MARKER)})", re.IGNORECASE)
 
+# `cd`/`Set-Location`/`pushd` embedded in the SAME command string as the clear/authorize call.
+# Needed because the hook only ever sees the tool's STARTING cwd, never a directory the command
+# changes into internally before invoking credential_gate.py.
+#
+# A WORD boundary (`\b`), not an anchor on `^`/`;`/`&`. The first version required "cd" to sit at the
+# very start of the extracted text or right after a shell separator - but `_extract_args_text` wraps
+# shell arguments in a JSON envelope (`{"command": "cd ...; python ..."}`), so in the text actually
+# matched, "cd" is preceded by a literal `"` (the JSON string's opening quote), which satisfied NONE
+# of those anchors. Measured 2026-08-03: that made `_effective_base` silently fall back to the
+# unresolved payload cwd for EVERY real command, so the fix below never engaged in practice - it
+# looked correct in isolation and failed against the exact payload shape the hook actually receives.
+_CD_RE = re.compile(r"\b(?:cd|Set-Location|pushd)\b\s+(\"[^\"]+\"|'[^']+'|[^\s;&\n\"]+)", re.IGNORECASE)
+
+
+def _effective_base(text: str, cwd: Path) -> Path:
+    """Resolve the shell's EFFECTIVE working directory, honouring a leading `cd` in the same text.
+
+    Measured 2026-08-03, live in a real happy-path run (claude-haiku-4.5, variant-m5c): it ran
+    `cd _probe-lab/variant-m5c; python ../../scripts/credential_gate.py clear . 2>&1`. Resolving the
+    bare `.` against the payload's cwd (the REPO ROOT - never gated, since the marker lives inside
+    the migration folder) made `_targets_an_armed_gate` conclude "not armed" and ALLOW a bare, unearned
+    clear on a gate that had, seconds earlier, been legitimately re-armed. `verify` caught the result
+    (`GATE VERIFY: UNEARNED CLEAR ... UNVALIDATED`) - detection held - but enforcement should not have
+    needed rescuing here. Takes the LAST `cd` before the credential_gate.py invocation; chained cd's
+    are rare enough that a wrong guess here only ever WIDENS what counts as armed (falling back to the
+    unresolved cwd), never narrows it, so this cannot make the check MORE permissive than before.
+    """
+    base = cwd
+    for match in _CD_RE.finditer(text):
+        raw = match.group(1).strip("\"'")
+        candidate = Path(raw)
+        base = candidate if candidate.is_absolute() else (base / candidate)
+    return base
+
 
 def _command_targets(text: str, cwd: Path) -> list[Path]:
     """Best-effort extraction of the directory a control-surface command is aimed at."""
+    base = _effective_base(text, cwd)
     targets: list[Path] = []
     for rx in (_CLEAR_OR_AUTHORIZE_RE, _ICACLS_TARGET_RE):
         match = rx.search(text)
         if match:
             raw = match.group(1).strip("\"'")
             candidate = Path(raw)
-            targets.append(candidate if candidate.is_absolute() else (cwd / candidate))
+            targets.append(candidate if candidate.is_absolute() else (base / candidate))
     for match in _MARKER_PATH_RE.finditer(text):
         dirpart = (match.group(1) or "").rstrip("\\/")
-        candidate = Path(dirpart) if dirpart else cwd
-        targets.append(candidate if candidate.is_absolute() else (cwd / candidate))
+        candidate = Path(dirpart) if dirpart else base
+        targets.append(candidate if candidate.is_absolute() else (base / candidate))
     return targets
 
 
