@@ -305,7 +305,16 @@ def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
     """
     # pylint: disable=too-many-return-statements
     low = text.lower()
-    if "model identity unverified" in low or "wrong_model" in low:
+    # Deliberately "identity unverified" alone, NOT "model identity unverified". Measured
+    # 2026-08-03 (gpt-5.6-sol, live happy-path run): the real producer text is
+    # "model  : identity unverified (no model folder resolved for this pid)" - note the extra
+    # spaces and COLON between "model" and "identity", from the caller's own print formatting.
+    # The stricter substring never matched, so this exact failure fell through to the "no catalog"
+    # branch below and came out as a confident UNREACHABLE ("check server and http_path") against
+    # a warehouse that was reachable seconds earlier and seconds later for sibling runs. The
+    # invariant signal from the producer (github/skills/pbip-model-refresh/refresh_pbip_model.py)
+    # is "identity unverified" on its own; "model" is decorative context whose punctuation varies.
+    if "identity unverified" in low or "wrong_model" in low:
         return (
             "ERROR",
             "the probe could not confirm which Power BI Desktop instance it was bound to, so it "

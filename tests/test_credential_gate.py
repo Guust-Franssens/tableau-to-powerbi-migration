@@ -665,3 +665,38 @@ def migration_fixture(tmp_path: Path) -> Path:
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
     return mig
+
+
+def test_identity_unverified_is_classified_as_error_not_unreachable() -> None:
+    """A LOCAL tooling failure must never come out as a claim about the customer's source.
+
+    Measured 2026-08-03, live (gpt-5.6-sol, happy-path run against the CREDENTIALED warehouse):
+    the refresh returned "model  : identity unverified (no model folder resolved for this pid)" -
+    note the double space and colon between "model" and "identity", from the caller's own print
+    formatting. The classifier's substring check required the exact phrase "model identity
+    unverified" with no punctuation in between, so it never matched, and this fell through to the
+    "no catalog" branch as a confident UNREACHABLE - telling the user to fix a server address that
+    was reachable seconds earlier for a sibling run against the identical warehouse.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _classify_failure  # noqa: PLC0415
+
+    real_text = (
+        "PROBE: UNREACHABLE the probe model failed to load even after waiting - the data source "
+        "did not resolve. Check server and http_path in the spec before treating this as a "
+        "credential problem. Raw: model  : identity unverified (no model folder resolved for this pid)\n"
+        "REFRESH: ERROR RuntimeError: no catalog found on the Desktop Analysis Services instance"
+    )
+    verdict, detail = _classify_failure(real_text)
+    assert verdict == "ERROR", f"a local pid-binding failure must classify as ERROR, got {verdict}"
+    assert "local tooling failure" in detail.lower()
+    assert "not a fact about the data source" in detail.lower()
+
+
+def test_a_genuine_no_catalog_failure_still_classifies_as_unreachable() -> None:
+    """Paired control: the fix must not swallow REAL load failures into ERROR."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _classify_failure  # noqa: PLC0415
+
+    verdict, _ = _classify_failure("no catalog found on the Desktop Analysis Services instance")
+    assert verdict == "UNREACHABLE"
