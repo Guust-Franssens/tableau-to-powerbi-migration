@@ -2,7 +2,7 @@
 purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--timeout-sec 90] [--save]
+             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--save]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -83,10 +83,19 @@ from probe_desktop_query import AUTO_DATE_TABLE_PREFIXES, _load_adomd, discover_
 
 SAVE_SETTLE_SECONDS = 3
 SAVE_TIMEOUT_SECONDS = 120
-# Bounded so a missing credential fails FAST instead of hanging on an invisible sign-in modal.
-# 90s is comfortably above a serverless warehouse cold start (~30-60s) and far below the "agent
-# looks busy but is permanently stuck" territory that made this necessary.
-REFRESH_TIMEOUT_SECONDS = 90
+# The XMLA refresh ceiling. NOT agent-tunable on purpose - there is no CLI flag for it.
+#
+# 300s is chosen from measurement, not intuition. A 246,236-row, 11-table refresh took 38.8s on a
+# good run and over 87s on a slow one (2026-08-04), so the previous 90s ceiling left a ~3s margin and
+# duly false-positived on 2 of 5 Desktop instances opened on the SAME bundle. 5 minutes is
+# comfortably clear of that, and still far below the "agent looks busy but is permanently stuck"
+# territory this bound exists to prevent.
+#
+# Why no flag: a knob here is an attractive nuisance. An agent that hits a timeout will reach for a
+# bigger number - and the one case where waiting longer never helps is the credential wait, which
+# `refresh()` documents this ceiling cannot interrupt anyway. If a model legitimately needs longer,
+# the right lever is `--tables` (refresh only what is needed), not a longer wait.
+REFRESH_TIMEOUT_SECONDS = 300
 
 # A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
 # only when it needs to be (spaces, punctuation), so both forms have to be accepted.
@@ -422,7 +431,7 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     writing to a destination that was never verified.
     """
     try:
-        ok, message = refresh(port, args.tables, args.timeout_sec)
+        ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         text = f"{type(exc).__name__}: {exc}"
         # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
@@ -438,12 +447,12 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
         # So: report the observation, offer both hypotheses, and name the arbiter that settles it.
         # Never emit a stop-word instruction from an unverified heuristic.
         if "timeout" in text.lower() or "timed out" in text.lower():
-            print(f"REFRESH: TIMEOUT - no result within {args.timeout_sec}s ({text})")
+            print(f"REFRESH: TIMEOUT - no result within {REFRESH_TIMEOUT_SECONDS}s ({text})")
             print(
                 "  CAUSE UNKNOWN - this script cannot distinguish these two, and they need\n"
                 "  opposite responses:\n"
-                "    (a) SLOW: a large model simply needs longer. Re-run with a bigger\n"
-                f"        --timeout-sec (this was {args.timeout_sec}s).\n"
+                "    (a) SLOW: a very large model. Refresh only what you need with --tables;\n"
+                "        do NOT simply wait longer.\n"
                 "    (b) BLOCKED: Desktop is showing a data-source sign-in modal no automation\n"
                 "        can fill. Retrying cannot dismiss it; a human must sign in once.\n"
                 "  SETTLE IT - run the arbiter, do not guess:\n"
@@ -528,17 +537,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
     parser.add_argument("--tables", nargs="*", help="Tables to refresh (default: whole database)")
-    parser.add_argument(
-        "--timeout-sec",
-        type=int,
-        default=REFRESH_TIMEOUT_SECONDS,
-        help=(
-            f"XMLA refresh ceiling in seconds (default {REFRESH_TIMEOUT_SECONDS}). Raise it for a "
-            "large model: a 246,236-row, 11-table refresh was measured at 38.8s on a good run and "
-            "over 87s on a slow one. A timeout is reported as TIMEOUT with the cause UNKNOWN - it "
-            "is NOT evidence of a credential modal on its own"
-        ),
-    )
     parser.add_argument(
         "--save",
         action="store_true",

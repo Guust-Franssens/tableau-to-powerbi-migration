@@ -37,7 +37,7 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
-                                     [--timeout-sec 90] [--save] [--verify-only] [--ui-save]
+                                     [--save] [--verify-only] [--ui-save]
 ```
 
 > ⚠️ **`--save` is OFF by default, and that default is load-bearing.** Measured 3-vs-3 on
@@ -54,8 +54,13 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
 > ⚠️ **A refresh TIMEOUT is not evidence of a credential modal.** This script used to assert that,
 > and it was wrong: measured 2026-08-04 it fired on 2 of 5 Desktop instances opened on the *same*
 > bundle that refreshed cleanly on the other 3 (38.8 s on a good run, >87 s on a slow one, against a
-> 90 s ceiling). It now reports `REFRESH: TIMEOUT` with the cause **UNKNOWN** and names the arbiter
-> (`scripts/probe_desktop_credential.ps1`). Raise `--timeout-sec` for a large model. Never emit a
+> 90 s ceiling — a ~3 s margin). It now reports `REFRESH: TIMEOUT` with the cause **UNKNOWN** and
+> names the arbiter (`scripts/probe_desktop_credential.ps1`).
+>
+> **The ceiling is 300 s and is deliberately NOT agent-tunable — there is no flag.** A knob here is
+> an attractive nuisance: an agent that hits a timeout reaches for a bigger number, and the one case
+> where waiting longer never helps is the credential wait, which this ceiling cannot interrupt
+> anyway. If a model legitimately needs longer, refresh less with `--tables`. Never emit a
 > "this needs a human" stop from an unverified timeout - that phrasing names the one blocker an
 > agent must not retry, so a false positive turns a slow refresh into a permanent dead end.
 
