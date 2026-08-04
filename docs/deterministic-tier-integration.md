@@ -1,9 +1,75 @@
 # Integrating the deterministic tier (`Yarbrdab000/tableau-fabric-skills`)
 
-**Status:** DRAFT **v2** — revised after adversarial critique by Claude Opus 5 and GPT-5.6 Sol
+**Status:** DRAFT **v3** — revised after two adversarial critique rounds by Claude Opus 5 and GPT-5.6 Sol
 **Branch:** `feat/deterministic-tier-integration`
 **Evidence root:** `~/.copilot/session-state/5d5a3c63-…/files/integration-analysis/`
 **Ground truth:** `C:\pbip\airline-fresh\` (a complete Tier-0 run, skill 2.40.0)
+
+---
+
+## 0a. What changed in v3 (critique round 2 — knowledge architecture)
+
+Round 2 asked: *"can we drop persona instructions by adopting his tier?"* **Measured answer: no.**
+
+| # | v2 claimed | measured reality | impact |
+|---|---|---|---|
+| 1 | *"the numeric oracle — his docs reference a reconciliation oracle **he does not ship**"* (§5 BUILD-7) | **He ships it.** `scripts/fidelity_oracle.py` = **227,813 bytes**, with `DEFAULT_VALUE_TOLERANCE = 0.005`, `_normalize_expected(expected)`, a `dax_value_tier` (ADOMD against a live model) and an `image_tier`; plus `resources/fidelity-oracle.md` (30 KB). What he does **not** ship is the `expected` dict — the Tableau-side ground truth | ❌ v2 authorised rebuilding a 227 KB comparator. **Our differentiator is the `expected` producer** (`capture_tableau_reference.py`, `migrations/*/reference/`), not the comparator |
+| 2 | Tier 1b = all **105** `model_object_parameter` stubs need his `parameters.py`; ceiling **62.0 %** | **63 of 105 are misfiled.** Only **42** carry `fallback_reason: "parameter reference … (unmodeled)"`; 60 carry `"unresolved/ambiguous field [Calculation_2324420414664089602]"`. `translation_router.py:195-207` classifies *any* request touching a parameter as `model_object_parameter` | ✅ **Corrected `--approved-dax` ceiling: 84.8 %**, not 62 %. Tier 1b is ~42 objects, not 105 |
+| 3 | persona prose shrinks by adopting Tier 0 | Tier 0 supersedes **~4,500** chars of build prose but **adds ~6,000** (`--approved-dax` loop, Tier 1b, I1-I6, repair DoD). **Net +600** across three personas; `pbi-semantic-builder` goes **30,674 → ~33,900** | ❌ integration alone makes the cap **worse** |
+
+**The keystone.** A single unresolved object, `Calculation_2324420414664089602`, is referenced by **124 of
+188** requests and is the stated `fallback_reason` for **60**. It is **not itself in the queue**.
+Resolving it is the highest-leverage single action available and is now Phase 6's fixture.
+
+**Why persona prose does not shrink** (the round-2 self-scepticism check): our personas never contained
+Tableau→DAX translation prose — they *delegate* to `docs/tableau-dax-translation-guide.md`. So
+`category_guidance` shaves **the guide, not the persona**. The drift surface is therefore exactly one
+file, which is tractable.
+
+**The two levers that actually work are orthogonal to his tier:**
+1. **A 5th skill bundle `.github/skills/deterministic-tier/`** holding the whole Tier-0 contract
+   (`--approved-dax` mechanics, `approved_dax.json` shape, I1-I6, the `parameters.py` sequence, the
+   `report.json` field map, `guidance_sha256`). This is the `AGENTS.md:175` precedent and is the only
+   thing that makes the +6,000 affordable.
+2. **Split the 5,649-char shared-conventions block** — it is **22,596 chars across four personas,
+   24.6 % of the total agent budget**, and *none* of it is affected by Tier 0. Hard stops (credential
+   stop, layer ownership) stay verbatim inline; rationale (~3,500-4,000) moves behind a mandatory
+   step-0 invoke. **This single change buys more headroom than the entire integration.**
+
+**Split `pbi-semantic-builder` into build + repair personas** — not for cap reasons, but because the
+modes have **contradictory defaults on ambiguity**: build says *author something*, repair says *change
+nothing*. One prompt cannot hold both safely. `pbi-report-builder` stays unified (its repair surface
+*is* authoring).
+
+**New integration hazards found in round 2:**
+- ⚠️ **PBIR `$schema` divergence** — all **232** of his `visual.json` declare `visualContainer/1.0.0`;
+  our cookbook declares **2.11.0** (25) / 2.1.0 (2). Zero overlap. Pasting a cookbook fragment into his
+  container is unflagged.
+- ⚠️ **Visual-type vocabulary divergence** — ours `cardVisual`/`columnChart`/`barChart`, his
+  `card`/`clusteredColumnChart`/`clusteredBarChart`. Run a `catalog list` deprecation check before
+  standardising.
+- ⚠️ **`limitations_encountered` has no Tier-0 analogue** (0 occurrences under `C:\pbip\airline-fresh`)
+  and **AI-readiness is wholly uncontested upstream** (`CustomInstructions`, `qnaEnabled`, `synonym`,
+  `ai-instructions` = **0 hits** across his `SKILL.md` + 21 `resources/*.md`). Both erode by neglect:
+  AI-prep is the *last* build phase and repair mode has no natural slot for it, so **it will simply
+  stop running** unless the orchestrator owns it.
+
+**The 16 examples are the A/B corpus — freeze them, never rebuild.**
+`examples/airline-alliance-activity/fabric/` is the **same workbook** as `C:\pbip\airline-fresh`:
+**198 visuals / 108 measures (ours, from scratch)** vs ~126 visuals / 88 translated + 188 stubs (his).
+That is a ready-made Phase 0.5 hold-out set with no new tooling. They are also live test infrastructure
+(`tests/test_repo_layout.py`, `tests/test_skills.py:191-201`, `tests/test_check_m_syntax.py:149-155`)
+and source workbooks are gitignored (`README.md:235-249`), so they are **not** reproducible from a
+clean clone. Add `examples/*/deterministic/` alongside; never overwrite.
+⚠️ The **198 → 126 visual gap** (mostly textbox 107→9, card 51→13) is an **unexplained finding**, not
+noise. Determine whether he consolidated or dropped before accepting "Tier 0 becomes the builder".
+
+**Cookbook verdict: (c) still the source of truth, for a disjoint surface.** His 126 visuals span 10
+types; our 28 cookbook entries overlap on **card and donutChart only**. Everything the cookbook exists
+for — `azureMap` (**0** hits in his 60,934-char `viz-rebuild.md`), `kpi`, `waterfallChart`, `funnel`,
+`decompositionTreeVisual`, `shape`, plus the 6 non-type idioms — he does not emit at all. And the
+warned set maps straight onto it: 14 `empty` = *"mark class 'Shape' … not supported"* → `shape`;
+13 `degraded` = default continuous palette → `table-cond-format`.
 
 ---
 
@@ -41,8 +107,8 @@ compiler … There is no script that authors the tail for you."*
 | tier | what | executor |
 |---|---|---|
 | Tier 0 | deterministic → TMDL + PBIR + `report.json` | his `migrate_estate.py` (pinned) |
-| Tier 1a | stubbed calcs → DAX via `--approved-dax` | ⭐ our `pbi-semantic-builder` — **≤44 % of the queue** |
-| Tier 1b | Tableau parameters → model objects | ⚠️ his `parameters.py`, **in-process** — 56 % of the queue |
+| Tier 1a | stubbed calcs → DAX via `--approved-dax` | ⭐ our repair persona — **ceiling 84.8 %** (v3 correction) |
+| Tier 1b | genuine unmodeled Tableau parameters → model objects | ⚠️ his `parameters.py`, **in-process** — **~42 objects**, not 105 |
 | Tier 3 | warned visuals | ⚠️ **no on-disk seam exists** (§5.4) |
 | Tier ∞ | fidelity vs Tableau, credentials, portability, gate | ⭐ only us |
 
@@ -178,7 +244,10 @@ Tier-0 build, `connection_to_m.py`, field-parameter emission, `model_translation
 4. **`identifier_map`** — caption ↔ sanitized model identifier.
 5. **Complement contract** (§6) — much smaller than v1's.
 6. **`viz_fidelity` → PBIR resolver.**
-7. **The numeric oracle** — his docs reference a reconciliation oracle he does not ship.
+7. **The `expected`-value producer** — ⚠️ **v3 correction:** he **ships** the comparator
+   (`fidelity_oracle.py`, 227 KB, `dax_value_tier(expected=…)`, tolerance 0.005). We build and feed the
+   **Tableau-side ground truth** (`capture_tableau_reference.py`, `migrations/*/reference/`) and the
+   validator's adjudication layer. **Do not rebuild the comparator.**
 8. **Gate fixes** — `denied_dirs()` vs `audited_paths()`; audit materialized data by content.
 
 ### 🚫 SKIP
@@ -258,14 +327,14 @@ path**).*
 | # | phase | acceptance criterion (falsifiable) |
 |---|---|---|
 | **0** | Fix our classifier defects; parse federated `connections[]`; iterate **all** connections in preflight | 8-case agreement test `classify_source` ≡ `connection_target.powerbi_target` (6 currently contradict); artifact 1 → **3** connections; a mixed federated source arms the gate |
-| **0.5** | ⭐ **Fidelity spot-check of the UN-WARNED surface** | 5 of the 88 `translated: true` measures reconcile to Tableau values. **If silence ≠ correctness, STOP — the thesis is wrong** |
+| **0.5** | ⭐ **Fidelity spot-check of the UN-WARNED surface.** Fixture: **airline** — `examples/airline-alliance-activity/fabric/` (108 measures, ours) vs `C:\pbip\airline-fresh` (88 translated, his), same source workbook. Feed `expected` values to **his** `fidelity_oracle.dax_value_tier` | 5 of the 88 `translated: true` measures reconcile to Tableau values. **If silence ≠ correctness, STOP — the thesis is wrong** |
 | **1** | Gate fixes: split `denied_dirs()` / `audited_paths()`; audit materialized data by content | red-then-green: a migration whose only artifacts are `deterministic/**.pbip` **and** a 110 MB `.csv` makes `verify()` exit non-zero (today: 0 for both) |
 | **2** | `identifier_map` emitter | every caption in `migration-spec.json` maps to a model identifier or is explicitly unmatched |
 | **3** | M-layer detectors | flags live artifacts 1 & 3 **and** passes all 16 extracts **in the same run** (positive + negative control together) |
 | **4** | Complement emitter + `guidance_sha256` | schema-validates; contains no field already in `report.json`; hash changes when a guidance string is edited |
 | **5** | Canary: landing behaviour **+ guidance hashes + CLI flag surface** | fails on 2.34, passes on 2.40, fails on a reworded guidance string |
-| **6** | ⭐ **Prove the Tier-1 seam** — fixture must include **≥1 `model_object_parameter`** and ≥1 cascade keystone; derive **K** | mechanical: `needs_review_total` falls by exactly the count landed. semantic: each landed measure reconciles to a Tableau value. Re-run preserves unrelated objects (I2/I3) |
-| **7a** | `pbi-semantic-builder` → `--approved-dax` | coverage → **ceiling `1 − (model_object_parameter/total)`** = **62 %** on airline. **Not 70 %** |
+| **6** | ⭐ **Prove the Tier-1 seam.** Fixture: resolve the **keystone** `Calculation_2324420414664089602` (referenced by 124/188, blocks 60) and measure the queue drop; must also include ≥1 genuine `parameter reference` stub | mechanical: `needs_review_total` falls by exactly the count landed. semantic: each landed measure reconciles via `fidelity_oracle`. Re-run preserves unrelated objects (I2/I3) |
+| **7a** | repair persona → `--approved-dax` | coverage → **ceiling 84.8 %** on airline (`1 − 42/276`). ⚠️ v2's 62 % was wrong — 63 of 105 `model_object_parameter` are misfiled |
 | **7b** | Tier 1b — model objects via his `parameters.py`, in-process | the 105 parameter stubs land as field-parameter tables; Desktop renders ≥1 parameter-driven visual |
 | **8** | Deterministic post-passes: height clamp + rebase | *(strictly after the I3 barrier)* validate errors → <40; **a bundle moved to a new folder opens AND refreshes** |
 | **9** | `viz_fidelity` resolver + Tier 3 (only if a seam exists) | for ≥N entries the resolver names an existing `visual.json` that is the warned one |
