@@ -167,7 +167,13 @@ def _clear_but_keep_git(out: Path) -> None:
         if entry.name == ".git":
             continue
         if entry.is_dir():
-            shutil.rmtree(entry, onexc=_force_remove)
+            # `onexc` is Python 3.12+; this repo targets 3.11 (`pyproject.toml` py-version), where
+            # passing it raises TypeError and the build dies before writing anything. `onerror` is
+            # deprecated in 3.12 but still honoured, so it is the one spelling that works on both.
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(entry, onexc=_force_remove)
+            else:
+                shutil.rmtree(entry, onerror=lambda fn, path, _exc: _force_remove(fn, Path(path), None))
         else:
             entry.chmod(stat.S_IWRITE)
             entry.unlink()

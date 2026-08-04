@@ -3,7 +3,7 @@ purpose: forwarding shim. The real script now ships INSIDE the `pbip-model-refre
          `.github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py`, so the skill is one
          self-contained copyable unit. This keeps `python scripts/refresh_pbip_model.py ...`
          working - the four agent personas and `docs/` still invoke that path.
-usage:   python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"] [--no-save]
+usage:   python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"] [--save]
 
 Temporary by design: delete it once every caller points at the skill path (the personas under
 `.github/agents/` are the last holdouts). `tests/test_skills.py` proves the forward actually reaches

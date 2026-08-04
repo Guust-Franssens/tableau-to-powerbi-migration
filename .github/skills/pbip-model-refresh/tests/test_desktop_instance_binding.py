@@ -316,12 +316,16 @@ def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_p
 
 
 def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_path: Path, capsys) -> None:
-    """The gate must not cry wolf: the normal single-migration flow has to stay green."""
+    """The gate must not cry wolf: the normal single-migration flow has to stay green.
+
+    Passes `--save` explicitly: persisting became opt-in on 2026-08-04 (a present `cache.abf` makes
+    the PBIP unopenable), so this exercises the save path deliberately rather than by default.
+    """
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
 
     def fake_image_save(port: int, cache_path: Path) -> tuple[bool, str]:
@@ -331,10 +335,60 @@ def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_p
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
 
-    assert refresh_pbip_model.main(["--pid", "111"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--save"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.read_bytes() == b"cache"
+
+
+def test_not_saving_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
+    """Without `--save`, a refresh must NOT write `cache.abf`.
+
+    Regression test for a defect that shipped in the published plugin. Measured 3-vs-3 on
+    2026-08-04: with a persisted cache present, Desktop opened the PBIP as
+    "Untitled - Power BI Desktop" and the bridge reported `Host is not ready to accept operations`
+    (pids 59584, 64668, 50316); without it the same bundle loaded (pids 15216, 4888, 37076). There
+    is no error - the file silently does not open - so the safe behaviour has to be the default
+    rather than an opt-out every caller must remember.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _explode("image_save must not run"))
+    monkeypatch.setattr(refresh_pbip_model, "save", _explode("save must not run"))
+
+    assert refresh_pbip_model.main(["--pid", "111"]) == 0
+    out = capsys.readouterr().out
+    assert "REFRESH: DATA_OK" in out
+    assert "PERSISTED" not in out
+    assert not cache.exists(), "a default refresh must not write cache.abf"
+
+
+def test_a_timeout_does_not_assert_a_credential_modal(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A refresh timeout must report the cause as UNKNOWN, never as "this needs a human".
+
+    Regression test for the most expensive defect found on 2026-08-04. The old message named a
+    data-source sign-in modal and said "THIS NEEDS A HUMAN. Do not retry" on ANY timeout - the one
+    blocker an agent is forbidden to retry - so a false positive converted a transient slowdown into
+    a permanent dead end. It fired on 2 of 5 Desktop instances opened on the SAME bundle that
+    refreshed cleanly on the other 3 (38.8s good run, >87s slow run, 90s ceiling).
+    """
+    _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", _explode("The XML for Analysis request timed out"))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    out = capsys.readouterr().out
+    assert exit_code == 3
+    assert "REFRESH: TIMEOUT" in out
+    assert "CAUSE UNKNOWN" in out
+    assert "THIS NEEDS A HUMAN" not in out, "a timeout heuristic must not emit a stop-word instruction"
+    assert "probe_desktop_credential" in out, "it must name the arbiter that settles the cause"
 
 
 def test_persisting_uses_the_exact_cache_path_the_gate_verified(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -355,12 +409,12 @@ def test_persisting_uses_the_exact_cache_path_the_gate_verified(monkeypatch, tmp
     monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda pid: resolved.pop(0) if resolved else None)
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (7, "Orders"))
     monkeypatch.setattr(refresh_pbip_model, "save", lambda pid: (True, "saved via UI"))
     monkeypatch.setattr(refresh_pbip_model, "image_save", _record)
 
-    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--save"])
     assert written == []
     assert exit_code == 1
     assert "NOT_PERSISTED" in capsys.readouterr().out

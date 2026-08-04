@@ -2,7 +2,7 @@
 purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--no-save]
+             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--timeout-sec 90] [--save]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -422,27 +422,48 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     writing to a destination that was never verified.
     """
     try:
-        ok, message = refresh(port, args.tables)
+        ok, message = refresh(port, args.tables, args.timeout_sec)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         text = f"{type(exc).__name__}: {exc}"
-        # A timeout here is almost always a credential modal Desktop is showing but the agent cannot
-        # see. Say so explicitly and name the human action, rather than emitting a bare stack trace
-        # that reads like a transient glitch worth retrying. Retrying cannot dismiss a sign-in dialog.
+        # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
+        # the credential one ("THIS NEEDS A HUMAN. Do not retry"), which is the single most expensive
+        # thing it could get wrong: that phrasing names the one blocker an agent is forbidden to
+        # retry, so a false positive turns a transient slowdown into a permanent dead end.
+        #
+        # Measured 2026-08-04: it fired on 2 of 5 Desktop instances opened on the SAME bundle, which
+        # refreshed cleanly on the other 3. Real cause: a 246,236-row, 11-table refresh took 38.8s on
+        # a good run and over 87s on a slow one, against a 90s ceiling. It cost that run ~45 minutes
+        # and produced a headline finding that was flatly wrong until it was re-tested.
+        #
+        # So: report the observation, offer both hypotheses, and name the arbiter that settles it.
+        # Never emit a stop-word instruction from an unverified heuristic.
         if "timeout" in text.lower() or "timed out" in text.lower():
-            print(f"REFRESH: NO_DATA - refresh timed out after {REFRESH_TIMEOUT_SECONDS}s ({text})")
+            print(f"REFRESH: TIMEOUT - no result within {args.timeout_sec}s ({text})")
             print(
-                "  LIKELY CAUSE: Power BI Desktop is showing a data-source sign-in modal that no\n"
-                "  automation can fill. Confirm with:\n"
+                "  CAUSE UNKNOWN - this script cannot distinguish these two, and they need\n"
+                "  opposite responses:\n"
+                "    (a) SLOW: a large model simply needs longer. Re-run with a bigger\n"
+                f"        --timeout-sec (this was {args.timeout_sec}s).\n"
+                "    (b) BLOCKED: Desktop is showing a data-source sign-in modal no automation\n"
+                "        can fill. Retrying cannot dismiss it; a human must sign in once.\n"
+                "  SETTLE IT - run the arbiter, do not guess:\n"
                 f"    powershell -File scripts/probe_desktop_credential.ps1 -DesktopPid {pid}\n"
-                "  THIS NEEDS A HUMAN. Do not retry, and do not proceed to a full build: ask the user\n"
-                "  to sign in to the source once in Desktop, or to authorize an unvalidated build."
+                "  A one-row probe bundle also answers this definitively: a refresh limited to a\n"
+                "  single row per partition is fast by construction, so a timeout on THAT is\n"
+                "  evidence of (b), while a timeout here is not."
             )
             return 3
         print(f"REFRESH: ERROR {text}")
         return 2
     print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
 
-    if args.no_save:
+    # Not saving is the DEFAULT. Measured 3-vs-3 (2026-08-04): with a persisted `cache.abf` present,
+    # Desktop opened the PBIP as "Untitled - Power BI Desktop" and the bridge reported `Host is not
+    # ready to accept operations` (pids 59584, 64668, 50316); with it absent the same bundle loaded
+    # correctly (pids 15216, 4888, 37076). Restoring a previously-good cache re-breaks opening, so
+    # there is no workaround - which is why the safe behaviour has to be the default rather than an
+    # opt-out that callers must remember. `--no-save` is retained as a no-op for existing callers.
+    if not args.save:
         return None
 
     # Preferred: a real API call. Falls back to driving the UI only if it fails, so a change in the
@@ -507,7 +528,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
     parser.add_argument("--tables", nargs="*", help="Tables to refresh (default: whole database)")
-    parser.add_argument("--no-save", action="store_true", help="Refresh only; do NOT persist the cache")
+    parser.add_argument(
+        "--timeout-sec",
+        type=int,
+        default=REFRESH_TIMEOUT_SECONDS,
+        help=(
+            f"XMLA refresh ceiling in seconds (default {REFRESH_TIMEOUT_SECONDS}). Raise it for a "
+            "large model: a 246,236-row, 11-table refresh was measured at 38.8s on a good run and "
+            "over 87s on a slow one. A timeout is reported as TIMEOUT with the cause UNKNOWN - it "
+            "is NOT evidence of a credential modal on its own"
+        ),
+    )
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help=(
+            "Persist the refreshed model to .pbi/cache.abf via AMO ImageSave. OFF BY DEFAULT: a "
+            "persisted cache was measured (3-vs-3, 2026-08-04) to make the PBIP UNOPENABLE - "
+            "Desktop opens it as 'Untitled' with no error and the bridge reports 'Host is not "
+            "ready to accept operations'. Only pass this when a later step genuinely needs the "
+            "data to survive a Desktop restart, and re-open the PBIP afterwards to confirm it still "
+            "loads"
+        ),
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Deprecated no-op: not saving is now the default. Kept so existing callers still work",
+    )
     parser.add_argument("--verify-only", action="store_true", help="Skip refresh/save; just report the state")
     parser.add_argument(
         "--ui-save",
@@ -547,10 +595,10 @@ def main(argv: list[str] | None = None) -> int:
     if rows <= 0:
         print("REFRESH: NO_DATA (refresh ran but the table is empty - check the source and credentials)")
         return 1
-    if not args.no_save and not args.verify_only and not persisted:
+    if args.save and not args.verify_only and not persisted:
         print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
         return 1
-    print("REFRESH: DATA_OK" + ("" if args.no_save or args.verify_only else " + PERSISTED"))
+    print("REFRESH: DATA_OK" + (" + PERSISTED" if args.save and not args.verify_only else ""))
     return 0
 
 

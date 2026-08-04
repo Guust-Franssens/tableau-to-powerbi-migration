@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop and PERSIST the result to .pbi/cache.abf, headlessly via AMO Server.ImageSave with a UI-Automation fallback. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and OPTIONALLY persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is opt-in - `--save` - because a persisted cache can make the PBIP unopenable. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -37,8 +37,27 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
-                                     [--no-save] [--verify-only] [--ui-save]
+                                     [--timeout-sec 90] [--save] [--verify-only] [--ui-save]
 ```
+
+> ⚠️ **`--save` is OFF by default, and that default is load-bearing.** Measured 3-vs-3 on
+> 2026-08-04: with a persisted `cache.abf` present, Desktop opened the PBIP as
+> **"Untitled - Power BI Desktop"** and the bridge reported `Host is not ready to accept operations`
+> (pids 59584, 64668, 50316); with it absent, the same bundle loaded correctly (pids 15216, 4888,
+> 37076). **There is no error message** - the file simply does not open. Restoring a
+> previously-good cache re-breaks opening, so you cannot keep a cache around to skip a slow refresh.
+> Diagnostic: check `MainWindowTitle`, and do not retry.
+>
+> Pass `--save` only when a later step genuinely needs the data to survive a Desktop restart, and
+> **re-open the PBIP afterwards to confirm it still loads.**
+
+> ⚠️ **A refresh TIMEOUT is not evidence of a credential modal.** This script used to assert that,
+> and it was wrong: measured 2026-08-04 it fired on 2 of 5 Desktop instances opened on the *same*
+> bundle that refreshed cleanly on the other 3 (38.8 s on a good run, >87 s on a slow one, against a
+> 90 s ceiling). It now reports `REFRESH: TIMEOUT` with the cause **UNKNOWN** and names the arbiter
+> (`scripts/probe_desktop_credential.ps1`). Raise `--timeout-sec` for a large model. Never emit a
+> "this needs a human" stop from an unverified timeout - that phrasing names the one blocker an
+> agent must not retry, so a false positive turns a slow refresh into a permanent dead end.
 
 Read-only preflight (proves credentials + source reachability without changing anything):
 
@@ -69,8 +88,12 @@ Re-localizing, reopening, refreshing and saving again produced a cache that **di
 `Stop-Process -Force` + reopen (`PREFLIGHT: DATA_OK`, no refresh). So "refresh last, after sanitize"
 does not rescue the cache: Desktop keys the cache to the definition it was built from.
 
-> **Hand-off rule:** leave the model **localized + refreshed + persisted** so the next agent gets data,
-> and tell whoever commits to run the sanitize step (which knowingly discards the cache).
+> **Hand-off rule:** leave the model **localized + refreshed**, and tell whoever commits to run the
+> sanitize step. ⚠️ **Revised 2026-08-04 — this used to say "+ persisted".** That was wrong, and it
+> was the more expensive of the two errors: persisting is what makes the PBIP unopenable (see the
+> `--save` warning above), so the guidance to always persist actively broke the hand-off it was
+> written to protect. Persist only with `--save`, only when the next step needs data to survive a
+> restart, and verify the PBIP still opens afterwards.
 
 **`powerbi-desktop reload` does NOT re-read edited TMDL.** Measured 2026-08-01: after editing two
 measures on disk, `reload` returned `{"success": true}` and `INFO.MEASURES()` still showed the **old**
@@ -84,8 +107,12 @@ number you read back.
 
 | Path | What it is | Status |
 |---|---|---|
-| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless. | **Default** |
+| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless. | **Opt-in (`--save`)** |
 | **UI Automation (`InvokePattern` on the "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Fallback / `--ui-save` |
+
+⚠️ **Read the `--save` warning above before using either.** Both write the same `cache.abf`, and a
+present cache was measured to make the PBIP unopenable. The mechanism below is sound and worth
+keeping - the error was making it the default, not building it.
 
 **Why ImageSave exists at all**, because the obvious answer says it should not: the guidance is that
 writing model state back to `.pbip`/`cache.abf` "is a separate Save action that only the Desktop UI
