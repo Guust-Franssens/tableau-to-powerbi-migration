@@ -1,6 +1,6 @@
 # Review remediation plan
 
-**Status:** Phase A ✅ COMPLETE (`0cbff41`) · next: Phase B · **Branch:** `feat/deterministic-tier-integration` · **Created:** 2026-08-04
+**Status:** Phases A + B ✅ COMPLETE · next: Phase C · **Branch:** `feat/deterministic-tier-integration` · **Created:** 2026-08-04
 
 Tracks the work arising from four review rounds (plan · knowledge-architecture · code · direction).
 Both direction reviewers returned **CHANGE SHAPE — do not merge, do not continue plan v3 as written**,
@@ -50,7 +50,13 @@ plugin stale, which preflight blocks on.
 
 ---
 
-## Phase B — repair the credential gate  ☐ NOT STARTED
+## Phase B — repair the credential gate  ✅ COMPLETE (`96b5482`, `087aba5`, `c24ba73`)
+
+All four fixes landed with regression tests. Suite 276 -> 301 passing.
+
+- **B1+B2** dissolved into one deletion: the preflight held a second, contradictory policy (deny-list, fails open) against `connection_target`'s allow-list (fails safe). Removing it fixed the extract-over-live precedence AND the missing `azure_sqldb` at once — 51 lines deleted, not extended.
+- **B3** split `denied_dirs()` (enforcement, `fabric/` only) from `audited_paths()` (verification, whole migration + materialized data). A new test also caught `verify` CREATING `fabric/` as a side effect.
+- **B4** parser emits `connection.connections[]`; preflight gates every leg. Upstream half filed as their issue #90.
 
 | # | task | site | status |
 |---|---|---|---|
