@@ -136,6 +136,25 @@ def _clear_gate_marker(spec_path: Path) -> None:
         )
 
 
+def _classify_legs(src: dict, index: int) -> list[tuple[str, str, str]]:
+    """Classify every connection behind one data source. Returns (name, verdict, reason) per leg.
+
+    A `federated` datasource wraps SEVERAL named connections - a Tableau join across, say, Azure SQL
+    + Snowflake + Databricks is ONE datasource with three live systems behind it. Measured
+    2026-08-04, classifying only the primary armed the credential gate for 1 of 3 and reported the
+    other two nowhere. Under-reporting live sources is the one direction this must never fail in.
+    """
+    conn = src.get("connection", {}) or {}
+    base_name = str(src.get("name") or conn.get("hyper_file") or f"source[{index}]")
+    legs = conn.get("connections") or [conn]
+    classified: list[tuple[str, str, str]] = []
+    for leg_index, leg in enumerate(legs):
+        verdict, reason = classify_source(leg)
+        name = base_name if len(legs) == 1 else f"{base_name}[{leg_index}] {leg.get('class', '?')}"
+        classified.append((name, verdict, reason))
+    return classified
+
+
 def cmd_classify(spec_path: Path) -> int:
     """Classify every data source in a migration-spec.json for credential needs."""
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -149,15 +168,13 @@ def cmd_classify(spec_path: Path) -> int:
     blocked_names: list[str] = []
     log.info("Data-source credential preflight for %s", spec_path)
     for i, src in enumerate(sources):
-        conn = src.get("connection", {}) or {}
-        verdict, reason = classify_source(conn)
-        name = src.get("name") or conn.get("hyper_file") or f"source[{i}]"
-        marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
-        log.info("%s %-28s %s", marker, str(name)[:28], reason)
-        needs += verdict == "needs-credential"
-        review += verdict == "review"
-        if verdict == "needs-credential":
-            blocked_names.append(str(name))
+        for name, verdict, reason in _classify_legs(src, i):
+            marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
+            log.info("%s %-28s %s", marker, name[:28], reason)
+            needs += verdict == "needs-credential"
+            review += verdict == "review"
+            if verdict == "needs-credential":
+                blocked_names.append(name)
 
     log.info("-" * 60)
     if needs:

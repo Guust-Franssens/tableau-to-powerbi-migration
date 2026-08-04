@@ -153,7 +153,18 @@ def _capture_connect_details(connection: dict[str, Any], conn_el: etree._Element
 
 def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dict[str, Any]:
     """Resolve both the *original* source connection (e.g. excel-direct, sqlserver) and whether the
-    datasource runs off a packaged .hyper extract (Tableau Public workbooks always do)."""
+    datasource runs off a packaged .hyper extract (Tableau Public workbooks always do).
+
+    A `class='federated'` datasource can wrap SEVERAL named connections - a Tableau join across, say,
+    Azure SQL + Snowflake + Databricks is one datasource with three. `connection` (singular) keeps
+    describing the FIRST, because the schema, the 16 committed example specs and every consumer
+    predate this; the full list is added as `connections` so nothing downstream has to guess.
+
+    ⚠️ This is a SAFETY fix, not a completeness one. Measured 2026-08-04 on a tri-source workbook:
+    the parser reported one connection, so `preflight_source_credentials` armed the credential gate
+    for 1 of 3 live systems and reported the other two nowhere. Under-reporting live sources is the
+    one direction the gate must never fail in.
+    """
     outer_conn = ds_el.find("connection")
     connection: dict[str, Any] = {"class": "unknown", "mode": "live", "server": None, "database": None, "note": None}
     if outer_conn is None:
@@ -161,8 +172,8 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
         return connection
 
     # Both branches want the same treatment; pick the element that actually describes the source.
-    named_conn = outer_conn.find(".//named-connections/named-connection/connection")
-    source_el = named_conn
+    named_conns = outer_conn.findall(".//named-connections/named-connection/connection")
+    source_el = named_conns[0] if named_conns else None
     if source_el is None and outer_conn.get("class") not in (None, "federated"):
         source_el = outer_conn
     if source_el is not None:
@@ -183,7 +194,30 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
     connection["powerbi_target"], connection["powerbi_target_reason"] = powerbi_target(
         connection["class"], connection["mode"]
     )
+
+    # Every named connection, in document order, each independently classified. Emitted whenever a
+    # federated wrapper is present - including the single-connection case, so consumers can read one
+    # field unconditionally instead of branching on how many there are.
+    if named_conns:
+        connection["connections"] = [_describe_named_connection(el, connection["mode"]) for el in named_conns]
     return connection
+
+
+def _describe_named_connection(conn_el: etree._Element, mode: str) -> dict[str, Any]:
+    """One entry of `connection.connections[]`: class, server, database, and its own PBI target.
+
+    `mode` is inherited from the parent datasource: an extract caches the whole federated join, not
+    one leg of it, so every named connection under an extracted datasource is itself extract-backed.
+    """
+    described: dict[str, Any] = {
+        "class": conn_el.get("class", "unknown"),
+        "server": conn_el.get("server"),
+        "database": conn_el.get("dbname"),
+        "mode": mode,
+    }
+    _capture_connect_details(described, conn_el)
+    described["powerbi_target"], described["powerbi_target_reason"] = powerbi_target(described["class"], mode)
+    return described
 
 
 _CONTAINER_RELATION_TYPES = {"collection", "join", "union"}

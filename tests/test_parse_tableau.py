@@ -15,6 +15,7 @@ from parse_tableau import _parse_published_datasource, parse_workbook  # noqa: E
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
 TDS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "standalone_datasource.tds"
+FEDERATED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "federated_multi_connection.twb"
 
 
 def test_parses_top_level_shape():
@@ -337,3 +338,47 @@ def test_parser_and_server_lineage_agree_on_the_dedup_key():
     assert parsed["id"] == "Sales Master"  # percent-decoded, not 'Sales%20Master'
     assert parsed["key"] == dedup_key("Finance", "Sales Master")
     assert parsed["key"] == "finance/sales master"
+
+
+def test_a_federated_datasource_reports_every_named_connection():
+    """A `class='federated'` datasource can wrap several live systems; report all of them.
+
+    Measured 2026-08-04 on a real tri-source workbook (Azure SQL + Snowflake + Databricks joined in
+    one Tableau datasource): the parser used `.find()` on the named-connection path, kept only the
+    first, and `preflight_source_credentials` therefore armed the credential gate for 1 of 3 live
+    systems while reporting the other two nowhere. Under-reporting live sources is the one direction
+    the gate must never fail in.
+    """
+    spec = parse_workbook(FEDERATED_FIXTURE)
+    conn = spec["data_sources"][0]["connection"]
+
+    classes = [c["class"] for c in conn["connections"]]
+    assert classes == ["azure_sqldb", "snowflake", "databricks"], "all three legs, in document order"
+    assert all(c["powerbi_target"] == "live_source" for c in conn["connections"])
+
+    servers = {c["server"] for c in conn["connections"]}
+    assert "esookcu-vg56333.snowflakecomputing.com" in servers
+    assert "adb-7405612403187675.15.azuredatabricks.net" in servers
+
+
+def test_the_primary_connection_stays_backwards_compatible():
+    """`connection` (singular) must keep describing the first leg.
+
+    The schema, the 16 committed example specs and every existing consumer predate `connections[]`,
+    so adding it must not move the primary.
+    """
+    conn = parse_workbook(FEDERATED_FIXTURE)["data_sources"][0]["connection"]
+    assert conn["class"] == "azure_sqldb"
+    assert conn["server"] == "tableaumigration.database.windows.net"
+    assert conn["powerbi_target"] == "live_source"
+
+
+def test_connector_specific_details_survive_per_leg():
+    """Each leg keeps the details its connector needs, not just class and server.
+
+    A Databricks M query needs the SQL-warehouse HTTP path and a Snowflake one needs the warehouse;
+    losing them per-leg would make the connection unusable even once the credential is supplied.
+    """
+    legs = {c["class"]: c for c in parse_workbook(FEDERATED_FIXTURE)["data_sources"][0]["connection"]["connections"]}
+    assert legs["databricks"].get("http_path") == "/sql/1.0/warehouses/abc123"
+    assert legs["snowflake"].get("warehouse") == "COMPUTE_WH"
