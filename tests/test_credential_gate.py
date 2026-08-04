@@ -89,6 +89,76 @@ def test_verify_flags_artifacts_built_while_blocked(migration: Path) -> None:
     assert run_gate("verify", str(migration)).returncode == 1
 
 
+def test_verify_flags_materialized_source_data(migration: Path) -> None:
+    """Extracted customer ROWS are a violation, not just a `.tmdl`.
+
+    `verify` used to scan only `{.tmdl,.pbism,.pbir,.pbip}`. Measured 2026-08-04: a
+    deterministic-tier run wrote **two 110 MB CSVs** of source rows next to the model and `verify`
+    reported *"OK - gate applied, no model/report artifacts exist"*. A materialized CSV is a
+    strictly LARGER harm than a definition file - a `.tmdl` describes a model, a `.csv` IS the
+    customer's data on a workstation, extracted from a source whose reachability was never proven.
+    """
+    run_gate("block", str(migration), "--sources", "warehouse")
+    run_gate("clear", str(migration), "--reason", "simulate-evasion")
+    (migration / ".credential-gate-BLOCKED.json").write_text('{"blocked": true, "sources": []}')
+    data = migration / "data" / "Orders"
+    data.mkdir(parents=True)
+    (data / "Extract_Extract.csv").write_text("order_id,amount\n1,42\n")
+
+    result = run_gate("verify", str(migration))
+    assert result.returncode == 1, "materialized rows must fail verification"
+    assert "Extract_Extract.csv" in (result.stdout + result.stderr)
+
+
+def test_verify_scans_outside_fabric(migration: Path) -> None:
+    """A build that lands anywhere in the migration counts, not only under `fabric/`.
+
+    The deterministic tier writes to `pbip/`, `semantic_models/` and `data/`. A `fabric/`-only scan
+    reported "no artifacts exist" beside a complete, unvalidated PBIP.
+    """
+    run_gate("block", str(migration), "--sources", "warehouse")
+    run_gate("clear", str(migration), "--reason", "simulate-evasion")
+    (migration / ".credential-gate-BLOCKED.json").write_text('{"blocked": true, "sources": []}')
+    emitted = migration / "deterministic" / "pbip" / "Wb.SemanticModel" / "definition" / "tables"
+    emitted.mkdir(parents=True)
+    (emitted / "Orders.tmdl").write_text("table Orders")
+
+    assert run_gate("verify", str(migration)).returncode == 1
+
+
+def test_verify_ignores_the_probe_sandbox_and_the_source_workbook(migration: Path) -> None:
+    """The sanctioned exceptions must not self-report a violation.
+
+    `_probe/` is built WHILE the gate is up - that is how a clear is earned, so flagging it would
+    make the gate impossible to satisfy. `source/` is the input we were handed, and `reference/`
+    holds Tableau screenshots; neither is something we built.
+    """
+    run_gate("block", str(migration), "--sources", "warehouse")
+    for relative, name in (
+        ("_probe", "Probe.tmdl"),
+        ("source", "workbook.twbx"),
+        ("source", "bundled.hyper"),
+        ("reference", "tableau-page.csv"),
+    ):
+        folder = migration / relative
+        folder.mkdir(exist_ok=True)
+        (folder / name).write_text("x")
+
+    result = run_gate("verify", str(migration))
+    assert result.returncode == 0, f"sanctioned paths must not trip the gate: {result.stdout}{result.stderr}"
+
+
+def test_verify_does_not_create_directories(tmp_path: Path) -> None:
+    """`verify` is a post-hoc check and must not mutate the tree it judges.
+
+    `denied_dirs` deliberately creates `fabric/` (the ACL needs a directory to apply to), so the
+    audit surface has to be a separate, read-only function - otherwise a read-only verification
+    conjures a phantom directory into every migration it inspects.
+    """
+    run_gate("verify", str(tmp_path))
+    assert not (tmp_path / "fabric").exists(), "verify must not create fabric/"
+
+
 def test_hook_denies_a_guarded_write_under_a_blocked_migration(migration: Path) -> None:
     run_gate("block", str(migration), "--sources", "shipment")
     target = migration / "fabric" / "Shipment.tmdl"
