@@ -1,6 +1,6 @@
 # Review remediation plan
 
-**Status:** Phase A in progress · **Branch:** `feat/deterministic-tier-integration` · **Created:** 2026-08-04
+**Status:** Phase A ✅ COMPLETE (`0cbff41`) · next: Phase B · **Branch:** `feat/deterministic-tier-integration` · **Created:** 2026-08-04
 
 Tracks the work arising from four review rounds (plan · knowledge-architecture · code · direction).
 Both direction reviewers returned **CHANGE SHAPE — do not merge, do not continue plan v3 as written**,
@@ -23,7 +23,7 @@ and both put fixing our own safety boundary ahead of any further integration wor
 
 ---
 
-## Phase A — stop shipping broken guidance  🔴 IN PROGRESS
+## Phase A — stop shipping broken guidance  ✅ COMPLETE (`0cbff41`)
 
 Nothing outranks this: it is wrong guidance in a bundle other repos consume today.
 
@@ -41,9 +41,9 @@ probe. `refresh_pbip_model.py` then stops asserting a cause it cannot observe.
 
 | # | task | site | acceptance | status |
 |---|---|---|---|---|
-| A1 | On timeout, report `SLOW_REFRESH` and stop claiming a credential modal. Parameterise the ceiling | `.github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py:89,109` | a slow full refresh no longer emits credential language; a genuine modal is still reported by the probe path | ☐ |
-| A2 | Make `--no-save` the DEFAULT; `--save` opt-in, documented with the 3-vs-3 evidence | same file + its `SKILL.md:23-37` | after a default refresh the PBIP opens (window title is the model name, not "Untitled") | ☐ |
-| A3 | Sync all three copies | `scripts/`, `.github/skills/`, `dist/marketplace/` | `preflight.ps1` reports no STALE bundle | ☐ |
+| A1 | On timeout, report `REFRESH: TIMEOUT` + `CAUSE UNKNOWN`, name the arbiter, add `--timeout-sec` | `refresh_pbip_model.py:429-449` | ✅ regression test `test_a_timeout_does_not_assert_a_credential_modal` asserts the stop-word is gone and the arbiter is named | ✅ |
+| A2 | `--save` opt-in; `--no-save` kept as a no-op; SKILL.md hand-off rule corrected | same file + `SKILL.md` | ✅ regression test `test_not_saving_is_the_default` asserts no `cache.abf` is written | ✅ |
+| A3 | Sync all three copies | `scripts/`, `.github/skills/`, `dist/marketplace/` | ✅ dist rebuilt (31,215 B, matches bundle). ⚠️ Required fixing `build_plugin.py`, which used `shutil.rmtree(onexc=)` (py3.12+) on a py3.11 target and died before writing | ✅ |
 
 ⚠️ `refresh_pbip_model.py` exists in **three** locations. A fix that misses one leaves the published
 plugin stale, which preflight blocks on.
