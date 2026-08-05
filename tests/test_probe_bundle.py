@@ -435,3 +435,147 @@ def test_undefined_m_parameter_is_detected(bundle: Path) -> None:
     params = probe_bundle.check_m_parameters(probe_bundle.find_model_dir(bundle))
 
     assert params["undefined"] == ["Database"]
+
+
+# ---------------------------------------------------------------------------
+# SOURCE_COLLAPSED - the silent sibling of M_PARAM_UNDEFINED (upstream issue #91)
+# ---------------------------------------------------------------------------
+
+
+def _coverage_model(tmp_path: Path, expressions: str, partitions: dict[str, str]) -> Path:
+    """Write a minimal semantic model with the given parameters and table partitions."""
+    model = tmp_path / "b" / "M.SemanticModel" / "definition"
+    (model / "tables").mkdir(parents=True, exist_ok=True)
+    (model / "expressions.tmdl").write_text(expressions, encoding="utf-8")
+    for name, source in partitions.items():
+        (model / "tables" / f"{name}.tmdl").write_text(
+            f"table {name}\n\tpartition {name} = m\n\t\tmode: import\n\t\tsource =\n\t\t\tlet\n"
+            f"\t\t\t\tSource = {source}\n\t\t\tin\n\t\t\t\tSource\n",
+            encoding="utf-8",
+        )
+    return tmp_path / "b"
+
+
+def _spec(tmp_path: Path, servers: list[tuple[str, str]]) -> Path:
+    """Write a migration-spec.json declaring one live datasource with the given connection legs."""
+    path = tmp_path / "migration-spec.json"
+    path.write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "name": "ds",
+                        "connection": {
+                            "powerbi_target": "live_source",
+                            "connections": [
+                                {"server": s, "database": d, "powerbi_target": "live_source"} for s, d in servers
+                            ],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_two_declared_servers_collapsed_to_one_is_caught(tmp_path: Path) -> None:
+    """The measured upstream defect: a cross-database join over two SQL servers.
+
+    Both parameters ARE defined, so `check_m_parameters` is clean and the model refreshes without
+    error - it just silently reads the wrong server. Only endpoint counting catches it.
+    """
+    model = _coverage_model(
+        tmp_path,
+        'expression Server = "sales-sql.example.net" meta [IsParameterQuery=true]\n'
+        'expression Database = "salesdb" meta [IsParameterQuery=true]\n',
+        {
+            "Orders": 'Sql.Database(#"Server", #"Database"),',
+            "Employees": 'Sql.Database(#"Server", #"Database"),',
+        },
+    )
+    spec = _spec(tmp_path, [("sales-sql.example.net", "salesdb"), ("hr-sql.example.net", "hrdb")])
+
+    params = probe_bundle.check_m_parameters(probe_bundle.find_model_dir(model))
+    assert not params["undefined"], "precondition: the parameter check must NOT catch this"
+    assert not params["empty"]
+
+    result = probe_bundle.check_source_coverage(probe_bundle.find_model_dir(model), spec)
+    assert result["status"] == "SOURCE_COLLAPSED"
+    assert result["missing"] == ["hr-sql.example.net"]
+
+
+def test_per_connector_parameters_pass(tmp_path: Path) -> None:
+    """The shape the fix should produce - one parameter set per connector - must pass."""
+    model = _coverage_model(
+        tmp_path,
+        'expression SalesServer = "sales-sql.example.net" meta [IsParameterQuery=true]\n'
+        'expression SalesDb = "salesdb" meta [IsParameterQuery=true]\n'
+        'expression HrServer = "hr-sql.example.net" meta [IsParameterQuery=true]\n'
+        'expression HrDb = "hrdb" meta [IsParameterQuery=true]\n',
+        {
+            "Orders": 'Sql.Database(#"SalesServer", #"SalesDb"),',
+            "Employees": 'Sql.Database(#"HrServer", #"HrDb"),',
+        },
+    )
+    spec = _spec(tmp_path, [("sales-sql.example.net", "salesdb"), ("hr-sql.example.net", "hrdb")])
+    result = probe_bundle.check_source_coverage(probe_bundle.find_model_dir(model), spec)
+    assert result["status"] == "OK"
+
+
+def test_a_missing_spec_is_unknown_never_ok(tmp_path: Path) -> None:
+    """Absence of evidence must not print as coverage.
+
+    This is the same false-green the receipt lifecycle was written to kill: claiming a property was
+    checked when the input needed to check it was never supplied.
+    """
+    model = _coverage_model(
+        tmp_path,
+        'expression Server = "a.example.net" meta [IsParameterQuery=true]\n',
+        {"T": 'Sql.Database(#"Server", "db"),'},
+    )
+    for spec in (None, tmp_path / "does-not-exist.json"):
+        result = probe_bundle.check_source_coverage(probe_bundle.find_model_dir(model), spec)
+        assert result["status"] == "UNKNOWN"
+        assert result["status"] != "OK"
+
+
+def test_an_extract_only_spec_is_unknown_not_a_false_pass(tmp_path: Path) -> None:
+    """Extracts reference no Server parameter, so there is nothing to compare - say so."""
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps({"data_sources": [{"connection": {"powerbi_target": "flat_file", "server": None}}]}),
+        encoding="utf-8",
+    )
+    model = _coverage_model(tmp_path, "", {"T": 'Csv.Document(File.Contents("x.csv")),'})
+    result = probe_bundle.check_source_coverage(probe_bundle.find_model_dir(model), spec)
+    assert result["status"] == "UNKNOWN"
+
+
+def test_a_single_connection_spec_without_the_plural_array_still_works(tmp_path: Path) -> None:
+    """Older specs carry only the scalar server/database - they must still get a real answer."""
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "connection": {
+                            "powerbi_target": "live_source",
+                            "server": "only.example.net",
+                            "database": "db",
+                        }
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    model = _coverage_model(
+        tmp_path,
+        'expression Server = "only.example.net" meta [IsParameterQuery=true]\n',
+        {"T": 'Sql.Database(#"Server", "db"),'},
+    )
+    result = probe_bundle.check_source_coverage(probe_bundle.find_model_dir(model), spec)
+    assert result["status"] == "OK"

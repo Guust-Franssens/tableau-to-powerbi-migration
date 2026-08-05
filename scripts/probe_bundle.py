@@ -119,6 +119,14 @@ _WRAPPED = re.compile(r"Table\.FirstN\((?P<expr>.+),\s*\d+\)\s*" + re.escape(PRO
 _DAX_OBJECT_HEAD = re.compile(r"^(?P<indent>[ \t]*)(?P<kind>measure|column)\s+(?P<name>'[^']+'|[^\s=]+)\s*=")
 
 _M_PARAM_REF = re.compile(r'#"([^"]+)"')
+# Connector functions whose FIRST argument is the upstream host. Used by `check_source_coverage` to
+# resolve which endpoints a model can actually reach. Deliberately a fixed list: an unrecognised
+# connector yields UNKNOWN (an honest "cannot tell"), never a silent pass.
+_M_CONNECTOR_CALL = re.compile(
+    r"\b(?:Sql\.Database|Snowflake\.Databases|Databricks\.Catalogs|Oracle\.Database"
+    r"|MySQL\.Database|PostgreSQL\.Database|AmazonRedshift\.Database|Odbc\.DataSource"
+    r"|GoogleBigQuery\.Database|Teradata\.Database)\s*\((?P<args>[^)]*)\)"
+)
 _M_PARAM_DEF = re.compile(r"(?m)^\s*expression\s+(?:'([^']+)'|([^\s=]+))\s*=\s*(?P<value>[^\r\n]*)")
 # `... meta [IsParameterQuery=true, ...]` trails the value and is not part of it.
 _M_PARAM_META = re.compile(r"\s+meta\s*\[.*$")
@@ -340,6 +348,123 @@ def check_m_parameters(model_dir: Path) -> dict[str, list[str]]:
     }
 
 
+def _declared_endpoints(doc: dict) -> set[str]:
+    """Every distinct live-source host the spec declares, lowercased.
+
+    A single-connection datasource predates (and does not need) the plural ``connections[]`` array,
+    so the scalar ``server`` is used as a one-leg fallback - otherwise an ordinary one-source
+    workbook would report UNKNOWN forever and the check would be dead weight.
+    """
+    hosts: set[str] = set()
+    for source in doc.get("data_sources") or []:
+        conn = source.get("connection") or {}
+        legs = conn.get("connections")
+        if legs is None:
+            legs = [conn]
+        for leg in legs:
+            if (leg.get("powerbi_target") or conn.get("powerbi_target")) != "live_source":
+                continue  # extracts / flat files are materialised and reference no Server parameter
+            server = (leg.get("server") or "").strip().lower()
+            if server:
+                hosts.add(server)
+    return hosts
+
+
+def _reached_endpoints(model_dir: Path) -> set[str]:
+    """Every distinct host the emitted model can actually resolve, lowercased.
+
+    A ``#"Name"`` first argument is resolved through the model's own ``expression`` definitions, so
+    a parameterised and a hard-coded connection are compared on equal terms.
+    """
+    defined: dict[str, str] = {}
+    for tmdl in model_dir.rglob("*.tmdl"):
+        text = tmdl.read_text(encoding="utf-8", errors="replace")
+        for match in _M_PARAM_DEF.finditer(text):
+            name = match.group(1) or match.group(2)
+            defined[name] = _M_PARAM_META.sub("", match.group("value")).strip().strip(chr(34))
+
+    hosts: set[str] = set()
+    for tmdl in model_dir.rglob("*.tmdl"):
+        text = tmdl.read_text(encoding="utf-8", errors="replace")
+        for match in _M_CONNECTOR_CALL.finditer(text):
+            args = [a for a in match.group("args").split(",") if a.strip()]
+            if not args:
+                continue
+            arg = args[0].strip()
+            ref = _M_PARAM_REF.fullmatch(arg)
+            host = defined.get(ref.group(1), "") if ref else arg.strip(chr(34))
+            if host.strip():
+                hosts.add(host.strip().lower())
+    return hosts
+
+
+def _load_spec(spec: Path | None) -> tuple[dict | None, str]:
+    """Read the migration spec, or explain why it could not be read."""
+    if spec is None:
+        return None, "no --spec given; endpoint coverage was not checked"
+    if not spec.is_file():
+        return None, f"spec not found: {spec}"
+    try:
+        return json.loads(spec.read_text(encoding="utf-8")), ""
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"spec unreadable: {type(exc).__name__}"
+
+
+def check_source_coverage(model_dir: Path, spec: Path | None) -> dict:
+    """Compare the DISTINCT upstream endpoints the spec declares against those the model can reach.
+
+    This is the `SOURCE_COLLAPSED` defect class, and it is the *silent* sibling of
+    `M_PARAM_UNDEFINED`. Measured 2026-08-05 against the deterministic tier at 2.59.0
+    (upstream issue #91): a Tableau cross-database join over two Azure SQL servers emitted
+
+        expression Server   = "sales-sql.database.windows.net"   <- the FIRST connection only
+        expression Database = "salesdb"
+        Orders     -> Sql.Database(#"Server", #"Database")   correct
+        Employees  -> Sql.Database(#"Server", #"Database")   WRONG - belongs to hr-sql / hrdb
+
+    Nothing catches this. Every parameter IS defined, so `check_m_parameters` returns clean; the
+    TMDL is well-formed, so `tmdl_lint` exits 0; the model refreshes without error. It then either
+    fails with a confusing "invalid object name" or - if a same-named table exists on the first
+    server - **returns the wrong data and looks completely healthy**.
+
+    The invariant: a datasource declaring N distinct upstream endpoints must produce a model that
+    resolves N distinct endpoints. Collapsing N -> 1 means every table after the first is pointed at
+    the wrong server.
+
+    Returns `status` of `OK`, `SOURCE_COLLAPSED`, or `UNKNOWN`. **`UNKNOWN` is not a pass.** A spec
+    that is missing, unreadable, or predates the `connections[]` array cannot support the claim
+    "the sources are covered", and reporting that as OK is the false-green this whole script exists
+    to prevent - the same defect the receipt lifecycle was written to kill.
+    """
+    doc, reason = _load_spec(spec)
+    if doc is None:
+        return {"status": "UNKNOWN", "reason": reason}
+
+    declared = _declared_endpoints(doc)
+    if not declared:
+        return {
+            "status": "UNKNOWN",
+            "reason": "the spec declares no live-source endpoints (extract/flat-file only, or a "
+            "spec predating the connections[] array) - nothing to compare",
+        }
+
+    reached = _reached_endpoints(model_dir)
+    if not reached:
+        return {
+            "status": "UNKNOWN",
+            "reason": "no recognised connector call found in the model - cannot compare endpoints",
+        }
+
+    if len(reached) < len(declared):
+        return {
+            "status": "SOURCE_COLLAPSED",
+            "declared": sorted(declared),
+            "reached": sorted(reached),
+            "missing": sorted(declared - reached),
+        }
+    return {"status": "OK", "declared": sorted(declared), "reached": sorted(reached)}
+
+
 def build_probe(bundle: Path, out: Path, rows: int, keep_dax: bool) -> dict:
     """Copy `bundle` to `out` and rewrite it into a one-row probe variant."""
     if out.exists():
@@ -521,11 +646,63 @@ def _cmd_record(args: argparse.Namespace) -> int:
 
 # The CLI is a small dispatcher over 5 mutually exclusive modes; splitting it would hide the flow.
 # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
+def run_check_only(bundle: Path, spec: Path | None) -> int:
+    """Static, offline defect checks: undefined/empty M parameters, then endpoint coverage.
+
+    Split out of ``main`` because it is the part that grows: each new static defect class lands
+    here, and every one of them must be able to say UNKNOWN rather than being forced into a
+    pass/fail it cannot honestly make.
+    """
+    model_dir = find_model_dir(bundle)
+    params = check_m_parameters(model_dir)
+    print(f"M parameters defined   : {', '.join(params['defined']) or '(none)'}")
+    print(f"M parameters referenced: {', '.join(params['referenced']) or '(none)'}")
+    if params["undefined"]:
+        print(f"M_PARAM_UNDEFINED: {', '.join(params['undefined'])}")
+        print("The model references M parameters that are never defined; it cannot refresh.")
+        return 1
+    if params["empty"]:
+        print(f"M_PARAM_EMPTY: {', '.join(params['empty'])}")
+        print("These are defined but blank. Navigating with an empty parameter cannot refresh.")
+        return 1
+
+    coverage = check_source_coverage(model_dir, spec)
+    if coverage["status"] == "SOURCE_COLLAPSED":
+        print(
+            f"SOURCE_COLLAPSED: declared {len(coverage['declared'])} endpoint(s), "
+            f"model reaches {len(coverage['reached'])}"
+        )
+        print(f"  declared: {', '.join(coverage['declared'])}")
+        print(f"  reached : {', '.join(coverage['reached'])}")
+        print(f"  MISSING : {', '.join(coverage['missing'])}")
+        print(
+            "  Every table bound to a missing endpoint is silently pointed at a DIFFERENT\n"
+            "  server. This does NOT fail: it refreshes clean and returns the wrong data if a\n"
+            "  same-named table exists there. See upstream issue #91."
+        )
+        return 1
+    if coverage["status"] == "UNKNOWN":
+        # Deliberately not an exit-1: it is not a defect, it is an absence of evidence. But it
+        # must never print as OK - claiming coverage we did not check is the exact false green
+        # the receipt lifecycle exists to prevent.
+        print(f"SOURCE_COVERAGE: UNKNOWN - {coverage['reason']}")
+    else:
+        print(f"OK - all {len(coverage['declared'])} declared endpoint(s) are reachable in the model.")
+    print("OK - every referenced M parameter is defined and non-empty.")
+    return 0
+
+
 def main() -> int:
     """Parse arguments and dispatch to the requested mode."""
     parser = argparse.ArgumentParser(description="Build a one-row probe variant of an emitted PBIP bundle.")
     parser.add_argument("bundle", type=Path, help="the emitted bundle (contains *.SemanticModel)")
     parser.add_argument("--out", type=Path, help="where to write the probe variant")
+    parser.add_argument(
+        "--spec",
+        type=Path,
+        help="migration-spec.json - enables the SOURCE_COLLAPSED endpoint-coverage check "
+        "(without it, coverage reports UNKNOWN rather than passing silently)",
+    )
     parser.add_argument("--rows", type=int, default=1, help="rows per partition (default 1)")
     parser.add_argument("--keep-dax", action="store_true", help="keep measures and calculated columns")
     parser.add_argument(
@@ -588,19 +765,7 @@ def main() -> int:
         return 0
 
     if args.check_only:
-        params = check_m_parameters(find_model_dir(args.bundle))
-        print(f"M parameters defined   : {', '.join(params['defined']) or '(none)'}")
-        print(f"M parameters referenced: {', '.join(params['referenced']) or '(none)'}")
-        if params["undefined"]:
-            print(f"M_PARAM_UNDEFINED: {', '.join(params['undefined'])}")
-            print("The model references M parameters that are never defined; it cannot refresh.")
-            return 1
-        if params["empty"]:
-            print(f"M_PARAM_EMPTY: {', '.join(params['empty'])}")
-            print("These are defined but blank. Navigating with an empty parameter cannot refresh.")
-            return 1
-        print("OK - every referenced M parameter is defined and non-empty.")
-        return 0
+        return run_check_only(args.bundle, args.spec)
 
     if not args.out:
         print("ERROR: --out is required unless --check-only is given", file=sys.stderr)
