@@ -118,3 +118,9 @@ uv.lock
 
 # Throwaway agent-behaviour test fixtures (see scripts/probe_lab.py)
 _probe-lab/
+
+# Live multi-source test fixture: embeds real endpoint hostnames, so it is generated
+# on demand by scripts/make_live_source_fixture.py and never committed. tests/test_live_multisource.py
+# skips when it is absent, so a clean clone and CI stay green without it.
+tests/fixtures/live/
+

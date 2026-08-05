@@ -194,6 +194,25 @@ and `Guust-Franssens/powerbi-migration-skills`, enable `powerbi-authoring` and
 
 ## Quickstart
 
+> ### ⚠️ One-time Power BI Desktop setting: turn OFF Privacy Levels
+>
+> **Options → Global → Privacy → "Always ignore Privacy Level settings"**
+>
+> Without it, opening any model that spans **more than one data source** raises a modal —
+> *"Potential security risk: This file uses multiple data sources…"* — **before the model loads**.
+> Federated datasources are normal in real Tableau workbooks, so most migrations hit this.
+>
+> It matters more for agents than for people. The dialog blocks at **load time**, so it stalls
+> before any refresh call and no automation can dismiss it: measured 2026-08-05, a run sat past
+> **450 s** on it while the refresh script's own 300 s ceiling never fired, because that ceiling
+> wraps the XMLA refresh rather than the open. To a supervising agent it looks like a hang with no
+> error, which is the single failure mode this toolkit's conventions exist to prevent.
+>
+> Setting it once is safe here: the reachability probe builds a throwaway **one-row** copy of the
+> model, so there is no real data-privacy boundary to protect. `scripts/preflight.ps1` cannot read
+> this setting — Desktop ships as an MSIX package and stores it outside the registry — so it stays a
+> documented manual step rather than an automated check.
+
 **Clone.** The 16 worked examples under `examples/` are ~91% of the repo's files. If you're mainly
 here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
 the example blobs:

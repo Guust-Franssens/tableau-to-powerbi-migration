@@ -251,6 +251,24 @@ Add-Check 'Power BI Desktop' 'recommended' ([bool]$desktop) `
     $(if ($desktop) { $desktop } else { 'not found' }) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
 
+# --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
+# Opening a model that spans more than one data source raises a modal ("Potential security risk: This
+# file uses multiple data sources...") BEFORE the model loads. Federated datasources are normal in real
+# Tableau workbooks, so most migrations hit it.
+#
+# It is worse for an agent than for a person: it blocks at LOAD, so it stalls before any refresh call
+# and no automation can dismiss it. Measured 2026-08-05, a run sat past 450s on this while
+# refresh_pbip_model.py's own 300s ceiling never fired - that ceiling wraps the XMLA refresh, not the
+# open. To a supervising agent it looks like a hang with no error.
+#
+# This is stated rather than checked ON PURPOSE. Desktop ships as an MSIX package and keeps the setting
+# in the package's private settings.dat hive, which needs SeRestorePrivilege to load and is locked while
+# Desktop runs; there is no supported read path. Asserting a check we cannot actually perform would be
+# worse than an honest reminder.
+Add-Check 'Privacy Levels (manual)' 'optional' $true `
+    'VERIFY BY HAND: Options > Global > Privacy > "Always ignore Privacy Level settings"' `
+    'Without it, any MULTI-SOURCE model blocks on a modal at open and an unattended refresh hangs with no error.'
+
 # --- .NET SDK (builds scripts/tmdl_validate for offline TMDL deserialization) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
 # ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that

@@ -42,6 +42,8 @@ _LOD_RE = re.compile(r"\{\s*(FIXED|INCLUDE|EXCLUDE)\b", re.IGNORECASE)
 _TABLE_CALC_RE = re.compile(r"\b(WINDOW_\w+|RUNNING_\w+|INDEX|RANK\w*|LOOKUP|TOTAL|PREVIOUS_VALUE)\s*\(", re.IGNORECASE)
 _PARAM_EQUALITY_RE = re.compile(r"if\s*\[Parameters\]\.\[[^\]]+\]\s*=\s*\[[^\]]+\]\s*then", re.IGNORECASE)
 _BRACKET_TOKEN_RE = re.compile(r"\[([^\[\]]+)\]")
+# Tableau's feature-flagged attribute spelling: `_.fcp.<Feature>.<true|false>...<realAttrName>`
+_FCP_ATTR = re.compile(r"^_\.fcp\.(?P<feature>[^.]+)\.(?P<state>true|false)\.\.\.(?P<attr>.+)$")
 _SHELF_FIELD_RE = re.compile(r"\[([^\[\]]+)\]\.\[([^\[\]]+)\]")
 
 
@@ -128,6 +130,44 @@ def parse_parameters(root: etree._Element, ids: IdRegistry) -> list[dict[str, An
     return parameters
 
 
+def _conn_attr(conn_el: etree._Element, attr: str) -> str | None:
+    """Read a connection attribute, tolerating Tableau's feature-flagged spelling.
+
+    When a connector gains a capability behind a document-format flag, Tableau writes the attribute
+    as `_.fcp.<Feature>.<true|false>...<attr>` and ships BOTH variants, whose meanings differ. For
+    `DatabricksCatalog`: the `.true...` variant of `dbname` is the Unity catalog while the
+    `.false...` variant is the LEGACY meaning (it held the HTTP path), and only `.true...` carries
+    `v-http-path` at all.
+
+    So the plain name must be tried first, then the variant the `<document-format-change-manifest>`
+    declares live. A blind prefix-strip is actively harmful - it lets `.false...dbname` overwrite
+    the catalog with a `/sql/1.0/warehouses/...` string, a wrong value that still looks like a value.
+
+    Measured 2026-08-05: without this, a real Databricks `.twbx` yields `http_path: None` and
+    `database: None`, so the emitted M cannot connect. The deterministic tier has the same gap
+    (`connection_to_m._http_path_of` checks only the bare spellings), reported upstream.
+    """
+    direct = conn_el.get(attr)
+    if direct:
+        return direct
+
+    root = conn_el.getroottree().getroot()
+    manifest = root.find(".//document-format-change-manifest")
+    live = set()
+    for child in manifest if manifest is not None else []:
+        match = _FCP_ATTR.match(str(child.tag))
+        if match and match.group("state") == "true":
+            live.add(match.group("feature"))
+
+    for name, value in conn_el.attrib.items():
+        match = _FCP_ATTR.match(str(name))
+        if not match or match.group("attr") != attr:
+            continue
+        if (match.group("feature") in live) == (match.group("state") == "true"):
+            return value
+    return None
+
+
 def _capture_connect_details(connection: dict[str, Any], conn_el: etree._Element) -> None:
     """Carry the attributes needed to CONNECT, not just to describe.
 
@@ -146,7 +186,7 @@ def _capture_connect_details(connection: dict[str, Any], conn_el: etree._Element
         ("warehouse", "warehouse"),
         ("role", "role"),
     ):
-        value = (conn_el.get(attr) or "").strip()
+        value = (_conn_attr(conn_el, attr) or "").strip()
         if value:
             connection[spec_key] = value
 
@@ -211,8 +251,8 @@ def _describe_named_connection(conn_el: etree._Element, mode: str) -> dict[str, 
     """
     described: dict[str, Any] = {
         "class": conn_el.get("class", "unknown"),
-        "server": conn_el.get("server"),
-        "database": conn_el.get("dbname"),
+        "server": _conn_attr(conn_el, "server"),
+        "database": _conn_attr(conn_el, "dbname"),
         "mode": mode,
     }
     _capture_connect_details(described, conn_el)
