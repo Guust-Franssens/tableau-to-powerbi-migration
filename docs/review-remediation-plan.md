@@ -246,6 +246,20 @@ counts as satisfying the review is a call for the repo owner.
 
 Both code reviewers: not safe to merge. Per artefact:
 
+**Measured status 2026-08-05** — two of the four are already resolved, so the real remaining work is
+smaller than this table implies:
+
+| item | reviewer's ask | actual status now |
+|---|---|---|
+| C1 `probe_bundle.py` | revert, re-derive smaller | ⚠️ **needs a human decision** — we fixed it in place (`d8dec54`) and it has since grown `SOURCE_COLLAPSED` (`2f6f026`) and 26 tests |
+| C2a `--fix` exit code | return 1 while occluders remain | ❌ **open, and confirmed a real bug**: `main()` returns `0` unconditionally after `--fix` (L173-180), printing `RE-CHECK: N occluder(s) remain` and then ignoring N. ~1 line |
+| C2b geometry | replace `contains` with ≥90% area overlap | ❌ **open** — still `contains()` at L60, used at L94. 8 victims missed on the very report we cite. ~10 lines |
+| C3 `transpile_tableau_calc.py` | import safety | ❌ **open** — module-level driver code at the file tail, no `if __name__ == "__main__":` guard |
+| C4 CI | make green | ✅ **already passes** — `test_every_script_is_documented_in_the_scripts_readme` is green |
+
+So Phase C is roughly **one decision (C1) plus ~a dozen lines (C2a, C2b, C3)**, not the open-ended
+rebuild the original table suggests.
+
 | artefact | action | rationale |
 |---|---|---|
 | `probe_bundle.py` | **revert**, re-derive smaller | The flaw is design, not lines: it writes `"credential is bound in Power BI"` having executed nothing. The 1-row M wrap itself is sound (33/33 partitions, byte-identical unwrap); the corruption comes from `strip_dax_objects` (duplicate annotations in 8/8 files) and the missing execution step. Rebuild as: external, non-mutating, `--keep-dax` behaviour, and **only claims what it executed** |
@@ -260,6 +274,16 @@ Both code reviewers: not safe to merge. Per artefact:
 - **D1 — price the numeric ground truth.** Both reviewers' #1 untracked risk. Either fund a Tableau
   licence + one live workbook, or re-scope the validator to *structural fidelity only* and say so.
   Carrying an unfundable numeric tier as the differentiator is the dishonest option.
+
+  > ⚠️ **Do not confuse the two caches — they are unrelated files with opposite roles.**
+  >
+  > | file | lives in | what it is | relevance |
+  > |---|---|---|---|
+  > | `.pbi/cache.abf` | a **Power BI** PBIP | the persisted model image `pbip-model-refresh --save` writes | **not D1** — the one that can make a PBIP unopenable |
+  > | `TwbxExternalCache/TwbxResultsCacheV3/` | a **Tableau** `.twbx` | Tableau's own saved *query results* | **this is D1** — a candidate numeric oracle |
+  >
+  > D1 is not about anything breaking. It asks whether Tableau left real **numbers** in the workbook
+  > that we can compare our Power BI output against.
   ⚠️ Lead worth a spike first: `.twbx` files carry `TwbxExternalCache/TwbxResultsCacheV3/*.bin`,
   i.e. Tableau's own cached query results. If readable, every workbook ships its own ground truth.
 
