@@ -183,28 +183,62 @@ stress the multi-source path.
 
 ## What happens next — ordered, with the dependency that sets the order
 
-The order is not preference, it is **dependency**. Phase C is what blocks the merge, and it turned out
-to be far smaller than the review implied, so it goes first.
+The order is not preference, it is **what actually advances the integration**.
 
-| # | work | effort | blocks | why now |
+### ⚠️ First — an honest answer to "how does Phase C get us closer to the integration?"
+
+**It mostly does not.** Phase C is *merge hygiene* — debt from the review rounds — not integration
+progress. Worse, **most of it just became obsolete** (measured 2026-08-05):
+
+- Upstream **#89 is CLOSED**, fixed in 2.59.0 (109 lines in `migrate_estate.py`, 62 in
+  `twb_to_pbir.py`, 163 lines of tests). The reviewer kept `detect_occlusion.py` explicitly
+  *"while #89 is open"* — that condition has expired.
+- **Verified empirically, not from the changelog:** ran his 2.60.0 on `interactive-resume` (the
+  example with the most image content) and our detector reports `OCCLUSION: none detected`, exit 0.
+
+So C2a/C2b would be **fixing a script that no longer has a job**. The open question is not "fix it"
+but "does it have a *second* life as a check on **our own** report-builder output?" — a decision, and
+not on the integration path either way.
+
+### The integration is further along than this plan implies
+
+**The two-tier loop already ran end-to-end today, twice** — it just was not labelled as the milestone
+it is:
+
+1. **his engine** built a semantic model from a Tableau workbook
+2. **our parser** produced `migration-spec.json` from the same workbook
+3. **our probe** compared the two and found a real defect (`SOURCE_COLLAPSED`) that **both** his
+   `tmdl_lint` and our own earlier checks passed
+4. we reported it, he shipped 2.60.0, and **our check independently confirmed the fix** (exit 1 → 0)
+
+That is the **critic** half of critic-enricher-fixer, working against a live upstream on real output.
+Missing are the **enricher** and **fixer** halves — and the persona wiring that would let an agent do
+this instead of a human driving it by hand.
+
+### The real gap, and therefore the real next step
+
+| capability | status |
+|---|---|
+| connectivity proven, both directions, 3 real systems | ✅ done |
+| **critic** — find defects the structural validators miss | ✅ **proven today** (`SOURCE_COLLAPSED`, and the FCP finding behind #92) |
+| **handoff contract** — how a tier-1 bundle formally enters our pipeline | ❌ undefined; done by hand each time |
+| **personas rewired** as critic-enricher-fixer | ❌ `tableau-migrator` step 6 still delegates to `pbi-semantic-builder` to **BUILD** a model that, in the two-tier world, already exists |
+| **enricher** — AI-readiness, descriptions, model critique on **his** output | ❌ not wired to his artifacts |
+| **fixer** — apply a fix to his bundle without re-authoring it | ❌ undefined, and the layer-ownership rule makes this the delicate one |
+
+| # | work | effort | advances integration? | note |
 |---|---|---|---|---|
-| **1** | **Phase C code** — `detect_occlusion.py` (C2a/C2b) + `transpile` import safety (C3) | ~1 h | **the merge** | Measured: C4 already passes, and C2a/C2b/C3 are ~a dozen lines between them. This branch is 19 commits deep and cannot land until C is resolved. |
-| **2** | **C1 decision** — accept the in-place `probe_bundle.py` fix, or honour the revert | a decision, not a task | **the merge** | The only genuinely blocking item, and it needs the repo owner, not an agent. |
-| **3** | **Close the input-shape gap** (6 connectors × one real `.tds`) | ~1 h each, **no credentials** | connector confidence | Takes input-shape fidelity from 4/10 toward 10/10. `derive_connection_templates.py` converts each export in one command. Inference has already failed once here. |
-| **4** | **F1 — source-side numeric verification** (see Phase D) | days | the honest fidelity claim | The real answer to "how do we know the numbers are right." Reaches **~90%** of calculated fields. Needs a live-source migration, which the connectivity work has now made possible. |
-| **5** | **Hook write-up** → `docs/agent-architecture.md` | ~1 h | nothing | Knowledge capture only: hooks did **not** fire in subagents before CLI 1.0.49 (`github/copilot-cli#2392`), and the hooks reference never documents agent scope. Cheap insurance against re-deriving it. |
-| **6** | **Phase E** — persona measurement | days | on a numeric oracle | Needs F1 to supply the numerator. |
+| **1** | **Handoff contract + persona rewiring** — define how a tier-1 bundle enters our pipeline, and rewrite `tableau-migrator` steps 5-8 so the builders **critique and enrich** an existing PBIP instead of authoring one | days | ✅ **this IS the integration** | The critic half already works; this makes it repeatable by an agent rather than by hand |
+| **2** | **C1 decision** — accept the in-place `probe_bundle.py` fix, or honour the revert | a decision | ⬜ unblocks the merge only | Needs the repo owner |
+| **3** | **Close the input-shape gap** (6 connectors × one real `.tds`) | ~1 h each, no credentials | ⬜ indirectly | 4/10 → 10/10; inference already failed here once |
+| **4** | **F1 — source-side numeric verification** | days | ✅ yes — it is the fidelity claim | ~90% of calculated fields; needs a live-source migration |
+| **5** | **Phase C code** (C2a/C2b/C3) | ~1 h | ❌ **no** | Mostly obsolete; C3 (import safety) is the only piece with lasting value |
+| **6** | **Hook write-up** | ~1 h | ❌ no | Knowledge capture: `github/copilot-cli#2392`, undocumented subagent scope |
 
 **Deprioritised: D1** (the `.twbx` results cache). Real and readable, but present in **1 of 16**
 workbooks; F1 reaches ~90% of calculated fields instead. Kept as a tracked idea, not a next step.
 
-### 1 · Phase C — what actually blocks the merge
-
-Two of the four reviewer items are already resolved. What remains is one **confirmed** bug
-(`detect_occlusion.py --fix` returns 0 even when occluders remain), one geometry fix (`contains` →
-≥90% area overlap), and one import-safety guard. Measured status in the Phase C table below.
-
-### 2 · C1 — the decision only the repo owner can make
+### C1 — the decision only the repo owner can make
 
 Both code reviewers said this branch is not safe to merge. One item needs **a human decision, not an
 agent's**: reviewers said *revert* `probe_bundle.py` and re-derive it smaller; we instead **fixed it
