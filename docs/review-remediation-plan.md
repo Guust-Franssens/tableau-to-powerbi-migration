@@ -132,8 +132,21 @@ Both code reviewers: not safe to merge. Per artefact:
 - **D1 — price the numeric ground truth.** Both reviewers' #1 untracked risk. Either fund a Tableau
   licence + one live workbook, or re-scope the validator to *structural fidelity only* and say so.
   Carrying an unfundable numeric tier as the differentiator is the dishonest option.
-  ⚠️ Lead worth a spike first: `.twbx` files carry `TwbxExternalCache/TwbxLQResultsCacheV3/*.bin`,
+  ⚠️ Lead worth a spike first: `.twbx` files carry `TwbxExternalCache/TwbxResultsCacheV3/*.bin`,
   i.e. Tableau's own cached query results. If readable, every workbook ships its own ground truth.
+
+  **Spike run 2026-08-05 — the lead is real but thin. Three measured corrections:**
+  1. **The path in this doc was wrong.** It is `TwbxResultsCacheV3`, not `TwbxLQResultsCacheV3`
+     (plus a sibling `TwbxTimestampsCacheV3`). Searching for the old name returns **0 of 16**, which
+     would have retired a live lead as a dead end.
+  2. **Coverage is 1 of 16, not "every workbook."** Only `urban-adaptation.twbx` ships a cache
+     (6 result entries + 6 timestamp entries, 92 KB). So this can **never be *the* oracle** — but it
+     is a free one for at least one workbook, against a baseline of "no numeric ground truth exists."
+  3. ✅ **It is readable without Tableau.** `.key` is plain XML naming the query context
+     (`<pack class='hyper' dbname='…federated 6.hyper'>`); `.bin` is UTF-16LE XML behind a short
+     binary header, opening with `<metadata-record class='column'><remote-name>Calculation_…`.
+     ⚠️ **Unconfirmed:** whether the `.bin` carries result *values* or only column metadata — only
+     the first 220 bytes were inspected. That question decides the whole spike and is ~1 hour of work.
 - **D2 — update issue #89** with `twb_to_pbir.py:8418` and `:8881` (*"images z=1100 ... are never
   moved"*). The constant is deliberate and documented, so the report should be framed as a layering
   scheme that fails for full-canvas backgrounds, not as an oversight.
@@ -151,6 +164,41 @@ Run airline **both ways** — the four personas vs a generated run-brief — and
 already exist. This converts a two-round disagreement (-47,450 chars vs +600) into one number.
 
 ⚠️ Depends on D1: without an oracle the numerator is unmeasurable.
+
+**Budget measured 2026-08-05 — the denominator is already at the ceiling:**
+
+| persona | chars | % of 30,000 cap |
+|---|---|---|
+| `pbi-semantic-builder` | 29,979 | **99%** |
+| `pbi-report-builder` | 29,932 | **99%** |
+| `tableau-migrator` | 29,731 | **99%** |
+| `pbi-migration-validator` | 17,656 | 58% |
+
+The shared block is **5,551 chars, duplicated ×4 = 22,204**. It is not evenly distributed — one
+bullet is **44% of it**:
+
+| bullet | chars | % of block |
+|---|---|---|
+| NEVER block silently on an external system | **2,460** | **44%** |
+| Clean up after yourself | 963 | 17% |
+| Structural validation is necessary, not sufficient | 564 | 10% |
+| (7 others) | 1,564 | 28% |
+
+**E1 — a slimming candidate that does not need D1's oracle.** The 2,460-char bullet is the one whose
+subject matter has been progressively moved *into code* — `probe_live_source.py` self-bounds and
+prints its own DO-NOT-KILL directive, and `refresh()` now self-bounds (Phase B′). The repo's own
+retrospective rule is *"delete what a newer tool now catches automatically."*
+
+The precedent is already in `probe_live_source.py`'s comments: an agent applied the persona's
+"~2 minute cap" **to the bounded script itself**, killed it at 120 s and recorded no verdict — and
+the fix was to put the directive in **tool output**, not in persona prose ("Saying so in the output
+is what actually reaches the agent"). So prose and enforcement have already collided once, and tool
+output won.
+
+⚠️ **What must NOT be cut**, because no script can enforce it: the rule generalises past our own
+scripts (MCP servers, XMLA, the Desktop bridge), and "AUTOPILOT does not override a credential stop"
+governs the agent's *own* reasoning. Cut the situation-specific halves, keep the general rule.
+Estimated recovery ~1,200 chars ×4 ≈ 5 KB, i.e. 99% → ~95% of cap on three personas.
 
 ---
 
