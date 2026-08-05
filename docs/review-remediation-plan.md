@@ -1,12 +1,79 @@
 # Review remediation plan
 
-**Status:** Phases A + B ✅ COMPLETE · next: Phase C · **Branch:** `feat/deterministic-tier-integration` · **Created:** 2026-08-04
+**Status:** Phases A · B · B′ ✅ COMPLETE · Phase 0 (connectivity) ✅ PROVEN LIVE · E1 ✅ DONE ·
+next: **D1 spike** → C → D → E · **Branch:** `feat/deterministic-tier-integration` ·
+**Created:** 2026-08-04 · **Last updated:** 2026-08-05
 
 Tracks the work arising from four review rounds (plan · knowledge-architecture · code · direction).
 Both direction reviewers returned **CHANGE SHAPE — do not merge, do not continue plan v3 as written**,
 and both put fixing our own safety boundary ahead of any further integration work.
 
 **Restate this plan and its status at the end of every phase.**
+
+---
+
+## Where we are today (read this first)
+
+### What we are building
+
+A **two-tier** Tableau → Power BI migration. A colleague's *deterministic* engine
+(`Yarbrdab000/tableau-fabric-skills`, currently 2.59.0) converts a workbook into a PBIP — TMDL
+semantic model + PBIR report — with **no LLM in the loop**, getting roughly 60-70% of the way. Our
+Copilot **agents** are tier 2: **critic · enricher · fixer** on an artifact that already exists. We
+do not author the model from scratch any more.
+
+That split is why our layer's job is *acceptance*, not re-implementation. The boundary we hold:
+**we only check things observable at the data layer** — "will it load, and will it load the *right*
+data" — never TMDL syntax his own `tmdl_lint` already covers. Anything else is a parallel validator
+and pure waste.
+
+### Branch state
+
+| | |
+|---|---|
+| branch | `feat/deterministic-tier-integration` (19 commits ahead of `master`) |
+| size | 34 files, **+4,079 / −263** |
+| tests | **336 passing** (was 276 at branch start) |
+| lint | ruff clean, pylint **10.00/10** |
+| upstream issues filed | **#91**, **#92** (both with credential-free reproducers) |
+
+### The one thing that had to be true first
+
+**Nothing downstream is observable without loaded data.** Screenshots, `EVALUATE` gates, AI-readiness
+checks and fidelity comparison all require a model that actually refreshed. So proving the
+connectivity loop — in **both** directions, against **real** systems — became Phase 0 and consumed
+most of the effort. It is now done:
+
+| connector | happy path | sad path |
+|---|---|---|
+| Databricks | `DATA_OK` **21 s** | revoked PAT → 403 → `CREDENTIAL_REQUIRED` |
+| Snowflake | `DATA_OK` **167 s** (cold warehouse) | never-authed account → modal → `CREDENTIAL_REQUIRED` |
+| Azure SQL | `DATA_OK` | never-authed server → modal → `CREDENTIAL_REQUIRED` |
+| all three at once | `DATA_OK` **220 s** cold / **19 s** warm | one bad leg → `CREDENTIAL_REQUIRED` |
+
+⚠️ **Keep three confidence layers separate — do not conflate them:**
+
+| layer | coverage | meaning |
+|---|---|---|
+| M emission logic | **10/10** | we emit correct M for ten connectors |
+| input-shape fidelity vs a **real** export | **4/10** | the other six are inferred — and inference already failed once (the FCP bug) |
+| **live** connectivity | **3/10** | actually reached a running system |
+
+### What that work turned up
+
+Four **false greens in our own probe**, each of which passed every static validator (ours *and* his)
+and was caught only by a real Desktop open: a receipt claiming a credential it never tested;
+orphaned annotations that crash TMDL merge; gutted calculated tables; dangling column references.
+Plus `M_PARAM_EMPTY` — we checked a parameter *name* existed but never its *value*.
+
+And two defects in the deterministic tier, both now filed with reproducers that need no credentials:
+
+- **#91 — federated multi-connection datasource collapses to one parameter set.** The *heterogeneous*
+  case fails loudly; the **same-class case (two SQL servers) fails silently and returns the wrong
+  data**, which is the common shape and strictly worse. **Our probe missed the silent one too** —
+  now fixed (`SOURCE_COLLAPSED`, `2f6f026`).
+- **#92 — FCP-prefixed connection attributes not read**, so Databricks `HttpPath` is empty and the
+  table degrades to an empty placeholder.
 
 ---
 
@@ -114,6 +181,67 @@ stress the multi-source path.
 
 ---
 
+## What happens next — ordered, with the dependency that sets the order
+
+The order is not preference, it is **dependency**. One unresolved question (D1) gates two whole
+phases, so it comes first even though it is the smallest job.
+
+| # | work | effort | blocks | why now |
+|---|---|---|---|---|
+| **1** | **D1 spike — does the `.twbx` results cache hold *values*?** | ~1 h | **D, E** | Everything about fidelity and persona measurement needs a numeric oracle. Right now we have none, and this is the only free lead. One hour either opens it or closes it honestly. |
+| **2** | **Phase C — `detect_occlusion.py` + the branch decision** | ~half day | merge | Reviewers said *not safe to merge*. Until C is resolved this branch cannot land, and it is 19 commits deep. |
+| **3** | **Close the input-shape gap** (6 connectors × one real `.tds`) | ~1 h each, no credentials | connector confidence | Takes input-shape fidelity from 4/10 toward 10/10. `derive_connection_templates.py` converts each export in one command. Inference has already failed once here. |
+| **4** | **Hook write-up** → `docs/agent-architecture.md` | ~1 h | nothing | Two independent researchers agreed; the finding is worth committing before it decays into folklore. |
+| **5** | **Phase D / E proper** | days | on **D1** | The honest re-scope and the persona measurement. Cannot start before 1. |
+
+### 1 · D1 spike — the only thing gating two phases
+
+**The question:** a `.twbx` may ship `TwbxExternalCache/TwbxResultsCacheV3/` — Tableau's own cached
+query results. If those hold *values*, every such workbook carries its own numeric ground truth and
+the validator can compare real numbers instead of screenshots.
+
+**What is already known** (measured 2026-08-05, see Phase D below): the path in this doc was
+**wrong** (`TwbxResultsCacheV3`, not `TwbxLQResultsCacheV3` — the wrong name returns 0/16 and would
+have retired the lead as dead); coverage is **1 of 16**, so it can never be *the* oracle; and it **is**
+readable without Tableau. ⚠️ **Unconfirmed and decisive:** only the first 220 bytes were inspected,
+which showed `<metadata-record class='column'>` — schema. Whether result *values* follow is the whole
+question.
+
+**Both outcomes are useful.** Values → a free oracle for at least one workbook, and Phase E becomes
+measurable. No values → we **stop carrying an unfundable numeric tier as the differentiator** and
+re-scope the validator to structural fidelity honestly. Today we are carrying it on hope.
+
+### 2 · Phase C — what actually blocks the merge
+
+Both code reviewers said this branch is not safe to merge. One item needs **a human decision, not an
+agent's**: reviewers said *revert* `probe_bundle.py` and re-derive it smaller; we instead **fixed it
+in place** (`d8dec54`) and it has since grown a second check (`2f6f026`) and 26 tests. Whether that
+counts as satisfying the review is a call for the repo owner.
+
+### What is NOT next, and why
+
+- **The remaining probe arms (`1happy2sad`, `3sad`).** They will re-prove the same modal block with
+  less information. The sad path is already proven on three connectors and on the multi-source case.
+- **Mid-migration tooling upgrades.** Never; swapping the validator under a half-built report is
+  worse than a slightly old one.
+- **A general TMDL linter on our side.** That is his layer. See the boundary in "What we are building".
+
+---
+
+## Open decisions that need a human
+
+1. **Phase C / `probe_bundle.py`** — accept the in-place fix, or honour the reviewers' revert?
+2. **If D1 finds no values** — fund a Tableau licence for one live workbook, or formally re-scope the
+   validator to structural fidelity only? (Carrying an unfundable numeric tier is the dishonest
+   option, and it is what we are doing today.)
+3. **Hook-based gating at the handoff** — worth adding a `preToolUse` deny on the `task` tool so an
+   armed credential gate stops the *delegation* rather than the first write? Verified feasible
+   (parent hooks do fire in subagents since CLI 1.0.49, `github/copilot-cli#2392`). It is an
+   optimisation — the kernel ACL is already the enforcement — so it is a cost/benefit call.
+
+---
+
+
 ## Phase C — deal with the committed branch  ☐ NOT STARTED
 
 Both code reviewers: not safe to merge. Per artefact:
