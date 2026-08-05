@@ -183,35 +183,28 @@ stress the multi-source path.
 
 ## What happens next — ordered, with the dependency that sets the order
 
-The order is not preference, it is **dependency**. One unresolved question (D1) gates two whole
-phases, so it comes first even though it is the smallest job.
+The order is not preference, it is **dependency**. Phase C is what blocks the merge, and it turned out
+to be far smaller than the review implied, so it goes first.
 
 | # | work | effort | blocks | why now |
 |---|---|---|---|---|
-| **1** | **D1 spike — does the `.twbx` results cache hold *values*?** | ~1 h | **D, E** | Everything about fidelity and persona measurement needs a numeric oracle. Right now we have none, and this is the only free lead. One hour either opens it or closes it honestly. |
-| **2** | **Phase C — `detect_occlusion.py` + the branch decision** | ~half day | merge | Reviewers said *not safe to merge*. Until C is resolved this branch cannot land, and it is 19 commits deep. |
-| **3** | **Close the input-shape gap** (6 connectors × one real `.tds`) | ~1 h each, no credentials | connector confidence | Takes input-shape fidelity from 4/10 toward 10/10. `derive_connection_templates.py` converts each export in one command. Inference has already failed once here. |
-| **4** | **Hook write-up** → `docs/agent-architecture.md` | ~1 h | nothing | Two independent researchers agreed; the finding is worth committing before it decays into folklore. |
-| **5** | **Phase D / E proper** | days | on **D1** | The honest re-scope and the persona measurement. Cannot start before 1. |
+| **1** | **Phase C code** — `detect_occlusion.py` (C2a/C2b) + `transpile` import safety (C3) | ~1 h | **the merge** | Measured: C4 already passes, and C2a/C2b/C3 are ~a dozen lines between them. This branch is 19 commits deep and cannot land until C is resolved. |
+| **2** | **C1 decision** — accept the in-place `probe_bundle.py` fix, or honour the revert | a decision, not a task | **the merge** | The only genuinely blocking item, and it needs the repo owner, not an agent. |
+| **3** | **Close the input-shape gap** (6 connectors × one real `.tds`) | ~1 h each, **no credentials** | connector confidence | Takes input-shape fidelity from 4/10 toward 10/10. `derive_connection_templates.py` converts each export in one command. Inference has already failed once here. |
+| **4** | **F1 — source-side numeric verification** (see Phase D) | days | the honest fidelity claim | The real answer to "how do we know the numbers are right." Reaches **~90%** of calculated fields. Needs a live-source migration, which the connectivity work has now made possible. |
+| **5** | **Hook write-up** → `docs/agent-architecture.md` | ~1 h | nothing | Knowledge capture only: hooks did **not** fire in subagents before CLI 1.0.49 (`github/copilot-cli#2392`), and the hooks reference never documents agent scope. Cheap insurance against re-deriving it. |
+| **6** | **Phase E** — persona measurement | days | on a numeric oracle | Needs F1 to supply the numerator. |
 
-### 1 · D1 spike — the only thing gating two phases
+**Deprioritised: D1** (the `.twbx` results cache). Real and readable, but present in **1 of 16**
+workbooks; F1 reaches ~90% of calculated fields instead. Kept as a tracked idea, not a next step.
 
-**The question:** a `.twbx` may ship `TwbxExternalCache/TwbxResultsCacheV3/` — Tableau's own cached
-query results. If those hold *values*, every such workbook carries its own numeric ground truth and
-the validator can compare real numbers instead of screenshots.
+### 1 · Phase C — what actually blocks the merge
 
-**What is already known** (measured 2026-08-05, see Phase D below): the path in this doc was
-**wrong** (`TwbxResultsCacheV3`, not `TwbxLQResultsCacheV3` — the wrong name returns 0/16 and would
-have retired the lead as dead); coverage is **1 of 16**, so it can never be *the* oracle; and it **is**
-readable without Tableau. ⚠️ **Unconfirmed and decisive:** only the first 220 bytes were inspected,
-which showed `<metadata-record class='column'>` — schema. Whether result *values* follow is the whole
-question.
+Two of the four reviewer items are already resolved. What remains is one **confirmed** bug
+(`detect_occlusion.py --fix` returns 0 even when occluders remain), one geometry fix (`contains` →
+≥90% area overlap), and one import-safety guard. Measured status in the Phase C table below.
 
-**Both outcomes are useful.** Values → a free oracle for at least one workbook, and Phase E becomes
-measurable. No values → we **stop carrying an unfundable numeric tier as the differentiator** and
-re-scope the validator to structural fidelity honestly. Today we are carrying it on hope.
-
-### 2 · Phase C — what actually blocks the merge
+### 2 · C1 — the decision only the repo owner can make
 
 Both code reviewers said this branch is not safe to merge. One item needs **a human decision, not an
 agent's**: reviewers said *revert* `probe_bundle.py` and re-derive it smaller; we instead **fixed it
@@ -275,6 +268,11 @@ rebuild the original table suggests.
   licence + one live workbook, or re-scope the validator to *structural fidelity only* and say so.
   Carrying an unfundable numeric tier as the differentiator is the dishonest option.
 
+  > 🔻 **DEPRIORITISED 2026-08-05 — superseded in priority by F1 below, but kept as a live idea.**
+  > The cache lead is real (readable, no Tableau needed) but present in **1 of 16** workbooks, so at
+  > best it is an oracle for one migration. **F1 reaches ~90% of calculated fields.** Revisit the
+  > cache only if F1 is blocked, or opportunistically when a workbook that has one comes up.
+
   > ⚠️ **Do not confuse the two caches — they are unrelated files with opposite roles.**
   >
   > | file | lives in | what it is | relevance |
@@ -284,6 +282,48 @@ rebuild the original table suggests.
   >
   > D1 is not about anything breaking. It asks whether Tableau left real **numbers** in the workbook
   > that we can compare our Power BI output against.
+
+- **F1 — verify against the DATA SOURCE, not against Tableau.** ☐ TRACKED, NOT STARTED.
+  *Proposed by the repo owner 2026-08-05; it is the better-scoped idea and displaces D1 in priority.*
+
+  **The idea:** for a **live** source we do not need Tableau to tell us the right number — we can ask
+  the upstream system. Query Databricks/Snowflake/SQL directly, compute the expected value, and
+  compare it with what the Power BI model returns.
+
+  **Why it beats the cache lead** (measured 2026-08-05 across the 16 examples):
+
+  | | count | share |
+  |---|---|---|
+  | calculated fields | **1,009** | |
+  | LOD expressions | 46 | 5% |
+  | table calculations | 59 | 6% |
+  | **everything else** | **904** | **90%** |
+
+  So ~90% of calculated fields are ordinary expressions a source-side check could adjudicate, versus
+  a results cache that exists in 1 of 16 workbooks. An order of magnitude more reach.
+
+  ⚠️ **The trap this must not fall into — we have already fallen into it once.** The retracted
+  "silence = correctness" result was measured with a DuckDB oracle reading *the same CSV*, written by
+  *the same agent* that wrote the DAX. That is self-consistency, not validation. A source-side check
+  inherits the same hazard the moment the validating SQL is written from the same reading of the
+  Tableau formula that produced the DAX. **Two implementations by one author agreeing proves only
+  that the author is consistent.**
+
+  So scope the claim precisely — these are different strengths:
+
+  | claim | can F1 prove it? |
+  |---|---|
+  | the model reads the **right server / table / rows** | ✅ yes, strongly — and it would have caught the cross-wired-server bug in upstream #91 at the data layer |
+  | a **simple aggregate** matches the source | ✅ yes, if the SQL is derived independently |
+  | an **LOD / table calc** was translated correctly | ❌ no — "what should this number be?" *is* the question, and answering it in SQL means reimplementing Tableau's semantics, which is the thing under test |
+
+  **Prerequisite that limits it today:** all 16 examples are **extracts** (`textscan`), so there is no
+  live source to query for any of them. F1 needs a live-source migration — which the connectivity
+  work has now proven we can stand up (Databricks / Snowflake / Azure SQL, all `DATA_OK`).
+
+  **Net effect on the honest re-scope:** we can credibly claim **structural fidelity + data-pipeline
+  fidelity**. We still cannot claim **semantic fidelity of the hard 10%** without a Tableau-side
+  oracle. That is a much better position than today's, and it is honest.
   ⚠️ Lead worth a spike first: `.twbx` files carry `TwbxExternalCache/TwbxResultsCacheV3/*.bin`,
   i.e. Tableau's own cached query results. If readable, every workbook ships its own ground truth.
 
