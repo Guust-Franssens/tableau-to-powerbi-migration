@@ -71,6 +71,49 @@ non-zero · the tri-source workbook parses **3** connections, not 1.
 
 ---
 
+## Phase B′ — bound the refresh itself  ✅ COMPLETE (live-testing finding, not a review finding)
+
+Found while proving the multi-source probe against three live systems. A direct
+`refresh_pbip_model.py --pid` call against a **never-authenticated** Azure SQL server
+(`sql-demo-server-sociale-fraude`, the deliberate sad leg of the `2happy1sad` arm) sat blocked on a
+Desktop sign-in modal for **956 s** while `REFRESH_TIMEOUT_SECONDS = 300` never fired.
+
+**Two corrections to how this was first written up, both from ground truth:**
+
+1. **It was never a product hang on the probe path.** `probe_live_source.py` already wraps the
+   script in `subprocess.run(..., timeout=timeout_sec)` and converts `TimeoutExpired` →
+   `NO_CREDENTIAL`. The 956 s was an *ad-hoc harness* bypassing that wrapper. The original framing
+   ("OPEN BUG: the cap must wrap the whole operation") over-claimed the blast radius.
+2. **The residual defect was real but different**: `refresh()`'s own docstring said *"the caller must
+   run its own clock."* That is a rule, not a bound — and the caller who forgot it was this repo's
+   own agent. Every **direct** caller (which the `pbip-model-refresh` skill documents as the normal
+   way to refresh a model) inherited nothing.
+
+**Fix — scope, never duration.** `REFRESH_TIMEOUT_SECONDS` stays **300 s**: cold starts are real (a
+1-row probe against a suspended Snowflake warehouse measured **167 s**, vs 21 s warm), and this repo
+has already produced a false `TIMEOUT` once by shortening a ceiling to 90 s. The ADOMD call now runs
+on a **daemon** thread joined at `timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS` (330 s total), so
+XMLA still gets first crack at raising its far better error, and a parked mashup engine can no longer
+keep the *process* alive. We cannot cancel work the server itself cannot preempt — we can always
+return a verdict.
+
+| # | task | site | acceptance | status |
+|---|---|---|---|---|
+| B′1 | `refresh()` bounds itself on a daemon thread; keep the 300 s ceiling | `refresh_pbip_model.py:118-` | ✅ `test_a_command_that_never_returns_still_yields_a_verdict` (a fake that never returns ends in ~3 s, message names the modal diagnosis) | ✅ |
+| B′2 | A worker failure must reach the caller unchanged — `main` classifies on its text | same | ✅ `test_an_error_from_the_worker_reaches_the_caller_unchanged`; **caught a real bug**: `conn.Open()` sat outside the `try`, so a connect failure escaped the thread and surfaced as the generic "worker returned no result" | ✅ |
+| B′3 | Sync all three copies | `scripts/`, `.github/skills/`, plugin | ✅ `sync_installed_skills.py` → 2 files copied | ✅ |
+
+**What this does NOT fix, and why that is fine.** A multi-source model still gives an all-or-nothing
+verdict: the modal blocks the whole refresh before any table loads, so `2happy1sad` records
+model-level `CREDENTIAL_REQUIRED` with **no per-table rows** — the PARTIAL downgrade never fires
+(it needs a refresh that *completes* with empty tables). That is not a gap, because **the product
+does not probe that way**: `probe_live_source.py` iterates live sources and builds a **one-table
+model per source**, so the per-source matrix comes from there, and the orchestrator's step 5b hard
+-stops before `pbi-semantic-builder` is ever called. The fused tri-source bundle exists only to
+stress the multi-source path.
+
+---
+
 ## Phase C — deal with the committed branch  ☐ NOT STARTED
 
 Both code reviewers: not safe to merge. Per artefact:

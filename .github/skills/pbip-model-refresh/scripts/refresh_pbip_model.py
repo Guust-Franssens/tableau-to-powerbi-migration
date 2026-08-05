@@ -72,6 +72,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -96,6 +97,13 @@ SAVE_TIMEOUT_SECONDS = 120
 # `refresh()` documents this ceiling cannot interrupt anyway. If a model legitimately needs longer,
 # the right lever is `--tables` (refresh only what is needed), not a longer wait.
 REFRESH_TIMEOUT_SECONDS = 300
+
+# Grace on top of the XMLA ceiling before the outer wall clock gives up. The XMLA layer honours
+# `CommandTimeout` precisely for a genuinely slow *query*, so letting it fire first yields a far
+# better error ("The XML for Analysis request timed out ... Timeout value: N sec") than a generic
+# wall-clock abort. The outer bound only exists to catch the case XMLA provably cannot interrupt:
+# a mashup engine parked on a sign-in modal in another process.
+REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
 
 # A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
 # only when it needs to be (spaces, punctuation), so both forms have to be accepted.
@@ -134,31 +142,70 @@ def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIME
       process, which the server cannot preempt the way it aborts a running query.
 
     So it cuts short a source that is merely *slow*, and never one that is waiting on a human.
-    **The caller must run its own clock** — that agent-side "~2 minutes then stop and ask" rule is the
-    only thing that actually bounds this.
+    **Hence the outer wall clock below.** This used to say "the caller must run its own clock", and
+    that was a real defect dressed up as documentation: `probe_live_source.py` did wrap it
+    (`subprocess.run(..., timeout=...)`), but every *direct* caller inherited nothing. Measured
+    2026-08-05, a direct `--pid` call against a never-authenticated Azure SQL server sat blocked on a
+    modal for **956 s** while `REFRESH_TIMEOUT_SECONDS = 300` never fired — and the caller who forgot
+    to wrap it was this repo's own agent. A rule an agent must remember is not a bound; a bound is a
+    bound.
+
+    The ADOMD call runs on a **daemon** thread so that a parked mashup engine — which genuinely
+    cannot be preempted — no longer keeps the *process* alive. We cannot cancel that work, but we can
+    always return control and a verdict, which is all any caller needs.
 
     Historical note, because it nearly went in the other direction: an earlier attempt to measure this
     was run against the *stale plugin copy* of this file, which had no timeout at all. It "ran past
     90 s" because there was no 90. Never take a timing measurement against a bundle preflight reports
     as STALE.
     """
-    adomd_connection = _load_adomd()
-    conn = adomd_connection(f"Data Source=localhost:{port}")
-    conn.Open()
-    try:
-        catalog = _catalog_id(conn)
-        if tables:
-            objects = [{"database": catalog, "table": t} for t in tables]
-        else:
-            objects = [{"database": catalog}]
-        tmsl = json.dumps({"refresh": {"type": "full", "objects": objects}})
-        cmd = conn.CreateCommand()
-        cmd.CommandText = tmsl
-        cmd.CommandTimeout = timeout_sec
-        cmd.ExecuteNonQuery()
-        return True, f"refreshed {'/'.join(tables) if tables else 'entire database'} (catalog {catalog})"
-    finally:
-        conn.Close()
+    result: dict[str, tuple[bool, str] | BaseException] = {}
+
+    def _run() -> None:
+        conn = None
+        try:
+            adomd_connection = _load_adomd()
+            conn = adomd_connection(f"Data Source=localhost:{port}")
+            conn.Open()
+            catalog = _catalog_id(conn)
+            if tables:
+                objects = [{"database": catalog, "table": t} for t in tables]
+            else:
+                objects = [{"database": catalog}]
+            tmsl = json.dumps({"refresh": {"type": "full", "objects": objects}})
+            cmd = conn.CreateCommand()
+            cmd.CommandText = tmsl
+            cmd.CommandTimeout = timeout_sec
+            cmd.ExecuteNonQuery()
+            result["ok"] = (True, f"refreshed {'/'.join(tables) if tables else 'entire database'} (catalog {catalog})")
+        except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            # Everything the worker can raise has to be handed back, not left to die on the thread:
+            # `main` classifies on the exception text, and an unhandled thread exception would reach
+            # it as "worker returned no result" - a generic failure masking a specific, actionable one.
+            result["ok"] = exc
+        finally:
+            if conn is not None:
+                try:
+                    conn.Close()
+                except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                    pass
+
+    worker = threading.Thread(target=_run, name="xmla-refresh", daemon=True)
+    worker.start()
+    worker.join(timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS)
+    if worker.is_alive():
+        raise TimeoutError(
+            f"refresh did not return within {timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS}s "
+            f"(XMLA CommandTimeout was {timeout_sec}s and did not fire, which is the signature of a "
+            f"mashup engine parked on a sign-in modal rather than a slow query)"
+        )
+
+    outcome = result.get("ok")
+    if isinstance(outcome, BaseException):
+        raise outcome
+    if outcome is None:  # pragma: no cover - defensive; the worker always records something
+        raise RuntimeError("refresh worker returned no result")
+    return outcome
 
 
 def _bridge_status() -> dict:
@@ -447,7 +494,10 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
         # So: report the observation, offer both hypotheses, and name the arbiter that settles it.
         # Never emit a stop-word instruction from an unverified heuristic.
         if "timeout" in text.lower() or "timed out" in text.lower():
-            print(f"REFRESH: TIMEOUT - no result within {REFRESH_TIMEOUT_SECONDS}s ({text})")
+            print(
+                f"REFRESH: TIMEOUT - no result within "
+                f"{REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS}s ({text})"
+            )
             print(
                 "  CAUSE UNKNOWN - this script cannot distinguish these two, and they need\n"
                 "  opposite responses:\n"
