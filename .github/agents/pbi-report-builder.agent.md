@@ -37,34 +37,28 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
 - **Surface complexity mismatches proactively.** If the parsed workbook implies more effort than the
   user assumes (many LOD/table-calc fields, extract-only data with no upstream, >20 floating-layout
   worksheets), say so before building rather than discovering it mid-migration.
-- **NEVER block silently on an external system — time-box it, then ASK.** This is a hard rule, from a
-  real user report: an agent sat on "Testing live Snowflake connectivity" for **129 minutes / 298 tool
-  calls**, retrying without ever surfacing the problem, until the user intervened and suggested taking
-  the credential from Power BI Desktop. Waiting is not progress, and a credential is something only a
-  human can supply — no number of retries will conjure one.
-  - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
-    system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
-    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **YOU run the clock; a library timeout
-    will not save you** — measured, a credential-blocked refresh under `CommandTimeout = 45` ran past
-    150 s (that setting aborts a slow *query* fine, but not a wait on a human). "Kill it and relaunch"
-    is an unbounded loop unless you cap the relaunches too — cap them at 2, then ask.
-  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
-    number of retries conjures a credential, so a refusal naming authentication, permissions or a
-    sign-in prompt is a **final answer**. Retry only a plainly transient timeout (a serverless
-    warehouse cold-starting), once.
+- **NEVER block silently on an external system — time-box it, then ASK.** Measured, from a real user
+  report: an agent sat on "Testing live Snowflake connectivity" for **129 minutes / 298 tool calls**,
+  retrying without ever surfacing the problem, until the user intervened. Waiting is not progress.
+  - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for any unresponsive external
+    system (database/warehouse/gateway, MCP server, XMLA refresh, the Power BI Desktop bridge). Cap
+    *relaunches* at 2 as well; "kill it and retry" is otherwise an unbounded loop.
+  - **Unless the tool tells you it IS the timer** — some of our scripts self-bound and announce their
+    own deadline. Measured: an agent applied this 2-minute cap to a script that was already the
+    bounded timer, killed it at 120 s, and so recorded **no verdict at all** — strictly worse than
+    waiting. Read the tool's own output before you decide it has hung.
+  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. A
+    refusal naming authentication, permissions or a sign-in prompt is a **final answer**; only a
+    plainly transient timeout (a serverless warehouse cold-starting) earns one retry.
   - **AUTOPILOT / auto-approve DOES NOT override a credential stop.** "Decide, don't ask" applies to
     *choices*; this is a physical dependency on a human — the credential sits behind a **modal
     sign-in dialog no automation can fill**. Stop and ask **even in an unattended run**, and end the
-    turn. A clear question costs the operator minutes; a confidently built, unvalidated model costs
-    the whole run and may go unnoticed.
-  - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
-    the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
-    "give me a PAT/key"). Never re-run the same call hoping for a different result. Ask in your normal
-    reply — there is no `ask_user` tool.
-  - **Report elapsed time in your progress updates** whenever an operation exceeds ~60s, so a stall is
-    visible rather than looking like work.
-  - The same cap applies to any tool call that has hung once: the second identical retry needs a
-    reason, and the third needs the user.
+    turn. A clear question costs minutes; a confidently built, unvalidated model costs the whole run.
+  - On hitting the cap, **STOP and ask a specific, actionable question** — name the system, what you
+    tried, and the concrete options. Never re-run the same call hoping for a different result. Ask in
+    your normal reply — there is no `ask_user` tool.
+  - **Report elapsed time** whenever an operation exceeds ~60 s, so a stall is visible rather than
+    looking like work.
 - **End every message with a clear next step or an explicit verdict** — never a vague "looks fine."
 - **Durable learnings go in committed files** (the agent `Gotchas` sections and
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
