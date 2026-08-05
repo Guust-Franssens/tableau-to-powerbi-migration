@@ -457,9 +457,12 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
                 "        can fill. Retrying cannot dismiss it; a human must sign in once.\n"
                 "  SETTLE IT - run the arbiter, do not guess:\n"
                 f"    powershell -File scripts/probe_desktop_credential.ps1 -DesktopPid {pid}\n"
-                "  A one-row probe bundle also answers this definitively: a refresh limited to a\n"
-                "  single row per partition is fast by construction, so a timeout on THAT is\n"
-                "  evidence of (b), while a timeout here is not."
+                "  A one-row probe bundle narrows this, but does NOT settle it: a probe limited to a\n"
+                "  single row is fast once the source is WARM, yet measured 2026-08-05 a 1-row probe\n"
+                "  against a SUSPENDED Snowflake warehouse took 167 s (vs 21 s against an already\n"
+                "  running Databricks warehouse) - the auto-resume dominates, not the row count. So a\n"
+                "  slow probe is evidence of a cold source at least as often as a blocked one; use the\n"
+                "  arbiter above, and check whether the compute was suspended, before concluding (b)."
             )
             return 3
         print(f"REFRESH: ERROR {text}")
@@ -588,7 +591,16 @@ def main(argv: list[str] | None = None) -> int:
     persisted = cache is not None and after_stamp > before_stamp
 
     print(f"  data   : {rows} row(s) in '{table}'")
-    print(f"  cache  : {cache if cache else '<none>'}{' (updated)' if persisted else ''}")
+    # Say what HAPPENED, not where a file would go. Printing the path alone reads as "written" -
+    # it misled a reader on 2026-08-05 into believing a probe run had persisted a 1-row cache.
+    # For a probe that distinction matters twice over: a persisted 1-row `cache.abf` is a trap,
+    # and (measured, see `--save`) a present cache can make the PBIP unopenable.
+    if persisted:
+        print(f"  cache  : PERSISTED -> {cache}")
+    elif cache is None:
+        print("  cache  : not persisted (no cache path resolved)")
+    else:
+        print("  cache  : not persisted (--save not given; this is the safe default)")
 
     if rows <= 0:
         print("REFRESH: NO_DATA (refresh ran but the table is empty - check the source and credentials)")
