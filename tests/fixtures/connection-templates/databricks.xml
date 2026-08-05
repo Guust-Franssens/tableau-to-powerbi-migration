@@ -1,0 +1,16 @@
+<connection
+            authentication='oauth'
+            instanceurl='{{INSTANCE_URL}}'
+            server-oauth='server-custom'
+            username='{{USERNAME}}'
+
+            authentication-type=''
+            class='databricks'
+            odbc-connect-string-extras=''
+            one-time-sql=''
+            _.fcp.DatabricksCatalog.false...dbname='{{HTTP_PATH}}'
+            _.fcp.DatabricksCatalog.true...dbname='{{DATABASE}}'
+            _.fcp.DatabricksCatalog.true...v-http-path='{{HTTP_PATH}}'
+            schema='{{SCHEMA}}'
+            tableName=''
+            server='{{SERVER}}'>

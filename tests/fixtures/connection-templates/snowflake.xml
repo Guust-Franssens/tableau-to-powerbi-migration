@@ -1,0 +1,1 @@
+<connection authentication='Username Password' class='snowflake' dbname='{{DATABASE}}' odbc-connect-string-extras='' one-time-sql='' schema='{{SCHEMA}}' server='{{SERVER}}' service='' temp-table-detection='optimized' username='{{USERNAME}}' warehouse='{{WAREHOUSE}}' workgroup-auth-mode='' />

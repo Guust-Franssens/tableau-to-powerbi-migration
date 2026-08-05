@@ -25,6 +25,7 @@ import zipfile
 from pathlib import Path
 
 DEFAULT_OUT = Path("tests/fixtures/live/multi-source-live.twbx")
+TEMPLATE_DIR = Path("tests/fixtures/connection-templates")
 
 
 def _leg(prefix: str, cls: str, extra: dict[str, str]) -> dict | None:
@@ -46,7 +47,7 @@ def _leg(prefix: str, cls: str, extra: dict[str, str]) -> dict | None:
 def collect_legs() -> list[dict]:
     """Every leg that has an endpoint configured, in a stable order."""
     legs = [
-        _leg("DBX", "databricks", {"_.fcp.DatabricksCatalog.true...v-http-path": "PROBE_DBX_HTTP_PATH"}),
+        _leg("DBX", "databricks", {"http_path": "PROBE_DBX_HTTP_PATH"}),
         _leg("SF", "snowflake", {"warehouse": "PROBE_SF_WAREHOUSE"}),
         _leg("SQL", "azure_sqldb", {}),
     ]
@@ -54,24 +55,40 @@ def collect_legs() -> list[dict]:
 
 
 def connection_xml(leg: dict) -> str:
-    """Render one <named-connection>, using the spelling real Tableau writes for that connector."""
+    """Render one <named-connection> from the REAL attribute shape for that connector.
+
+    The inner element is a template derived from an actual Tableau export
+    (`scripts/derive_connection_templates.py`), with only endpoint values substituted. It is not
+    synthesised, and that distinction is the point of this fixture: a hand-written element encodes
+    what we THINK Tableau writes, and that guess has been wrong in a way that mattered - the
+    Databricks HTTP path is spelled `_.fcp.DatabricksCatalog.true...v-http-path`, which both this
+    repo's parser and the deterministic tier's silently read as None.
+    """
+    template_path = TEMPLATE_DIR / f"{leg['class']}.xml"
+    if not template_path.exists():
+        raise SystemExit(
+            f"ERROR: no connection template for '{leg['class']}' at {template_path}.\n"
+            f"       Derive one from a real Tableau export:\n"
+            f"       python scripts/derive_connection_templates.py <export.tds|.tdsx|.twb|.twbx>"
+        )
+
+    element = template_path.read_text(encoding="utf-8").strip()
+    server = leg["server"]
+    for token, value in (
+        ("{{SERVER}}", server),
+        ("{{DATABASE}}", leg["database"]),
+        ("{{SCHEMA}}", leg["schema"]),
+        ("{{WAREHOUSE}}", leg["extra"].get("warehouse", "")),
+        ("{{HTTP_PATH}}", leg["extra"].get("http_path", "")),
+        ("{{USERNAME}}", "probeuser"),
+        ("{{INSTANCE_URL}}", f"https://{server}/oidc"),
+    ):
+        element = element.replace(token, value)
+
     name = f"{leg['class']}.probe{leg['prefix']}"
-    attrs = {
-        "class": leg["class"],
-        "server": leg["server"],
-        "schema": leg["schema"],
-        "username": "probeuser",
-    }
-    if leg["class"] == "databricks":
-        # Tableau writes the catalog under the feature-flagged spelling, and so must we -
-        # the bare `dbname` is the LEGACY meaning (it held the HTTP path).
-        attrs["_.fcp.DatabricksCatalog.true...dbname"] = leg["database"]
-    else:
-        attrs["dbname"] = leg["database"]
-    attrs.update({k: v for k, v in leg["extra"].items() if v})
-    rendered = "\n                    ".join(f"{k}='{v}'" for k, v in attrs.items())
-    return f"""      <named-connection caption='{leg["server"]}' name='{name}'>
-        <connection {rendered} />
+    closing = "" if element.rstrip().endswith("/>") else "\n        </connection>"
+    return f"""      <named-connection caption='{server}' name='{name}'>
+        {element}{closing}
       </named-connection>"""
 
 
