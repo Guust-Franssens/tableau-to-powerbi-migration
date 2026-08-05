@@ -43,10 +43,22 @@ Two reasons, and the second is the one that matters.
 
 What a pass proves, and what it does not
 ----------------------------------------
-PROVES  : the connector resolves, every M parameter is defined, the credential is bound, the object
-          is readable, and Power BI can return a row.
-DOES NOT: prove the full load succeeds. Type drift on row 500,000 is invisible at row 1. Record that
-          limitation in the credential receipt rather than implying full validation.
+A **pass** here means a refresh that RAN and returned a row, not a probe variant that was built.
+Those are different events, and this script keeps them apart:
+
+  build  (`--out`)      -> receipt.status = BUILT_NOT_EXECUTED, proves []
+  refresh (ran by you)  -> `--record DATA_OK|NO_DATA|TIMEOUT|CREDENTIAL_REQUIRED|ERROR`
+                        -> receipt.status = EXECUTED, proves populated FROM THE OUTCOME
+
+PROVES (only on a recorded `DATA_OK`): the connector resolves, every M parameter is defined, the
+          credential is bound, the object is readable, and Power BI returned a row.
+DOES NOT: prove the full load succeeds. Type drift on row 500,000 is invisible at row 1.
+
+⚠️ This split exists because of a real defect in this file. The receipt used to assert
+"credential is bound in Power BI" and "a row can be returned" the moment the files were rewritten -
+having opened nothing, bound nothing and read nothing. It was a false green emitted by the script
+written to prevent false greens, and it would certify an unreachable source. Building a probe is
+preparation; only an executed refresh is evidence.
 """
 
 from __future__ import annotations
@@ -74,17 +86,42 @@ _LET_IN = re.compile(r"(?ms)(?P<lead>\n(?P<indent>[ \t]*)in[ \t]*\n[ \t]*)(?P<ex
 # bundle could not be proven probe-free.
 PROBE_MARKER = "/*PROBE*/"
 
+RECEIPT_NAME = "probe-receipt.json"
+
+# Receipt lifecycle. A probe variant is BUILT by rewriting files, and only becomes EXECUTED when a
+# refresh has actually run against it. Keeping these distinct is the whole point of the receipt:
+# a consumer can tell "prepared" from "proven" without reading the code that wrote it.
+STATUS_BUILT = "BUILT_NOT_EXECUTED"
+STATUS_EXECUTED = "EXECUTED"
+
+OUTCOME_DATA_OK = "DATA_OK"
+OUTCOME_PARTIAL = "PARTIAL"
+OUTCOME_NO_DATA = "NO_DATA"
+OUTCOME_TIMEOUT = "TIMEOUT"
+OUTCOME_CREDENTIAL_REQUIRED = "CREDENTIAL_REQUIRED"
+OUTCOME_ERROR = "ERROR"
+REFRESH_OUTCOMES = frozenset(
+    {
+        OUTCOME_DATA_OK,
+        OUTCOME_PARTIAL,
+        OUTCOME_NO_DATA,
+        OUTCOME_TIMEOUT,
+        OUTCOME_CREDENTIAL_REQUIRED,
+        OUTCOME_ERROR,
+    }
+)
+
 # A wrapped expression: `Table.FirstN(<expr>, <n>) /*PROBE*/`
 _WRAPPED = re.compile(r"Table\.FirstN\((?P<expr>.+),\s*\d+\)\s*" + re.escape(PROBE_MARKER))
 
-# `measure 'X' = ...` / `column 'X' = ...` (calculated). A SOURCE column has no `=`.
-_DAX_OBJECT = re.compile(
-    r"(?ms)^(?P<indent>[ \t]*)(?P<kind>measure|column)\s+(?P<name>'[^']+'|[^\s=]+)\s*=.*?"
-    r"(?=^[ \t]*(?:partition|column|measure|hierarchy|annotation|changedProperty)\b|\Z)"
-)
+# The line that OPENS a calculated object: `measure 'X' = ...` / `column 'X' = ...`.
+# A SOURCE column has no `=`, so it never matches and is never stripped.
+_DAX_OBJECT_HEAD = re.compile(r"^(?P<indent>[ \t]*)(?P<kind>measure|column)\s+(?P<name>'[^']+'|[^\s=]+)\s*=")
 
 _M_PARAM_REF = re.compile(r'#"([^"]+)"')
-_M_PARAM_DEF = re.compile(r"(?m)^\s*expression\s+(?:'([^']+)'|([^\s=]+))\s*=")
+_M_PARAM_DEF = re.compile(r"(?m)^\s*expression\s+(?:'([^']+)'|([^\s=]+))\s*=\s*(?P<value>[^\r\n]*)")
+# `... meta [IsParameterQuery=true, ...]` trails the value and is not part of it.
+_M_PARAM_META = re.compile(r"\s+meta\s*\[.*$")
 
 
 def find_model_dir(bundle: Path) -> Path:
@@ -150,21 +187,123 @@ def force_import_mode(tmdl: str) -> tuple[str, int]:
     return out, n
 
 
+def _indent_width(line: str) -> int:
+    """Visual indent of a line, tabs expanded, so tab- and space-indented TMDL compare correctly."""
+    return len(line[: len(line) - len(line.lstrip())].expandtabs(4))
+
+
+def _block_end(lines: list[str], start: int) -> int:
+    """Index just past the block opened at `start` (every following deeper-indented line)."""
+    own = _indent_width(lines[start])
+    index = start + 1
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() and _indent_width(line) <= own:
+            break
+        index += 1
+    return index
+
+
+def _repair_dangling_refs(lines: list[str], removed: set[str]) -> list[str]:
+    """Drop hierarchy levels and sort-by references that point at a column we just removed.
+
+    Without this the file is still well-formed TMDL - and still fails to open. Measured 2026-08-05,
+    Desktop 2.157:
+
+        Cannot resolve all the paths while de-serializing Database.
+        Property Column of object "level Year in hierarchy Calendar in table Date" refers to an
+        object which cannot be found
+
+    A hierarchy that loses every level is removed too, since an empty hierarchy is not valid.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+
+        if stripped.startswith("level "):
+            end = _block_end(lines, index)
+            target = None
+            for inner in lines[index:end]:
+                match = re.match(r"\s*column:\s*'?([^'\r\n]+?)'?\s*$", inner)
+                if match:
+                    target = match.group(1)
+            if target in removed:
+                index = end
+                continue
+            out.extend(lines[index:end])
+            index = end
+            continue
+
+        if stripped.startswith("hierarchy "):
+            end = _block_end(lines, index)
+            kept = _repair_dangling_refs(lines[index + 1 : end], removed)
+            if any(part.strip().startswith("level ") for part in kept):
+                out.append(line)
+                out.extend(kept)
+            index = end
+            continue
+
+        match = re.match(r"\s*sortByColumn:\s*'?([^'\r\n]+?)'?\s*$", line)
+        if match and match.group(1) in removed:
+            index += 1
+            continue
+
+        out.append(line)
+        index += 1
+    return out
+
+
 def strip_dax_objects(tmdl: str) -> tuple[str, int]:
-    """Remove measures and CALCULATED columns, keeping source columns.
+    """Remove measures, and calculated columns from M-BACKED tables only.
 
     Measured 2026-08-04: a single calculated column whose expression errors takes the whole model
     down - every query against it fails, not just the ones touching that column. A connectivity
     probe must isolate the connection, so DAX objects are dropped rather than risked.
+
+    Two hard-won boundaries, both found only by opening the result in Power BI Desktop while every
+    static check - ours and the deterministic tier's `tmdl_lint`/`openability_gate` - reported clean:
+
+    1. **A CALCULATED table is left alone.** Its columns are not decoration, they ARE the table
+       (`Date` is `CALENDAR(...)`, its Year/Quarter/Month columns derive from that), and it never
+       touches the data source, so stripping it buys a connectivity probe nothing while destroying
+       the table. Measures are still stripped everywhere.
+    2. **Whatever is removed must not leave a dangling reference.** See `_repair_dangling_refs`.
+
+    The earlier single-regex implementation also stopped at `^annotation`, orphaning a deleted
+    object's own annotations onto its predecessor - Desktop then refused to open the project with
+    "TMDL objects cannot be merged because both declare the same property". The rule is now
+    STRUCTURAL: an object owns every following line indented deeper than its own declaration.
     """
+    lines = tmdl.splitlines(keepends=True)
+    table_is_calculated = any(re.match(r"\s*partition\s+.*=\s*calculated\s*$", ln) for ln in lines)
+
+    kept: list[str] = []
+    removed: set[str] = set()
+    index = 0
     count = 0
 
-    def _drop(_match: re.Match[str]) -> str:
-        nonlocal count
-        count += 1
-        return ""
+    while index < len(lines):
+        head = _DAX_OBJECT_HEAD.match(lines[index])
+        if not head:
+            kept.append(lines[index])
+            index += 1
+            continue
 
-    return _DAX_OBJECT.sub(_drop, tmdl), count
+        if head.group("kind") == "column" and table_is_calculated:
+            kept.append(lines[index])
+            index += 1
+            continue
+
+        removed.add(head.group("name").strip("'"))
+        index = _block_end(lines, index)
+        count += 1
+
+    if removed:
+        kept = _repair_dangling_refs(kept, removed)
+
+    return "".join(kept), count
 
 
 def check_m_parameters(model_dir: Path) -> dict[str, list[str]]:
@@ -174,18 +313,30 @@ def check_m_parameters(model_dir: Path) -> dict[str, list[str]]:
     check that needs no credential, no Desktop and no network, and neither
     `powerbi-report-author validate` nor the deterministic tier's own `openability_selfcheck`
     detects it (measured: both report clean on a bundle with two undefined parameters).
+
+    It also reports `empty` - a parameter that IS defined but holds `""`. Measured 2026-08-05 on a
+    real Snowflake `.tdsx` whose `<connection warehouse=''>` was blank: the emitter correctly wrote
+    `expression Warehouse = ""` with a TODO comment, and this function - checking only for the
+    NAME's existence - reported "all referenced parameters are defined" and exited 0. A partition
+    calling `Snowflake.Databases(#"Server", #"Warehouse")` with an empty warehouse cannot refresh,
+    so an empty required parameter is exactly as fatal as a missing one and must not pass.
     """
-    defined: set[str] = set()
+    defined: dict[str, str] = {}
     referenced: set[str] = set()
     for tmdl in model_dir.rglob("*.tmdl"):
         text = tmdl.read_text(encoding="utf-8", errors="replace")
         for match in _M_PARAM_DEF.finditer(text):
-            defined.add(match.group(1) or match.group(2))
+            name = match.group(1) or match.group(2)
+            value = _M_PARAM_META.sub("", match.group("value")).strip()
+            defined[name] = value
         referenced.update(_M_PARAM_REF.findall(text))
+
+    empty = sorted(n for n in referenced if n in defined and defined[n] in ("", '""', "''"))
     return {
         "defined": sorted(defined),
         "referenced": sorted(referenced),
-        "undefined": sorted(referenced - defined),
+        "undefined": sorted(referenced - set(defined)),
+        "empty": empty,
     }
 
 
@@ -219,24 +370,157 @@ def build_probe(bundle: Path, out: Path, rows: int, keep_dax: bool) -> dict:
         "rows_per_partition": rows,
         "stats": stats,
         "m_parameters": check_m_parameters(model_dir),
-        "proves": [
-            "connector resolves",
-            "every M parameter is defined",
-            "credential is bound in Power BI",
-            "object is readable",
-            "a row can be returned",
+        # ---------------------------------------------------------------------------------
+        # NOTHING here is a connectivity claim, and that is deliberate. This function has
+        # copied a directory and rewritten regexes; it has not opened Power BI, not bound a
+        # credential, and not read a row. An earlier version of this receipt asserted
+        # "credential is bound in Power BI" and "a row can be returned" at exactly this
+        # point - a false green produced by the very script written to prevent false greens.
+        # Connectivity claims are now written ONLY by record_refresh_result(), and only from
+        # the outcome of a refresh that actually ran.
+        # ---------------------------------------------------------------------------------
+        "status": STATUS_BUILT,
+        "refresh": None,
+        "proves": [],
+        "statically_checked": [
+            "every M parameter referenced by a partition has a definition in the bundle",
+            "every partition expression is wrapped to at most "
+            f"{rows} row(s), so a refresh measures REACHABILITY, not data volume",
         ],
         "does_not_prove": [
-            "the full load succeeds (type drift beyond row 1 is invisible)",
-            "query folding actually occurred (confirm in the source system's query history)",
+            "the connector resolves",
+            "the credential is bound in Power BI",
+            "the object is readable",
+            "a row can be returned",
+            "the full load succeeds",
         ],
     }
-    (out / "probe-receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    _write_receipt(out, receipt)
     return receipt
 
 
-# The CLI is a small dispatcher over 4 mutually exclusive modes; splitting it would hide the flow.
-# pylint: disable=too-many-return-statements
+def _write_receipt(probe_dir: Path, receipt: dict) -> None:
+    (probe_dir / RECEIPT_NAME).write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+
+def read_receipt(probe_dir: Path) -> dict:
+    """Read a probe receipt, or raise if the directory is not a probe variant."""
+    path = probe_dir / RECEIPT_NAME
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found - {probe_dir} is not a probe variant")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def record_refresh_result(
+    probe_dir: Path,
+    outcome: str,
+    *,
+    detail: str | None = None,
+    elapsed_sec: float | None = None,
+    table_rows: dict[str, int] | None = None,
+) -> dict:
+    """Update a probe receipt from a refresh that ACTUALLY RAN.
+
+    This is the only function permitted to write a connectivity claim, and it derives that claim
+    from `outcome` rather than from having been called. `DATA_OK` is the single outcome that
+    proves anything; every other outcome proves nothing and says so, because the failure modes are
+    not equivalent - a TIMEOUT is uninformative (it may be a slow source *or* an unreachable one),
+    whereas CREDENTIAL_REQUIRED is a final answer that no retry can change.
+
+    `table_rows` maps table name -> rows returned by the probe, and exists because a MODEL-level
+    verdict is not safe for a mixed model. Measured 2026-08-04 on a Databricks migration: a 2.5-hour
+    run produced a full model, a 62 KB `cache.abf`, and a green refresh - while the warehouse never
+    left STOPPED with 0 sessions. The flat-file table had refreshed; both live tables were empty.
+    A model-level `DATA_OK` would have certified a source that was never contacted. So when
+    `table_rows` is supplied and ANY table returned 0 rows, a claimed `DATA_OK` is DOWNGRADED to
+    `PARTIAL` and the receipt names the unproven tables, rather than a caller's optimistic verdict
+    being taken at face value.
+    """
+    if outcome not in REFRESH_OUTCOMES:
+        raise ValueError(f"unknown outcome {outcome!r}; expected one of {sorted(REFRESH_OUTCOMES)}")
+
+    receipt = read_receipt(probe_dir)
+    receipt["status"] = STATUS_EXECUTED
+
+    proven = sorted(t for t, n in (table_rows or {}).items() if n)
+    unproven = sorted(t for t, n in (table_rows or {}).items() if not n)
+
+    downgraded_from = None
+    if outcome == OUTCOME_DATA_OK and unproven:
+        downgraded_from = OUTCOME_DATA_OK
+        outcome = OUTCOME_PARTIAL
+
+    receipt["refresh"] = {
+        "outcome": outcome,
+        "downgraded_from": downgraded_from,
+        "detail": detail,
+        "elapsed_sec": round(elapsed_sec, 1) if elapsed_sec is not None else None,
+        "table_rows": table_rows,
+        "tables_with_rows": proven or None,
+        "tables_without_rows": unproven or None,
+    }
+
+    if outcome == OUTCOME_DATA_OK:
+        rows = receipt.get("rows_per_partition", 1)
+        scope = f"all {len(proven)} table(s)" if proven else "the model"
+        receipt["proves"] = [
+            "the connector resolves",
+            "every M parameter is defined",
+            "the credential is bound in Power BI",
+            "the object is readable",
+            f"at least one row can be returned for {scope} (probe limit {rows}/partition)",
+        ]
+        receipt["does_not_prove"] = [
+            "the full load succeeds (type drift beyond the probe limit is invisible)",
+            "query folding actually occurred (confirm in the source system's query history)",
+            "any DAX is correct (measures are stripped unless --keep-dax)",
+        ]
+    elif outcome == OUTCOME_PARTIAL:
+        receipt["proves"] = [f"'{t}' returned at least one row" for t in proven]
+        receipt["does_not_prove"] = [
+            f"'{t}' is reachable - it returned NO rows, so its source was never proven" for t in unproven
+        ] + [
+            "the model as a whole is loadable; a per-table verdict is the only safe reading here",
+        ]
+    else:
+        receipt["proves"] = []
+        receipt["does_not_prove"] = [
+            f"nothing - the probe refresh ended {outcome}, so no connectivity claim is supported",
+        ]
+
+    _write_receipt(probe_dir, receipt)
+    return receipt
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    """Record an executed refresh outcome into an existing probe receipt."""
+    table_rows = json.loads(args.table_rows) if args.table_rows else None
+    receipt = record_refresh_result(
+        args.bundle,
+        args.record,
+        detail=args.detail,
+        elapsed_sec=args.elapsed_sec,
+        table_rows=table_rows,
+    )
+    refresh = receipt["refresh"]
+    print(f"receipt: {args.bundle / RECEIPT_NAME}")
+    print(f"  status  : {receipt['status']}")
+    print(f"  outcome : {refresh['outcome']}")
+    if refresh["downgraded_from"]:
+        print(
+            f"  DOWNGRADED from {refresh['downgraded_from']}: "
+            f"{', '.join(refresh['tables_without_rows'])} returned no rows"
+        )
+    if receipt["proves"]:
+        for claim in receipt["proves"]:
+            print(f"  PROVES  : {claim}")
+    else:
+        print("  PROVES  : (nothing - a non-DATA_OK refresh supports no connectivity claim)")
+    return 0 if refresh["outcome"] == OUTCOME_DATA_OK else 1
+
+
+# The CLI is a small dispatcher over 5 mutually exclusive modes; splitting it would hide the flow.
+# pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
 def main() -> int:
     """Parse arguments and dispatch to the requested mode."""
     parser = argparse.ArgumentParser(description="Build a one-row probe variant of an emitted PBIP bundle.")
@@ -259,11 +543,27 @@ def main() -> int:
         action="store_true",
         help="exit non-zero if any probe wrapper remains (run before shipping a bundle)",
     )
+    parser.add_argument(
+        "--record",
+        choices=sorted(REFRESH_OUTCOMES),
+        help="record the outcome of a refresh that ACTUALLY RAN against this probe variant; "
+        "only this writes a connectivity claim into the receipt",
+    )
+    parser.add_argument("--detail", help="free-text detail to store alongside --record")
+    parser.add_argument("--elapsed-sec", type=float, help="wall-clock seconds the refresh took")
+    parser.add_argument(
+        "--table-rows",
+        help='per-table rows the probe returned, as JSON: \'{"Sales": 1, "Orders": 0}\'. '
+        "A claimed DATA_OK with any 0-row table is downgraded to PARTIAL.",
+    )
     args = parser.parse_args()
 
     if not args.bundle.exists():
         print(f"ERROR: {args.bundle} does not exist", file=sys.stderr)
         return 2
+
+    if args.record:
+        return _cmd_record(args)
 
     if args.assert_clean:
         residue = find_probe_residue(args.bundle)
@@ -295,7 +595,11 @@ def main() -> int:
             print(f"M_PARAM_UNDEFINED: {', '.join(params['undefined'])}")
             print("The model references M parameters that are never defined; it cannot refresh.")
             return 1
-        print("OK - every referenced M parameter is defined.")
+        if params["empty"]:
+            print(f"M_PARAM_EMPTY: {', '.join(params['empty'])}")
+            print("These are defined but blank. Navigating with an empty parameter cannot refresh.")
+            return 1
+        print("OK - every referenced M parameter is defined and non-empty.")
         return 0
 
     if not args.out:
@@ -310,10 +614,17 @@ def main() -> int:
         f" | directQuery->import {stats['dq_flipped']} | DAX objects stripped {stats['dax_stripped']}"
     )
     undefined = receipt["m_parameters"]["undefined"]
+    empty = receipt["m_parameters"]["empty"]
     if undefined:
         print(f"  M_PARAM_UNDEFINED: {', '.join(undefined)} - this bundle CANNOT refresh as emitted.")
         return 1
-    print("  M parameters: all referenced parameters are defined.")
+    if empty:
+        print(
+            f"  M_PARAM_EMPTY: {', '.join(empty)} - defined but blank. A partition that navigates"
+            " with an empty parameter CANNOT refresh; supply a value before probing."
+        )
+        return 1
+    print("  M parameters: all referenced parameters are defined and non-empty.")
     return 0
 
 
