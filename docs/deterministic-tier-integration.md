@@ -106,42 +106,51 @@ Ran the full loop on `compound Table Calcs For Corpus`: estate run → handover 
 `--approved-dax` → verify. **It works**, and it produced the sharpest evidence yet for *why* our tier
 exists.
 
-**The handoff is self-sufficient for the FORMULA and insufficient for the ADDRESSING — and it says so
-itself.** Three of the four stubbed calcs come back as `category: missing_addressing_intent`, with:
+⚠️ **First, a correction to an earlier draft of this section.** It said his engine "lacks the
+addressing" and we supply it. **That overstated it.** He has a full addressing resolver
+(`visual_calc_spec.py` → `resolve_addressing`, `usage_to_visual_calc_spec`) and a *preferred* target
+for table calcs that is better than ours: **Power BI Visual Calculations**, not model measures. His
+own reasoning, and it is right:
 
-> *"This is a table calculation whose partition/order/scope (Tableau 'Compute Using') **is not carried
-> by the `.tds`**. Recover the addressing from worksheet context (the `.twb` 'ordering-type' +
-> `<order>`/`<sort>` and the rows/cols shelves)."*
+> *"a Tableau table calc computes along the visual's own layout order ('Compute Using / Table
+> (across|down)'). A Visual Calculation runs over the visual's result matrix in that same display
+> order, so it stays faithful when the user re-sorts; **a model measure must bake a fixed `ORDERBY`
+> that can drift from the shown order**."*
 
-That is a precise instruction to go and read something his input format cannot carry. **Our parser
-already carries exactly that.** For the same calc:
+So a model measure — which is what we authored — is the **fallback**, not the ideal. Any DAX we write
+for a table calc inherits exactly the drift he names.
+
+**What actually happened on this workbook:** his visual-calc path reached `emitted_total: 0`,
+`review_total: 7`, and bailed *before* addressing on a **formula-parse** limit —
+`"unresolved aggregate SUM([Sales])"` and `"unsupported character '<'"`. The latter is
+`IF [Calc] <= 6 THEN true ELSE false END`; comparison operators are simply outside his declared,
+**fail-closed v1 subset** (`+ - * /`, unary minus, numerals, parens). That is working as designed, not
+a defect — the module states it "never guesses a translation."
+
+**The residual complementarity is real but narrower than first claimed.** Where a table calc falls
+through to the model-measure path, it arrives as `category: missing_addressing_intent`, and there his
+guidance is explicit that the `.tds` cannot carry the Compute Using scope. Our
+`migration-spec.json` does carry it:
 
 | source | supplies |
 |---|---|
-| his `requests[]` | `formula: RUNNING_SUM(SUM([Sales]))`, `role: measure`, `target_table: _Measures`, `fields[]` with source table + type, `category`, `fallback_reason` |
-| our `migration-spec.json` | `encodings.rows = [running Sum / Index]`, `encodings.columns = [Order Date, derivation "tmn"]`, `manual_sort` — i.e. **compute using Order Date (month), ascending** |
+| his `requests[]` | `formula: RUNNING_SUM(SUM([Sales]))`, `role`, `target_table`, `fields[]` with source table + type, `category`, `fallback_reason` |
+| our spec | `encodings.rows = [running Sum / Index]`, `encodings.columns = [Order Date, derivation "tmn"]`, `manual_sort` — i.e. compute using Order Date (month), ascending |
 
-Neither is sufficient alone. Together they are enough to author the measure:
-
-```dax
-CALCULATE(SUM('Orders'[Sales]),
-    FILTER(ALLSELECTED('Orders'[Order_Date]), 'Orders'[Order_Date] <= MAX('Orders'[Order_Date])))
-```
-
-Landed via `--approved-dax`: stubbed calcs **4 → 3**, the stub `measure 'Running Sum' = 0` became live
-DAX, `lineageTag` and `annotation TableauFormula` preserved, and he stamps
-`annotation TranslatedBy = assisted translation (human-approved)`. The sibling stub was untouched.
+Landed via `--approved-dax`: stubbed calcs **4 → 3**, the stub became live DAX, `lineageTag` and
+`annotation TableauFormula` preserved, and he stamps
+`annotation TranslatedBy = assisted translation (human-approved)`.
 
 **Consequences for the redesign:**
 
-1. **`pbi-semantic-builder`'s job is now specific, not vague.** Not "refine the model" — *supply the
-   addressing his format cannot carry, for the `missing_addressing_intent` class.* That is a real,
-   bounded, checkable job, and it is exactly what our `migration-spec.json` was already producing.
+1. **`pbi-semantic-builder`'s job is specific, not vague** — supply the addressing for the
+   `missing_addressing_intent` class, on the fallback path. **But it must prefer his visual-calc
+   route where that route is available**, because a model measure bakes an order that can drift.
+   A persona that reflexively writes a model measure would be *quietly worse* than doing nothing.
 2. **Do not delete the parser's worksheet-encoding extraction when trimming.** It looked like
    duplicate work next to his engine; it is the input to the largest stub category.
 3. **The `--approved-dax` barrier is validated in practice** — the landing re-run rebuilt the whole
-   bundle, which was harmless only because nothing else had been written into it yet. That is the
-   ordering `run_estate.py` now enforces.
+   bundle, harmless only because nothing else had been written into it yet.
 
 ⚠️ **What this did NOT prove:** that the authored DAX is *numerically correct*. It parses, it lands,
 it references real objects. Whether it equals Tableau's number is the F1/oracle question and remains
