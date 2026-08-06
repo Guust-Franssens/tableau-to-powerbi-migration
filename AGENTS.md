@@ -40,9 +40,21 @@ schema-required `reportVersionAtImport`) — a stale CLI silently green-lights a
 
 | When | Run | Why |
 |---|---|---|
-| Session start (nothing in flight) | `preflight.ps1 -Update` | Safe; the CLI floor is a correctness floor |
-| Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without swapping tooling mid-flow |
+| Session start (nothing in flight) | `preflight.ps1 -Update -CheckUpstream` | Safe; the CLI floor is a correctness floor, and this is the one moment upgrading is allowed |
+| Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without swapping tooling mid-flow — and without a network round trip on every migration |
 | Mid-migration | **never** | Swapping the validator under a half-built report is worse than a slightly old one |
+
+**`-CheckUpstream` answers a question the version matrix cannot.** Every other check compares an
+installed version against a **hard-coded** number — that says "is what I have good enough", never
+"has the world moved". `-CheckUpstream` asks npm for the latest `powerbi-report-author` /
+`powerbi-desktop`, and asks the deterministic engine's git remote for its HEAD. It is **opt-in**
+(~3s of network) and **advisory** — it never upgrades and never fails the run, because being behind
+is not an error; the timing rule above still decides *when* acting on it is safe.
+
+Measured 2026-08-06, this gap bit twice in one day: the engine moved **2.60.0 → 2.72.0** unnoticed
+(issues were nearly filed against behaviour it had already replaced, caught only by a manual
+`git fetch`), and **Power BI Desktop auto-updated** and silently broke the bridge's exe discovery
+while preflight still reported "Ready to migrate".
 
 It cannot update the **skill bundles**: `copilot plugin update` hits a file lock while any Copilot
 session is running. That lock is narrower than it looks, though — it blocks renaming the plugin

@@ -33,7 +33,7 @@
   Exit: 0 if every CRITICAL + RECOMMENDED item is present; 1 if any is missing.
 #>
 #Requires -Version 5.1
-param([switch]$Update)
+param([switch]$Update, [switch]$CheckUpstream)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $copilot = Join-Path $HOME '.copilot'
@@ -236,7 +236,49 @@ foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote',
 Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
 Add-Cli 'powerbi-desktop' 'recommended' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
-# --- Power BI Desktop (Windows-only; this is why the bootstrap is PowerShell) ---
+# --- Is anything NEWER available upstream? (-CheckUpstream, opt-in) -------------------------------
+#
+# Everything above compares an installed version against a HARD-CODED number. That answers "is what I
+# have good enough", never "has the world moved". Measured 2026-08-06, that gap bit twice in one day:
+#
+#   * the deterministic engine went 2.60.0 -> 2.72.0 unnoticed, and issues were nearly filed against
+#     behaviour it had already replaced -- caught only by running `git fetch` by hand;
+#   * Power BI Desktop auto-updated and silently broke the bridge's exe discovery (see below).
+#
+# Deliberately OPT-IN and deliberately ADVISORY:
+#   * it needs the network and costs ~5s (measured), and the orchestrator runs plain preflight on
+#     EVERY invocation - a mandatory network round trip there would be a tax on every migration;
+#   * being behind is NOT an error. The timing rule still governs: upgrading mid-migration is worse
+#     than being slightly old. So this never fails the run and never upgrades anything - it tells you
+#     what to look at BETWEEN migrations.
+if ($CheckUpstream) {
+    foreach ($cliName in $cliFloor.Keys) {
+        $installed = Get-CliVersion $cliName
+        if (-not $installed) { continue }
+        $latest = (& npm view $cliPackage[$cliName] version 2>$null | Select-Object -First 1)
+        if ($latest -match '^\d+(\.\d+)+$') {
+            $behind = [version]$installed -lt [version]$latest
+            Add-Check "upstream: $cliName" 'optional' (-not $behind) `
+                $(if ($behind) { "$installed installed, $latest available" } else { "$installed (latest)" }) `
+                "Between migrations only: npm install -g $($cliPackage[$cliName])@latest, then re-verify the version-specific Gotchas in .github/agents/."
+        }
+    }
+
+    # The deterministic tier is a git clone, not an npm package, so ask the remote for its HEAD.
+    $enginePath = Join-Path (Split-Path -Parent $repoRoot) 'tableau-fabric-skills'
+    if (Test-Path (Join-Path $enginePath '.git')) {
+        $localHead  = (& git -C $enginePath rev-parse HEAD 2>$null)
+        $remoteHead = ((& git -C $enginePath ls-remote origin HEAD 2>$null) -split '\s+')[0]
+        if ($localHead -and $remoteHead) {
+            $current = $localHead -eq $remoteHead
+            Add-Check 'upstream: tableau-fabric-skills' 'optional' $current `
+                $(if ($current) { "current ($($localHead.Substring(0,7)))" } else { "local $($localHead.Substring(0,7)), remote $($remoteHead.Substring(0,7))" }) `
+                "git -C `"$enginePath`" pull --ff-only  - then RE-VERIFY any open issue against the new build before citing it."
+        }
+    }
+}
+
+
 #
 # TWO things are checked here, and the second one is the one that bites.
 #
