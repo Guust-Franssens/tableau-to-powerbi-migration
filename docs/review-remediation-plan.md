@@ -255,6 +255,92 @@ counts as satisfying the review is a call for the repo owner.
 
 ---
 
+## Estate orchestration — DECIDED 2026-08-06 (two independent models, same answer)
+
+**Decision: neither (a) nor plain (b). A thin `scripts/run_estate.py` coordinator + the top-level
+session as control plane.** Reached independently by `claude-opus-5` and `gpt-5.6-sol`, then
+re-derived after a false constraint was removed — both said **the recommendation is unchanged, only
+its sizing**, which is the strongest form of agreement available.
+
+> **"The main agent drives the estate; a script remembers and enforces it."**
+> *"A conversation should not be the only scheduler for 29 workbooks and ~400 KB of raw report state."*
+
+### The false constraint that had to be removed first
+
+Both first-round answers said **"Desktop concurrency = 1, acquire a lease"** — because `AGENTS.md`
+told them so. It was wrong: the Bridge takes `--pid` natively, every port lookup is PID-scoped, and
+**8 tests pin multi-instance binding**. Fixed at source in `48af6b3`. Practical N ≈ 4, bounded by
+RAM, and **per model-closure** (the pool is sized by peak model size, not workbook count).
+
+### Why we are downstream of the engine, never a peer of it
+
+The `--approved-dax` re-run is **delete-and-recreate**, verified directly:
+
+| site | what it does |
+|---|---|
+| `migrate_estate.py:880` | `shutil.rmtree(dest)` before `write_model_folder` — *"clear stale parts so a rerun never leaves renamed/dropped tables"* |
+| `:3005` | `shutil.rmtree(dest)` before `write_local_pbip` — the whole `.pbip` project dir |
+| `:3253` | `shutil.rmtree(dest)` for `<name>.Report` |
+
+**Nothing we wrote into that bundle survives a landing re-run**, and this is wholly independent of
+Desktop. Sharper still (`:5003-5005`): the stale-output guard **exempts** the landing re-run —
+`landing_rerun = bool(args.approved_dax or second_compile)`, and the guard only fires
+`if not args.force and not landing_rerun`. So the re-run that destroys the most is the one that needs
+**no `--force`**. It is deliberate and documented on his side; the consequence for a *consumer* is
+that the barrier is unguarded by design.
+
+⚠️ **Two of the five citations originally offered for this were wrong** — `:4997-5005` is the guard
+(and argues the opposite of how it was used) and `:3971-3981` is the estate loop threading the flat
+`approved_calc_dax`, which is collision evidence, not deletion evidence. Caught by the second model
+and verified here. The conclusion stands on the three `rmtree` sites alone.
+
+### Concurrency unit: the **model-closure**, not the workbook
+
+One semantic model **plus every report bound to it**. Several workbooks routinely share a model, so:
+
+| phase | unit | concurrency |
+|---|---|---|
+| engine runs (1..n) | whole estate | **serial** — each one `rmtree`s |
+| **BARRIER** — last engine run | — | freeze, then copy to writable trees |
+| model enrichment | per closure | parallel across closures, **once per model** (not per workbook) |
+| report finish | per report | parallel within a closure, once its model is frozen |
+| validation | per report | parallel; a late model fix invalidates **that closure only** |
+
+### The real binding constraint is **human credential attention**, not Desktop and not the barrier
+
+Ranked: (1) **credential prompts** — the only true zero, since a modal sign-in cannot be automated and
+a human answers one at a time, so K first-time credentials = K touchpoints queued on *a person*;
+(2) shared-model freeze/invalidation; (3) RAM/CPU (N≈4); (4) ⚠️ screenshot capture — **unverified**,
+and the only thing that could reintroduce a serial phase, since `PrintWindow` against a *background*
+window may capture blank (a ~10-minute experiment settles it); (5) top-level context volume, solved
+by slicing; (6) source-side refresh throttling.
+
+**Actionable now:** batch-probe every workbook with `--check-only`, collect all `NO_CREDENTIAL` into
+**one** message, and ask the human **once**. That was previously hidden behind "Desktop forces serial
+anyway."
+
+⚠️ Ranking the barrier first conflates *ordering* with *throughput* — it is crossed once and costs
+seconds. It constrains sequence, not capacity.
+
+### What `run_estate.py` owns (the only estate code worth funding now)
+
+1. Invoke his CLI, and **convert `definition_of_done.status` into a real exit code** — `:5072`
+   `# Soft-but-loud: exit stays 0` with an unconditional `return 0`, so `failed` exits 0 today. *An
+   agent may read the JSON field; a script must.* This is the disqualifying evidence for letting a
+   conversation be the only scheduler.
+2. Stamp `VERSION` + `input_manifest` sha256s for provenance.
+3. **Collision-check `approved_dax.json` before flattening** — the map is estate-global and
+   name-keyed; observed names include `Calculation2` (Tableau's auto-generated default), `Rank`,
+   `Size`. Key decisions internally by `(model identity, calc name, formula hash)`.
+4. Slice `report.json` (83.4 KB / 6 workbooks ≈ 14 KB each) into per-workbook handovers so the raw
+   estate report never enters a subagent's context.
+5. Hold the DAG and survive context loss.
+
+**No worker ever writes `approved_dax.json`.** DAX authoring and validation run in parallel into
+isolated decision files; exactly one central merge crosses the barrier.
+
+---
+
 ## Open decisions that need a human
 
 1. **Phase C / `probe_bundle.py`** — accept the in-place fix, or honour the reviewers' revert?
