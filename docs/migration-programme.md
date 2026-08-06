@@ -261,6 +261,31 @@ We are unusually well placed on the numeric half, and should be honest about the
 wrong in Tableau stays wrong and passes; RLS never tested in Tableau passes on both sides;
 subscriptions and alerts are usually outside UAT scope and surface only after cutover.
 
+### 4.1 Measured limits of the oracle — from the first end-to-end run
+
+Superstore, migrated by the engine, refreshed in Desktop (`DATA_OK`, 10,194 rows), then compared
+against the Tableau values captured the same day. **57 of 58 grains agreed within 5e-4.** Both
+discrepancies were informative, and both generalise:
+
+⚡ **The oracle's resolution is capped by the view's display format.** Wyoming: the model returned
+`0.0625` exactly; Tableau's CSV said `"6.3%"` because the field carries `formatString 0.0%`. The
+apparent delta of `0.0005` is *entirely* display rounding — Power BI was right. So a comparison
+tolerance **must be derived from the format string**, not chosen: at `0.0%` nothing finer than
+±5e-4 is knowable, and a tighter tolerance manufactures false mismatches. Capture the format
+alongside the value, and set the tolerance per field.
+
+⚡ **A set difference is mandatory, not optional.** Power BI returned **59** grains, Tableau **58** —
+`('Canada','New Brunswick')` exists in the model (8 rows, sales 225.70, profit −74.14) and simply is
+not in the Tableau view. Nothing in the exported rows explains the omission, because **a view-level
+filter leaves no trace**. Comparing only matched keys would have reported a clean "57/58 agree" and
+missed that the migrated report shows a region the original does not — a visible fidelity defect.
+**Always report `tableau_only` and `pbi_only` counts, never just the agreement rate.**
+
+⚡ **Column names are sanitised in translation.** `Country/Region` → `Country_Region`. The join from a
+Tableau CSV header to a model column needs that normalisation; an exact-string join silently matches
+nothing, which — as everywhere else in this pipeline — reads as "no data" rather than an error.
+
+
 ---
 
 ## 5. Gaps — honest inventory
