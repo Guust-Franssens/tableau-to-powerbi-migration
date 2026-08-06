@@ -212,6 +212,8 @@ it must show up in `limitations_encountered`, not be silently dropped.
    deliberate — measured, one such row would silently re-scope six other table calcs. Give it the
    handover slice, `migration-spec.json` and the reference bundle
    (`migrations/workbooks/<name>/reference/`; capture with `capture_tableau_reference.py` if empty).
+   **Name the mode** — this persona has three (triage / spot-check / sign-off) and they are different
+   jobs; step 10 invokes it again, independently, for the last one.
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work
    queue), the emitted model path, `migration-spec.json` (the addressing for table calcs lives in
    `worksheets[].encodings`), and the validator's model-side findings. Its job is to prove the model
@@ -224,10 +226,13 @@ it must show up in `limitations_encountered`, not be silently dropped.
    that re-run recreates the `.Report` folder and would destroy its work. Give it: the handover
    slice, the validator's classification from step 7, the model location, and the reference bundle.
    Its edits must land as re-runnable `_build/fix_*.py` scripts, not bundle-only edits.
-10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation that
-   sees the artifacts and evidence but **not the builders' rationale**. That independence is the
-   point: a reviewer told why something was done tends to accept the reasoning. Prefer a multi-model
-   cross-check here (2-3 models in parallel); a discrepancy every model raises is high-confidence.
+10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. Name
+   the mode explicitly; it is a different job from step 7's triage. It sees the artifacts, the
+   reference bundle and the triage classifications, but **not the builders' rationale** — and it is
+   told the classifications are **claims to verify, not settled facts**, including the ones an earlier
+   instance of itself produced. A reviewer given the reasoning tends to accept it. Prefer a
+   multi-model cross-check here (2-3 models in parallel); a discrepancy every model raises is
+   high-confidence.
 11. **Route every discrepancy the validator reports back to its owning subagent** — numeric/DAX issues
    to `pbi-semantic-builder`, visual/layout issues to `pbi-report-builder`, genuine capability gaps to
    `limitations_encountered` (not a fix request to anyone). **Never fix a validator finding yourself**

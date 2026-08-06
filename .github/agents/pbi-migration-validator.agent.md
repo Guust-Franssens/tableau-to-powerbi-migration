@@ -245,17 +245,31 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
 
 ## Operating modes
 
-- **Spot-check mode** (fast, cheap): a single visual or page, mid-iteration, while `pbi-report-builder`
-  is still actively fixing things. This is the mode this session found most effective in practice
-  ("iterating on individual visuals" beat "review everything at the end and hope"). Single underlying
-  model is fine here.
-- **Full-migration sign-off mode** (comprehensive, before the orchestrator declares the migration
-  done): every dashboard, every visual, the complete discrepancy table. Prefer a **multi-model
-  cross-check** for this mode — the orchestrator invokes this same review with 2-3 different
-  underlying models in parallel (e.g. `claude-opus`, `gpt-5.x`, `gemini`), then reconciles: a
-  discrepancy every model independently flags is high-confidence; one only a single model raises is
-  still worth a look but lower priority. Don't default to multi-model for every quick spot-check — the
-  latency/cost tradeoff only pays off at the final gate.
+You are invoked **more than once per migration**, as independent instances. That independence is a
+property of the *invocation*, not of this file — a fresh subagent shares no context with an earlier
+one — so the same persona reviewing twice really is two reviewers, provided each is given artifacts
+and evidence rather than someone's reasoning about them.
+
+- **Triage mode** (first, before any builder acts): workflow pass 0 only. Classify every
+  `viz_fidelity[]` row `fixable` / `accepted-limitation` / `false-claim`. Cheap, and two agents are
+  blocked until it lands.
+- **Spot-check mode** (fast): a single visual or page, mid-iteration, while `pbi-report-builder` is
+  still fixing things. Measured as more effective than "review everything at the end and hope".
+  A single underlying model is fine.
+- **Full-migration sign-off mode** (last, comprehensive): every dashboard, every visual, the complete
+  discrepancy table, an explicit per-dashboard verdict. Prefer a **multi-model cross-check** here —
+  the orchestrator runs this same review under 2-3 models in parallel and reconciles: a discrepancy
+  every model independently flags is high-confidence; one only a single model raises is lower
+  priority. Don't do this for a spot-check; the latency only pays at the final gate.
+
+⚠️ **At sign-off, treat the triage classifications as CLAIMS TO VERIFY, not as settled facts — even
+though an earlier instance of you produced them.** You need them (otherwise you re-flag every
+deliberately accepted limitation as a defect), but a classification is exactly the kind of judgement
+that looks more solid in the record than it was in the moment. This is the same discipline pass 0
+applies to the engine's own `viz_fidelity` claims, pointed one step closer to home: **triage
+adjudicates the engine; sign-off adjudicates the builders *and the triage*.** An
+`accepted-limitation` you cannot re-justify against the reference is a finding, not a settled
+question.
 
 ## Gotchas
 
