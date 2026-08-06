@@ -162,7 +162,7 @@ permission export belongs in **week 1**, not before go-live.
 
 ---
 
-## 3.2 Migration strategy — a customer decision, not ours
+### 3.2 Migration strategy — a customer decision, not ours
 
 The customer chooses **how much of the estate moves**. Two positions get argued:
 
@@ -325,8 +325,171 @@ conversion tier.
 
 ---
 
-## 7. Keeping the engine current
+## 7. The scan — exactly what to call, in what order
 
+Every endpoint below was **verified live** against Tableau Cloud (API 3.29) on 2026-08-06. Ordered by
+cost, because the cheap passes decide whether the expensive ones are worth running at all.
+
+### Pass 1 — inventory (cheap, 1 call each, whole site)
+
+| what | call | gives |
+|---|---|---|
+| workbooks | `GET /sites/{s}/workbooks` *(paginate)* | name, project, owner, size, createdAt, **updatedAt**, tags |
+| views + usage | `GET /sites/{s}/views?includeUsageStatistics=true` | `usage.totalViewCount`, contentUrl, viewUrlName |
+| datasources | `GET /sites/{s}/datasources` | the publish targets |
+| projects | `GET /sites/{s}/projects` | **`contentPermissions`** — decides Pass 3's cost |
+| groups | `GET /sites/{s}/groups` | + `/groups/{id}/users` for membership |
+| flows | `GET /sites/{s}/flows` | Tableau Prep ETL — its own dependency chain |
+
+**Always paginate.** A site survey that stops at page 1 under-reports the estate.
+
+### Pass 2 — structure (1 GraphQL call for the whole estate)
+
+```graphql
+{ workbooks { name projectName
+    sheets { name } dashboards { name }
+    embeddedDatasources { name hasUserReference
+      fields { name __typename
+        ... on ColumnField     { role dataType }
+        ... on CalculatedField { role dataType formula } } } }
+  publishedDatasources { name isCertified hasExtracts extractLastRefreshTime
+    downstreamWorkbooks { name } upstreamTables { fullName } } }
+```
+
+Gives sheet/dashboard counts, **calculated-field formulas** (so LOD and table-calc detection is free),
+`role` = DIMENSION/MEASURE, `isCertified`, **extract freshness**, and fully-qualified `upstreamTables`
+— the join key for "does this already exist in Fabric".
+
+⚠️ **Inline fragments are required.** `fields { role }` fails with `FieldUndefined` — `role` lives on
+the concrete types, not the `Field` interface.
+
+⚠️ **Do NOT use this for dependencies.** Measured: `upstreamDatasources` reported **0 of 13** where
+REST showed **9**. Use Pass 3.
+
+### Pass 3 — per-item (N calls; this is where cost lives)
+
+| what | call | note |
+|---|---|---|
+| **dependencies** | `GET /workbooks/{id}/connections` → `type == "sqlproxy"` | ground truth. `datasource.name` is the join key — **the id is not the site LUID** |
+| permissions | `GET /{workbooks\|datasources\|views}/{id}/permissions` | ⚡ **skip entirely when the project is `LockedToProject`** — read the project once instead. Ours: 11 `ManagedByOwner` + 1 locked |
+| liveness extras | `/subscriptions`, `/dataAlerts`, `/customviews`, `/workbooks/{id}/revisions` | a **custom view** is the strongest deliberate-use signal |
+
+Or just run the engine's `estate_survey.py --json` for the dependency half — verified to reproduce our
+REST ground truth exactly (9/13) and it emits a ready `fetch_order`.
+
+### Pass 4 — exports (expensive, session-fragile, ONLY for scoped-in content)
+
+`/views/{id}/data` (numbers) and `/views/{id}/image?resolution=high` (2× linear / 4× pixels). Measured
+**~6 s per view**, 262 s for 29 views. Run **after** triage, only on what is in scope.
+
+⚠️ Sessions drop intermittently with `401002` (observed after 1–58 exports). Re-authenticate and
+**record it**; a silently truncated capture is indistinguishable from a clean one.
+
+⚠️ Only **published views** are reachable — 9 of Superstore's 27 worksheets. The rest live inside
+dashboards; per-figure numbers need VizQL Data Service.
+
+---
+
+## 8. Where it lands — the store
+
+**Raw JSON as evidence, SQLite as the query layer, both git-ignored.**
+
+```
+_assessment/<site>/<yyyy-mm-dd>/
+  raw/            # verbatim API responses - the audit trail, never edited
+  estate.db       # SQLite: the queryable model
+  oracle/         # per-view CSV + PNG (only for scoped-in content)
+  report.md       # what the customer sees
+```
+
+Raw responses are kept because **an assessment is evidence for a commercial decision** — "retire these
+40 dashboards" must be defensible months later, and an API response is not reproducible once the
+estate changes.
+
+SQLite because every question that matters is a **join or an aggregate**, not a lookup:
+
+| table | key columns |
+|---|---|
+| `workbook` | luid, name, project, owner, size, created_at, updated_at, sheets, dashboards, calcs, lods, table_calcs |
+| `view` | luid, workbook_luid, name, content_url, total_view_count, updated_at |
+| `datasource` | luid, name, project, is_certified, has_extracts, extract_last_refresh |
+| `dependency` | workbook_luid → datasource_name *(name-joined, by necessity)* |
+| `upstream_table` | datasource_luid, full_name *(the Fabric-overlap key)* |
+| `permission` | object_type, object_luid, grantee_type, grantee_luid, capability, mode |
+| `group_member` | group_luid, user_luid |
+| `signal` | object_luid, kind (subscription/alert/custom_view/favourite), count |
+
+The coverage curve — the artifact that makes the strategy decision decidable — is then one query:
+
+```sql
+SELECT name, views, SUM(views) OVER (ORDER BY views DESC) * 1.0
+       / SUM(views) OVER () AS cumulative_share
+FROM   (SELECT w.name, SUM(v.total_view_count) AS views
+        FROM workbook w JOIN view v ON v.workbook_luid = w.luid GROUP BY w.name)
+ORDER  BY views DESC;
+```
+
+Read the workbook count where `cumulative_share` first exceeds the target. That is the answer to
+*"how much do we migrate?"*, computed from their data rather than asserted.
+
+**Criticality must then propagate up the dependency graph** — a datasource inherits the **max** of its
+dependants, or triage retires the foundation of the estate.
+
+---
+
+## 9. The Fabric target — how it deploys
+
+### Mapping
+
+| Tableau | Fabric / Power BI | note |
+|---|---|---|
+| published datasource | **semantic model** | migrate first; reports rebind to it |
+| workbook | **report** | thin report over the shared model |
+| project | **workspace** | ⚠️ projects nest, workspaces do not — a tree becomes N workspaces or folders, and **folders carry no permissions** |
+| project permissions | workspace roles | 12 capabilities → 4 roles: a **decision** per item |
+| local group | **Entra group** | must be created — identity owner, long lead time |
+| user filter / entitlement join | **RLS role + DAX** | the engine already translates these |
+| extract | Import + refresh schedule | replicate the freshness SLA |
+| live connection | DirectQuery / Direct Lake | validate under production load |
+
+### Order (the infrastructure DAG of §2.1, made concrete)
+
+```
+1  Entra groups created + synced         <- longest lead time, start week 1
+2  capacity sized on REFRESH + concurrency, not headcount
+3  workspaces provisioned from the permission export
+4  gateway + data source credentials tested
+5  semantic models published (one per published datasource)
+6  RLS roles tested AS A REAL USER, not a service principal
+7  deployment pipelines dev -> test -> prod
+8  reports published, bound to (5)
+9  apps + audiences
+10 subscriptions, alerts, embedded URLs re-pointed
+```
+
+Steps 1–4 have **nothing to do with report conversion** and are the usual cause of a slipped go-live.
+
+### Mechanics
+
+- **Local-first**: the engine emits a PBIP (TMDL + PBIR) to disk. Validate offline, then deploy — never
+  author in the portal when a local folder exists.
+- **Deploy** with `fab import` (or git-sync on a git-connected workspace), one item per artifact.
+- **Rebind** each report to its shared semantic model after the model lands.
+- **Parameterise data sources** before bulk deployment, or dev→test→prod promotion breaks connection
+  strings.
+- **Stagger refresh schedules across waves** — identical windows cause a first-morning capacity
+  stampede.
+- **Sensitivity labels** must be configured tenant-wide *before* publishing, not retrofitted.
+
+### Naming
+
+`<domain>-<layer>` for workspaces (e.g. `sales-prod`), semantic model named for the **Tableau published
+datasource** it replaces, report named for the **workbook**. Keeping the source names is what makes the
+parity conversation possible — a business owner must be able to find their dashboard.
+
+---
+
+## 10. Keeping the engine current
 The engine moves fast — 2.60.0 → 2.78.0 in two days, with issues filed and fixed same-day. Two
 mechanics matter:
 
