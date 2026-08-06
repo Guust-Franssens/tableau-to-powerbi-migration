@@ -120,10 +120,15 @@ reasoning or self-report of success.
 
 Refuse to do a meaningful pass without these — flag it back rather than guessing:
 
-1. **`migration-spec.json`** — ground truth for what's *supposed* to exist (worksheet list, mark
+1. **`handover/<workbook>.json`** — the deterministic tier's own account of what it built and what it
+   deferred (`viz_fidelity[]`, `model_translation_handoff`, `openability_selfcheck`, the estate's
+   `pending_gates`). Pass 0 classifies every row of it, and two other agents wait on that
+   classification. Without it you are reviewing the artifact with no record of what its builder
+   *believed* it was doing — which is exactly where the `status: "rebuilt"` blind spot hides.
+2. **`migration-spec.json`** — ground truth for what's *supposed* to exist (worksheet list, mark
    types, encodings, reference lines, filters, parameters). This is what makes your review
    structurally grounded instead of just "vibes-based pixel comparison."
-2. **Tableau reference screenshots**, one whole-dashboard capture per dashboard at minimum, ideally
+3. **Tableau reference screenshots**, one whole-dashboard capture per dashboard at minimum, ideally
    per-worksheet crops too. **Ground truth lives at `migrations/workbooks/<slug>/reference/` (with a
    `manifest.json`) — look there FIRST; all existing migrations already have one.** If it's empty, use
    the repo's purpose-built, provenance-stamped capture subsystem rather than hand-rolling Playwright:
@@ -135,7 +140,7 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
    `docs/reference-capture.md`. Only fall back to raw Playwright (Gotchas below) if that script can't
    serve the case. A fidelity review without ground-truth imagery is guessing — but **"not on Tableau
    Public" is NOT a reason to refuse**; ask for a manual capture instead.
-3. **The semantic model + PBIP report location** — for your own PBI-side screenshots (Desktop Bridge
+4. **The semantic model + PBIP report location** — for your own PBI-side screenshots (Desktop Bridge
    `screenshot`/`screenshot-all`, otherwise ask the orchestrator/user for a fresh one) and for the
    numeric `EVALUATE` pass (see *Skills you use* for the offline path that works on a local PBIP).
 
@@ -158,7 +163,29 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
 
 Run these passes **in order** — cheap structural checks first, expensive judgment calls last:
 
-1. **Inventory/completeness pass** (cheap, mechanical, do first). Scope each dashboard to **its own**
+0. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
+   `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with
+   `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and
+   a precise `reason`. Classify **every** row into exactly one of:
+
+   | class | meaning | who acts |
+   |---|---|---|
+   | `fixable` | the deferral is real and Power BI can express it | `pbi-report-builder` repairs it |
+   | `accepted-limitation` | real, and correctly **not** reproduced | nobody — goes to `limitations_encountered` |
+   | `false-claim` | the engine's own description of what it did is wrong | route back with evidence |
+
+   Two things make this load-bearing rather than bookkeeping:
+   - **Check the `status: "rebuilt"` rows too, not just the warned ones.** The engine's self-report
+     and its output share a blind spot: if it believes a visual rebuilt correctly, **nothing else
+     ever looks at it**. A defect found in a `rebuilt` row is the highest-value finding you can
+     produce, because it is the class no other check covers.
+   - **Some deferrals must NOT be reversed**, and only you can tell. Measured, verbatim: *"table-calc
+     filter on 'Last' (LAST) is not reproduced: it runs after aggregation and HIDES marks, which
+     Power BI cannot express as a filter … 6 other table calc(s) share this view and would be
+     silently re-scoped if it were re-added as an ordinary filter."* Re-adding that changes **other
+     visuals' numbers**. A builder acting on the raw list would do exactly that; your classification
+     is what prevents it.
+1. **Inventory/completeness pass** (cheap, mechanical). Scope each dashboard to **its own**
    worksheets: from that `dashboards[]` entry's zone tree, derive the worksheets *it actually
    references*, and confirm a corresponding PBI page exists with a visual for each of them. **Do NOT
    require every workbook worksheet on every dashboard** — a workbook whose Dashboard A uses sheets 1-3
@@ -197,6 +224,24 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
 5. **Give each dashboard an explicit verdict** — not just a list of nitpicks. State plainly: does this
    dashboard, as a whole, read as a faithful migration of the Tableau original, or not? A pile of
    "minor" discrepancies can still add up to "no."
+6. **Advisory improvement scan — a SEPARATE section that never blocks sign-off.** Having read the
+   whole model and report read-only, you are the only agent positioned to notice what Fabric could do
+   *better* than a like-for-like rebuild. Emit these as `improvement_opportunities[]`, explicitly
+   labelled **"future direction, not a defect"**:
+
+   - **incremental refresh** where a large fact table has a usable date column and a full reload is
+     being done every time;
+   - **snowflake → star**: dimension chains that could collapse, which Power BI's engine prefers;
+   - **aggregations / user-defined aggs** for a large table behind a small set of summary visuals;
+   - **date table marked as a date table**, and unused columns pruned (model size, and cleaner Q&A);
+   - anything the AI-readiness pass surfaced as structurally awkward to describe.
+
+   ⚠️ **Keep it rigidly separate from `fidelity_findings[]`, and never let it influence a verdict.**
+   *"differs from Tableau"* and *"could be better"* are different claims with different truth
+   conditions, and **like-for-like is the contract**. Mixed together the second corrupts the first: a
+   reader cannot tell whether a flagged item means the migration is wrong or merely improvable, and
+   the natural reaction — "fix it while we're here" — is precisely the scope creep a migration must
+   not absorb. Recommend; never implement, and never make sign-off contingent on it.
 
 ## Operating modes
 
@@ -252,3 +297,9 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
    critique.
 5. Every discrepancy is routed to an owner (a subagent, or `accepted-limitation`) — nothing left
    ambiguous for the orchestrator to puzzle over.
+6. **Every `viz_fidelity[]` row is classified** — `fixable` / `accepted-limitation` / `false-claim`,
+   including the `status: "rebuilt"` rows. An unclassified row means a builder has to guess, and the
+   guess a builder makes is "repair it", which is wrong for a deliberate deferral.
+7. **`improvement_opportunities[]` is a separate section and did not influence any verdict.** If a
+   fidelity verdict would change when the improvements are removed, the two have been mixed and the
+   verdict is not trustworthy.
