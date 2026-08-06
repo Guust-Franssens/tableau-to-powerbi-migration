@@ -418,10 +418,62 @@ rebuild the original table suggests.
   licence + one live workbook, or re-scope the validator to *structural fidelity only* and say so.
   Carrying an unfundable numeric tier as the differentiator is the dishonest option.
 
-  > 🔻 **DEPRIORITISED 2026-08-05 — superseded in priority by F1 below, but kept as a live idea.**
-  > The cache lead is real (readable, no Tableau needed) but present in **1 of 16** workbooks, so at
-  > best it is an oracle for one migration. **F1 reaches ~90% of calculated fields.** Revisit the
-  > cache only if F1 is blocked, or opportunistically when a workbook that has one comes up.
+  > ✅ **RESOLVED 2026-08-06 — a Tableau instance now exists, and its REST API is the oracle.**
+  > D1 and F1 are both **superseded**; see "The oracle arrived" below. Keep the cache lead only as a
+  > curiosity for offline `.twbx` files with no Server behind them.
+
+### The oracle arrived — Tableau REST, and why it beats both D1 and F1
+
+The repo owner stood up a Tableau instance. Three endpoints are live and tested on it:
+
+| endpoint | gives |
+|---|---|
+| `/views/{id}/data` | **Tableau's own computed numbers for the view** (CSV) |
+| `/views/{id}/image?resolution=high` | full-size PNG, ~2.4× pixels |
+| `/views/{id}/pdf`, `/crosstab/excel` | vector / crosstab |
+
+Verified about the data endpoint (Tableau REST docs): it returns **summary — i.e. aggregated, as
+displayed — data by default** (`includeUnderlying=true` switches to row level), and filter context is
+set per request with **`vf_<field>=<value>`**. Both matter: summary is the *answer*, and `vf_` is how
+you make the two sides comparable.
+
+**Why this is strictly better than F1, not merely another option:**
+
+| | F1 (query the source) | Tableau REST `/data` |
+|---|---|---|
+| whose answer | **ours**, re-derived in SQL | **Tableau's own** |
+| self-consistency trap | ⚠️ inherits it — the validating SQL is written from the same reading of the formula that produced the DAX | ✅ immune — nobody on our side computed it |
+| the hard ~10% (LOD, table calcs) | ❌ cannot adjudicate — answering it in SQL means reimplementing Tableau, which is the thing under test | ✅ covered — a table calc's **output is in the view data** |
+| coverage | ~90% of calculated fields | every field the view displays |
+
+That reverses the reason F1 was ranked above D1. **F1 is retired as the plan of record** — it remains
+a fallback for a workbook with no Server behind it.
+
+**It plugs two sockets that were already declared and empty:**
+
+1. **Ours** — `capture_tableau_reference.py` lists a `server_rest` provider whose status is literally
+   *"STUB — no Server to test against."* Implementing it is completing a declared slot, not new
+   design, and it retires the Playwright/Tableau-Public path as the default (higher resolution, no
+   browser automation, no dependency on the workbook being public).
+2. **His** — `translation_reconcile.reconcile(name, candidate_dax, *, fabric_oracle=None,
+   tableau_value=_UNSET, tableau_oracle=None, ...)`. The `tableau_oracle` socket has **never been
+   injected by anything**. Opus's audit marked it *"needs a live VizQL Data Service — a user
+   credential, correctly a human gate"*: the one of the three sockets we could not unblock ourselves.
+
+**Consequence:** with `fabric_oracle` (our probe, upstream #96) and `tableau_oracle` (this) both
+supplied, `reconcile()` runs for the first time in its existence and emits his three-state verdict —
+`VERIFIED` / `MISMATCH` / `NOT_EVALUATED`. That is the *"non-circular proof of faithfulness"* his own
+docstring describes and nothing has ever been able to execute.
+
+⚠️ **What it does not solve, stated before anyone assumes otherwise:**
+- **Filter-context matching is the actual work.** `vf_` sets Tableau's side; the PBI side must be put
+  in the *same* context before the numbers mean anything. Mismatched context produces confident
+  garbage, and his comparator's tolerance handling will not save us from it.
+- **Column/field names will not match** across the two sides; a mapping step is required.
+- It validates **numbers, not layout**. The image endpoint helps the visual pass separately.
+- It needs the workbook **published to the site**, so it applies to the trial-run corpus, not to an
+  arbitrary `.twbx` someone emails us.
+
 
   > ⚠️ **Do not confuse the two caches — they are unrelated files with opposite roles.**
   >
