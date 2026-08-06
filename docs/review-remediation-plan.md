@@ -474,6 +474,49 @@ docstring describes and nothing has ever been able to execute.
 - It needs the workbook **published to the site**, so it applies to the trial-run corpus, not to an
   arbitrary `.twbx` someone emails us.
 
+### Where it lands in the agentic flow
+
+It is not one new step — it touches five, and the most valuable change is *where* numeric
+verification happens:
+
+| orchestrator step | today | with the Tableau instance |
+|---|---|---|
+| 1-2 inputs / estate | a human hands us `.twb`/`.twbx` files | **discover from the Server** — enumerate workbooks and views, download content. The estate's source of truth becomes the site, and `tableau_lineage.py --plan` already speaks that API |
+| 7 validator, triage mode | reference bundle via Playwright (Tableau Public only) or manual drop | `/views/{id}/image?resolution=high` — provenance-stamped, ~2.4×, no browser automation, no public-URL requirement |
+| **8 semantic builder** | authors residual DAX; **nobody checks the number until sign-off, if ever** | **`/views/{id}/data` gives the expected value at authoring time** — a wrong measure is caught before it is handed on |
+| 9 report builder | gestalt check against a whole-dashboard image | same images, and per-view captures make the figure-by-figure comparison cheap |
+| 10 validator, sign-off | the numeric pass is the part the capabilities doc admits "still needs a human" | an automated diff, per view, in matched filter context |
+
+**The architectural change is that numeric verification moves LEFT.** Today a wrong DAX can reach the
+report builder, get bound into visuals, and surface only at sign-off — or not at all. With an oracle
+available at step 8, the builder that *wrote* the measure is the one that disproves it, which is both
+the cheapest place to catch it and the only place the author still has the context to fix it.
+
+It also closes an escape hatch that should not survive: the validator's DoD currently permits
+`numeric_status: unverified` when no Tableau-side number can be obtained. For a **published** workbook
+that excuse disappears, and the DoD should say so.
+
+### Performance comparison — we have NONE today, and it is a different axis
+
+Measured 2026-08-06: we time **our own pipeline** (`probe_bundle`, `probe_live_source`,
+`run_estate` → `phase-timings.json`) and **never the artifact**. There is no DAX query timing, no
+refresh benchmark, no Tableau-side timing, and no comparison script. A customer asking *"is the
+migrated report as fast as the original?"* currently gets an opinion.
+
+It is straightforward to build, and worth being precise about what each number would mean:
+
+| side | obtainable | honest caveat |
+|---|---|---|
+| Power BI | `EVALUATE` duration over the existing ADOMD connection (we already hold it); refresh duration (already reported) | first run vs warm cache differ by an order of magnitude — report both, or state which |
+| Tableau | wall-clock of the `/views/{id}/data` call as a *proxy*; the Workgroup repository / admin views hold real per-request timings | a REST data export is **not** the same work as rendering a viz |
+
+⚠️ **The comparison is not apples-to-apples and must never be presented as if it were.** A REST export,
+a DAX query and a rendered visual are three different workloads on different infrastructure with
+different caching. What it *can* honestly support is a **relative, like-for-like trend** — same view,
+same filter context, both cold or both warm — which is enough for the question a customer actually
+asks, and far better than the opinion they get today.
+
+
 
   > ⚠️ **Do not confuse the two caches — they are unrelated files with opposite roles.**
   >
