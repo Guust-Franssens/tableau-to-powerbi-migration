@@ -318,10 +318,8 @@ One semantic model **plus every report bound to it**. Several workbooks routinel
 
 Ranked: (1) **credential prompts** — the only true zero, since a modal sign-in cannot be automated and
 a human answers one at a time, so K first-time credentials = K touchpoints queued on *a person*;
-(2) shared-model freeze/invalidation; (3) RAM/CPU (N≈4); (4) ⚠️ screenshot capture — **unverified**,
-and the only thing that could reintroduce a serial phase, since `PrintWindow` against a *background*
-window may capture blank (a ~10-minute experiment settles it); (5) top-level context volume, solved
-by slicing; (6) source-side refresh throttling.
+(2) shared-model freeze/invalidation; (3) RAM/CPU; (4) ~~screenshot capture~~ — **tested and cleared,
+see below**; (5) top-level context volume, solved by slicing; (6) source-side refresh throttling.
 
 **Actionable now:** batch-probe every workbook with `--check-only`, collect all `NO_CREDENTIAL` into
 **one** message, and ask the human **once**. That was previously hidden behind "Desktop forces serial
@@ -329,6 +327,30 @@ anyway."
 
 ⚠️ Ranking the barrier first conflates *ordering* with *throughput* — it is crossed once and costs
 seconds. It constrains sequence, not capacity.
+
+#### Screenshot concurrency — MEASURED 2026-08-06, no serial phase needed ✅
+
+The one open risk that could have reintroduced a serial phase (`PrintWindow` against a *background*
+window capturing blank — the validator has recorded blank KPI cards under `PrintWindow` before). Two
+Desktop instances opened concurrently, one deliberately raised to the foreground via
+`SetForegroundWindow`, then `screenshot-all --pid` run against the **background** one:
+
+| | result |
+|---|---|
+| bridge visibility | **both** instances `bridgeStatus: connected` simultaneously |
+| background capture | `"failures": []`, 3034x1624 PNG |
+| pixel check | **2,181 distinct colours, 74.2% dominant** — comparable to the foreground pages (2,770-4,933) |
+| visual check | fully rendered: title, body text, colours, section headers. No blank cards |
+
+**Per-instance footprint, measured on the same run:** Desktop 733-769 MB + its `msmdsrv` 532-584 MB
+= **~1.28 GB per loaded instance**. So the repo owner's practical N ≈ 4 costs ~5 GB, which is the
+number to size `desktop_slots` against — RAM, not the bridge.
+
+⚠️ One incidental finding worth knowing: `powerbi-desktop open` returned **pid 55812 for both opens**
+— the *first* instance's pid, not the newly launched one. So **do not trust `open`'s pid when an
+instance is already running**; resolve the real pid from `status` (which correctly listed both) or by
+window title. A fan-out that binds to `open`'s return value would silently point every worker at the
+same instance.
 
 ### What `run_estate.py` owns (the only estate code worth funding now)
 
