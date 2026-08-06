@@ -103,9 +103,11 @@ reasoning or self-report of success.
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
   real migration permanently improves the toolkit.
 - **Clean up after yourself when you finish.** (a) **Close any Power BI Desktop instance you opened.**
-  In a parallel batch, orphaned Desktop instances (+ their child `msmdsrv`) cause Desktop-bridge
-  contention that blocks later agents from opening/rendering — a real bottleneck. Close the instance
-  you pinned your screenshots to: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
+  **Concurrent instances are fine** — the Desktop Bridge addresses one by `--pid` natively and every
+  port lookup is PID-scoped, so this is a **leak** rule, not a concurrency limit: each live instance
+  holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
+  your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
+  close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
   by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
   automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
   mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
