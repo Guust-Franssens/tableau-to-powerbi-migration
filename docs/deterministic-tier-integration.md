@@ -100,19 +100,69 @@ and `run_estate.py` aggregates. Two consequences beyond the ask:
 - **It supplies Phase E's denominator** — *oracle-verified correct measures per agent-visible
   instruction byte*. The numerator still needs F1.
 
+### Measured on the first real round trip (2026-08-06) — the two tiers are complementary at the seam
+
+Ran the full loop on `compound Table Calcs For Corpus`: estate run → handover slice → author DAX →
+`--approved-dax` → verify. **It works**, and it produced the sharpest evidence yet for *why* our tier
+exists.
+
+**The handoff is self-sufficient for the FORMULA and insufficient for the ADDRESSING — and it says so
+itself.** Three of the four stubbed calcs come back as `category: missing_addressing_intent`, with:
+
+> *"This is a table calculation whose partition/order/scope (Tableau 'Compute Using') **is not carried
+> by the `.tds`**. Recover the addressing from worksheet context (the `.twb` 'ordering-type' +
+> `<order>`/`<sort>` and the rows/cols shelves)."*
+
+That is a precise instruction to go and read something his input format cannot carry. **Our parser
+already carries exactly that.** For the same calc:
+
+| source | supplies |
+|---|---|
+| his `requests[]` | `formula: RUNNING_SUM(SUM([Sales]))`, `role: measure`, `target_table: _Measures`, `fields[]` with source table + type, `category`, `fallback_reason` |
+| our `migration-spec.json` | `encodings.rows = [running Sum / Index]`, `encodings.columns = [Order Date, derivation "tmn"]`, `manual_sort` — i.e. **compute using Order Date (month), ascending** |
+
+Neither is sufficient alone. Together they are enough to author the measure:
+
+```dax
+CALCULATE(SUM('Orders'[Sales]),
+    FILTER(ALLSELECTED('Orders'[Order_Date]), 'Orders'[Order_Date] <= MAX('Orders'[Order_Date])))
+```
+
+Landed via `--approved-dax`: stubbed calcs **4 → 3**, the stub `measure 'Running Sum' = 0` became live
+DAX, `lineageTag` and `annotation TableauFormula` preserved, and he stamps
+`annotation TranslatedBy = assisted translation (human-approved)`. The sibling stub was untouched.
+
+**Consequences for the redesign:**
+
+1. **`pbi-semantic-builder`'s job is now specific, not vague.** Not "refine the model" — *supply the
+   addressing his format cannot carry, for the `missing_addressing_intent` class.* That is a real,
+   bounded, checkable job, and it is exactly what our `migration-spec.json` was already producing.
+2. **Do not delete the parser's worksheet-encoding extraction when trimming.** It looked like
+   duplicate work next to his engine; it is the input to the largest stub category.
+3. **The `--approved-dax` barrier is validated in practice** — the landing re-run rebuilt the whole
+   bundle, which was harmless only because nothing else had been written into it yet. That is the
+   ordering `run_estate.py` now enforces.
+
+⚠️ **What this did NOT prove:** that the authored DAX is *numerically correct*. It parses, it lands,
+it references real objects. Whether it equals Tableau's number is the F1/oracle question and remains
+open — do not let a green landing be read as a fidelity claim.
+
+
+
 ### Sequencing — measure first, then cut
 
 **No persona has been edited yet, deliberately.** The cuts are large and the honest order is:
 
-1. **`scripts/run_estate.py`** — new code, breaks nothing, and forces the handoff contract to be
-   concrete. Owns: converting `definition_of_done` into a real exit code (it exits 0 on `failed`
-   today), the `approved_dax.json` collision check, slicing `report.json` (~14 KB/workbook), the DAG,
-   and the phase-record aggregation.
-2. **Run the loop once on one workbook** — `compound Table Calcs For Corpus`, 4 stubbed calcs:
-   `requests[]` → author DAX → `--approved-dax` → verify. This produces the **first telemetry**.
-3. **Then cut the personas**, biggest win first, with `sync_agent_conventions.py --check` as the gate.
+1. ✅ **`scripts/run_estate.py`** — shipped. Converts `definition_of_done` into a real exit code,
+   collision-checks `approved_dax.json`, slices `report.json` (83.4 KB → 5.7-24.5 KB/workbook),
+   writes `phase-timings.json`. Emits no model content, by test.
+2. ✅ **Run the loop once** — done, on `compound Table Calcs For Corpus`. See the round-trip finding
+   above; it changed what `pbi-semantic-builder`'s job actually is.
+3. ☐ **Then cut the personas**, biggest win first, with `sync_agent_conventions.py --check` as the gate.
 
-Cutting first means *guessing* what is dead; running the loop first means **measuring** it.
+Cutting first means *guessing* what is dead; running the loop first means **measuring** it — and the
+loop already caught one thing we were about to cut wrongly (the parser's worksheet encodings).
+
 
 ---
 
