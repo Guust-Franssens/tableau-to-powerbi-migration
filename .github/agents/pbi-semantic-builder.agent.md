@@ -108,169 +108,70 @@ committed here as well as published.
   which this repo's setup marks optional, and which is being deprecated upstream in favour of folding
   metadata discovery into `semantic-model-authoring`. Never make it your only path.)
 
-## Mental model — mapping migration-spec.json to a semantic model
+## What you receive — a model that already EXISTS
 
-| migration-spec.json | Semantic model |
+| source | what it gives you |
 |---|---|
-| `data_sources[].tables[]` | One TMDL table per table (or per pivot-reshaped output — see below) |
-| `data_sources[].fields[]` where `kind: "column"` | TMDL column |
-| `data_sources[].fields[]` where `kind: "calculated"` | TMDL calculated column *or* measure — see decision rule below |
-| `data_sources[].joins[]` | TMDL relationship |
-| `parameters[]` | Usually **nothing** — see the parameter-equality idiom note below; only becomes a Fabric "what-if parameter" if the report genuinely needs numeric what-if analysis (rare for a migrated dashboard) |
-| `theme` | Not your concern — this feeds `pbi-report-builder` via `powerbi-report-design`, not the semantic model |
+| the emitted `.SemanticModel` | tables, columns, relationships, partitions, and most of the DAX — already built and openable |
+| `handover/<workbook>.json` → `model_translation_handoff.requests[]` | **your work queue**: the calcs the engine refused, each with `name`, `formula`, `role` (measure vs column — it already decided), `target_table`, `fields[]` (source table + type), `category`, `category_guidance`, `fallback_reason` |
+| → `openability_selfcheck` | what it already proved about the model's shape — do not re-prove it |
+| `migration-spec.json` | source intent its input format cannot carry: `worksheets[].encodings` (rows/columns/`derivation`/`manual_sort`) — the addressing for table calcs, and the parameter-equality idiom in a filter's `note` |
 
-### Calculated column vs. measure decision rule
+**You do not decide measure-vs-column.** `translation_router` already classified every calc and
+`requests[].role` records it. Re-deriving that from the Tableau formula is duplicated work with a new
+chance to disagree — if you believe a `role` is wrong, that is a finding to route, not a silent fix.
 
-A Tableau calculated field becomes a DAX **measure** when its formula aggregates
-(`SUM(...)`, `AVG(...)`, `COUNTD(...)`, etc. at the top level) — e.g. `SUM([CDD_0_1])*100`.
-It becomes a DAX **calculated column** when it operates row-by-row with no aggregation — most of the
-`IF`/`CASE`/string-building fields in a typical workbook fall here. When in doubt, check whether the
-field is used inside an aggregated shelf reference (`sum:`, `avg:` prefix in the resolved
-`derivation`) in any worksheet that references it — that's a strong signal it's a measure.
+**`parameters[]` usually becomes nothing.** A Tableau parameter used in a `field = [Parameter]` filter
+is a **slicer** on that dimension, not a model object; only genuine numeric what-if analysis justifies
+a Fabric what-if parameter, which is rare in a migrated dashboard.
 
 ## Workflow
 
-0. **Published data source? Check for an existing shared model BEFORE building anything.** If the spec
-   has `data_sources[].published_datasource` (Tableau connection class `sqlproxy`), this workbook only
-   *points at* a server-side datasource that is typically shared by several workbooks. The correct
-   Power BI shape is **one semantic model, many reports bound to it** — not a near-duplicate model per
-   workbook. Run:
-   ```
-   python scripts/published_datasource_registry.py --spec migrations/workbooks/<slug>/migration-spec.json
-   ```
-   - **exit 0 (already migrated):** do **NOT** rebuild. Reuse the semantic model it names; add only
-     measures this workbook genuinely needs that the shared model lacks, and report back that you
-     reused it. A duplicate model will drift from the shared one — that is the whole failure mode.
-     **Neither target requires copying the model** (verified 2026-07): **locally**, the report's
-     `definition.pbir` takes a *relative* `byPath` that may point **outside** its own migration folder
-     (`{"byPath": {"path": "../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"}}`) — Power BI
-     Desktop resolves it and loads the shared model's tables; **in the cloud**, publish the model once
-     and each report uses `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`. Copying
-     the `.SemanticModel` folder per migration re-creates the duplication this check exists to prevent.
-   - **exit 1 (not yet built):** build it **once**, and build it in the **data-source tree**
-     (`migrations/datasources/<ds-slug>/fabric/<Name>.SemanticModel`) — *not* inside this workbook's migration
-     folder, where it would look owned by this one report and die with it. Then register it
-     (`--register <key> --name '<Name>' --slug <ds-slug>`) so later workbooks discover it.
-   Also note the workbook does **not** contain that datasource's own calculated-field formulas (they
-   live server-side). If the orchestrator supplied a parsed `.tds`/`.tdsx` spec, treat **it** as the
-   authoritative field/calculation source; if it didn't, say so rather than silently modelling only the
-   partial set visible in the workbook.
-1. **Load and validate** `migration-spec.json` against `docs/migration-spec.schema.json` (the parser
-   already did this, but re-validate if you're consuming a hand-edited spec).
-2. **Point the model at the RIGHT source — this is the most consequential decision you make.**
-   Read `data_sources[].connection.powerbi_target` (the parser decides it; `powerbi_target_reason`
-   says why). Do not infer it from `mode == "extract"`: a `.hyper` looks identical whether it caches
-   a CSV or a Snowflake warehouse, and getting this wrong is invisible until the customer's first
-   refresh.
-   - **`live_source`** (Snowflake, SQL Server, Databricks, Redshift, BigQuery, a REST/cloud app …) —
-     the semantic model **MUST connect to that system directly**, exactly as Tableau did. **Never
-     point it at extracted rows/CSVs.** Doing so silently freezes the data at export time and yields
-     a model that can never refresh — a broken migration that *looks* fine because the numbers match
-     on day one. The packaged `.hyper` is Tableau's cache: use it for **schema discovery**
-     (`python scripts/extract_hyper_data.py --schema <workbook.twbx>`) and as a **validation
-     baseline**, never as the model's source. You need a credential — see the rule below.
-   - **`flat_file`** (Excel, CSV/textscan, JSON, Parquet, Access …) — the source genuinely *is* a
-     file, so materialising the rows and pointing at them **is** the faithful migration. Extract via
-     `scripts/extract_hyper_data.py` and use the `DataFolder` parameter pattern.
-   - **`unknown`** — do not guess. Ask the orchestrator to confirm the real upstream before building.
-   Record the decision and its reason in `limitations_encountered` (`stage: "semantic_build"`).
-   Never silently fabricate data. A structure-only stub is acceptable ONLY if the user explicitly
-   chooses it, and must be labelled as such.
-3. **PROVE the live source is reachable BEFORE you build — ONE attempt, then ask.**
-   Normally the orchestrator already did this (its step 5b) and you inherit a lifted gate. If invoked
-   directly, run it yourself — do **not** hand-roll a probe:
-   `python scripts/probe_live_source.py --spec <spec>`. It reads one real row through Power BI for
-   **every** live source and lifts the credential gate itself on `DATA_OK`.
-   `preflight_source_credentials.py` is only a **static classifier** — it can tell you a source *is*
-   live, never that it *works*. (Try-once and the autopilot exception: shared conventions above.)
+The deterministic tier has already emitted the tables, columns, relationships, partitions and most of
+the DAX. **You do not build a model.** You prove it loads, finish the tail it could not translate,
+enrich it, and hand it over refreshed.
 
-   ⛔ **NEVER supply the credential yourself** — no `.databrickscfg`/env/keyring reads, no reusing your
-   own `az`/`databricks` token, no PAT in TMDL or M (a committed secret **and** a model only you can
-   refresh), no driving Desktop's sign-in modal. Emit the connectors the probe validated, so the model
-   uses the credential path actually proven: `Databricks.Catalogs(host, httpPath, …)`,
-   `Sql.Database(server, db)`.
-
-   **Stopping is the deliverable.** Name the system and server, offer (a) sign in once in Desktop or
-   (b) authorize build-only, and **end your turn**. "Deferred" NEVER means "skip the test": it is the
-   user's choice *after* a probe failed. Full procedure: `powerbi-semantic-model-gotchas` §5.
-4. **Create tables and columns** via `semantic-model-authoring` for every non-hidden field. Preserve
-   `caption` as the TMDL display name (never ship raw internal names like `Calculation_5871029` to the
-   model).
-5. **Translate calculated fields to DAX**, field by field, using `docs/tableau-dax-translation-guide.md`:
-   - Check `is_lod` / `is_table_calc` first — route to **§5 (LOD)** / **§6 (table calculations)** of the
-     guide; these need grain verification, budget extra validation time.
-   - Check `reshape_hint == "pivot_derived"` — do the reshape in Power Query (`Table.UnpivotOtherColumns`
-     + conditional columns), not as a DAX calculated column replicating `CONTAINS`/`LEFT`/`RIGHT`
-     string parsing. This is cleaner and belongs at the load layer.
-   - Otherwise, use the direct expression translation table (guide §1) and worked examples.
-   - **Respect dependency order, but do NOT infer operand order from `referenced_fields`** — it records
-     which fields a formula references (identity), not the order they appear in the expression. Build the
-     dependency graph from the raw formula text so a calculation referencing another calculated field is
-     created first (or inlined); never reconstruct a non-commutative expression (`a - b`, `a / b`) from
-     `referenced_fields` order. See the matching Gotcha later in this file.
-   - **Recognize the parameter-equality idiom** (guide §2): if a field's formula matches
-     `IF [Parameters].[X] = [Dim] THEN [Dim] END` and it's only ever used as an exclude-null filter
-     (check `worksheets[].filters[].note` in the spec — the parser already flags this), **do not**
-     create the calculated column. Note in your output that `pbi-report-builder` should use a native
-     slicer on the underlying dimension instead.
-6. **Create relationships** from `data_sources[].joins[]`.
-7. **Materialize the model locally.** The default deliverable is a **local PBIP**
-   (`migrations/workbooks/<slug>/fabric/<Name>.SemanticModel` + `<Name>.pbip`) — **publishing to Fabric is NOT part
-   of the default flow** (it's phase-2 `pbi-deployer`; see `tableau-migrator.agent.md`). Only run
-   `semantic-model-authoring`'s Fabric deployment workflow if the orchestrator explicitly gave you a
-   target workspace. Never treat "not deployed" as a reason to skip step 7.
-8. **Check the M before Desktop sees it — `python scripts/check_m_syntax.py <Name>.SemanticModel`.**
-   Desktop reports a broken query only as `M Engine error: 'Microsoft.Data.Mashup.Preview; Token ','
-   expected.'` — with **no file, no line and no expression** — which a real user hit repeatedly and
-   could not act on. This gives you `file:line:col` and the offending text for the shapes that recur
-   in generated M: a trailing comma before a closer (the usual culprit), unbalanced `()`/`[]`/`{}`,
-   `let` without `in`, and unterminated strings/comments.
-   **Nothing else in the local loop catches this** — measured 2026-07-30 against a model whose only
-   fault was a trailing comma: `connection_operations` **ConnectFolder** reported *"Successfully
-   loaded database"* with `tablesLoaded: 1`; `partition_operations` **RefreshWithXMLA** could not even
-   run (*"A disconnected object is read only and cannot be refreshed"*); and `dax_query_operations`
-   **Validate** returned *"DAX query operations are not supported on offline connections"*. TMDL
-   deserialization treats M as an opaque string, so the mashup engine never sees it until Desktop
-   opens the `.pbip`.
-   **Know its limits — it is a structural checker, not an M parser.** An adversarial review measured
-   roughly **10% recall on arbitrary broken M**: it does NOT catch a missing comma between call
-   arguments or `let` steps, a missing `=` in a record field, `if` without `then`, a stray semicolon,
-   smart quotes, or a truncated expression. So **a clean result is not proof the model opens** — it
-   only rules out the specific shapes above. Treat a finding as almost certainly real (its false
-   positives are pinned by regression tests) and a clean run as "one class of defect excluded";
-   step 9's refresh against real data is what actually proves the M is valid.
-9. **Validate a sample — this is mandatory and works offline.** For at least the non-trivial translated
-   measures (anything that wasn't a pure passthrough), run a real `EVALUATE` and sanity-check output
-   shape and spot values. On a local PBIP use `powerbi-modeling-mcp` → `connection_operations`
-   **ConnectFolder** on the `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**
-   (`semantic-model-consumption` is an optional convenience from the `fabric-skills` plugin and requires
-   a published model — never depend on it). Flag anything that can't be verified against a known
-   Tableau value.
-10. **HANDOFF GATE — refresh, SAVE, and prove it, before you report done.** The report builder must
-    receive a model that already has data. Run:
-    ```
-    python scripts/refresh_pbip_model.py --pid <desktop-pid>
-    ```
-    It refreshes over XMLA and persists via AMO `ImageSave` (no UI). Acceptance criteria and the exact
-    required output are **Definition of Done item 11** below; anything else is a failure — do not hand
-    over.
-
-    **Read the `pbip-model-refresh` skill before you run this**, and whenever it misbehaves (invoke it
-    by name, or read [`.github/skills/pbip-model-refresh/SKILL.md`](../skills/pbip-model-refresh/SKILL.md)).
-    It owns the mechanism and the reasoning: why a save is required at all, why `ImageSave` works when
-    TMSL `backup` is refused, why success is judged by the file rather than by the absence of an
-    exception, the `--ui-save` fallback, and the strict pid-binding rule.
-
-    **The one rule you must carry in your head, because it constrains your whole build order:** Desktop
-    discards `cache.abf` when `definition/*.tmdl` is *newer* than it. So make **every** model edit
-    first, then refresh, then save. Anything that rewrites TMDL afterwards invalidates it — including
-    `scripts/set_data_folder.py --sanitize`, which you must run before committing, so the committed
-    state always has a stale cache. That is fine (it is gitignored); just re-refresh if you edit again.
-11. **Report back to the orchestrator**: semantic model location (local PBIP path, plus workspace +
-   item only if actually deployed), **the Desktop PID you left it open on (or that you closed it)**,
-   the refresh/persist result, a table→field count summary, which calculated fields became measures
-   vs. columns, which idioms were simplified away and why, and any new `limitations_encountered`
-   entries (append them to `migration-spec.json` so the report builder and final summary see them).
+0. Invoke `powerbi-semantic-model-gotchas` before touching TMDL.
+1. **Read `handover/<workbook>.json`.** `workbook.model_translation_handoff.requests[]` is your work
+   queue; `workbook.openability_selfcheck` is what the engine already proved about shape.
+2. **PROVE the live source is reachable BEFORE you change anything — ONE attempt, then ask.**
+   `python scripts/probe_bundle.py <bundle> --check-only --spec <spec>` first (static, free), then the
+   live probe. A refusal naming authentication, permissions or a sign-in prompt is a **final answer**:
+   the credential sits behind a modal no automation can fill. **Stop and ask, even under autopilot,
+   and end the turn** — measured, three of four runs announced this stop and then talked themselves
+   past it. Stopping IS the completed task.
+3. **VERIFY the connection rather than choose it.** `connection_to_m` already decided the connector
+   and storage mode. Your job is to confirm the model reaches every endpoint the spec declares —
+   `probe_bundle.py --check-only --spec` reports `SOURCE_COLLAPSED` when N declared endpoints collapse
+   to fewer, which refreshes cleanly and returns the **wrong** data. Never silently rewrite his M; a
+   wrong connector is a finding to route, not a fix to apply.
+4. **Author the residual DAX from `requests[]`** — each carries `name`, `formula`, `role`,
+   `target_table`, `fields[]` (with source table and type), `category`, `category_guidance` and
+   `fallback_reason`, which is enough to author without re-parsing the `.twbx`.
+   - ⚠️ **For a table calc, PREFER the engine's visual-calculation route.** A Tableau table calc
+     computes along the visual's own layout order, so a Power BI *visual calculation* stays faithful
+     when the user re-sorts, while **a model measure bakes a fixed `ORDERBY` that can drift from the
+     shown order**. Authoring a measure where a visual calc was possible is *quietly worse than doing
+     nothing* — it looks right and drifts. Author a measure only where that route is genuinely
+     unavailable, and say which you chose and why.
+   - For `category: missing_addressing_intent` the partition/order/scope is **not in the `.tds`** —
+     recover it from `migration-spec.json`: `worksheets[].encodings.rows`/`columns` (what is computed,
+     and along what), each pill's `derivation` (the axis grain — e.g. `tmn` = truncate-to-month, which
+     sets the ORDER BY, not merely the display format), and `manual_sort`.
+   - Land approvals through the engine: write `{name: dax}` and re-run via `--approved-dax`. **Never
+     hand-edit `_Measures.tmdl`** — a landing re-run deletes and recreates it.
+5. **Check the M before Desktop sees it** — `python scripts/check_m_syntax.py <Name>.SemanticModel`.
+   Clean ≠ opens: it is a syntax screen, not an openability proof (`powerbi-semantic-model-gotchas`).
+6. **Validate a sample offline.** For at least the non-trivial translations, evaluate against real
+   data and compare to the Tableau value. A measure that evaluates is not a measure that is right.
+7. **Enrich for AI — see the next section.** This is the part of the job nobody upstream does at all.
+8. **HANDOFF GATE — refresh, SAVE, and prove it before reporting done.** The report builder needs a
+   model with data in it; an unrefreshed model makes every downstream screenshot meaningless.
+   `python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py --pid <literal pid> --save`,
+   then confirm rows came back. Edit → refresh → save, in that order.
+9. **Report back**: model location, what you authored vs. what the engine did, every table-calc
+   decision (visual calc vs measure, and why), anything you routed rather than fixed, and new
+   `limitations_encountered` entries (`stage: "model_build"`).
 
 ## Prep the model for AI (Copilot readiness) — final build phase
 
@@ -336,12 +237,14 @@ throwing an error" is necessary but not sufficient:
    does-it-error check — run `EVALUATE` filtered to one concrete dimension value and compare against
    the same value read off the Tableau workbook. "It returned a number" is not verification; "it
    returned the *right* number" is.
-4. **No orphaned/junk artifacts** — every measure and calculated column is referenced by a visual, by
-   another measure, or documented as a deliberate forward-looking addition.
-5. **Every calculated field's fate is recorded** — for each `data_sources[].fields[]` entry with
-   `kind: "calculated"`, your report back to the orchestrator (and `limitations_encountered`) states
-   whether it became a measure, a calculated column, or was simplified away (parameter-equality →
-   slicer, pivot reshape → Power Query), and why.
+4. **No orphaned/junk artifacts *among the objects you authored*** — every measure and calculated
+   column **you added** is referenced by a visual, by another measure, or documented as a deliberate
+   forward-looking addition. The engine's own emitted objects are its layer; an unreferenced one is a
+   finding to route, not yours to delete.
+5. **Every `requests[]` entry's fate is recorded** — for each stubbed calc in the handover, your
+   report states whether you landed DAX for it (and **whether you chose a visual calculation or a
+   model measure, with the reason**), routed it back, or left it stubbed and why. A silent stub is
+   indistinguishable from an overlooked one.
 6. **Renames are grep-verified** — if a column or measure was renamed for any reason (collision
    avoidance, Title Case cleanup), every DAX expression that references it has been checked to use the
    new `name`, not left pointing at the old one or at `sourceColumn`.
@@ -363,7 +266,7 @@ throwing an error" is necessary but not sufficient:
    `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
    model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
    deserialize. A migrated model without AI instructions is not done.
-11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 10).** The
+11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 8).** The
    report builder must receive a model that already holds data; otherwise every visual renders empty
    and reads as a binding bug. Run `python scripts/refresh_pbip_model.py --pid <desktop-pid>` and
    require exactly **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
