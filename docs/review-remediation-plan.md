@@ -202,6 +202,11 @@ not on the integration path either way.
 
 ### The integration is further along than this plan implies
 
+> 📄 **The agent redesign lives in [`deterministic-tier-integration.md`](deterministic-tier-integration.md) §0 (v4)** —
+> per-persona cut lists (105,482 → ~46 k), the validator's two new jobs, the report-builder
+> constraints, and the phase-telemetry design. This document tracks *review remediation*; that one
+> tracks *the integration*. Read both.
+
 **The two-tier loop already ran end-to-end today, twice** — it just was not labelled as the milestone
 it is:
 
@@ -256,6 +261,9 @@ counts as satisfying the review is a call for the repo owner.
 ---
 
 ## Estate orchestration — DECIDED 2026-08-06 (two independent models, same answer)
+
+> 📄 Recorded here because it arose from the review work, but it is **integration** scope — the agent
+> redesign it belongs to is [`deterministic-tier-integration.md`](deterministic-tier-integration.md) §0 (v4).
 
 **Decision: neither (a) nor plain (b). A thin `scripts/run_estate.py` coordinator + the top-level
 session as control plane.** Reached independently by `claude-opus-5` and `gpt-5.6-sol`, then

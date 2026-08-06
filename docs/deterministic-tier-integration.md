@@ -1,13 +1,126 @@
 # Integrating the deterministic tier (`Yarbrdab000/tableau-fabric-skills`)
 
-**Status:** DRAFT **v3** — revised after two adversarial critique rounds by Claude Opus 5 and GPT-5.6 Sol
+**Status:** **v4** — the agent-architecture redesign. Supersedes v3's shape.
 **Branch:** `feat/deterministic-tier-integration`
 **Evidence root:** `~/.copilot/session-state/5d5a3c63-…/files/integration-analysis/`
-**Ground truth:** `C:\pbip\airline-fresh\` (a complete Tier-0 run, skill 2.40.0)
+**Ground truth:** engine **2.72.0** (`279f79d`), plus a 6-workbook run over the maintainer's own
+`Workbook Dump` (blended table calcs, compound table calcs, small multiples, reference lines).
+
+---
+
+## 0. What changed in v4 — and why the numbers below are the *opposite* of v3's
+
+**v3 measured "can we drop persona instructions by adopting his tier?" and answered NO (net +600
+chars). That answer was correct for v3's architecture and is now obsolete**, because v3 still had our
+agents **authoring**. In v4 they do not: the deterministic tier produces a working PBIP and our
+agents become **critic · enricher · fixer**. Two independent redesigns (Claude Opus 5, GPT-5.6 Sol)
+put the cut at **105,482 → ~46 k, −56%**.
+
+**What made the difference is not a better idea — it is that his handoff turned out to be far richer
+than v3 assumed.** Measured over six real workbooks:
+
+| surface | what it already carries |
+|---|---|
+| `workbooks[].model_translation_handoff.requests[]` | `name`, `formula`, `target_table`, `role`, `fields`, `category`, `category_guidance`, `fallback_reason`, `has_suggestion` — enough to author DAX **without re-parsing the `.twbx`** — plus a return path, `--approved-dax` |
+| `workbooks[].viz_fidelity[]` | `worksheet`, `visual_type`, `status`, `tier`, `reason`, `additional_reasons[]` — a real `reason` reads: *"table-calc filter on 'Last' (LAST) is not reproduced: it runs after aggregation and HIDES marks … 6 other table calc(s) share this view and would be silently re-scoped if it were re-added as an ordinary filter"* |
+| `pending_gates[]`, `definition_of_done`, `input_manifest` | which gates must be offered, pass/warn/fail, sha256 per input |
+
+So the prose that taught an agent to **author from nothing** and to **discover** problems is dead
+weight — his report hands them over pre-diagnosed.
+
+### Per-persona verdicts
+
+| persona | now | target | verdict |
+|---|---|---|---|
+| `pbi-report-builder` | 29,478 | 11–13 k | **Biggest single win** — ~10 k is author-from-scratch mapping + a CLI catalogue that belongs in the `powerbi-report-gotchas` skill it already invokes |
+| `pbi-semantic-builder` | 29,525 | 10–12 k | Build-from-zero workflow (−2,328) and the spec→model mental model (−1,396) are **purely dead** — he builds all of it |
+| `tableau-migrator` | 29,277 | 9–11 k *(Sol)* / ~24 k *(Opus)* | ⚠️ **the two redesigns genuinely disagree** — see below |
+| `pbi-migration-validator` | 17,202 | 12–14 k | The only persona that **gains** a job |
+
+⚠️ **Unresolved: how aggressive to be on the orchestrator.** Sol pushes ~20 k into generated,
+run-scoped briefs; Opus keeps more inline and *adds* ~2.6 k for estate mode + handoff consumption.
+Do not average them — this is a real design choice, and the honest way to settle it is to run the
+loop once and see which prose actually gets used.
+
+### `pbi-semantic-builder` survives — but not for the reason we assumed
+
+The stated job ("refines the model, checks the work, finds gaps") is a **checklist, and a checklist is
+a skill**. Two measured facts keep it a persona:
+
+1. **The enrichment surface is 100 % uncontested upstream** — **zero** TMDL `description` emission
+   across his generators, and **zero** hits for `CustomInstructions` / `qnaEnabled` /
+   `linguisticMetadata` in his `SKILL.md` + all 21 `resources/*.md`. That is *authoring* work on a
+   100+-measure model, not gap-checking.
+2. **A skill invocation returns knowledge into the CALLER's context. It does not grant a second
+   30,000-char budget or a second context window.** The reason to keep a persona is **context
+   isolation**, not knowledge delivery.
+
+### `pbi-report-builder` — two constraints that must survive any cut
+
+1. **Never blindly apply `viz_fidelity`.** Some warnings describe something that must **not** be
+   recreated (the `LAST` table-calc filter would change semantics). The **validator classifies each
+   row before the builder repairs it**.
+2. **Every PBIR edit must be a replayable patch manifest.** There is no `--approved-viz` landing
+   channel, and any engine re-run `rmtree`s our work (see the estate decision in
+   `review-remediation-plan.md`). Without the manifest a re-run silently discards it.
+
+### `pbi-migration-validator` — the persona that grows
+
+It does **not** stay the same. Two additions:
+
+- **Adjudicate his claims, including `status: "rebuilt"` rows.** His engine's self-report and its
+  output share a blind spot: if it believes a visual rebuilt correctly, nothing else ever checks.
+- **An advisory improvement scan** (repo owner, 2026-08-06): incremental refresh, snowflake→star,
+  aggregations, date-table marking, unused-column pruning. **Strictly separated** from fidelity:
+
+  > `fidelity_findings[]` blocks sign-off. `improvement_opportunities[]` **never** does, and is
+  > labelled *"future direction, not a defect"*.
+
+  The separation is the point — *"differs from Tableau"* and *"could be better"* are different claims
+  with different truth conditions, and **like-for-like is the contract**. Mixed together, the second
+  corrupts the first. It is a natural fit (the validator already reads the whole model, read-only)
+  and a differentiating deliverable: *"here is your like-for-like migration, and here is what Fabric
+  could do for you next."*
+
+### New: phase telemetry, so the retrospective stops being prose
+
+Repo owner, 2026-08-06: the orchestrator should record where agents spend time, effort and tokens, so
+the tooling can improve itself.
+
+**Do not build a telemetry system — the data already exists.** Measured 2026-08-06: model, tokens,
+duration and files-touched are already recorded per session and are attributable to this repository.
+What is missing is **phase attribution**, and the pattern for it is already in our own code — the
+probe receipt stamps `elapsed_sec`.
+
+So: each phase stamps a small record (`phase`, `workbook`, `elapsed`, `outcome`, artifacts touched)
+and `run_estate.py` aggregates. Two consequences beyond the ask:
+
+- **It makes step 12 falsifiable.** The retrospective today asks *"what did we learn"* — prose, which
+  this repo has repeatedly had to retract. It becomes *"where did the time actually go"*.
+- **It supplies Phase E's denominator** — *oracle-verified correct measures per agent-visible
+  instruction byte*. The numerator still needs F1.
+
+### Sequencing — measure first, then cut
+
+**No persona has been edited yet, deliberately.** The cuts are large and the honest order is:
+
+1. **`scripts/run_estate.py`** — new code, breaks nothing, and forces the handoff contract to be
+   concrete. Owns: converting `definition_of_done` into a real exit code (it exits 0 on `failed`
+   today), the `approved_dax.json` collision check, slicing `report.json` (~14 KB/workbook), the DAG,
+   and the phase-record aggregation.
+2. **Run the loop once on one workbook** — `compound Table Calcs For Corpus`, 4 stubbed calcs:
+   `requests[]` → author DAX → `--approved-dax` → verify. This produces the **first telemetry**.
+3. **Then cut the personas**, biggest win first, with `sync_agent_conventions.py --check` as the gate.
+
+Cutting first means *guessing* what is dead; running the loop first means **measuring** it.
 
 ---
 
 ## 0a. What changed in v3 (critique round 2 — knowledge architecture)
+
+> ⚠️ **Row 3 below is SUPERSEDED by v4.** It concluded that integration makes the character cap
+> *worse* (net **+600**). That was correct **for v3's architecture, in which our agents still
+> authored**. In v4 they do not, and the measured direction reverses to **−56%**. Rows 1 and 2 stand.
 
 Round 2 asked: *"can we drop persona instructions by adopting his tier?"* **Measured answer: no.**
 
