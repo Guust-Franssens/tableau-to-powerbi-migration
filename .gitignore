@@ -124,3 +124,6 @@ _probe-lab/
 # skips when it is absent, so a clean clone and CI stay green without it.
 tests/fixtures/live/
 
+
+# Tableau oracle capture - data-bearing (Tableau's computed values + rendered PNGs)
+_oracle/
