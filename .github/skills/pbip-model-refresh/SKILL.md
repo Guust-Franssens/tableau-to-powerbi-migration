@@ -48,6 +48,20 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
 > previously-good cache re-breaks opening, so you cannot keep a cache around to skip a slow refresh.
 > Diagnostic: check `MainWindowTitle`, and do not retry.
 >
+> **RE-VERIFIED 2026-08-06 on Desktop 2.157.627.0 (the finding holds), and the diagnostic is now
+> time-qualified.** Confirmed in the *best possible* case: `ImageSave` wrote a 779 KB `cache.abf` at
+> 21:54:19 from a definition last touched at 21:21:10 - cache newer than the definition, built from
+> exactly it, no TMDL edits in between - and the reopen still never loaded. So this is **not** a
+> staleness or ordering condition; it is not the same phenomenon as the cache-discard note below.
+>
+> ⚠️ **`MainWindowTitle` is a LOADING STATE before it is a verdict - do not read it early.** Measured
+> the same day: *without* a cache the title still read `Untitled - Power BI Desktop` at t+25 s and
+> only became `Superstore` by ~t+55 s. Reading at 25 s produced a false "it is broken" on a bundle
+> that was merely still opening, and briefly looked like it refuted the finding. *With* a cache the
+> title stayed `Untitled` at t+15/30/45/60/90/**120 s** and the bridge settled on
+> `bridgeStatus: "error"`, `Host is not ready to accept operations` (`jsonRpcCode -32502`).
+> **Wait >= 90 s before concluding anything**, and prefer the bridge error over the title.
+>
 > Pass `--save` only when a later step genuinely needs the data to survive a Desktop restart, and
 > **re-open the PBIP afterwards to confirm it still loads.**
 
