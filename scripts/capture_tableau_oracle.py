@@ -27,11 +27,26 @@ leaves normalisation to whoever compares.
 
 Tableau Cloud session behaviour (measured, see repo memory + upstream issue #97)
 -------------------------------------------------------------------------------
-A single REST session starts returning ``401002 Unauthorized Access`` on view-export endpoints after
-an unpredictable number of exports (observed 1, 2, 3 and 6; no consistent count or elapsed time).
-Once it starts, even metadata calls on that token fail. Re-authenticating per export succeeded 8/8.
-This script therefore re-authenticates on ``401002`` and **records every re-auth in the manifest** --
-silent recovery is how a truncated capture looks complete.
+A single REST session can start returning ``401002 Unauthorized Access`` on view-export endpoints
+after an unpredictable number of exports (observed after 1, 2, 3 and 6 in one sitting -- yet also 58
+consecutive exports with none, so it is intermittent, not a fixed quota). Once it starts, even
+metadata calls on that token fail. This script re-authenticates on ``401002``.
+
+Failure handling is classified, because the right response differs completely:
+
+============== ============================================== ==========================
+class          example                                        response
+============== ============================================== ==========================
+session_lost   ``401002`` mid-loop                             re-authenticate, retry
+transient      gateway ``502/503/504``, ``429``, conn. reset   exponential backoff + jitter
+source_credent ``400081`` FederatedDataSourceException         **STOP** -- ask a human
+failed         anything else                                   record and move on
+============== ============================================== ==========================
+
+A missing credential is **not** transient: no number of retries conjures one, so it fails fast with a
+named host and remedy and sets exit code 2. Every recovery is **recorded** in the manifest
+(``reauths``, ``retries``, ``retry_reasons``) -- a capture that silently healed itself looks identical
+to one that never had a problem, which is exactly how a truncated result comes to be trusted.
 """
 
 from __future__ import annotations
@@ -39,13 +54,16 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import http.client
 import io
 import json
 import logging
+import random
 import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +72,15 @@ LOG = logging.getLogger("tableau-oracle")
 REST_TIMEOUT_SEC = 180
 SESSION_LOST_CODE = "401002"
 MAX_REAUTH_PER_VIEW = 2
+DEFAULT_MAX_ATTEMPTS = 5
+DEFAULT_RETRY_BUDGET_SEC = 120.0
+BACKOFF_BASE_SEC = 1.0
+BACKOFF_CAP_SEC = 30.0
+
+# Status 0 is our own marker for a network-level failure (reset, DNS, gateway timeout) that never
+# produced an HTTP status at all. Tableau Cloud sits behind a gateway that intermittently 502/504s.
+NETWORK_ERROR_STATUS = 0
+TRANSIENT_STATUSES = frozenset({NETWORK_ERROR_STATUS, 429, 500, 502, 503, 504})
 
 _PERCENT = re.compile(r"^-?[\d,.]+%$")
 _CURRENCY = re.compile(r"^-?[$£€¥]\s?[\d,.]+$")
@@ -80,16 +107,21 @@ class ExportFailed(RuntimeError):
 
 
 def classify_export_error(status: int, text: str) -> tuple[str, str]:
-    """Map a Tableau error body to an actionable class.
+    """Map a Tableau failure to an actionable class. The distinction drives whether we retry.
 
-    The distinction is the whole point. ``401002`` is our session dying and is worth a retry.
-    A ``FederatedDataSourceException`` naming an expired OAuth token or a connection that "needs
+    Order matters. ``401002`` is our session dying and is fixed by re-authenticating. A transient
+    status (gateway 5xx, 429, or a network-level failure) is fixed by waiting. A
+    ``FederatedDataSourceException`` naming an expired OAuth token or a connection that "needs
     attention" is Tableau itself being unable to query the underlying source -- **a missing credential
-    is not transient**, so retrying it burns time and still cannot succeed. Only a human can fix it,
-    which is exactly the case the repo's credential rule exists for.
+    is not transient**, so retrying burns time and still cannot succeed; only a human can fix it.
+    Transient is checked *before* the credential markers so a 503 whose body happens to mention
+    authentication is still retried rather than misfiled as a permanent credential block.
     """
     if SESSION_LOST_CODE in text:
         return "session_lost", ""
+    if status in TRANSIENT_STATUSES:
+        label = "network error" if status == NETWORK_ERROR_STATUS else f"HTTP {status}"
+        return "transient", f"{label}: {text[:150]}"
     credential_markers = (
         "FederatedDataSourceException",
         "OAuth refresh token",
@@ -105,17 +137,56 @@ def classify_export_error(status: int, text: str) -> tuple[str, str]:
     return "failed", f"HTTP {status}: {text[:200]}"
 
 
-class TableauSession:
-    """Minimal stdlib Tableau REST client that survives mid-loop session loss."""
+def backoff_delay(attempt: int, retry_after: str | None = None, *, jitter: bool = True) -> float:
+    """Exponential backoff with full jitter, honouring a server-supplied ``Retry-After``.
 
-    def __init__(self, base: str, site: str, pat_name: str, pat_secret: str, version: str) -> None:
-        self._base = base.rstrip("/")
-        self._site = site
-        self._pat = (pat_name, pat_secret)
-        self.version = version
+    Jitter matters even for a sequential capture: without it, a whole estate run that trips a rate
+    limit retries in lockstep with any other client behind the same gateway.
+    """
+    if retry_after:
+        try:
+            return min(float(retry_after), BACKOFF_CAP_SEC)
+        except ValueError:
+            pass
+    delay = min(BACKOFF_CAP_SEC, BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+    return delay * (0.5 + random.random() / 2) if jitter else delay
+
+
+@dataclass(frozen=True)
+class SiteCredentials:
+    """Everything needed to reach one Tableau site. The PAT secret is never logged or serialised."""
+
+    base: str
+    site: str
+    pat_name: str
+    pat_secret: str
+    version: str
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Bounds on recovery. Both bounds matter: attempts alone cannot stop a slow-failing endpoint
+    from eating an estate run, and a wall-clock budget alone would allow an unbounded fast loop."""
+
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    budget_sec: float = DEFAULT_RETRY_BUDGET_SEC
+
+
+class TableauSession:
+    """Minimal stdlib Tableau REST client that survives mid-loop session loss and transient faults."""
+
+    def __init__(self, creds: SiteCredentials, retry: RetryPolicy | None = None) -> None:
+        self._creds = creds
+        self.retry = retry or RetryPolicy()
         self.token: str | None = None
         self.site_id: str | None = None
         self.reauth_count = 0
+        self.retry_count = 0
+
+    @property
+    def version(self) -> str:
+        """REST API version in use, for logging and the manifest."""
+        return self._creds.version
 
     def _request(
         self,
@@ -125,9 +196,11 @@ class TableauSession:
         body: dict[str, Any] | None = None,
         accept: str | None = None,
         authed: bool = True,
-    ) -> tuple[int, bytes]:
+    ) -> tuple[int, bytes, dict[str, str]]:
+        """One HTTP round trip. Never raises for a network failure -- returns status 0 instead, so
+        the retry loop can treat a reset connection and a gateway 503 the same way."""
         req = urllib.request.Request(
-            f"{self._base}/api/{self.version}{path}",
+            f"{self._creds.base.rstrip('/')}/api/{self._creds.version}{path}",
             data=json.dumps(body).encode() if body else None,
             method=method,
         )
@@ -139,29 +212,47 @@ class TableauSession:
             req.add_header("X-Tableau-Auth", self.token)
         try:
             with urllib.request.urlopen(req, timeout=REST_TIMEOUT_SEC) as resp:
-                return resp.status, resp.read()
+                return resp.status, resp.read(), dict(resp.headers)
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read()
+            return exc.code, exc.read(), dict(exc.headers or {})
+        except (OSError, http.client.HTTPException) as exc:
+            # URLError (a subclass of OSError) covers DNS/refused/timeout; HTTPException covers
+            # RemoteDisconnected and IncompleteRead, which urlopen does not always wrap.
+            return NETWORK_ERROR_STATUS, f"{type(exc).__name__}: {exc}".encode(), {}
 
     def sign_in(self) -> None:
-        """Exchange the PAT for a session token. The secret is never logged or returned."""
-        status, payload = self._request(
-            "POST",
-            "/auth/signin",
-            accept="application/json",
-            authed=False,
-            body={
-                "credentials": {
-                    "personalAccessTokenName": self._pat[0],
-                    "personalAccessTokenSecret": self._pat[1],
-                    "site": {"contentUrl": self._site},
-                }
-            },
-        )
-        if status != 200:
-            raise RuntimeError(f"Tableau sign-in failed: HTTP {status}. Check PAT name AND secret (two values).")
-        creds = json.loads(payload)["credentials"]
-        self.token, self.site_id = creds["token"], creds["site"]["id"]
+        """Exchange the PAT for a session token, retrying transient failures.
+
+        Sign-in is retried too: a gateway blip here would otherwise abort an entire estate capture
+        before it started, and re-authentication is also the recovery path for mid-loop session loss.
+        """
+        last = ""
+        for attempt in range(1, self.retry.max_attempts + 1):
+            status, payload, _ = self._request(
+                "POST",
+                "/auth/signin",
+                accept="application/json",
+                authed=False,
+                body={
+                    "credentials": {
+                        "personalAccessTokenName": self._creds.pat_name,
+                        "personalAccessTokenSecret": self._creds.pat_secret,
+                        "site": {"contentUrl": self._creds.site},
+                    }
+                },
+            )
+            if status == 200:
+                creds = json.loads(payload)["credentials"]
+                self.token, self.site_id = creds["token"], creds["site"]["id"]
+                return
+            last = payload.decode("utf-8", "replace")[:200]
+            if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
+                break
+            self.retry_count += 1
+            delay = backoff_delay(attempt)
+            LOG.warning("sign-in transient failure (HTTP %s); retrying in %.1fs", status, delay)
+            time.sleep(delay)
+        raise RuntimeError(f"Tableau sign-in failed: HTTP {status}. Check the PAT NAME and SECRET (two values). {last}")
 
     def sign_out(self) -> None:
         """Release the session. Best-effort; a failed sign-out is not worth aborting a capture."""
@@ -170,34 +261,62 @@ class TableauSession:
             self.token = None
 
     def get_json(self, path: str) -> dict[str, Any]:
-        """GET a metadata endpoint as JSON, raising on any non-200."""
-        status, payload = self._request("GET", path, accept="application/json")
-        if status != 200:
-            raise RuntimeError(f"GET {path} -> HTTP {status}")
-        return json.loads(payload)
+        """GET a metadata endpoint as JSON, retrying transient failures."""
+        for attempt in range(1, self.retry.max_attempts + 1):
+            status, payload, _ = self._request("GET", path, accept="application/json")
+            if status == 200:
+                return json.loads(payload)
+            if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
+                raise RuntimeError(f"GET {path} -> HTTP {status}: {payload.decode('utf-8', 'replace')[:200]}")
+            self.retry_count += 1
+            time.sleep(backoff_delay(attempt))
+        raise RuntimeError(f"GET {path} exhausted {self.retry.max_attempts} attempts")
 
-    def export(self, path: str) -> tuple[bytes, float, int]:
-        """GET a content-export endpoint, re-authenticating on session loss.
+    def export(self, path: str) -> tuple[bytes, float, dict[str, Any]]:
+        """GET a content-export endpoint, recovering from session loss and transient failures.
 
-        Returns ``(body, elapsed_sec, reauths_used)``. Raises on a non-401002 failure so a genuinely
-        broken view is never silently recorded as empty.
+        Returns ``(body, elapsed_sec, stats)`` where ``stats`` records how much recovery was needed --
+        ``reauths``, ``retries`` and the reasons. Recovery is deliberately **recorded, not silent**:
+        a capture that quietly healed itself looks identical to one that never had a problem, which is
+        exactly how a partially-truncated result comes to be trusted.
+
+        Raises :class:`ExportFailed` for anything not worth retrying, so a genuinely broken view is
+        never recorded as an empty success.
         """
         reauths = 0
-        while True:
+        retries: list[str] = []
+        deadline = time.monotonic() + self.retry.budget_sec
+        for attempt in range(1, self.retry.max_attempts + 1):
             started = time.perf_counter()
-            status, payload = self._request("GET", path)
+            status, payload, headers = self._request("GET", path)
             elapsed = time.perf_counter() - started
             if status == 200:
-                return payload, elapsed, reauths
+                return payload, elapsed, {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
             text = payload.decode("utf-8", "replace")
             kind, detail = classify_export_error(status, text)
+
             if kind == "session_lost" and reauths < MAX_REAUTH_PER_VIEW:
                 reauths += 1
                 self.reauth_count += 1
+                retries.append("session_lost")
                 LOG.debug("session lost (401002); re-authenticating (%d)", self.reauth_count)
                 self.sign_in()
                 continue
+
+            if kind == "transient" and attempt < self.retry.max_attempts and time.monotonic() < deadline:
+                delay = backoff_delay(attempt, headers.get("Retry-After"))
+                if time.monotonic() + delay > deadline:
+                    raise ExportFailed(f"GET {path} -> retry budget exhausted", "transient", detail)
+                self.retry_count += 1
+                retries.append(detail[:80])
+                LOG.warning(
+                    "  transient (%s); retry %d/%d in %.1fs", detail[:60], attempt, self.retry.max_attempts, delay
+                )
+                time.sleep(delay)
+                continue
+
             raise ExportFailed(f"GET {path} -> HTTP {status}", kind, detail or text[:200])
+        raise ExportFailed(f"GET {path} -> exhausted {self.retry.max_attempts} attempts", "transient", "")
 
 
 def list_views(session: TableauSession) -> list[dict[str, Any]]:
@@ -259,7 +378,7 @@ def capture_view(session: TableauSession, view: dict[str, Any], out_dir: Path, w
     data_path = out_dir / "data" / f"{stem}.csv"
     data_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        payload, elapsed, reauths = session.export(f"/sites/{session.site_id}/views/{view_luid}/data")
+        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data")
     except ExportFailed as exc:
         record["data"] = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
         return record
@@ -270,7 +389,7 @@ def capture_view(session: TableauSession, view: dict[str, Any], out_dir: Path, w
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_sec": round(elapsed, 2),
-        "reauths": reauths,
+        **stats,
         **summarise_csv(payload),
     }
 
@@ -278,7 +397,7 @@ def capture_view(session: TableauSession, view: dict[str, Any], out_dir: Path, w
         image_path = out_dir / "images" / f"{stem}.png"
         image_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            png, elapsed, reauths = session.export(f"/sites/{session.site_id}/views/{view_luid}/image?resolution=high")
+            png, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/image?resolution=high")
         except ExportFailed as exc:
             record["image"] = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
             return record
@@ -289,7 +408,7 @@ def capture_view(session: TableauSession, view: dict[str, Any], out_dir: Path, w
             "bytes": len(png),
             "sha256": hashlib.sha256(png).hexdigest(),
             "elapsed_sec": round(elapsed, 2),
-            "reauths": reauths,
+            **stats,
         }
     return record
 
@@ -302,6 +421,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workbook", action="append", default=None, help="workbook name filter (repeatable)")
     parser.add_argument("--images", action="store_true", help="also capture /image?resolution=high per view")
     parser.add_argument("--limit", type=int, default=0, help="stop after N views (0 = all)")
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=DEFAULT_MAX_ATTEMPTS,
+        help=f"attempts per export before giving up (default {DEFAULT_MAX_ATTEMPTS})",
+    )
+    parser.add_argument(
+        "--retry-budget",
+        type=float,
+        default=DEFAULT_RETRY_BUDGET_SEC,
+        help=f"max seconds spent retrying ONE export (default {DEFAULT_RETRY_BUDGET_SEC:.0f})",
+    )
     return parser
 
 
@@ -326,7 +457,12 @@ def log_progress(index: int, total: int, record: dict[str, Any]) -> None:
     name = (record.get("view_name") or "")[:34]
     status = data.get("status")
     if status == "ok":
-        suffix = f"  (re-auth x{data['reauths']})" if data["reauths"] else ""
+        marks = []
+        if data.get("reauths"):
+            marks.append(f"re-auth x{data['reauths']}")
+        if data.get("retries"):
+            marks.append(f"retry x{data['retries']}")
+        suffix = f"  ({', '.join(marks)})" if marks else ""
         LOG.info(
             "  %2d/%d  %-34s %5d rows  %6.1fs%s", index, total, name, data["row_count"], data["elapsed_sec"], suffix
         )
@@ -356,6 +492,7 @@ def write_manifest(
         "credential_blocked": len(blocked),
         "failed": len(failed),
         "total_reauths": session.reauth_count,
+        "total_retries": session.retry_count,
         "elapsed_sec": round(time.perf_counter() - started, 1),
         "views": records,
     }
@@ -363,13 +500,14 @@ def write_manifest(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     LOG.info(
-        "\n%d/%d captured (%d empty), %d credential-blocked, %d failed, %d re-auth(s), %.0fs -> %s",
+        "\n%d/%d captured (%d empty), %d credential-blocked, %d failed, %d re-auth(s), %d retr(ies), %.0fs -> %s",
         len(ok),
         len(records),
         len(empty),
         len(blocked),
         len(failed),
         session.reauth_count,
+        session.retry_count,
         manifest["elapsed_sec"],
         manifest_path,
     )
@@ -397,11 +535,14 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     env = load_env(args.env)
     session = TableauSession(
-        base=env["TABLEAU_SERVER_URL"],
-        site=env["TABLEAU_SITE"],
-        pat_name=env["TABLEAU_PAT_NAME"],
-        pat_secret=env["TABLEAU_PAT_SECRET"],
-        version=env.get("TABLEAU_REST_API_VERSION", "3.21"),
+        SiteCredentials(
+            base=env["TABLEAU_SERVER_URL"],
+            site=env["TABLEAU_SITE"],
+            pat_name=env["TABLEAU_PAT_NAME"],
+            pat_secret=env["TABLEAU_PAT_SECRET"],
+            version=env.get("TABLEAU_REST_API_VERSION", "3.21"),
+        ),
+        RetryPolicy(max_attempts=args.max_attempts, budget_sec=args.retry_budget),
     )
     session.sign_in()
     LOG.info("signed in to site %r (api %s)", env["TABLEAU_SITE"], session.version)
