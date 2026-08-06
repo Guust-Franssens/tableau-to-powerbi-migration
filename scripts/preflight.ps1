@@ -237,19 +237,53 @@ Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP 
 Add-Cli 'powerbi-desktop' 'recommended' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
 # --- Power BI Desktop (Windows-only; this is why the bootstrap is PowerShell) ---
+#
+# TWO things are checked here, and the second one is the one that bites.
+#
+# 1. Is Desktop installed? (below)
+# 2. Can the BRIDGE find it? -- a different question with a different answer. Measured 2026-08-06:
+#    Desktop auto-updated 2.157.480.0 -> 2.157.627.0 mid-session. `Get-AppxPackage` (what THIS script
+#    uses) followed the move and reported [OK] with the new path, so preflight printed
+#    "Ready to migrate" -- and the very next `powerbi-desktop open` died with DESKTOP_EXE_NOT_FOUND,
+#    because the bridge resolves the exe from its OWN hard-coded list which still named ...480.0.
+#    A green preflight followed immediately by a broken Desktop call is the exact false-green class
+#    this script exists to prevent, so it must not happen again.
+#
+#    The bridge cannot be asked cheaply (only `open` resolves the exe; `status` returns
+#    not_connected without touching it), so instead of detecting the mismatch we REMOVE it:
+#    PBI_DESKTOP_PATH is honoured by the bridge and wins over its built-in discovery. Setting it
+#    makes Desktop auto-updates a non-event for every downstream call.
 $desktop = $null
-if ($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH }
+$desktopVia = ''
+if ($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH; $desktopVia = 'PBI_DESKTOP_PATH' }
+$appx = Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop -ErrorAction SilentlyContinue
 if (-not $desktop) {
-    $loc = (Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop).InstallLocation
-    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) { $desktop = (Join-Path $loc 'bin\PBIDesktop.exe') }
+    $loc = $appx.InstallLocation
+    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) { $desktop = (Join-Path $loc 'bin\PBIDesktop.exe'); $desktopVia = 'MSIX discovery' }
 }
 if (-not $desktop) {
     $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
-    if (Test-Path $classic) { $desktop = $classic }
+    if (Test-Path $classic) { $desktop = $classic; $desktopVia = 'classic install' }
 }
 Add-Check 'Power BI Desktop' 'recommended' ([bool]$desktop) `
-    $(if ($desktop) { $desktop } else { 'not found' }) `
+    $(if ($desktop) { "$desktop (via $desktopVia)" } else { 'not found' }) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
+
+# The Desktop APP version is tracked like the two npm CLIs are, because it moves on its own schedule
+# and takes the bridge's exe discovery with it.
+if ($appx) {
+    $desktopKnownGood = '2.157.627.0'
+    Add-Check 'version: Power BI Desktop' 'recommended' ($appx.Version -eq $desktopKnownGood) `
+        "$($appx.Version)$(if ($appx.Version -eq $desktopKnownGood) { ' (known-good)' } else { " (known-good $desktopKnownGood)" })" `
+        "Desktop moved to $($appx.Version). Not an error - but re-set PBI_DESKTOP_PATH (below) and re-verify any version-specific Desktop behaviour."
+}
+
+# The mismatch-remover. A set PBI_DESKTOP_PATH means the bridge and this script resolve the SAME exe;
+# unset means the bridge is guessing from a version-pinned list and may already be wrong.
+$pathPinned = [bool]($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH))
+Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
+    $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery' }) `
+    $(if ($desktop) { "setx PBI_DESKTOP_PATH `"$desktop`"   (then reopen the shell)" } else { 'install Power BI Desktop first' })
 
 # --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
 # Opening a model that spans more than one data source raises a modal ("Potential security risk: This
