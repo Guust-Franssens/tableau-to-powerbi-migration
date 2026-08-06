@@ -564,7 +564,28 @@ def record_refresh_result(
     if outcome not in REFRESH_OUTCOMES:
         raise ValueError(f"unknown outcome {outcome!r}; expected one of {sorted(REFRESH_OUTCOMES)}")
 
+    # `read_receipt` first: "this is not a probe bundle" is the more fundamental complaint, and a
+    # caller who got the directory wrong should hear that rather than a lecture about evidence.
     receipt = read_receipt(probe_dir)
+
+    # A DATA_OK claim must ARRIVE WITH ITS EVIDENCE. Until 2026-08-06 the downgrade below could only
+    # fire when `table_rows` was supplied, so `--record DATA_OK` with no measurements wrote the
+    # strongest claim in the receipt backed by nothing at all - the caller's word. That is the same
+    # false-green shape this module was written to kill (a receipt asserting "the credential is bound
+    # in Power BI" having executed nothing), one level up: we stopped the BUILD step from claiming,
+    # and left the RECORD step able to claim without measuring.
+    #
+    # An external caller still supplies the numbers, so this is not proof - it is the difference
+    # between an unfalsifiable assertion and a checkable one. `tables_without_rows` names what failed;
+    # a fabricated row count is now a specific, auditable lie rather than a vague optimistic verdict.
+    if outcome == OUTCOME_DATA_OK and not table_rows:
+        raise ValueError(
+            "DATA_OK requires --table-rows: a connectivity claim must arrive with the per-table "
+            "measurements that support it. Query the loaded model (probe_desktop_query.py exposes "
+            "discover_port/table_names/probe) and pass what you measured. To record a refresh you "
+            "could not measure per-table, use PARTIAL - it claims nothing."
+        )
+
     receipt["status"] = STATUS_EXECUTED
 
     proven = sorted(t for t, n in (table_rows or {}).items() if n)
@@ -583,6 +604,10 @@ def record_refresh_result(
         "table_rows": table_rows,
         "tables_with_rows": proven or None,
         "tables_without_rows": unproven or None,
+        # Provenance, so a reader never has to guess how strong this is. `probe_bundle` does not run
+        # the refresh, so every measurement here reached it from outside. Saying so in the receipt is
+        # the difference between evidence and hearsay-presented-as-evidence.
+        "evidence_source": "caller-supplied measurements (probe_bundle does not execute the refresh)",
     }
 
     if outcome == OUTCOME_DATA_OK:

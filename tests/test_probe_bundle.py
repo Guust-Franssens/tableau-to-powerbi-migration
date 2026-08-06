@@ -94,7 +94,11 @@ def test_recording_data_ok_is_what_grants_the_claim(bundle: Path, tmp_path: Path
     probe_bundle.build_probe(bundle, probe, rows=1, keep_dax=False)
 
     receipt = probe_bundle.record_refresh_result(
-        probe, probe_bundle.OUTCOME_DATA_OK, detail="1 row from Sales", elapsed_sec=12.34
+        probe,
+        probe_bundle.OUTCOME_DATA_OK,
+        detail="1 row from Sales",
+        elapsed_sec=12.34,
+        table_rows={"Sales": 1},
     )
 
     assert receipt["status"] == probe_bundle.STATUS_EXECUTED
@@ -579,3 +583,53 @@ def test_a_single_connection_spec_without_the_plural_array_still_works(tmp_path:
     )
     result = probe_bundle.check_source_coverage(probe_bundle.find_model_dir(model), spec)
     assert result["status"] == "OK"
+
+
+# ---------------------------------------------------------------------------
+# A claim must arrive with its evidence (red-team finding, 2026-08-06)
+# ---------------------------------------------------------------------------
+
+
+def test_data_ok_without_measurements_is_refused(bundle: Path, tmp_path: Path) -> None:
+    """`--record DATA_OK` with no --table-rows used to write the strongest claim backed by nothing.
+
+    The receipt lifecycle stopped the BUILD step from claiming connectivity it had not tested, but
+    left the RECORD step able to assert DATA_OK on the caller's word alone - the same false green,
+    one step later. An external reviewer found this by reading the CLI surface, not by a failure.
+    """
+    probe = tmp_path / "probe"
+    probe_bundle.build_probe(bundle, probe, rows=1, keep_dax=False)
+
+    with pytest.raises(ValueError, match="DATA_OK requires --table-rows"):
+        probe_bundle.record_refresh_result(probe, "DATA_OK", detail="trust me")
+
+    # and the receipt must be untouched - a refused claim leaves no trace of having been attempted
+    receipt = probe_bundle.read_receipt(probe)
+    assert receipt["status"] == probe_bundle.STATUS_BUILT
+    assert receipt["proves"] == []
+
+
+def test_an_unmeasurable_refresh_can_still_be_recorded_as_partial(bundle: Path, tmp_path: Path) -> None:
+    """The rule must not make an honest caller unable to record anything.
+
+    PARTIAL claims nothing, so it needs no measurements - that is the escape hatch, and it keeps the
+    incentive pointing the right way: measuring buys you a stronger verdict, asserting buys nothing.
+    """
+    probe = tmp_path / "probe"
+    probe_bundle.build_probe(bundle, probe, rows=1, keep_dax=False)
+    probe_bundle.record_refresh_result(probe, "PARTIAL", detail="refresh ran; tables not queried")
+
+    receipt = probe_bundle.read_receipt(probe)
+    assert receipt["status"] == probe_bundle.STATUS_EXECUTED
+    assert receipt["refresh"]["outcome"] == "PARTIAL"
+    assert receipt["proves"] == []
+
+
+def test_a_recorded_receipt_says_where_its_evidence_came_from(bundle: Path, tmp_path: Path) -> None:
+    """probe_bundle does not run the refresh, so the receipt must not imply it witnessed anything."""
+    probe = tmp_path / "probe"
+    probe_bundle.build_probe(bundle, probe, rows=1, keep_dax=False)
+    probe_bundle.record_refresh_result(probe, "DATA_OK", table_rows={"Orders": 1})
+
+    receipt = probe_bundle.read_receipt(probe)
+    assert "caller-supplied" in receipt["refresh"]["evidence_source"]
