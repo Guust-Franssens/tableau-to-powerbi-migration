@@ -162,6 +162,82 @@ permission export belongs in **week 1**, not before go-live.
 
 ---
 
+## 3.2 Migration strategy — a customer decision, not ours
+
+The customer chooses **how much of the estate moves**. Two positions get argued:
+
+- **A — Lift everything, tidy up in Power BI later.** Simple message ("it all moves"), no
+  "who deleted my dashboard" politics, no triage effort.
+- **B — Usage-led.** Move what carries ~99% of actual usage; leave the tail behind.
+
+Three refinements make this decidable rather than philosophical.
+
+### It is a dial, not a binary
+
+A is simply the 100% end of the same dial. So do not present two options — present **the curve**, and
+let the customer pick a point on it with the cost of each point visible:
+
+| coverage of total usage | workbooks in scope | effort | left behind |
+|---|---|---|---|
+| 100% (A) | all | … | nothing |
+| 99% | … | … | … |
+| 95% | … | … | … |
+
+BI usage is severely long-tailed, so the useful property is that the 99% point is usually a *small*
+fraction of the content. **We measure that fraction from their own data instead of asserting it** —
+the coverage curve is the most persuasive artifact the assessment produces, and it converts an
+opinion-driven meeting into picking a threshold.
+
+### Three destinations, not two
+
+"Not migrated" is not one thing, and conflating them is what makes B feel risky:
+
+| destination | meaning | cost |
+|---|---|---|
+| **Migrate** | rebuilt, validated, signed off | full |
+| **Archive** | must stay *accessible* (retention/audit) but not *live* — static PDF/image + data extract | ~5% of migration |
+| **Retire** | no use, no owner — delete after a notice period | ~0 |
+
+Archive absorbs most of the anxiety about B: *"we still have it"* becomes true without rebuilding it.
+
+### The asymmetry is the opposite of how it feels
+
+A *feels* safer, but it is the **irreversible** option:
+
+- Retiring is **reversible during parallel run** — Tableau is still there, read-only. If someone
+  objects in month two, migrate it then, with a named owner and a real requirement.
+- Migrating dead content is **not** free later. It permanently inflates capacity sizing and refresh
+  contention, creates workspace sprawl, and appears in every future audit and access review. And
+  "clean up later" is precisely the thing that never happens — the same inertia that stalls
+  decommission.
+
+Framing for the customer: **B defers a reversible decision; A commits an irreversible one.**
+
+### Two traps that must be designed for
+
+⚡ **Seasonality will retire your most important report.** Year-end close, the annual regulatory
+filing, the board pack — near-zero view count, business-critical. Two mitigations, both required: a
+**minimum 13-month observation window** so annual cycles appear at all, and the standing rule that
+**usage proposes, the owner disposes** — nothing is retired on a metric alone.
+
+⚡ **Criticality must propagate *up* the dependency graph.** A published datasource has few direct
+views of its own; its importance is inherited from what binds to it. Measured on our site: the
+datasources report **0 downstream** in the Metadata API while **9 workbooks bind to them via
+`sqlproxy`** (§2.2). Triaging datasources on their own usage would retire the foundation of the
+estate. **A node's criticality is the maximum over its dependents** — computable precisely because we
+build the DAG from `sqlproxy` rather than trusting reported lineage.
+
+### What this means for the tooling
+
+The strategy is a **parameter, not a fork**: `--coverage-target 0.99`, with A being `1.0`. The
+assessment emits the curve, the tier assignment and the DAG-propagated criticality; the coordinator
+scopes waves to the chosen point. One code path, one dial.
+
+⚠️ **Not demonstrable on the lab site yet** — created today, so every `totalViewCount` is 0. The
+machinery is buildable and unit-testable now, but the curve needs a real estate with history.
+
+---
+
 ## 4. Validation and sign-off
 
 The practitioner standard is **KPI parity to the penny** for the same filter state, evidenced by a
