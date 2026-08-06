@@ -270,12 +270,12 @@ Ranked by (likelihood × cost of late discovery), research ranking in brackets.
 | # | gap | owner | notes |
 |---|---|---|---|
 | 1 | **IAM export + workspace topology design** [🔴1] | ours | zero coverage anywhere today; blocks Foundation |
-| 2 | **Dependency DAG from `sqlproxy`** [🔴—] | ours | ⚡ the Metadata API answer is wrong; must use REST |
+| 2 | ~~**Dependency DAG from `sqlproxy`**~~ | **his — DELIVERED** | `estate_survey.py` (2.77.0, issue #98, filed and fixed same day). ✅ Verified live against our site: reports **9 of 13** — exact match with our REST ground truth — and resolves the *correct* published LUID rather than the decoy id. Emits `fetch_order` (datasources first, then workbooks). **We consume it; we do not rebuild it.** |
 | 3 | **Liveness triage** [🔴3 partly] | ours | the "migrate less" lever; ~30–50% typically retirable |
 | 4 | **Subscriptions + alerts inventory** [🔴3] | ours | endpoints verified; nothing built |
 | 5 | **Capacity sizing input** [🔴2] | ours (advisory) | we already measure per-view latency — feed it, don't invent an F-SKU |
 | 6 | **Embedded/hard-coded URL audit** [🔴4] | ours (advisory) | needs a SharePoint/Confluence crawl — outside Tableau's API |
-| 7 | **Complexity scoring incl. published datasources** [🟠6] | **his** | his STEP 1.5 already owns embedded-vs-published → file an issue |
+| 7 | **Numeric complexity score** [🟠6] | **ours** | ⚡ his survey deliberately emits only a `complexity_understated` **boolean** — *"I deliberately did not invent a scoring model."* Correct call on his part, but it means the corrected score (folding the published datasource's calcs/LODs into its dependants) is **ours to compute** |
 | 8 | **Tableau Prep flows** [🟠8] | ours | ⚡ never considered; `/sites/{id}/flows` **verified 200**. Flows are ETL — a separate dependency chain that must land before the extracts they produce |
 | 8b | **Custom views** | ours | ⚡ `/sites/{id}/customviews` **verified 200**. Per-user saved filter states — both a migration item (≈ PBI personal bookmarks) and the *strongest* liveness signal available: making one is unambiguous deliberate use |
 | 9 | **RLS test matrix per role** [🟠7] | ours | he *builds* roles; nobody *tests* them per-role |
@@ -284,6 +284,24 @@ Ranked by (likelihood × cost of late discovery), research ranking in brackets.
 | 12 | **Evidence pack + sign-off artifact** | ours | we produce findings, not a signable document |
 | 13 | **Decommission support** | ours (light) | read-only period, archive, licence reclamation |
 
+### 5.1 The reconciliation seam — both halves are now within reach
+
+His `translation_reconcile` has always had two injection points and **neither has ever had a real
+implementation attached** (his words on #96: *"no real executor has ever been attached… please do
+prototype against it"*).
+
+| socket | what it must do | who can fill it |
+|---|---|---|
+| `fabric_oracle(dax_query) -> result` | **execute DAX against the built Power BI model** | **us** — `probe_desktop_query.discover_port` + ADOMD already does exactly this; he ships `subprocess_oracle` / `persistent_oracle` adapters explicitly *"for a Desktop/XMLA executor whose startup is expensive"* |
+| `tableau_oracle` / `tableau_values=` | **Tableau's own ground-truth number** | **us** — `capture_tableau_oracle.py`, built today |
+
+⚠️ **Correction to an earlier assumption of ours:** the Tableau capture is **not** a `fabric_oracle`.
+That socket executes DAX; ours supplies the ground-truth side. Wiring it to the wrong parameter would
+have compared Tableau against Tableau.
+
+Filling both closes a reconciliation loop that has never once run end-to-end.
+
+
 **Not gaps — already covered:** conversion, RLS *translation*, structural validation, fidelity
 structural/image tiers, estate fan-out, Fabric-overlap comparison.
 
@@ -291,12 +309,34 @@ structural/image tiers, estate fan-out, Fabric-overlap comparison.
 
 ## 6. Build order
 
-1. **`assess_estate.py`** — inventory + liveness + IAM + the `sqlproxy` DAG in one read-only pass,
-   emitting a tiered backlog. This is the **entry point** and it unblocks gaps 1–4 at once.
-2. **File the published-datasource complexity issue** to the engine (gap 7).
+1. **`assess_estate.py`** — liveness + IAM + complexity scoring in one read-only pass, **consuming
+   his `estate_survey.py --json` as the dependency input** rather than recomputing it. This is the
+   **entry point** and it unblocks gaps 1, 3, 4, 7.
+2. **Desktop DAX executor adapter** — fills his `fabric_oracle(dax_query)` socket from our existing
+   `probe_desktop_query` ADOMD path, and pairs with the Tableau oracle to close the reconciliation
+   loop (§5.1).
 3. **Provenance stamp** into the oracle manifest (`captured_as`, usage, lineage, blast radius).
 4. **VDS figure-level oracle** (gap 11) — the last piece of true per-visual parity.
 5. **Evidence pack generator** (gap 12) — turns our findings into something a business owner signs.
 
-Everything in 1–3 is read-only REST/GraphQL against Tableau, needs no Fabric capacity, and touches
-none of the engine's internals — so it can be built and shipped independently of the conversion tier.
+Everything in 1 and 3 is read-only REST/GraphQL against Tableau, needs no Fabric capacity, and
+touches none of the engine's internals — so it can be built and shipped independently of the
+conversion tier.
+
+---
+
+## 7. Keeping the engine current
+
+The engine moves fast — 2.60.0 → 2.78.0 in two days, with issues filed and fixed same-day. Two
+mechanics matter:
+
+- **`preflight.ps1 -CheckUpstream`** compares the local engine clone against `origin/HEAD` and tells
+  you to pull, because *"the deterministic engine went 2.60.0 → 2.72.0 unnoticed, and issues were
+  nearly filed against a build that had already fixed them."* Re-verify any open issue against the
+  new build before citing it.
+- **A stale *installed plugin* is invisible.** `copilot plugin update` fails while a session holds the
+  directory, but that lock only blocks **renaming** the plugin directory — files inside stay writable.
+  So a content refresh is a straight in-place overwrite from the clone, no restart required. Verified
+  2026-08-06: 273/273 files hash-identical afterwards, and the newly-shipped `estate_survey.py` ran
+  correctly against a live site in the same session. Clear `__pycache__` afterwards.
+
