@@ -382,3 +382,39 @@ def test_connector_specific_details_survive_per_leg():
     legs = {c["class"]: c for c in parse_workbook(FEDERATED_FIXTURE)["data_sources"][0]["connection"]["connections"]}
     assert legs["databricks"].get("http_path") == "/sql/1.0/warehouses/abc123"
     assert legs["snowflake"].get("warehouse") == "COMPUTE_WH"
+
+
+def test_shelf_encodings_carry_the_table_calc_addressing_inputs():
+    """The shelves are MODEL-layer input, not just report-layer decoration. Do not trim them.
+
+    Measured 2026-08-06 on the first real two-tier round trip. The deterministic tier stubs a
+    formula-authored table calc as ``category: missing_addressing_intent`` and says outright:
+
+        "This is a table calculation whose partition/order/scope (Tableau 'Compute Using') is not
+         carried by the .tds. Recover the addressing from worksheet context (the .twb
+         'ordering-type' + <order>/<sort> and the rows/cols shelves)."
+
+    That was the LARGEST stub category in that workbook (3 of 4). The three fields asserted below are
+    exactly what a caller needs to reconstruct the addressing:
+
+      * ``rows`` / ``columns``  - which pill is being computed and what it is computed ALONG;
+      * ``derivation``          - the grain of that axis (e.g. "tmn" = truncate-to-month), which
+                                  decides the ORDER BY, not merely the display format;
+      * ``manual_sort``         - an explicit ordering that overrides the natural one.
+
+    The hazard this guards against is specific and was nearly realised: while planning the persona
+    cuts, the parser's shelf extraction looked like duplicate work next to an engine that already
+    rebuilds visuals, and was a candidate for removal. It is not duplicate - it is the only surviving
+    source for the model-layer fallback path. A cut that removes it would not fail loudly; the calcs
+    would simply stay stubs, or worse, be authored with a guessed order.
+    """
+    spec = parse_workbook(FIXTURE)
+    worksheet = spec["worksheets"][0]
+    enc = worksheet["encodings"]
+
+    assert enc["rows"] and enc["columns"], "both shelves are needed to tell WHAT from ALONG-WHAT"
+    for shelf in ("rows", "columns"):
+        for pill in enc[shelf]:
+            assert "field_id" in pill
+            assert "derivation" in pill, f"{shelf} pill lost its derivation - the axis grain is what sets the ORDER BY"
+    assert "manual_sort" in worksheet, "an explicit sort overrides the natural order and must survive"

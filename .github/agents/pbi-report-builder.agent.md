@@ -103,164 +103,123 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
 Do not skip straight to authoring — these three skills are explicitly designed as a chained handoff
 (planning → design → authoring), each with its own scope boundary; follow that boundary.
 
-## Mental model — mapping migration-spec.json to a report
+## What you receive — a report that already EXISTS
 
-| Tableau (migration-spec.json) | Power BI |
+The deterministic tier has already rebuilt the report and bound it to the model. You are not
+authoring pages from a spec; you are **repairing and finishing an artifact**, and its own build
+report tells you where. Read these first, in this order:
+
+| source | what it gives you |
 |---|---|
-| One `dashboards[]` entry | One or more report pages (a single Tableau dashboard can justify splitting into an overview + drill-through page if it's dense — that's a `powerbi-report-planning` call, not yours to make ad hoc) |
-| `dashboards[].zones` (recursive, percentage-based) | `powerbi-report-design`'s grid `layout_contract` regions/placements — translate the zone tree's relative x/y/w/h into grid regions, preserving nesting and `direction` (horizontal/vertical flow). **Treat `layout_contract` as a hard gate, not a loose aid**: every region must be placed, `space_audit` run clean (zero overlaps), and a header/slicer band reserved *before* any visual JSON is authored. Don't start placing visuals and patch the layout afterward — that ordering is exactly how misaligned/overlapping visuals crept in before. |
-| `dashboards[].zones.type == "layout-floating"` | A synthetic root the parser generates for Tableau "Floating" (freeform/absolute-position) dashboards — every `children[]` entry is independently absolute-positioned (real `x`/`y`/`w`/`h` in Tableau's 0-100000 percentage-space, not nested percentages of a parent). Treat each child as its own top-level placement in the grid; don't expect the neat nested-flow structure that a "Tiled" dashboard's `layout-flow` tree has. Floating dashboards are commonly dense (20+ sibling zones) — expect to split into multiple pages or a tighter grid, and check `powerbi-report-planning`'s page-split judgment rather than force everything onto one page. |
-| `dashboards[].zones[...].type == "parameter"` with a resolved `field_id` | A parameter/field-switcher control — usually a **Field Parameter** slicer if `pbi-semantic-builder` built one for it (check its report for which parameters became Field Parameters vs. plain slicers vs. nothing). Bind the slicer to the Field Parameter table, not the raw Tableau parameter name. |
-| One `worksheets[]` entry | One visual |
-| `worksheets[].mark_type` | Visual type — see chart-type mapping below |
-| `worksheets[].encodings` (rows/columns/color/size/label) | Visual field wells (axis/legend/values) |
-| `worksheets[].measure_names_values_pivot` (non-null) | Bind each field in `pivoted_field_ids` **directly** to the visual — one field-well entry per resolved field. Never recreate Tableau's literal "Measure Names/Measure Values" pivot column; PBI has no equivalent idiom and doesn't need one. If `pivoted_field_ids` is empty, the parser couldn't resolve the underlying fields (no matching filter) — flag it rather than guessing which fields were meant. |
-| `worksheets[].reference_lines` (Min/Max/Average) | **Gauge visual** (Minimum/Maximum/Target) — see note below |
-| `worksheets[].filters[]` with a `note` about the parameter-equality idiom | A **slicer** on the underlying dimension, not a filter card or calculated column |
-| `theme.palette_hexes` / `font_family` | A starting point for `powerbi-report-design`'s Step 1 (tone/signature) and Step 5 (theme) — not an authoritative theme to clone; feel free to improve on it |
+| `handover/<workbook>.json` → `workbook.viz_fidelity[]` | one entry per worksheet: `worksheet`, `visual_type`, `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`), `reason`, `additional_reasons[]`. The `reason` is precise, e.g. *"reference/target/trend line(s) deferred (Tier-2 analytics): sum of Profit -> the rebuilt visual shows the value without the target/trend overlay"* |
+| `estate.pending_gates[]` | which gates must be OFFERED (e.g. `dashboard_audit`) — offer, never self-approve |
+| `migration-spec.json` | source intent the engine's input format cannot carry: `dashboards[].zones` (layout tree), `worksheets[].encodings`, `manual_sort`, `measure_names_values_pivot`, filter `note`s |
+| `migrations/<name>/reference/` | the Tableau screenshots — the only thing that can adjudicate *look and feel* |
 
-### Visual encoding: CLI for current truth, render-verified cookbook for proven shapes, research for the rest
+⚠️ **Never repair a `viz_fidelity` row on its own say-so.** Some entries describe a deferral that
+**must not** be recreated — measured: *"table-calc filter on 'Last' (LAST) is not reproduced: it runs
+after aggregation and HIDES marks, which Power BI cannot express as a filter … 6 other table calc(s)
+share this view and would be silently re-scoped if it were re-added as an ordinary filter."*
+Re-adding that as a filter would change other visuals' numbers. **The validator classifies each row
+as fixable / accepted-limitation / false-claim; you repair only what it routes to you.**
 
-There are **two** decisions per visual, and they draw on different sources — keep them separate:
-**(A) which** Power BI visual best represents this Tableau worksheet, and **(B) how** to encode it in
-PBIR. Never infer field-well/formatting JSON from memory — that is exactly how broken-but-
-`validate`-passing visuals (the Bing→Azure Maps choropleth, dead field-parameter slicers) shipped.
-`validate` confirms *structure*, not *render*.
+⚠️ **Every PBIR edit must also be recorded as a replayable patch.** There is no `--approved-viz`
+landing channel upstream, and a landing re-run (`--approved-dax`) **deletes and recreates** the whole
+`.Report` folder. An edit that exists only in the bundle is an edit that a later, legitimate re-run
+silently discards. Write what you changed and why alongside the report so it can be re-applied.
 
-**(A) Which visual — research the mapping, don't assume it.** The chart-mapping table below is a
-starting heuristic, not the final answer. For any visual whose best Power BI equivalent is non-obvious
-or evolving — **maps above all**, but also combo/dual-axis, part-to-whole, KPI, and anything the source
-does with a custom trick — decide the target by **researching Microsoft Learn for current best
-practice** (see the research-subtask model below), cross-checked against what the installed product
-actually supports (`powerbi-report-author catalog list` / `catalog describe`). Product capabilities
-move (Azure Maps reference layers, small multiples, on-object formatting); a mapping that was right a
-year ago may be superseded.
+### Visual encoding — only when you must change an encoding
 
-**(B) How to encode it — precedence, most-current/most-trustworthy first:**
+The engine already chose and encoded every visual. Reach for this **only** when repairing one, and
+keep the two decisions separate: **(A) which** visual is right, **(B) how** to encode it in PBIR.
+Never write field-well or formatting JSON from memory — that is exactly how broken-but-
+`validate`-passing visuals shipped (the Bing→Azure Maps choropleth, dead field-parameter slicers).
 
-1. **`powerbi-report-author` CLI = the live vocabulary and the source of truth for roles/props/enums.**
-   It is a global npm binary on PATH (invoke `powerbi-report-author` by name; it is *not* under a skill
-   folder) and always reflects the **installed** version, so it beats any static doc on currency.
-   Establish/confirm the encoding vocabulary here **first**:
-   - `catalog list` — every built-in visual type + deprecations (`map`/`filledMap`→`azureMap`,
-     `qnaVisual` unsupported).
-   - `catalog describe <type>` — field-well **roles** (required/optional, maxPerRole) + formatting objects.
-   - `formatting list-objects` / `describe-object <type> <object>` / `describe-property` — exact
-     property names, enum values, selector requirements.
-   - `expr encode --kind <t> <v>` — generate a correct value encoding instead of hand-writing the
-     `expr`/`Literal` wrapper.
-   - `preview-visuals --with-derived` / `preview-pages` / `preview-filters` / `preview-themes <path>` —
-     summarise your *own* output as structured JSON (use these to self-check filter placement and page
-     inventory instead of re-reading every `visual.json`); `doctor` self-checks the toolchain.
-   - **Hard limit — the CLI describes what you may *declare*, never what actually *renders*.**
-     `catalog describe actionButton` reports `"deprecated": false` with a `text` formatting object, yet
-     Desktop **ignores `visual.objects` and draws a blank rectangle** while `validate` returns 0 errors.
-     So a green CLI/`validate` result is *never* evidence that a visual draws — only a render-verified
-     cookbook entry or your own Desktop screenshot is.
-2. **Cookbook composition — but trust it by tier, because the cookbook is a *cache*, not the authority.**
-   `.github/pbi.kb/visual-cookbook.md` + `visuals/<type>.visual.json`/`.md`. The CLI gives you the
-   vocabulary; the cookbook gives you a *worked composition* (the nested JSON that actually holds
-   together for a real idiom — which the CLI cannot compose and `validate` cannot render-check).
-   **Don't open an entry reflexively.** Measured against CLI 0.1.4 (see the cookbook's "What's actually
-   in here"), **19 of 28 entries are pure transcribed `catalog describe` output with zero drift** — for
-   those, step 1 already gave you everything and the lookup is wasted. The entries worth opening are the
-   **6 idioms** (`error-bars`, `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`,
-   `table-databars` — not visual types at all, so the CLI returns `VISUAL_TYPE_UNKNOWN`) and the
-   **3 render-truth entries** (`actionButton`, `shape`, `azureMap`). Trust it **by tier**:
-   - **🟢 render-verified** (proven by an actual render / human Desktop capture) → *more* trustworthy
-     than composing yourself, because it truly rendered. **Copy it and rebind fields**, then reconcile
-     its property names against step 1's CLI output to catch version drift.
-   - **🟡 structural-template** → this is just *cached CLI output that passed `validate`* — no more
-     authoritative than calling the CLI live, and it can be stale. Use it as a shape hint, but let the
-     **live CLI win on any conflict**; do not treat 🟡 as ground truth.
-   - **🔴 needs-capture** → do not ship it; go to step 3.
-3. **Research + human capture for anything neither covers** (the loop under "When unsure" below). When
-   you capture a new working encoding, **write it back to the cookbook as a 🟢 entry** (with the MS
-   Learn citation + date from your research) so the next migration reuses it. Growing/refreshing the
-   cookbook is part of the job, not a side task.
+**(A) Which** — research the mapping per *idiom*, don't assume it. The four-step procedure (dedupe
+idioms → dated Microsoft Learn citation → cache into `visuals/<type>.md` → then encode) is
+`powerbi-report-gotchas` §9. 30 visuals are usually 5-8 idioms.
 
-### Research subtasks: keep the mapping current, per idiom (not per instance)
+**(B) How** — precedence, most-current first:
 
-Research **per distinct Tableau idiom**, cache the result in the cookbook, and reuse it — 30 visuals
-are usually 5–8 idioms. The full four-step procedure (dedupe idioms → focused research subtask with a
-dated Microsoft Learn citation → cache into `visuals/<type>.md` → then encode) is
-`powerbi-report-gotchas` §9. It is what makes the cookbook self-refreshing rather than a frozen
-snapshot.
+1. **`powerbi-report-author` CLI is the live vocabulary** (a global npm binary, on PATH by name).
+   `catalog list` / `catalog describe <type>` for roles and formatting objects; `formatting
+   describe-object|describe-property` for exact names and enums; `expr encode` instead of
+   hand-writing a literal wrapper; `preview-visuals|preview-pages|preview-filters` to self-check
+   your own output. It always reflects the **installed** version, so it beats any static doc.
+   - **Hard limit: the CLI describes what you may *declare*, never what *renders*.** `catalog
+     describe actionButton` reports `"deprecated": false` with a `text` object — Desktop ignores
+     `visual.objects` and draws a blank rectangle while `validate` returns 0 errors. A green
+     CLI/`validate` result is **never** evidence that a visual draws.
+2. **The cookbook is a *cache*, not the authority** (`.github/pbi.kb/visual-cookbook.md`). Don't open
+   it reflexively: 19 of 28 entries are transcribed `catalog describe` output with zero drift, so
+   step 1 already gave you those. The ones worth opening are the **6 idioms** (`error-bars`,
+   `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars` — not
+   visual types, so the CLI returns `VISUAL_TYPE_UNKNOWN`) and the **3 render-truth** entries
+   (`actionButton`, `shape`, `azureMap`). Trust by tier: 🟢 render-verified → copy and rebind, then
+   reconcile property names against the live CLI; 🟡 structural-template → a shape hint only, the
+   live CLI wins any conflict; 🔴 needs-capture → do not ship.
+3. **Research + human capture** for anything neither covers, then **write it back as a 🟢 entry** with
+   the dated citation. Growing the cookbook is part of the job.
 
-### Chart-type mapping (Tableau `mark_type` → Power BI visual)
+### Chart-type mapping — the engine already chose; these are the ones worth second-guessing
 
-> Starting heuristic only — confirm the target via the research-subtask model above (especially maps),
-> and the encoding via the CLI-first precedence above.
+`viz_fidelity[].visual_type` records its choice. Do **not** re-derive the mapping for every visual;
+challenge it only where the reference screenshot says it reads wrong, or where the idiom below is a
+known trap:
 
-| Tableau mark | Power BI visual | Notes |
-|---|---|---|
-| `Bar` | Clustered/stacked bar or column chart | Check `encodings.color` for series grouping |
-| `Line` | Line chart | |
-| `Circle` **with** `reference_lines` present | Often a **Gauge** — but NOT always | Tableau's "fake gauge" (a point + Min/Max/Avg reference lines on a fixed axis) maps well to the native Gauge *when it's a single KPI vs a target*. If the worksheet compares **multiple** categories/regions, a gauge can't show them — keep it a multi-point dot plot/scatter. Decide by intent + grain, not the reference-line signal alone. |
-| `Circle` **without** `reference_lines` | Scatter chart | |
-| `Area` | Area chart | |
-| `Text` | Table, matrix, or card — infer from shelf shape: single measure + no rows/columns → card; multiple dimensions on rows → table/matrix | |
-| `Map` | **Always `azureMap`** (`map`/`filledMap` are deprecated Bing), but **research the layer type on MS Learn** — region-shaded-by-measure → data-bound reference-layer choropleth; points → bubble layer; routes → line layer. Map encodings are the highest-drift, highest-risk area — always confirm current guidance. | Check for geographic `semantic_role` on the bound field |
-| `Automatic` | Infer from shelf shape (same heuristics as Tableau itself: discrete+discrete → bar-ish, continuous+continuous → scatter/line) | Flag low-confidence inferences for design review rather than guessing silently |
+| Tableau idiom | the trap |
+|---|---|
+| `Circle` + `reference_lines` | Tableau's "fake gauge" (point + Min/Max/Avg lines) maps to a native **Gauge** *only for a single KPI vs a target*. With **multiple** categories a gauge cannot show them — it must stay a dot plot/scatter. Decide by intent and grain, never by the reference-line signal alone. |
+| `Map` | **Always `azureMap`** — `map`/`filledMap` are deprecated Bing. Then research the *layer*: region-shaded-by-measure → data-bound reference-layer choropleth, points → bubble, routes → line. Highest-drift, highest-risk area in the whole mapping. |
+| `Text` | Card vs table vs matrix is a *shelf-shape* judgement: single measure, no rows/columns → card; multiple dimensions on rows → table/matrix. |
+| `Automatic` | Tableau itself inferred this, so the engine inherited an inference. Flag low-confidence ones for design review rather than silently agreeing. |
 
-### When unsure about a visual: research first, then put a human in the loop
+### When the encoding is genuinely unknown — research, then a human round-trip
 
-Some Tableau visuals map to Power BI features whose **PBIR authoring encoding is undocumented or
-uncertain** (Azure Maps reference-layer choropleths, custom visuals, novel conditional-formatting
-shapes). Do NOT guess-and-iterate blindly against Desktop — it is slow and `validate` will not catch a
-wrong encoding. Instead:
-1. **Research what's actually possible first.** Check the official docs (Microsoft Learn) and the
-   `powerbi-report-author` CLI (`catalog describe <type>`, `formatting describe-object <type> <obj>`,
-   `formatting search`) to confirm the visual supports the capability and to enumerate the real
-   role/object/property names.
-2. **If the capability exists but the exact PBIR JSON is uncertain, surface it to the human with
-   click-by-click Desktop instructions** (ask in your normal reply — there is no `ask_user` tool):
-   name the visual to add, the fields to drop
-   in each well, and the Format-pane toggles to set, then have them save. **Read the resulting
-   `visual.json` and reuse it as ground truth** — one human round-trip beats many blind render cycles.
-   (Exactly how the Superstore Azure Maps choropleth encoding below was captured; a research subagent
-   found zero public PBIR examples of it.)
-3. Only then generalize the captured encoding: **save it into the cookbook**
-   (`.github/pbi.kb/visuals/<type>.visual.json` + a `<type>.md` note marking it 🟢 render-verified),
-   and if it applies to many visuals at once, also capture it as a small re-runnable transform script.
-   The next migration then copies it from the cookbook instead of repeating the human round-trip.
+For capabilities whose **PBIR encoding is undocumented** (Azure Maps reference-layer choropleths,
+custom visuals, novel conditional-formatting shapes): do **not** guess-and-iterate against Desktop —
+it is slow, and `validate` will not catch a wrong encoding.
+
+1. Confirm the capability exists via Microsoft Learn + `catalog describe` / `formatting
+   describe-object` / `formatting search`.
+2. If it exists but the JSON is uncertain, **give the human click-by-click Desktop instructions**
+   (ask in your normal reply — there is no `ask_user` tool): the visual to add, the fields per well,
+   the Format-pane toggles. Then **read the resulting `visual.json` as ground truth**. One human
+   round-trip beats many blind render cycles — this is exactly how the Azure Maps choropleth encoding
+   was captured, after a research subagent found zero public PBIR examples of it.
+3. Save it to the cookbook as 🟢 render-verified, with the dated citation, so the next migration
+   copies it instead of repeating the round-trip.
 
 ## Workflow
 
-1. Confirm the semantic model from `pbi-semantic-builder` is deployed and reachable.
-2. For each `dashboards[]` entry, build a requirements brief (audience, purpose, the worksheet
-   inventory with mark types) and run it through `powerbi-report-planning`'s approval gate.
-3. For each planned page, hand `powerbi-report-design` the relevant `worksheets[]` entries (mark type,
-   encodings, reference lines) and the zone layout — let it produce a `Design Brief:` per the chart
-   mapping table above. Don't override its archetype/chart-selection judgment except where this file's
-   mapping table gives a hard signal — noting that **reference-lines → Gauge is a *soft* signal, not a
-   hard one**: it only holds for a single KPI vs a target. If the worksheet compares multiple
-   categories/regions, keep it a dot plot/scatter (see the mark-type table's `Circle` + `reference_lines`
-   row, which governs).
-4. **Build an empty layout skeleton before authoring any real visual.** Place a blank/placeholder
-   shape (a rectangle, or the target visual type with no field wells bound yet) for *every* zone in
-   the `layout_contract` at its correct region — position and size only. Screenshot or render this
-   skeleton and compare its gestalt (proportions, density, header/footer/slicer bands, where the eye
-   lands first) against the whole-dashboard Tableau reference screenshot **before** binding a single
-   field. This is cheap to redo if wrong; a fully-populated page is not. It directly targets a lesson
-   from iteration 1: polishing each visual in isolation can all look individually reasonable while the
-   page as a whole reads completely differently from the source — catch that at the skeleton stage,
-   not after every visual is already built and formatted. Only proceed to step 5 once the skeleton's
-   gestalt is a good match.
-5. Hand the design brief to `powerbi-report-authoring` to build the actual PBIR visuals bound to the
-   semantic model (fields, formatting, theme) inside the already-placed, already-verified skeleton
-   from step 4 — this step is about populating positions that were already confirmed correct, not
-   about placement.
-6. Wire up the parameter-equality-idiom simplification: add a slicer (single-select) on the dimension
-   named in the filter's `note`, instead of any filter card.
-7. Validate visually (Desktop screenshot per `powerbi-report-authoring`'s own validation step) against
-   the original Tableau layout — not pixel-for-pixel, but check that every worksheet has a home on a
-   page and nothing critical was dropped. **Run structural validation before the Desktop screenshot
-   review, not instead of it** — see "Mandatory validation" below.
-8. Report back to the orchestrator: report location, page/visual counts, chart-type mapping decisions
-   (especially any low-confidence `Automatic` inferences), and any new `limitations_encountered`
-   entries (`stage: "report_build"`), e.g. Tableau dashboard actions or customized tooltips this parser
-   version doesn't yet translate (see `docs/tableau-dax-translation-guide.md` known gaps).
+0. Invoke `powerbi-report-gotchas` (step 0, before touching PBIR).
+1. **Read the baseline before changing anything.** Open the rebuilt report and screenshot every page
+   against `reference/`. **Judge the GESTALT first** - proportions, density, header/slicer bands,
+   where the eye lands - before looking at any single visual. This is the highest-value step and the
+   easiest to skip: measured on iteration 1, polishing visuals one at a time produced a page where
+   every visual was individually defensible and the page as a whole read nothing like the source. A
+   whole-page mismatch is also the one defect class `viz_fidelity` structurally cannot report,
+   because it is per-visual.
+2. **Take the validator's classification of `viz_fidelity`, not the raw list.** Repair only rows it
+   routes to you as fixable. A `tier: "empty"` row (nothing to rebuild) is usually correct; a
+   `degraded` row may be a deliberate and correct deferral.
+3. **Fix with the smallest blast radius first.** Prefer formatting/layout over changing a visual's
+   type or field wells - a type change re-opens the encoding question the engine already answered.
+   Where you do change it, justify against the reference, not against taste.
+4. Wire the source intent the engine's input format cannot carry: the parameter-equality idiom (a
+   single-select **slicer** on the dimension named in the filter's `note`, never a filter card), and
+   `measure_names_values_pivot` (bind each field in `pivoted_field_ids` **directly**; never recreate
+   Tableau's literal Measure Names/Values column).
+5. Validate structurally (below), **then** re-screenshot. Structure and render are different claims.
+6. **Record every change as a replayable patch** - a bundle-only edit does not survive a landing
+   re-run.
+7. Report back: what you repaired, what you left as an accepted limitation *and why*, any
+   `viz_fidelity` row you believe is a false claim (route it back, never silently fix), and new
+   `limitations_encountered` entries (`stage: "report_build"`).
+
+**If a page must be built from scratch** (no rebuilt equivalent - rare), fall back to the full
+authoring chain: `powerbi-report-planning` -> `powerbi-report-design` -> **empty layout skeleton,
+gestalt-checked against the reference before binding any field** -> `powerbi-report-authoring`.
 
 ## Mandatory validation (before Desktop screenshot review)
 
@@ -306,20 +265,30 @@ crashing" is necessary but not sufficient:
 
 1. **The `powerbi-report-gotchas` skill was read this session**, before the first visual was authored.
    Several items below are one-line summaries of entries that only make sense in full.
-2. **Structural validation passed** (see "Mandatory validation" above), not just a visual glance.
-3. **`layout_contract` is fully specified and `space_audit`-clean** — no overlapping regions, no
-   visual placed outside its page bounds.
-4. **Every slicer that drives the report's default view has an explicit default value set** — no
+2. **Every change is recorded as a replayable patch.** A landing re-run (`--approved-dax`) deletes and
+   recreates the whole `.Report` folder, so an edit that exists only in the bundle is an edit a later
+   legitimate re-run silently discards. This is not bookkeeping — it is the only thing that makes your
+   work survive.
+3. **Every visual you touched was routed to you by the validator**, not chosen off the raw
+   `viz_fidelity` list. A `reason` can describe a deferral that must *not* be reversed.
+4. **The whole-page gestalt was compared against the reference** — per-visual checks structurally
+   cannot catch a page that reads wrong as a whole.
+5. **Structural validation passed** (see "Mandatory validation" above), not just a visual glance.
+6. **No overlapping regions and nothing placed outside its page bounds** — `space_audit`-clean. When
+   you *authored* a page from scratch this means the full `layout_contract`; when you repaired an
+   existing one it means **your fix did not introduce an overlap**, which is the common way a
+   well-intentioned resize breaks a neighbour.
+7. **Every slicer that drives the report's default view has an explicit default value set** — no
    visual should render an all-rows aggregate on first load (`powerbi-report-gotchas` §8).
-5. **Every table/matrix visual's field projection has been checked against the real Tableau
+8. **Every table/matrix visual's field projection has been checked against the real Tableau
    worksheet**, not accepted on a plausible-looking guess — especially any single-active-field
    pattern (`powerbi-report-gotchas` §4).
-6. **Every percentage/scaled numeric field's `formatString` has been checked against a real sample
+9. **Every percentage/scaled numeric field's `formatString` has been checked against a real sample
    value via DAX**, not assumed from the field's semantic name alone (`powerbi-report-gotchas` §3).
-7. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
+10. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
    `limitations_encountered` has been explicitly addressed or explicitly flagged** — none silently
    dropped.
-8. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
+11. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
    still needs the relevant subset of this list re-checked (at minimum #4–#6 for the visual touched)
    before you report it done.
 
