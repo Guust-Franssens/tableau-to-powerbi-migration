@@ -123,10 +123,22 @@ share this view and would be silently re-scoped if it were re-added as an ordina
 Re-adding that as a filter would change other visuals' numbers. **The validator classifies each row
 as fixable / accepted-limitation / false-claim; you repair only what it routes to you.**
 
-⚠️ **Every PBIR edit must also be recorded as a replayable patch.** There is no `--approved-viz`
-landing channel upstream, and a landing re-run (`--approved-dax`) **deletes and recreates** the whole
-`.Report` folder. An edit that exists only in the bundle is an edit that a later, legitimate re-run
-silently discards. Write what you changed and why alongside the report so it can be re-applied.
+⚠️ **Every PBIR edit must be re-runnable from `_build/`, not just present in the bundle.** There is no
+`--approved-viz` landing channel upstream, and a landing re-run (`--approved-dax`) **deletes and
+recreates** the whole `.Report` folder — so a bundle-only edit is one a later *legitimate* re-run
+silently discards. Write `_build/fix_<what>.py`, following the existing pattern in
+`examples/price-of-prosperity/_build/gen.py` (a re-runnable PBIR generator whose `emit` mode rewrites
+every `visual.json`). Three properties make it a patch rather than an edit:
+
+- **finds its target semantically** — by worksheet name, page name or visual type; never by file
+  path, array index or `lineageTag`. The engine rewrites whole files, so anything positional
+  re-applies to the wrong visual or silently no-ops;
+- **touches only what it claims to**, so two fixes can be re-run in any order;
+- **is idempotent** — twice must equal once, which is what makes *"re-run the engine, then re-run the
+  fixes"* a recipe instead of a gamble.
+
+Worth actually doing once per migration: re-run the engine, re-run your scripts, confirm you land on
+the same report. If you cannot, you do not have a patch — you have an edit.
 
 ### Visual encoding — only when you must change an encoding
 
@@ -211,8 +223,8 @@ it is slow, and `validate` will not catch a wrong encoding.
    `measure_names_values_pivot` (bind each field in `pivoted_field_ids` **directly**; never recreate
    Tableau's literal Measure Names/Values column).
 5. Validate structurally (below), **then** re-screenshot. Structure and render are different claims.
-6. **Record every change as a replayable patch** - a bundle-only edit does not survive a landing
-   re-run.
+6. **Write the change as a `_build/fix_*.py`** (see the rule above) — a bundle-only edit does not
+   survive a landing re-run.
 7. Report back: what you repaired, what you left as an accepted limitation *and why*, any
    `viz_fidelity` row you believe is a false claim (route it back, never silently fix), and new
    `limitations_encountered` entries (`stage: "report_build"`).
@@ -265,10 +277,9 @@ crashing" is necessary but not sufficient:
 
 1. **The `powerbi-report-gotchas` skill was read this session**, before the first visual was authored.
    Several items below are one-line summaries of entries that only make sense in full.
-2. **Every change is recorded as a replayable patch.** A landing re-run (`--approved-dax`) deletes and
-   recreates the whole `.Report` folder, so an edit that exists only in the bundle is an edit a later
-   legitimate re-run silently discards. This is not bookkeeping — it is the only thing that makes your
-   work survive.
+2. **Every change lives in a `_build/fix_*.py` that is semantic, scoped and idempotent** — verified by
+   actually re-running the engine and then the scripts, not asserted. Anything else is discarded by
+   the next landing re-run.
 3. **Every visual you touched was routed to you by the validator**, not chosen off the raw
    `viz_fidelity` list. A `reason` can describe a deferral that must *not* be reversed.
 4. **The whole-page gestalt was compared against the reference** — per-visual checks structurally
