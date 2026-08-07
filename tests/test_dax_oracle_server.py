@@ -241,12 +241,37 @@ def test_serving_without_a_target_is_refused_rather_than_guessed():
 
 
 def test_offline_mode_says_plainly_that_it_proves_nothing_about_a_model():
-    """An offline pass is plumbing evidence only. It must never read as model verification."""
+    """An offline pass is plumbing evidence only. It must never read as model verification.
+
+    The disclaimer is asserted unconditionally because it is printed BEFORE certification runs, so
+    it holds with or without the engine installed. The exit code is only meaningful when the engine
+    IS present - without it, `--certify` correctly exits 2 ("contract module not found"), and
+    asserting 0 there tests the machine rather than the code (measured: this failed on CI, which
+    has no deterministic tier).
+    """
     proc = subprocess.run(
         [sys.executable, str(REPO / "scripts" / "dax_oracle_server.py"), "--certify", "--offline"],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert proc.returncode == 0
     assert "PROVES NOTHING" in proc.stderr.upper()
+    if _contract() is not None:
+        assert proc.returncode == 0, proc.stderr
+
+
+def test_certify_without_the_engine_refuses_rather_than_passing_vacuously():
+    """No contract module must mean "cannot certify", never "certified".
+
+    The dangerous failure here is the silent one: if a missing engine degraded to a pass, every run
+    on a machine without the deterministic tier would report CONFORMS having checked nothing.
+    """
+    import dax_oracle_server as module  # noqa: PLC0415
+
+    original = module.CONTRACT_CANDIDATES
+    module.CONTRACT_CANDIDATES = (Path(__file__).parent / "no-such-engine",)
+    try:
+        assert module._load_contract() is None
+        assert module.certify(module.make_oracle(module._stub_executor)) == 2
+    finally:
+        module.CONTRACT_CANDIDATES = original

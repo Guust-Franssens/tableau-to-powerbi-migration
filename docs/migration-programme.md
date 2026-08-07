@@ -56,12 +56,19 @@ output carries it** because his engine does not need it: it converts, it does no
 
 So the parser stays, and it is not duplicated effort. Two consequences follow, though:
 
-- **Connection parsing IS duplicated, and he does it better.** His `connection_to_m.py` fully
-  handles feature-flagged `_.fcp.` attributes, *including* the Databricks trap where the HTTP path
-  hides in `_.fcp.DatabricksCatalog.true...v-http-path` — which is exactly our open issue #42.
-  Re-solving that on our side is re-solving it worse. Prefer his extraction for anything that feeds
-  **M generation**; keep ours only for the live-vs-flat-file *classification* that arms the
-  credential gate, which is ours by the boundary ("is it reachable" is around the workbook).
+- **Connection FCP parsing is parallel, not duplicated — and BOTH sides are now correct.** Tableau
+  writes some connection attributes twice behind a document-format flag
+  (`_.fcp.DatabricksCatalog.true...v-http-path`), where the `.true`/`.false` variants mean
+  *different things*, so a blind prefix-strip is actively harmful. He resolves it with
+  `_resolve_fcp_attributes(datasource)`, called before any connection reader runs, so his bare-name
+  lookups (`connection_to_m._http_path_of`) are correct *by construction*. We resolve it per
+  attribute in `parse_tableau._conn_attr`, reading `<document-format-change-manifest>` to pick the
+  live variant. **Neither is redundant**: his feeds M generation, ours feeds the live-vs-flat-file
+  classification that arms the credential gate, and the two run at different times on different
+  inputs. ⚠️ **An earlier revision of this section claimed "his does it better, prefer his for M
+  generation". That was wrong**, and it was wrong for an instructive reason: it was read off his
+  *comments* describing the FCP shapes rather than off the resolution code. A docstring is a claim,
+  not evidence — the same rule we apply to subagents applies to reading a peer's repo.
 - **`migration-spec.json` is load-bearing** — 38 tracked files reference it, including the
   credential gate's arming point and all four personas. Any future move here is a **contract**
   change, not a file deletion.

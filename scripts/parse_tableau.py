@@ -144,8 +144,11 @@ def _conn_attr(conn_el: etree._Element, attr: str) -> str | None:
     the catalog with a `/sql/1.0/warehouses/...` string, a wrong value that still looks like a value.
 
     Measured 2026-08-05: without this, a real Databricks `.twbx` yields `http_path: None` and
-    `database: None`, so the emitted M cannot connect. The deterministic tier has the same gap
-    (`connection_to_m._http_path_of` checks only the bare spellings), reported upstream.
+    `database: None`, so the emitted M cannot connect. The deterministic tier had the same gap then;
+    re-checked 2026-08-07, it no longer does — `connection_to_m` now calls `_resolve_fcp_attributes`
+    before any connection reader, so its bare-name lookups are correct by construction. Both sides
+    are right, and neither is redundant: his feeds M generation, this feeds the live-vs-flat-file
+    classification that arms the credential gate.
     """
     direct = conn_el.get(attr)
     if direct:
