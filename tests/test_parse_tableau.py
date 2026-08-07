@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from parse_tableau import _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
+from parse_tableau import _conn_attr, _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
@@ -418,3 +418,55 @@ def test_shelf_encodings_carry_the_table_calc_addressing_inputs():
             assert "field_id" in pill
             assert "derivation" in pill, f"{shelf} pill lost its derivation - the axis grain is what sets the ORDER BY"
     assert "manual_sort" in worksheet, "an explicit sort overrides the natural order and must survive"
+
+
+FCP_WORKBOOK = """<workbook version='18.1'>
+  <document-format-change-manifest>
+    <_.fcp.DatabricksCatalog.true...DatabricksCatalog />
+  </document-format-change-manifest>
+  <datasources><datasource caption='D' name='d.0'><connection class='federated'>
+    <named-connections><named-connection name='dbx.0'>
+      <connection class='databricks' server='adb.azuredatabricks.net'
+        _.fcp.DatabricksCatalog.false...dbname='/sql/1.0/warehouses/LEGACY'
+        _.fcp.DatabricksCatalog.true...dbname='unity_catalog'
+        _.fcp.DatabricksCatalog.true...v-http-path='/sql/1.0/warehouses/abc123' />
+    </named-connection></named-connections>
+  </connection></datasource></datasources></workbook>"""
+
+
+def _fcp_connection_element():
+    """The real Tableau shape: a manifest entry making `.true` live, and BOTH dbname variants."""
+    from lxml import etree  # noqa: PLC0415
+
+    return etree.fromstring(FCP_WORKBOOK.encode()).find(".//named-connection/connection")
+
+
+def test_feature_flagged_attribute_is_resolved_when_only_the_FCP_spelling_exists():
+    """`v-http-path` exists ONLY behind the flag, so a bare-name read returns None and the M dies.
+
+    The existing federated fixture carries the BARE `v-http-path`, so it exercises the early-return
+    branch and proves nothing about this path - which is why this test builds the flagged shape
+    explicitly. Without it, a real Databricks .twbx yields `http_path: None` (measured 2026-08-05).
+    """
+    assert _conn_attr(_fcp_connection_element(), "v-http-path") == "/sql/1.0/warehouses/abc123"
+
+
+def test_the_LIVE_variant_wins_and_a_blind_prefix_strip_would_corrupt_the_catalog():
+    """`.true` and `.false` mean DIFFERENT things, so stripping the prefix is actively harmful.
+
+    For DatabricksCatalog the `.false` variant of `dbname` holds the LEGACY meaning (the HTTP path)
+    while `.true` holds the Unity catalog. A parser that strips the prefix and takes whichever it
+    meets last writes `/sql/1.0/warehouses/...` into `database` - a wrong value that still looks
+    like a value, so nothing downstream errors.
+    """
+    resolved = _conn_attr(_fcp_connection_element(), "dbname")
+    assert resolved == "unity_catalog"
+    assert not resolved.startswith("/sql/"), "the legacy .false variant overwrote the catalog"
+
+
+def test_a_plain_attribute_still_wins_over_any_flagged_variant():
+    """Control: the direct spelling is authoritative when present, so this cannot regress."""
+    from lxml import etree  # noqa: PLC0415
+
+    el = etree.fromstring(b"<connection dbname='plain' _.fcp.X.true...dbname='flagged' />")
+    assert _conn_attr(el, "dbname") == "plain"
