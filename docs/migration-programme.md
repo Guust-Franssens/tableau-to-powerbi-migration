@@ -347,6 +347,34 @@ Ranked by (likelihood × cost of late discovery), research ranking in brackets.
 | 12 | **Evidence pack + sign-off artifact** | ours | we produce findings, not a signable document |
 | 13 | **Decommission support** | ours (light) | read-only period, archive, licence reclamation |
 
+### 5.0 Corpus findings — what a broader estate actually breaks
+
+The reference Tableau site was enriched from 13 to **38 workbooks** (2026-08-07), and it is a
+*feature-coverage* corpus rather than a usage one — a Tableau training curriculum (Sections 05-15)
+plus a 61-sheet "63 Charts" workbook. 321 sheets, 247 calcs, 10 LODs, 38 table-calcs. That makes it
+much better for hardening than customer content, and worth re-running the engine against after each
+of his releases.
+
+⚠️ **`assess_estate.py` tiers most of it `retire-candidate`, and that is correct behaviour on wrong
+input:** the tool assumes a production estate where no usage means no value. A test corpus has no
+usage by construction. Do not "fix" the tiering for this; just don't tier a corpus.
+
+First run of the deterministic tier over a 6-workbook slice: **bound 2/6, 30 stubbed calcs, 192
+visuals warned**. All four failures shared one root cause, filed upstream as
+[#104](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/104): a multi-table extract makes
+`_extract_materialized_tables` return `[]`, which blocks the untyped-relation collapse, which skips
+the entire `.pbip` — while the bundled `.hyper` holds a complete typed schema (measured:
+`Orders.csv` = 10 columns / 11,807 rows).
+
+**Method note, because two plausible hypotheses were wrong before the third was right.** The clean
+`1 extract -> builds / >=2 -> refuses` correlation was a coincidence, and so was
+`multi-table extract -> refuses` (a 4-table extract built fine). Only instrumenting his actual
+predicate settled it: the guard fires for *both* built and skipped workbooks, and is harmless right
+up until the live relations are also column-less. **A correlation over n=6 looked decisive twice and
+was wrong twice** — run the real code before filing.
+
+---
+
 ### 5.1 The reconciliation seam — both halves are now within reach
 
 His `translation_reconcile` has always had two injection points and **neither has ever had a real
