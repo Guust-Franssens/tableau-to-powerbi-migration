@@ -294,15 +294,15 @@ Ranked by (likelihood × cost of late discovery), research ranking in brackets.
 
 | # | gap | owner | notes |
 |---|---|---|---|
-| 1 | **IAM export + workspace topology design** [🔴1] | ours | zero coverage anywhere today; blocks Foundation |
+| 1 | **IAM export + workspace topology design** [🔴1] | ours | **export DELIVERED** (`assess_estate.py`): grants, Deny cases, per-view grants, local groups without an Entra counterpart. **Topology design still open** - and deliberately so; the tool refuses to map, because a mapping produced before the workspace topology is fixed is confident nonsense |
 | 2 | ~~**Dependency DAG from `sqlproxy`**~~ | **his — DELIVERED** | `estate_survey.py` (2.77.0, issue #98, filed and fixed same day). ✅ Verified live against our site: reports **9 of 13** — exact match with our REST ground truth — and resolves the *correct* published LUID rather than the decoy id. Emits `fetch_order` (datasources first, then workbooks). **We consume it; we do not rebuild it.** |
-| 3 | **Liveness triage** [🔴3 partly] | ours | the "migrate less" lever; ~30–50% typically retirable |
-| 4 | **Subscriptions + alerts inventory** [🔴3] | ours | endpoints verified; nothing built |
+| 3 | ~~**Liveness triage**~~ | **DELIVERED** (`assess_estate.py`) | the "migrate less" lever. Tiering never retires on a metric: a subscription, alert or custom view outranks any view count. ⚠️ Cloud reports **lifetime** counts only, so "no recent use" is not observable - and the tool warns outright when usage is too sparse to tier on |
+| 4 | ~~**Subscriptions + alerts inventory**~~ | **DELIVERED** (`assess_estate.py`) | collected and rolled up from view to workbook, since the decision is taken per workbook |
 | 5 | **Capacity sizing input** [🔴2] | ours (advisory) | we already measure per-view latency — feed it, don't invent an F-SKU |
 | 6 | **Embedded/hard-coded URL audit** [🔴4] | ours (advisory) | needs a SharePoint/Confluence crawl — outside Tableau's API |
-| 7 | **Numeric complexity score** [🟠6] | **ours** | ⚡ his survey deliberately emits only a `complexity_understated` **boolean** — *"I deliberately did not invent a scoring model."* Correct call on his part, but it means the corrected score (folding the published datasource's calcs/LODs into its dependants) is **ours to compute** |
-| 8 | **Tableau Prep flows** [🟠8] | ours | ⚡ never considered; `/sites/{id}/flows` **verified 200**. Flows are ETL — a separate dependency chain that must land before the extracts they produce |
-| 8b | **Custom views** | ours | ⚡ `/sites/{id}/customviews` **verified 200**. Per-user saved filter states — both a migration item (≈ PBI personal bookmarks) and the *strongest* liveness signal available: making one is unambiguous deliberate use |
+| 7 | **Numeric complexity score** — ⚠️ **partial** | **ours** | ⚡ his survey deliberately emits only a `complexity_understated` **boolean** — *"I deliberately did not invent a scoring model."* Correct call on his part. `assess_estate.py` now scores sheets/dashboards/calcs/LODs/table-calcs, **but does not yet fold a published datasource's calcs into its dependants** — it flags those workbooks as understated instead. Honest, not finished |
+| 8 | ~~**Tableau Prep flows**~~ | **DELIVERED** (`assess_estate.py`) | ⚡ never considered before; `/sites/{id}/flows` **verified 200**. Counted and reported as a separate dependency chain that lands before the extracts it produces. Inventory only — nothing *migrates* a flow |
+| 8b | ~~**Custom views**~~ | **DELIVERED** (`assess_estate.py`) | ⚡ `/sites/{id}/customviews` **verified 200**. Used as the *strongest* liveness signal available — making one is unambiguous deliberate use, so it holds a workbook out of the retire tier regardless of view count. Still an un-migrated item (≈ PBI personal bookmarks) |
 | 9 | **RLS test matrix per role** [🟠7] | ours | he *builds* roles; nobody *tests* them per-role |
 | 10 | **Refresh schedule staggering** [🟡9] | ours | trivially avoidable stampede on go-live morning |
 | 11 | **Figure-level oracle via VDS** | ours | needed for per-visual parity; 100 calls/hr/Creator limit |
@@ -334,13 +334,21 @@ structural/image tiers, estate fan-out, Fabric-overlap comparison.
 
 ## 6. Build order
 
-1. **`assess_estate.py`** — liveness + IAM + complexity scoring in one read-only pass, **consuming
-   his `estate_survey.py --json` as the dependency input** rather than recomputing it. This is the
-   **entry point** and it unblocks gaps 1, 3, 4, 7.
+1. ~~**`assess_estate.py`**~~ — **DELIVERED** (`17afa6d`). Liveness + IAM + complexity in one
+   read-only pass, **consuming his `estate_survey.py --json` as the dependency input** rather than
+   recomputing it. Closes gaps 1 (export half), 3, 4, 7, 8 and 8b. Verified live: 13 workbooks in
+   16 s, 241 grant rows, 9 dependency edges — matching REST ground truth.
+   **Still open from gap 1:** the *topology design* half. The tool deliberately exports grants and
+   refuses to map them, because mapping before the Power BI workspace topology is fixed produces
+   confident nonsense. That refusal is the correct default, but it means somebody still has to do
+   the design — see §3.1.
 2. **Desktop DAX executor adapter** — fills his `fabric_oracle(dax_query)` socket from our existing
    `probe_desktop_query` ADOMD path, and pairs with the Tableau oracle to close the reconciliation
-   loop (§5.1).
+   loop (§5.1). **This is the next build**, and it is the highest-leverage one left: both halves of
+   a loop that has never once run end-to-end now exist, and nothing but the adapter separates them.
 3. **Provenance stamp** into the oracle manifest (`captured_as`, usage, lineage, blast radius).
+   Partly delivered: `stamp_tableau_provenance.py` (`b76942d`) links an input to its Tableau origin
+   and is wired into `run_estate.py`; folding it into the *oracle* manifest is what remains.
 4. **VDS figure-level oracle** (gap 11) — the last piece of true per-visual parity.
 5. **Evidence pack generator** (gap 12) — turns our findings into something a business owner signs.
 
