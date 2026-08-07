@@ -44,8 +44,8 @@ Two separate gaps kept biting real migrations:
    `1606` vs a declared `1604`), and `ImageSave` serialises the live one - so on a mismatched bundle
    the reopen fails with a CompatibilityLevel *downgrade* error and no visible message. That is why
    the original run succeeded and later ones did not: the difference was the bundle, not the method.
-   `image_save()` now refuses on a mismatch unless `--align-compat` is given. See the `--save`
-   warning below.
+   `image_save()` aligns `database.tmdl` to the live level as part of saving, which is what
+   Desktop's own Save does. See the `--save` warning below.
 
    Two implementation notes: the AMO client raises *"The server sent an unrecognizable response"*
    while writing the file correctly, so success is judged by the FILE (exists, non-empty, newly
@@ -274,16 +274,6 @@ def _load_amo():
     return Server
 
 
-class CompatibilityMismatch(RuntimeError):
-    """The live database's compatibility level disagrees with the project's declared one.
-
-    Raised rather than returned so it can never be mistaken for "ImageSave was unavailable". That
-    distinction is load-bearing: the caller falls back to driving Desktop's UI when ImageSave fails,
-    and a UI save writes a cache **and** rewrites ~74 files - so treating a deliberate refusal as a
-    failure would perform, by another route, exactly the write we just refused. Measured 2026-08-07.
-    """
-
-
 _COMPAT_RE = re.compile(r"^(?P<indent>\s*)compatibilityLevel:\s*(?P<level>\d+)\s*$", re.M)
 
 
@@ -308,43 +298,44 @@ def align_declared_compatibility(path: Path, level: int) -> None:
     path.write_text(new_text, encoding="utf-8", newline="")
 
 
-def _compat_guard(database, model_dir: Path | None, align_compat: bool) -> None:
-    """Refuse (or align) when the live database's compatibility level differs from the project's.
+def _align_compatibility(database, model_dir: Path | None) -> str | None:
+    """Make ``database.tmdl`` declare the level the live database is actually running at.
 
-    Raises :class:`CompatibilityMismatch` to refuse; returns ``None`` when it is safe to write.
+    Returns a note describing the change, or ``None`` when nothing needed doing.
+
+    **This is not optional and there is no flag for it**, because there is no useful other
+    behaviour: a cache is only loadable when its level matches the project's, so refusing to align
+    would just be a `--save` that cannot save. It is also exactly what Desktop's own Save does
+    (measured: `1604 -> 1606` written at the same timestamp as `cache.abf`). An earlier version made
+    it opt-in behind `--align-compat`; that was ceremony rather than safety, since the only response
+    to the refusal is to re-run with the flag.
     """
     if model_dir is None:
-        return
+        return None
     live_level = int(database.CompatibilityLevel)
     declared, declared_path = read_declared_compatibility(model_dir)
     if declared is None or declared == live_level:
-        return
-    if not align_compat:
-        raise CompatibilityMismatch(
-            f"live database is compatibilityLevel {live_level} but {declared_path.name} declares "
-            f"{declared}. Saving would write a {live_level} cache into a {declared} project, and the "
-            f"reopen fails with a CompatibilityLevel downgrade error and NO visible message. Re-run "
-            f"with --align-compat to update {declared_path.name} to {live_level} (this is exactly "
-            f"what Desktop's own Save does)."
-        )
+        return None
     align_declared_compatibility(declared_path, live_level)
+    return f"aligned {declared_path.name} {declared} -> {live_level} (Desktop runs the model at {live_level})"
 
 
-def image_save(port: int, cache_path: Path, model_dir: Path | None = None, align_compat: bool = False):
+def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
     """Persist the in-memory model to ``<Name>.SemanticModel/.pbi/cache.abf`` via AMO ``ImageSave``.
 
-    ⚠️ **A cache is only loadable if its compatibility level MATCHES the project's.** Root-caused
-    2026-08-07: Desktop silently runs the database at a HIGHER level than the project declares (we
-    measured live ``1606`` against a ``database.tmdl`` of ``1604``, on a server whose default is
-    ``1700``). ``ImageSave`` serialises the *live* database, so the cache is a 1606 image while the
-    project still says 1604 -- and the reopen hits Desktop's own **"Tabular databases do not support
-    CompatibilityLevel downgrade"**, which surfaces only as an ``Untitled - Power BI Desktop`` window
-    and a bridge ``Host is not ready to accept operations``.
+    ⚠️ **A cache is only loadable if its compatibility level MATCHES the project's**, so this
+    ALIGNS ``database.tmdl`` to the live level as part of saving -- exactly what Desktop's own Save
+    does. Root-caused 2026-08-07: Desktop silently runs the database ABOVE the declared level (we
+    measured live ``1606`` against a ``database.tmdl`` of ``1604``, server default ``1700``).
+    ``ImageSave`` serialises the *live* database, so without the alignment the cache is a 1606 image
+    in a 1604 project and the reopen hits Desktop's own **"Tabular databases do not support
+    CompatibilityLevel downgrade"** -- which surfaces with NO visible message, only an
+    ``Untitled - Power BI Desktop`` window and a bridge ``Host is not ready to accept operations``.
 
-    **Desktop's own Save does not have this problem because it rewrites BOTH**: a UI Save was measured
-    updating ``database.tmdl`` 1604 -> 1606 and writing ``cache.abf`` at the same timestamp, keeping
-    project and cache in lockstep. This function therefore refuses by default when they disagree, and
-    ``align_compat=True`` opts into making the same edit Desktop would have made.
+    ⚠️ **Saving therefore EDITS the deployable artifact.** ``database.tmdl`` is part of what gets
+    deployed, and this raises its declared level. If a downstream target cannot accept the higher
+    level, do not pass ``--save`` -- the default (refresh in memory, persist nothing) exists exactly
+    for the validate-then-deploy path, and leaves the project byte-identical.
 
     Note the client throws "The server sent an unrecognizable response" while writing correctly, so
     success is judged by the FILE (exists, non-empty, newly written), never by the absence of an
@@ -361,7 +352,9 @@ def image_save(port: int, cache_path: Path, model_dir: Path | None = None, align
     try:
         database = server.Databases[0]
         live_level = int(database.CompatibilityLevel)
-        _compat_guard(database, model_dir, align_compat)
+        aligned = _align_compatibility(database, model_dir)
+        if aligned:
+            print(f"  save   : {aligned}")
 
         stream = FileStream(str(cache_path), FileMode.Create, FileAccess.Write)
         try:
@@ -591,18 +584,13 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
         return 2
     print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
 
-    # Not saving is the DEFAULT. Root-caused 2026-08-07: the 3-vs-3 that produced this default
-    # (2026-08-04) was real but MIS-ATTRIBUTED. Persisting is not inherently destructive - a cache
-    # whose compatibility level DISAGREES with the project's is. Desktop silently runs the database
-    # at a higher level than `database.tmdl` declares (measured: live 1606 vs declared 1604), and
-    # `ImageSave` serialises the live one, so the reopen hits "Tabular databases do not support
-    # CompatibilityLevel downgrade" - which surfaces only as an `Untitled - Power BI Desktop` window
-    # and `Host is not ready to accept operations`, with no visible message. Desktop's own Save is
-    # immune because it rewrites `database.tmdl` AND `cache.abf` together, in lockstep (measured:
-    # 1604 -> 1606 at the same timestamp as the cache). `image_save` now refuses on a mismatch, and
-    # `--align-compat` opts into making the same edit Desktop makes. The default stays off because
-    # aligning WRITES TO THE MODEL DEFINITION, which is a decision a caller should take knowingly.
-    # `--no-save` is retained as a no-op for existing callers.
+    # Not saving is the DEFAULT, but the reason has changed. The 3-vs-3 that produced this default
+    # (2026-08-04) was real but MIS-ATTRIBUTED: persisting is not inherently destructive, persisting
+    # a cache whose compatibility level disagrees with the project's is. `image_save` now aligns
+    # `database.tmdl` to the live level as part of saving (what Desktop's own Save does), so --save
+    # WORKS. The default stays off for a different and simpler reason: saving EDITS THE DEPLOYABLE
+    # ARTIFACT (it raises database.tmdl's declared level), and the common path here is validate-then-
+    # deploy, which wants the project left byte-identical. `--no-save` is a no-op for old callers.
     if not args.save:
         return None
 
@@ -611,14 +599,7 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     saved, save_message = (False, "no cache path resolved")
     if cache is not None and not args.ui_save:
         try:
-            saved, save_message = image_save(port, cache, model_dir=cache.parent.parent, align_compat=args.align_compat)
-        except CompatibilityMismatch as exc:
-            # A deliberate refusal, NOT a failure. Returning here is the whole point: the UI-save
-            # fallback below would write a cache anyway (and rewrite ~74 files), performing exactly
-            # the write we just refused. Measured 2026-08-07 when this fell through by accident.
-            print(f"  save   : REFUSED - {exc}")
-            print("REFRESH: NOT_PERSISTED (compatibility mismatch; nothing was written)")
-            return 2
+            saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
     if not saved:
@@ -679,12 +660,12 @@ def main(argv: list[str] | None = None) -> int:
         "--save",
         action="store_true",
         help=(
-            "Persist the refreshed model to .pbi/cache.abf via AMO ImageSave. OFF BY DEFAULT: a "
-            "persisted cache was measured (3-vs-3, 2026-08-04) to make the PBIP UNOPENABLE - "
-            "Desktop opens it as 'Untitled' with no error and the bridge reports 'Host is not "
-            "ready to accept operations'. Only pass this when a later step genuinely needs the "
-            "data to survive a Desktop restart, and re-open the PBIP afterwards to confirm it still "
-            "loads"
+            "Persist the refreshed model to .pbi/cache.abf via AMO ImageSave, so the next Desktop "
+            "open has data without re-refreshing. This also ALIGNS database.tmdl's compatibilityLevel "
+            "to the level Desktop actually runs the model at (e.g. 1604 -> 1606) - required, because "
+            "a cache at a different level than the project makes the PBIP silently unopenable, and it "
+            "is what Desktop's own Save does. OFF BY DEFAULT because it EDITS THE DEPLOYABLE ARTIFACT: "
+            "for validate-then-deploy, omit it and the project stays byte-identical"
         ),
     )
     parser.add_argument(
@@ -697,15 +678,6 @@ def main(argv: list[str] | None = None) -> int:
         "--ui-save",
         action="store_true",
         help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
-    )
-    parser.add_argument(
-        "--align-compat",
-        action="store_true",
-        help=(
-            "On --save, if the live database's compatibilityLevel differs from database.tmdl's, "
-            "update database.tmdl to match (what Desktop's own Save does). Without this, a mismatch "
-            "REFUSES rather than writing a cache the project cannot load."
-        ),
     )
     args = parser.parse_args(argv)
 

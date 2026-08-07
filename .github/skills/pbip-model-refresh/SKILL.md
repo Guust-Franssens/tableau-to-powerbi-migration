@@ -40,7 +40,7 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
                                      [--save] [--verify-only] [--ui-save]
 ```
 
-> ⚠️ **`--save` REFUSES on a compatibility-level mismatch — that guard is what makes it safe.**
+> ⚠️ **`--save` ALIGNS `database.tmdl`, and that alignment is what makes it work.**
 > **Root-caused 2026-08-07.** The earlier finding (3-vs-3 on 2026-08-04: a persisted `cache.abf`
 > made the PBIP open as **"Untitled - Power BI Desktop"** with the bridge reporting
 > `Host is not ready to accept operations`) was **real but mis-attributed**. Persisting is not
@@ -49,21 +49,29 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
 >
 > **The mechanism.** Desktop silently runs the database at a HIGHER level than the project declares —
 > measured live `Database.CompatibilityLevel: 1606` against a `database.tmdl` of `1604`, on a server
-> whose default is `1700`. `ImageSave` serialises the **live** database, so the cache is a 1606 image
-> sitting in a 1604 project. The reopen then hits Desktop's own **"Tabular databases do not support
-> CompatibilityLevel downgrade"**, which surfaces with **no visible message** — only the `Untitled`
-> window and the bridge error.
+> whose default is `1700`. `ImageSave` serialises the **live** database, so without alignment the
+> cache is a 1606 image in a 1604 project. The reopen then hits Desktop's own **"Tabular databases do
+> not support CompatibilityLevel downgrade"**, which surfaces with **no visible message** — only the
+> `Untitled` window and the bridge error.
 >
-> **Why Desktop's own Save is immune:** it rewrites **both**. A UI Save was measured updating
-> `database.tmdl` `1604 -> 1606` and writing `cache.abf` **at the same timestamp**, keeping project
-> and cache in lockstep. (It also reformats ~74 of 84 files and adds 5, including `.gitignore` and
-> `localSettings.json` — so a UI Save is far from a surgical operation.)
+> **`--save` therefore aligns, always, with no flag.** That is exactly what Desktop's own Save does: a
+> UI Save was measured updating `database.tmdl` `1604 -> 1606` and writing `cache.abf` **at the same
+> timestamp**. An earlier version put the alignment behind `--align-compat` and refused otherwise;
+> that was removed as **ceremony rather than safety** — the only possible response to the refusal is
+> to re-run with the flag, so an agent simply learns to always pass it. Verified end to end: after
+> aligning, a cold reopen gives `PREFLIGHT: DATA_OK` with **no refresh**, and the write touches
+> **2 files** where a UI Save touches **79**.
 >
-> `image_save()` now reads `Database.CompatibilityLevel` (one TOM property, on the `Server` it already
-> holds) and **refuses on a mismatch**, naming both numbers. `--align-compat` opts into making the
-> same edit Desktop makes. The default stays off because aligning **writes to the model definition**,
-> which a caller should do knowingly. Verified: after aligning, the cache reopens `DATA_OK` with no
-> refresh.
+> ⚠️ **`--save` stays OFF by default because it EDITS THE DEPLOYABLE ARTIFACT.** `database.tmdl` ships
+> with the model, and saving raises its declared level. The common path — refresh, validate, deploy —
+> wants the project left byte-identical, so simply do not pass `--save`. Pass it only when a later
+> step genuinely needs the data to survive a Desktop restart, and be aware the artifact changed.
+>
+> ⚠️ **A refusal must never fall through to the UI-save fallback.** Measured while fixing this: an
+> early version *returned* a refusal, `main()` read it as "ImageSave unavailable" and drove Desktop's
+> UI instead — which wrote `cache.abf` anyway and rewrote **74 of 89 files**, performing precisely the
+> write that had just been refused. Anything that declines to write must stop the pipeline, not hand
+> off to a fallback that writes.
 >
 > ⚠️ **`MainWindowTitle` is a LOADING STATE before it is a verdict — do not read it early.** Without a
 > cache the title still reads `Untitled - Power BI Desktop` at t+25 s and only becomes the report name
