@@ -40,30 +40,44 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
                                      [--save] [--verify-only] [--ui-save]
 ```
 
-> ⚠️ **`--save` is OFF by default, and that default is load-bearing.** Measured 3-vs-3 on
-> 2026-08-04: with a persisted `cache.abf` present, Desktop opened the PBIP as
-> **"Untitled - Power BI Desktop"** and the bridge reported `Host is not ready to accept operations`
-> (pids 59584, 64668, 50316); with it absent, the same bundle loaded correctly (pids 15216, 4888,
-> 37076). **There is no error message** - the file simply does not open. Restoring a
-> previously-good cache re-breaks opening, so you cannot keep a cache around to skip a slow refresh.
-> Diagnostic: check `MainWindowTitle`, and do not retry.
+> ⚠️ **`--save` REFUSES on a compatibility-level mismatch — that guard is what makes it safe.**
+> **Root-caused 2026-08-07.** The earlier finding (3-vs-3 on 2026-08-04: a persisted `cache.abf`
+> made the PBIP open as **"Untitled - Power BI Desktop"** with the bridge reporting
+> `Host is not ready to accept operations`) was **real but mis-attributed**. Persisting is not
+> inherently destructive; persisting a cache whose compatibility level **disagrees with the
+> project's** is.
 >
-> **RE-VERIFIED 2026-08-06 on Desktop 2.157.627.0 (the finding holds), and the diagnostic is now
-> time-qualified.** Confirmed in the *best possible* case: `ImageSave` wrote a 779 KB `cache.abf` at
-> 21:54:19 from a definition last touched at 21:21:10 - cache newer than the definition, built from
-> exactly it, no TMDL edits in between - and the reopen still never loaded. So this is **not** a
-> staleness or ordering condition; it is not the same phenomenon as the cache-discard note below.
+> **The mechanism.** Desktop silently runs the database at a HIGHER level than the project declares —
+> measured live `Database.CompatibilityLevel: 1606` against a `database.tmdl` of `1604`, on a server
+> whose default is `1700`. `ImageSave` serialises the **live** database, so the cache is a 1606 image
+> sitting in a 1604 project. The reopen then hits Desktop's own **"Tabular databases do not support
+> CompatibilityLevel downgrade"**, which surfaces with **no visible message** — only the `Untitled`
+> window and the bridge error.
 >
-> ⚠️ **`MainWindowTitle` is a LOADING STATE before it is a verdict - do not read it early.** Measured
-> the same day: *without* a cache the title still read `Untitled - Power BI Desktop` at t+25 s and
-> only became `Superstore` by ~t+55 s. Reading at 25 s produced a false "it is broken" on a bundle
-> that was merely still opening, and briefly looked like it refuted the finding. *With* a cache the
-> title stayed `Untitled` at t+15/30/45/60/90/**120 s** and the bridge settled on
-> `bridgeStatus: "error"`, `Host is not ready to accept operations` (`jsonRpcCode -32502`).
-> **Wait >= 90 s before concluding anything**, and prefer the bridge error over the title.
+> **Why Desktop's own Save is immune:** it rewrites **both**. A UI Save was measured updating
+> `database.tmdl` `1604 -> 1606` and writing `cache.abf` **at the same timestamp**, keeping project
+> and cache in lockstep. (It also reformats ~74 of 84 files and adds 5, including `.gitignore` and
+> `localSettings.json` — so a UI Save is far from a surgical operation.)
 >
-> Pass `--save` only when a later step genuinely needs the data to survive a Desktop restart, and
-> **re-open the PBIP afterwards to confirm it still loads.**
+> `image_save()` now reads `Database.CompatibilityLevel` (one TOM property, on the `Server` it already
+> holds) and **refuses on a mismatch**, naming both numbers. `--align-compat` opts into making the
+> same edit Desktop makes. The default stays off because aligning **writes to the model definition**,
+> which a caller should do knowingly. Verified: after aligning, the cache reopens `DATA_OK` with no
+> refresh.
+>
+> ⚠️ **`MainWindowTitle` is a LOADING STATE before it is a verdict — do not read it early.** Without a
+> cache the title still reads `Untitled - Power BI Desktop` at t+25 s and only becomes the report name
+> by ~t+55 s. Reading at 25 s produced a false "it is broken" on a bundle that was merely still
+> opening. **Wait >= 90 s**, and prefer the bridge error over the title.
+>
+> ⚠️ **Never write TMDL with a BOM.** Desktop's project reader hard-rejects one —
+> `UTF8EncodingThrowOnBOM.CheckBom` -> *"Only text with UTF8 encoding without BOM is supported"* — and
+> the file does not open. This bit us during the investigation itself: a probe wrote `database.tmdl`
+> with `[System.Text.UTF8Encoding]::new($true)` and contaminated a whole test arm. In Python use
+> `encoding="utf-8"`; in PowerShell use `-Encoding utf8NoBOM` and never the `Out-File`/`Set-Content`
+> defaults. **This is a separate failure from the compatibility mismatch** — same symptom, different
+> cause, and only the Desktop crash report ("Frown") distinguishes them. Ask for one rather than
+> inferring from the window title.
 
 > ⚠️ **A refresh TIMEOUT is not evidence of a credential modal.** This script used to assert that,
 > and it was wrong: measured 2026-08-04 it fired on 2 of 5 Desktop instances opened on the *same*

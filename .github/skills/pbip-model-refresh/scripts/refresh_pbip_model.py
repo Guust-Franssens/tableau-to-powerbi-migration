@@ -39,6 +39,14 @@ Two separate gaps kept biting real migrations:
    absent, that data can only have come from the cache. Output is ~113-114 KB, matching Desktop's
    own save (114.8 KB).
 
+   !! **That proof holds ONLY when the project's `compatibilityLevel` matches the live database's.**
+   Root-caused 2026-08-07: Desktop silently runs the database ABOVE the declared level (measured live
+   `1606` vs a declared `1604`), and `ImageSave` serialises the live one - so on a mismatched bundle
+   the reopen fails with a CompatibilityLevel *downgrade* error and no visible message. That is why
+   the original run succeeded and later ones did not: the difference was the bundle, not the method.
+   `image_save()` now refuses on a mismatch unless `--align-compat` is given. See the `--save`
+   warning below.
+
    Two implementation notes: the AMO client raises *"The server sent an unrecognizable response"*
    while writing the file correctly, so success is judged by the FILE (exists, non-empty, newly
    written), never by the absence of an exception; and `database_operations ExportToTmdlFolder`
@@ -266,17 +274,69 @@ def _load_amo():
     return Server
 
 
-def image_save(port: int, cache_path: Path) -> tuple[bool, str]:
-    """Persist the in-memory model to `<Name>.SemanticModel/.pbi/cache.abf` via AMO `Server.ImageSave`.
+_COMPAT_RE = re.compile(r"^(?P<indent>\s*)compatibilityLevel:\s*(?P<level>\d+)\s*$", re.M)
 
-    This is the programmatic equivalent of Desktop's Save, and it removes the need to drive the UI.
 
-    Discovered 2026-07-30 by probing the engine rather than accepting "only the Desktop UI can do it":
-    a TMSL `backup` is refused because Desktop runs its Analysis Services instance in **Diskless mode**
-    ("Backup/Restore ... not supported"), but that same mode sets `EnableDisklessTMImageSave=1`, and
-    AMO exposes `Server.ImageSave(databaseId, Stream)`. Proven end to end: delete cache.abf → refresh
-    in memory → ImageSave → **kill Desktop with -Force (no save prompt)** → reopen → DATA_OK, no
-    refresh needed. The bytes match Desktop's own save closely (114.1 KB vs 114.8 KB).
+def read_declared_compatibility(model_dir: Path) -> tuple[int | None, Path | None]:
+    """The ``compatibilityLevel`` declared in ``definition/database.tmdl``, or ``(None, None)``."""
+    path = model_dir / "definition" / "database.tmdl"
+    if not path.exists():
+        return None, None
+    match = _COMPAT_RE.search(path.read_text(encoding="utf-8"))
+    return (int(match.group("level")), path) if match else (None, path)
+
+
+def align_declared_compatibility(path: Path, level: int) -> None:
+    """Rewrite ``database.tmdl``'s declared level. **Never** writes a BOM.
+
+    Desktop's project reader hard-rejects a UTF-8 BOM (`UTF8EncodingThrowOnBOM.CheckBom` ->
+    "Only text with UTF8 encoding without BOM is supported"), and the file simply does not open --
+    so this uses plain ``utf-8`` and the caller re-asserts BOM-free afterwards.
+    """
+    text = path.read_text(encoding="utf-8")
+    new_text = _COMPAT_RE.sub(lambda m: f"{m.group('indent')}compatibilityLevel: {level}", text, count=1)
+    path.write_text(new_text, encoding="utf-8", newline="")
+
+
+def _compat_guard(database, model_dir: Path | None, align_compat: bool) -> str | None:
+    """Refuse (or align) when the live database's compatibility level differs from the project's.
+
+    Returns a refusal message, or ``None`` when it is safe to write. Split out from
+    :func:`image_save` so the decision is independently readable and testable.
+    """
+    if model_dir is None:
+        return None
+    live_level = int(database.CompatibilityLevel)
+    declared, declared_path = read_declared_compatibility(model_dir)
+    if declared is None or declared == live_level:
+        return None
+    if not align_compat:
+        return (
+            f"REFUSED: live database is compatibilityLevel {live_level} but {declared_path.name} "
+            f"declares {declared}. Saving would write a {live_level} cache into a {declared} "
+            f"project, and the reopen fails with a CompatibilityLevel downgrade error and NO "
+            f"visible message. Re-run with --align-compat to update {declared_path.name} to "
+            f"{live_level} (this is exactly what Desktop's own Save does)."
+        )
+    align_declared_compatibility(declared_path, live_level)
+    return None
+
+
+def image_save(port: int, cache_path: Path, model_dir: Path | None = None, align_compat: bool = False):
+    """Persist the in-memory model to ``<Name>.SemanticModel/.pbi/cache.abf`` via AMO ``ImageSave``.
+
+    ⚠️ **A cache is only loadable if its compatibility level MATCHES the project's.** Root-caused
+    2026-08-07: Desktop silently runs the database at a HIGHER level than the project declares (we
+    measured live ``1606`` against a ``database.tmdl`` of ``1604``, on a server whose default is
+    ``1700``). ``ImageSave`` serialises the *live* database, so the cache is a 1606 image while the
+    project still says 1604 -- and the reopen hits Desktop's own **"Tabular databases do not support
+    CompatibilityLevel downgrade"**, which surfaces only as an ``Untitled - Power BI Desktop`` window
+    and a bridge ``Host is not ready to accept operations``.
+
+    **Desktop's own Save does not have this problem because it rewrites BOTH**: a UI Save was measured
+    updating ``database.tmdl`` 1604 -> 1606 and writing ``cache.abf`` at the same timestamp, keeping
+    project and cache in lockstep. This function therefore refuses by default when they disagree, and
+    ``align_compat=True`` opts into making the same edit Desktop would have made.
 
     Note the client throws "The server sent an unrecognizable response" while writing correctly, so
     success is judged by the FILE (exists, non-empty, newly written), never by the absence of an
@@ -291,10 +351,15 @@ def image_save(port: int, cache_path: Path) -> tuple[bool, str]:
     server = server_type()
     server.Connect(f"Data Source=localhost:{port}")
     try:
-        database_id = server.Databases[0].ID
+        database = server.Databases[0]
+        live_level = int(database.CompatibilityLevel)
+        refusal = _compat_guard(database, model_dir, align_compat)
+        if refusal:
+            return False, refusal
+
         stream = FileStream(str(cache_path), FileMode.Create, FileAccess.Write)
         try:
-            server.ImageSave(database_id, stream)
+            server.ImageSave(database.ID, stream)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             # Expected: the response parser trips even on a successful write. Fall through to the
             # file check, which is the real evidence.
@@ -305,7 +370,8 @@ def image_save(port: int, cache_path: Path) -> tuple[bool, str]:
         server.Disconnect()
 
     if cache_path.exists() and cache_path.stat().st_size > 0 and cache_path.stat().st_mtime > before:
-        return True, f"persisted via AMO ImageSave ({cache_path.stat().st_size / 1024:.1f} KB)"
+        size_kb = cache_path.stat().st_size / 1024
+        return True, f"persisted via AMO ImageSave ({size_kb:.1f} KB, compatibilityLevel {live_level})"
     return False, "ImageSave did not produce a cache file"
 
 
@@ -519,12 +585,18 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
         return 2
     print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
 
-    # Not saving is the DEFAULT. Measured 3-vs-3 (2026-08-04): with a persisted `cache.abf` present,
-    # Desktop opened the PBIP as "Untitled - Power BI Desktop" and the bridge reported `Host is not
-    # ready to accept operations` (pids 59584, 64668, 50316); with it absent the same bundle loaded
-    # correctly (pids 15216, 4888, 37076). Restoring a previously-good cache re-breaks opening, so
-    # there is no workaround - which is why the safe behaviour has to be the default rather than an
-    # opt-out that callers must remember. `--no-save` is retained as a no-op for existing callers.
+    # Not saving is the DEFAULT. Root-caused 2026-08-07: the 3-vs-3 that produced this default
+    # (2026-08-04) was real but MIS-ATTRIBUTED. Persisting is not inherently destructive - a cache
+    # whose compatibility level DISAGREES with the project's is. Desktop silently runs the database
+    # at a higher level than `database.tmdl` declares (measured: live 1606 vs declared 1604), and
+    # `ImageSave` serialises the live one, so the reopen hits "Tabular databases do not support
+    # CompatibilityLevel downgrade" - which surfaces only as an `Untitled - Power BI Desktop` window
+    # and `Host is not ready to accept operations`, with no visible message. Desktop's own Save is
+    # immune because it rewrites `database.tmdl` AND `cache.abf` together, in lockstep (measured:
+    # 1604 -> 1606 at the same timestamp as the cache). `image_save` now refuses on a mismatch, and
+    # `--align-compat` opts into making the same edit Desktop makes. The default stays off because
+    # aligning WRITES TO THE MODEL DEFINITION, which is a decision a caller should take knowingly.
+    # `--no-save` is retained as a no-op for existing callers.
     if not args.save:
         return None
 
@@ -533,7 +605,7 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     saved, save_message = (False, "no cache path resolved")
     if cache is not None and not args.ui_save:
         try:
-            saved, save_message = image_save(port, cache)
+            saved, save_message = image_save(port, cache, model_dir=cache.parent.parent, align_compat=args.align_compat)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
     if not saved:
@@ -612,6 +684,15 @@ def main(argv: list[str] | None = None) -> int:
         "--ui-save",
         action="store_true",
         help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
+    )
+    parser.add_argument(
+        "--align-compat",
+        action="store_true",
+        help=(
+            "On --save, if the live database's compatibilityLevel differs from database.tmdl's, "
+            "update database.tmdl to match (what Desktop's own Save does). Without this, a mismatch "
+            "REFUSES rather than writing a cache the project cannot load."
+        ),
     )
     args = parser.parse_args(argv)
 

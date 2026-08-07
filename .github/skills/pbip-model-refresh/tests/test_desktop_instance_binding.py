@@ -328,7 +328,11 @@ def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_p
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
 
-    def fake_image_save(port: int, cache_path: Path) -> tuple[bool, str]:
+    def fake_image_save(port: int, cache_path: Path, model_dir=None, align_compat: bool = False):
+        # Signature mirrors the real image_save, including the compatibility-level guard arguments
+        # added 2026-08-07. A stub that lags the real signature raises TypeError, which main()
+        # swallows into the UI-save fallback - so this test would go green against a broken call.
+        del port, model_dir, align_compat
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(b"cache")
         return True, "persisted"
