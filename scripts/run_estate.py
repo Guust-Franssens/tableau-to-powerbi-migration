@@ -170,6 +170,29 @@ def slice_handovers(report: dict, out_dir: Path) -> list[Path]:
     return written
 
 
+def stamp_inputs(input_dir: Path, out_dir: Path) -> str | None:
+    """Record where each input workbook came from, into ``<out>/source-provenance.json``.
+
+    Best-effort by design: a migration must never fail because a Tableau site was unreachable, so a
+    lookup failure degrades to fingerprints and anything unexpected degrades to no file at all.
+    Imported lazily so `run_estate` still works in an environment where the stamper is absent.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+        result = prov.build(input_dir, prov.load_env(Path(".env")))
+        if not result["input_count"]:
+            return None
+        path = out_dir / "source-provenance.json"
+        path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        matched = sum(1 for r in result["inputs"] if (r.get("origin") or {}).get("match") == "sha256")
+        return f"{result['input_count']} input(s) stamped, {matched} confirmed against the site -> {path}"
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        log.warning("provenance stamp skipped (%s: %s)", type(exc).__name__, str(exc)[:120])
+        return None
+
+
 def write_phase_record(out_dir: Path, phases: list[dict]) -> Path:
     """Persist the phase timings.
 
@@ -280,6 +303,20 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_ENGINE_FAILED
 
     report = read_report(args.output)
+
+    # --- phase 1b: stamp where the inputs came from -------------------------------------------
+    # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)
+    # and nothing about the upstream: which Tableau site, workbook LUID, project, or product
+    # version. Measured cost of that gap: filing three upstream defects required reconstructing all
+    # of it by hand, and it mattered - Tableau's samples differ between releases, so figures cited
+    # against "Superstore" do not reproduce against a different build and the reader cannot tell.
+    # Best-effort and never fatal: a migration must not fail because a site was unreachable.
+    if args.input:
+        started = time.monotonic()
+        stamped = stamp_inputs(args.input, args.output)
+        phases.append({"phase": "provenance", "elapsed_sec": round(time.monotonic() - started, 1)})
+        if stamped:
+            log.info("PROVENANCE: %s", stamped)
 
     # --- phase 2: the check the engine's exit code cannot give us -----------------------------
     started = time.monotonic()
