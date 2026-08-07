@@ -33,49 +33,10 @@ import tempfile
 import time
 from pathlib import Path
 
+from connection_target import FLAT_FILE, LIVE_SOURCE, powerbi_target
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("preflight_source_credentials")
-
-# Tableau connection `class` values that are LIVE databases: Power BI needs a connection + credential.
-LIVE_DB_CLASSES = {
-    "databricks",
-    "spark",
-    "hive",
-    "snowflake",
-    "redshift",
-    "awsathena",
-    "presto",
-    "sqlserver",
-    "azure-sql-dw",
-    "azuresynapse",
-    "postgres",
-    "mysql",
-    "oracle",
-    "teradata",
-    "vertica",
-    "bigquery",
-    "google-bigquery",
-    "saphana",
-    "db2",
-    "netezza",
-    "exasolution",
-    "greenplum",
-    "cloudfile",
-    "webdata-direct",
-}
-
-# Tableau connection `class` values that resolve to a FLAT FILE / path source (no credential; the
-# migration materialises these to CSV and binds a DataFolder parameter).
-FLAT_FILE_CLASSES = {
-    "textscan",
-    "excel-direct",
-    "excel",
-    "msaccess",
-    "json",
-    "csv",
-    "hyper",
-    "dataengine",
-}
 
 # The exact service error code that means "no credential bound yet" (verified against a live refresh).
 CREDENTIALS_NOT_SPECIFIED = "ModelRefreshFailed_CredentialsNotSpecified"
@@ -85,21 +46,41 @@ def classify_source(connection: dict) -> tuple[str, str]:
     """Return (verdict, reason) for one data source's connection dict from a migration-spec.
 
     verdict is one of: "no-creds", "needs-credential", "review".
+
+    **This defers to `connection_target.powerbi_target()` and holds no policy of its own.** It used
+    to keep a second, independently-maintained opinion, and the two disagreed in the one direction
+    that matters - this one failed OPEN:
+
+    - It returned `no-creds` for EVERY `mode == "extract"` source *before* looking at the class, so a
+      Snowflake or Databricks extract was reported as needing no credential. `connection_target`
+      documents the opposite as deliberate policy ("`mode == 'extract'` deliberately does NOT change
+      the answer for a live class - that is exactly the case that looks like a flat file and isn't"),
+      because a packaged `.hyper` is Tableau's *cache* of an upstream system, not a source.
+    - It decided liveness from a DENY-list of known database classes, so anything unlisted fell
+      through to "review". Measured 2026-08-04: `azure_sqldb` appeared nowhere in the repo, so a
+      workbook joining Azure SQL + Snowflake + Databricks printed "No live sources: all extract/flat"
+      and the credential gate never armed. `connection_target` inverts this - an ALLOW-list of file
+      classes, everything else live - precisely so an unknown class fails safe.
+
+    Deleting the duplicate is the fix, not extending it: any deny-list of live systems is incomplete
+    by construction, and each omission is a silent failure of the gate.
     """
     klass = (connection.get("class") or "unknown").lower()
     mode = (connection.get("mode") or "live").lower()
 
-    if mode == "extract":
-        return "no-creds", f"extract-based ('{klass}' -> packaged .hyper); migrates to CSV, no credential"
-    if klass in FLAT_FILE_CLASSES:
-        return "no-creds", f"flat-file source ('{klass}'); path-based, no credential"
-    if klass in LIVE_DB_CLASSES:
+    # The parser stamps this onto every connection it writes; recompute only for legacy specs.
+    target = connection.get("powerbi_target")
+    reason = connection.get("powerbi_target_reason")
+    if not target:
+        target, reason = powerbi_target(klass, mode)
+
+    if target == FLAT_FILE:
+        return "no-creds", reason
+    if target == LIVE_SOURCE:
         server = connection.get("server") or "?"
-        return (
-            "needs-credential",
-            f"LIVE database ('{klass}' @ {server}); Power BI needs a bound connection + credential",
-        )
-    return "review", f"unrecognised connection class '{klass}' (mode='{mode}'); review manually"
+        cached = " (packaged as an extract, but the upstream is what must be connected)" if mode == "extract" else ""
+        return "needs-credential", f"LIVE source ('{klass}' @ {server}){cached}; {reason}"
+    return "review", reason
 
 
 GATE_MARKER = ".credential-gate-BLOCKED.json"
@@ -155,6 +136,25 @@ def _clear_gate_marker(spec_path: Path) -> None:
         )
 
 
+def _classify_legs(src: dict, index: int) -> list[tuple[str, str, str]]:
+    """Classify every connection behind one data source. Returns (name, verdict, reason) per leg.
+
+    A `federated` datasource wraps SEVERAL named connections - a Tableau join across, say, Azure SQL
+    + Snowflake + Databricks is ONE datasource with three live systems behind it. Measured
+    2026-08-04, classifying only the primary armed the credential gate for 1 of 3 and reported the
+    other two nowhere. Under-reporting live sources is the one direction this must never fail in.
+    """
+    conn = src.get("connection", {}) or {}
+    base_name = str(src.get("name") or conn.get("hyper_file") or f"source[{index}]")
+    legs = conn.get("connections") or [conn]
+    classified: list[tuple[str, str, str]] = []
+    for leg_index, leg in enumerate(legs):
+        verdict, reason = classify_source(leg)
+        name = base_name if len(legs) == 1 else f"{base_name}[{leg_index}] {leg.get('class', '?')}"
+        classified.append((name, verdict, reason))
+    return classified
+
+
 def cmd_classify(spec_path: Path) -> int:
     """Classify every data source in a migration-spec.json for credential needs."""
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -168,15 +168,13 @@ def cmd_classify(spec_path: Path) -> int:
     blocked_names: list[str] = []
     log.info("Data-source credential preflight for %s", spec_path)
     for i, src in enumerate(sources):
-        conn = src.get("connection", {}) or {}
-        verdict, reason = classify_source(conn)
-        name = src.get("name") or conn.get("hyper_file") or f"source[{i}]"
-        marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
-        log.info("%s %-28s %s", marker, str(name)[:28], reason)
-        needs += verdict == "needs-credential"
-        review += verdict == "review"
-        if verdict == "needs-credential":
-            blocked_names.append(str(name))
+        for name, verdict, reason in _classify_legs(src, i):
+            marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
+            log.info("%s %-28s %s", marker, name[:28], reason)
+            needs += verdict == "needs-credential"
+            review += verdict == "review"
+            if verdict == "needs-credential":
+                blocked_names.append(name)
 
     log.info("-" * 60)
     if needs:

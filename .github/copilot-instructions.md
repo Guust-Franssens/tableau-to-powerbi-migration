@@ -8,7 +8,7 @@
 ## Session start, do this first (before any other work)
 
 ```
-powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update
+powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream
 ```
 
 Repairs the npm bridge CLIs **if they are below the correctness floor**, then prints the environment
@@ -32,7 +32,7 @@ readiness matrix. Session start is the **only safe moment** to change them.
 
 | When | Run | Why |
 |---|---|---|
-| Session start (nothing in flight) | `preflight.ps1 -Update` | Safe; the CLI floor is a correctness floor |
+| Session start (nothing in flight) | `preflight.ps1 -Update -CheckUpstream` | Safe; the CLI floor is a correctness floor, and this is the one moment upgrading is allowed |
 | Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without changing tooling mid-flow |
 | Mid-migration | never | Swapping the validator under a half-built report is worse than a slightly old one |
 

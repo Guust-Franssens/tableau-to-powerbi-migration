@@ -8,6 +8,7 @@ file must authorize NOTHING, because agents demonstrably create it themselves.
 from __future__ import annotations
 
 import json
+import platform
 import re
 import subprocess
 import sys
@@ -89,6 +90,76 @@ def test_verify_flags_artifacts_built_while_blocked(migration: Path) -> None:
     assert run_gate("verify", str(migration)).returncode == 1
 
 
+def test_verify_flags_materialized_source_data(migration: Path) -> None:
+    """Extracted customer ROWS are a violation, not just a `.tmdl`.
+
+    `verify` used to scan only `{.tmdl,.pbism,.pbir,.pbip}`. Measured 2026-08-04: a
+    deterministic-tier run wrote **two 110 MB CSVs** of source rows next to the model and `verify`
+    reported *"OK - gate applied, no model/report artifacts exist"*. A materialized CSV is a
+    strictly LARGER harm than a definition file - a `.tmdl` describes a model, a `.csv` IS the
+    customer's data on a workstation, extracted from a source whose reachability was never proven.
+    """
+    run_gate("block", str(migration), "--sources", "warehouse")
+    run_gate("clear", str(migration), "--reason", "simulate-evasion")
+    (migration / ".credential-gate-BLOCKED.json").write_text('{"blocked": true, "sources": []}')
+    data = migration / "data" / "Orders"
+    data.mkdir(parents=True)
+    (data / "Extract_Extract.csv").write_text("order_id,amount\n1,42\n")
+
+    result = run_gate("verify", str(migration))
+    assert result.returncode == 1, "materialized rows must fail verification"
+    assert "Extract_Extract.csv" in (result.stdout + result.stderr)
+
+
+def test_verify_scans_outside_fabric(migration: Path) -> None:
+    """A build that lands anywhere in the migration counts, not only under `fabric/`.
+
+    The deterministic tier writes to `pbip/`, `semantic_models/` and `data/`. A `fabric/`-only scan
+    reported "no artifacts exist" beside a complete, unvalidated PBIP.
+    """
+    run_gate("block", str(migration), "--sources", "warehouse")
+    run_gate("clear", str(migration), "--reason", "simulate-evasion")
+    (migration / ".credential-gate-BLOCKED.json").write_text('{"blocked": true, "sources": []}')
+    emitted = migration / "deterministic" / "pbip" / "Wb.SemanticModel" / "definition" / "tables"
+    emitted.mkdir(parents=True)
+    (emitted / "Orders.tmdl").write_text("table Orders")
+
+    assert run_gate("verify", str(migration)).returncode == 1
+
+
+def test_verify_ignores_the_probe_sandbox_and_the_source_workbook(migration: Path) -> None:
+    """The sanctioned exceptions must not self-report a violation.
+
+    `_probe/` is built WHILE the gate is up - that is how a clear is earned, so flagging it would
+    make the gate impossible to satisfy. `source/` is the input we were handed, and `reference/`
+    holds Tableau screenshots; neither is something we built.
+    """
+    run_gate("block", str(migration), "--sources", "warehouse")
+    for relative, name in (
+        ("_probe", "Probe.tmdl"),
+        ("source", "workbook.twbx"),
+        ("source", "bundled.hyper"),
+        ("reference", "tableau-page.csv"),
+    ):
+        folder = migration / relative
+        folder.mkdir(exist_ok=True)
+        (folder / name).write_text("x")
+
+    result = run_gate("verify", str(migration))
+    assert result.returncode == 0, f"sanctioned paths must not trip the gate: {result.stdout}{result.stderr}"
+
+
+def test_verify_does_not_create_directories(tmp_path: Path) -> None:
+    """`verify` is a post-hoc check and must not mutate the tree it judges.
+
+    `denied_dirs` deliberately creates `fabric/` (the ACL needs a directory to apply to), so the
+    audit surface has to be a separate, read-only function - otherwise a read-only verification
+    conjures a phantom directory into every migration it inspects.
+    """
+    run_gate("verify", str(tmp_path))
+    assert not (tmp_path / "fabric").exists(), "verify must not create fabric/"
+
+
 def test_hook_denies_a_guarded_write_under_a_blocked_migration(migration: Path) -> None:
     run_gate("block", str(migration), "--sources", "shipment")
     target = migration / "fabric" / "Shipment.tmdl"
@@ -139,8 +210,6 @@ def test_authorize_is_refused_from_inside_an_agent_session(migration: Path) -> N
     the refusal path. It is the behaviour that matters: an agent must not be able to certify its own
     unvalidated build through the sanctioned command.
     """
-    import platform
-
     if platform.system() != "Windows":
         pytest.skip("lineage check is Windows-only")
     run_gate("block", str(migration), "--sources", "x")
@@ -168,6 +237,10 @@ def test_the_probe_can_build_while_the_deliverable_stays_blocked(migration: Path
     (probe / "shipment.tmdl").write_text("table shipment", encoding="utf-8")
     assert (probe / "shipment.tmdl").exists(), "the probe must be able to build, or the gate deadlocks"
 
+    # The other half - that the DELIVERABLE stays blocked - is the only assertion here that needs
+    # the kernel ACL, so it is the only thing guarded by platform. Everything above holds anywhere.
+    if platform.system() != "Windows":
+        pytest.skip("write-deny enforcement is an icacls ACL; the marker-only path cannot block a write")
     with pytest.raises(PermissionError):
         (migration / "fabric" / "Deliverable.tmdl").write_text("table x", encoding="utf-8")
 
@@ -247,6 +320,34 @@ def test_evidence_predating_the_most_recent_block_does_not_count(migration: Path
     assert run_gate("verify", str(migration)).returncode == 1, "backdated evidence must not count"
 
 
+def test_every_block_action_invalidates_earlier_evidence_on_EVERY_platform() -> None:
+    """The gate's ordering guarantee must not be Windows-only, silently.
+
+    Measured 2026-08-03: `apply_block` records `block` on Windows but `block-marker-only` where
+    there is no icacls, while `_clear_was_earned` and `_last_block_sources` recognised only `block`.
+    So on Linux/macOS a `probe-cleared` recorded BEFORE a re-arm still counted as earned AFTER it -
+    backdated evidence survived exactly the event that exists to invalidate it, and `verify` said OK.
+
+    CI had been reporting this for four consecutive runs and it was read as "those tests are
+    Windows-specific". Asserting the invariant directly, with no subprocess and no platform branch,
+    is what makes the next such failure unambiguous.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import credential_gate as cg  # noqa: PLC0415
+
+    assert cg.BLOCK_ACTIONS == {"block", "block-marker-only"}, (
+        "a new arming action was added without deciding whether it invalidates prior evidence; "
+        "every action that ARMS the gate must be in BLOCK_ACTIONS or the ordering guarantee leaks"
+    )
+    source = (REPO / "scripts" / "credential_gate.py").read_text(encoding="utf-8")
+    readers = source.split("def _icacls", 1)[0]
+    assert '== "block"' not in readers and '!= "block"' not in readers, (
+        "a reader is comparing the audit action against the bare string 'block'. That silently "
+        "excludes 'block-marker-only', which is how the non-Windows ordering hole was introduced. "
+        "Compare against BLOCK_ACTIONS."
+    )
+
+
 def test_dns_precheck_separates_a_bad_address_from_a_missing_credential() -> None:
     """`a hang means a sign-in modal` is only true once the host resolves.
 
@@ -292,8 +393,6 @@ def test_lineage_check_fails_closed_on_an_unknown_chain() -> None:
     happened for real under four concurrent agents - silently AUTHORIZED. "I could not tell" must
     never be read as permission.
     """
-    import platform
-
     if platform.system() != "Windows":
         pytest.skip("lineage check is Windows-only")
     sys.path.insert(0, str(REPO / "scripts"))
@@ -386,7 +485,7 @@ def test_the_classifier_ACTUALLY_ARMS_the_gate_not_just_talks_about_it(tmp_path:
         "so nothing was armed no matter what it printed"
     )
     actions = [json.loads(line)["action"] for line in audit.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert "block" in actions, f"classifier must record a 'block'; got {actions}"
+    assert BLOCK_ACTIONS & set(actions), f"classifier must record a block action; got {actions}"
 
 
 def test_the_classifier_still_forbids_building(tmp_path: Path) -> None:
@@ -762,6 +861,14 @@ def _audit_actions(migration: Path) -> list[str]:
     return [json.loads(line)["action"] for line in text.splitlines() if line.strip()]
 
 
+# `block` (kernel ACL) and `block-marker-only` (non-Windows) both mean "the gate was armed"; they
+# differ only in enforcement strength. Tests assert the SEMANTIC, so they pin the invariant on every
+# platform rather than only where icacls exists - and so a CI failure means the gate is wrong, not
+# that CI runs Linux. A suite that is red for a platform reason trains everyone to ignore it, which
+# is how a real ordering defect here survived four consecutive red runs.
+BLOCK_ACTIONS = frozenset({"block", "block-marker-only"})
+
+
 def test_the_probe_tells_the_agent_not_to_kill_it_for_the_2_minute_cap() -> None:
     """A measured conflict between two pieces of this repo's own guidance, pinned.
 
@@ -858,7 +965,7 @@ def test_rearming_after_a_BARE_clear_still_arms(tmp_path: Path) -> None:
     run_gate("block", str(mig), "--sources", "shipment")
     try:
         assert (mig / ".credential-gate-BLOCKED.json").exists(), "a bare manual-clear must NOT prevent re-arming"
-        assert _audit_actions(mig)[-1] == "block"
+        assert _audit_actions(mig)[-1] in BLOCK_ACTIONS
     finally:
         run_gate("clear", str(mig), "--reason", "test-teardown")
 
@@ -878,7 +985,7 @@ def test_rearming_with_a_NEW_source_still_arms(tmp_path: Path) -> None:
     run_gate("block", str(mig), "--sources", "shipment", "orders")
     try:
         assert (mig / ".credential-gate-BLOCKED.json").exists(), "a newly-added live source must re-arm the gate"
-        assert _audit_actions(mig)[-1] == "block"
+        assert _audit_actions(mig)[-1] in BLOCK_ACTIONS
     finally:
         run_gate("clear", str(mig), "--reason", "test-teardown")
 

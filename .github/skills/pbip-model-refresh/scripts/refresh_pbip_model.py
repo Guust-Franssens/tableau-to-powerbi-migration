@@ -2,7 +2,7 @@
 purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--no-save]
+             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--save]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -39,6 +39,14 @@ Two separate gaps kept biting real migrations:
    absent, that data can only have come from the cache. Output is ~113-114 KB, matching Desktop's
    own save (114.8 KB).
 
+   !! **That proof holds ONLY when the project's `compatibilityLevel` matches the live database's.**
+   Root-caused 2026-08-07: Desktop silently runs the database ABOVE the declared level (measured live
+   `1606` vs a declared `1604`), and `ImageSave` serialises the live one - so on a mismatched bundle
+   the reopen fails with a CompatibilityLevel *downgrade* error and no visible message. That is why
+   the original run succeeded and later ones did not: the difference was the bundle, not the method.
+   `image_save()` aligns `database.tmdl` to the live level as part of saving, which is what
+   Desktop's own Save does. See the `--save` warning below.
+
    Two implementation notes: the AMO client raises *"The server sent an unrecognizable response"*
    while writing the file correctly, so success is judged by the FILE (exists, non-empty, newly
    written), never by the absence of an exception; and `database_operations ExportToTmdlFolder`
@@ -72,6 +80,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -83,10 +92,26 @@ from probe_desktop_query import AUTO_DATE_TABLE_PREFIXES, _load_adomd, discover_
 
 SAVE_SETTLE_SECONDS = 3
 SAVE_TIMEOUT_SECONDS = 120
-# Bounded so a missing credential fails FAST instead of hanging on an invisible sign-in modal.
-# 90s is comfortably above a serverless warehouse cold start (~30-60s) and far below the "agent
-# looks busy but is permanently stuck" territory that made this necessary.
-REFRESH_TIMEOUT_SECONDS = 90
+# The XMLA refresh ceiling. NOT agent-tunable on purpose - there is no CLI flag for it.
+#
+# 300s is chosen from measurement, not intuition. A 246,236-row, 11-table refresh took 38.8s on a
+# good run and over 87s on a slow one (2026-08-04), so the previous 90s ceiling left a ~3s margin and
+# duly false-positived on 2 of 5 Desktop instances opened on the SAME bundle. 5 minutes is
+# comfortably clear of that, and still far below the "agent looks busy but is permanently stuck"
+# territory this bound exists to prevent.
+#
+# Why no flag: a knob here is an attractive nuisance. An agent that hits a timeout will reach for a
+# bigger number - and the one case where waiting longer never helps is the credential wait, which
+# `refresh()` documents this ceiling cannot interrupt anyway. If a model legitimately needs longer,
+# the right lever is `--tables` (refresh only what is needed), not a longer wait.
+REFRESH_TIMEOUT_SECONDS = 300
+
+# Grace on top of the XMLA ceiling before the outer wall clock gives up. The XMLA layer honours
+# `CommandTimeout` precisely for a genuinely slow *query*, so letting it fire first yields a far
+# better error ("The XML for Analysis request timed out ... Timeout value: N sec") than a generic
+# wall-clock abort. The outer bound only exists to catch the case XMLA provably cannot interrupt:
+# a mashup engine parked on a sign-in modal in another process.
+REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
 
 # A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
 # only when it needs to be (spaces, punctuation), so both forms have to be accepted.
@@ -125,31 +150,70 @@ def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIME
       process, which the server cannot preempt the way it aborts a running query.
 
     So it cuts short a source that is merely *slow*, and never one that is waiting on a human.
-    **The caller must run its own clock** — that agent-side "~2 minutes then stop and ask" rule is the
-    only thing that actually bounds this.
+    **Hence the outer wall clock below.** This used to say "the caller must run its own clock", and
+    that was a real defect dressed up as documentation: `probe_live_source.py` did wrap it
+    (`subprocess.run(..., timeout=...)`), but every *direct* caller inherited nothing. Measured
+    2026-08-05, a direct `--pid` call against a never-authenticated Azure SQL server sat blocked on a
+    modal for **956 s** while `REFRESH_TIMEOUT_SECONDS = 300` never fired — and the caller who forgot
+    to wrap it was this repo's own agent. A rule an agent must remember is not a bound; a bound is a
+    bound.
+
+    The ADOMD call runs on a **daemon** thread so that a parked mashup engine — which genuinely
+    cannot be preempted — no longer keeps the *process* alive. We cannot cancel that work, but we can
+    always return control and a verdict, which is all any caller needs.
 
     Historical note, because it nearly went in the other direction: an earlier attempt to measure this
     was run against the *stale plugin copy* of this file, which had no timeout at all. It "ran past
     90 s" because there was no 90. Never take a timing measurement against a bundle preflight reports
     as STALE.
     """
-    adomd_connection = _load_adomd()
-    conn = adomd_connection(f"Data Source=localhost:{port}")
-    conn.Open()
-    try:
-        catalog = _catalog_id(conn)
-        if tables:
-            objects = [{"database": catalog, "table": t} for t in tables]
-        else:
-            objects = [{"database": catalog}]
-        tmsl = json.dumps({"refresh": {"type": "full", "objects": objects}})
-        cmd = conn.CreateCommand()
-        cmd.CommandText = tmsl
-        cmd.CommandTimeout = timeout_sec
-        cmd.ExecuteNonQuery()
-        return True, f"refreshed {'/'.join(tables) if tables else 'entire database'} (catalog {catalog})"
-    finally:
-        conn.Close()
+    result: dict[str, tuple[bool, str] | BaseException] = {}
+
+    def _run() -> None:
+        conn = None
+        try:
+            adomd_connection = _load_adomd()
+            conn = adomd_connection(f"Data Source=localhost:{port}")
+            conn.Open()
+            catalog = _catalog_id(conn)
+            if tables:
+                objects = [{"database": catalog, "table": t} for t in tables]
+            else:
+                objects = [{"database": catalog}]
+            tmsl = json.dumps({"refresh": {"type": "full", "objects": objects}})
+            cmd = conn.CreateCommand()
+            cmd.CommandText = tmsl
+            cmd.CommandTimeout = timeout_sec
+            cmd.ExecuteNonQuery()
+            result["ok"] = (True, f"refreshed {'/'.join(tables) if tables else 'entire database'} (catalog {catalog})")
+        except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            # Everything the worker can raise has to be handed back, not left to die on the thread:
+            # `main` classifies on the exception text, and an unhandled thread exception would reach
+            # it as "worker returned no result" - a generic failure masking a specific, actionable one.
+            result["ok"] = exc
+        finally:
+            if conn is not None:
+                try:
+                    conn.Close()
+                except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                    pass
+
+    worker = threading.Thread(target=_run, name="xmla-refresh", daemon=True)
+    worker.start()
+    worker.join(timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS)
+    if worker.is_alive():
+        raise TimeoutError(
+            f"refresh did not return within {timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS}s "
+            f"(XMLA CommandTimeout was {timeout_sec}s and did not fire, which is the signature of a "
+            f"mashup engine parked on a sign-in modal rather than a slow query)"
+        )
+
+    outcome = result.get("ok")
+    if isinstance(outcome, BaseException):
+        raise outcome
+    if outcome is None:  # pragma: no cover - defensive; the worker always records something
+        raise RuntimeError("refresh worker returned no result")
+    return outcome
 
 
 def _bridge_status() -> dict:
@@ -210,17 +274,68 @@ def _load_amo():
     return Server
 
 
-def image_save(port: int, cache_path: Path) -> tuple[bool, str]:
-    """Persist the in-memory model to `<Name>.SemanticModel/.pbi/cache.abf` via AMO `Server.ImageSave`.
+_COMPAT_RE = re.compile(r"^(?P<indent>\s*)compatibilityLevel:\s*(?P<level>\d+)\s*$", re.M)
 
-    This is the programmatic equivalent of Desktop's Save, and it removes the need to drive the UI.
 
-    Discovered 2026-07-30 by probing the engine rather than accepting "only the Desktop UI can do it":
-    a TMSL `backup` is refused because Desktop runs its Analysis Services instance in **Diskless mode**
-    ("Backup/Restore ... not supported"), but that same mode sets `EnableDisklessTMImageSave=1`, and
-    AMO exposes `Server.ImageSave(databaseId, Stream)`. Proven end to end: delete cache.abf → refresh
-    in memory → ImageSave → **kill Desktop with -Force (no save prompt)** → reopen → DATA_OK, no
-    refresh needed. The bytes match Desktop's own save closely (114.1 KB vs 114.8 KB).
+def read_declared_compatibility(model_dir: Path) -> tuple[int | None, Path | None]:
+    """The ``compatibilityLevel`` declared in ``definition/database.tmdl``, or ``(None, None)``."""
+    path = model_dir / "definition" / "database.tmdl"
+    if not path.exists():
+        return None, None
+    match = _COMPAT_RE.search(path.read_text(encoding="utf-8"))
+    return (int(match.group("level")), path) if match else (None, path)
+
+
+def align_declared_compatibility(path: Path, level: int) -> None:
+    """Rewrite ``database.tmdl``'s declared level. **Never** writes a BOM.
+
+    Desktop's project reader hard-rejects a UTF-8 BOM (`UTF8EncodingThrowOnBOM.CheckBom` ->
+    "Only text with UTF8 encoding without BOM is supported"), and the file simply does not open --
+    so this uses plain ``utf-8`` and the caller re-asserts BOM-free afterwards.
+    """
+    text = path.read_text(encoding="utf-8")
+    new_text = _COMPAT_RE.sub(lambda m: f"{m.group('indent')}compatibilityLevel: {level}", text, count=1)
+    path.write_text(new_text, encoding="utf-8", newline="")
+
+
+def _align_compatibility(database, model_dir: Path | None) -> str | None:
+    """Make ``database.tmdl`` declare the level the live database is actually running at.
+
+    Returns a note describing the change, or ``None`` when nothing needed doing.
+
+    **This is not optional and there is no flag for it**, because there is no useful other
+    behaviour: a cache is only loadable when its level matches the project's, so refusing to align
+    would just be a `--save` that cannot save. It is also exactly what Desktop's own Save does
+    (measured: `1604 -> 1606` written at the same timestamp as `cache.abf`). An earlier version made
+    it opt-in behind `--align-compat`; that was ceremony rather than safety, since the only response
+    to the refusal is to re-run with the flag.
+    """
+    if model_dir is None:
+        return None
+    live_level = int(database.CompatibilityLevel)
+    declared, declared_path = read_declared_compatibility(model_dir)
+    if declared is None or declared == live_level:
+        return None
+    align_declared_compatibility(declared_path, live_level)
+    return f"aligned {declared_path.name} {declared} -> {live_level} (Desktop runs the model at {live_level})"
+
+
+def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
+    """Persist the in-memory model to ``<Name>.SemanticModel/.pbi/cache.abf`` via AMO ``ImageSave``.
+
+    ⚠️ **A cache is only loadable if its compatibility level MATCHES the project's**, so this
+    ALIGNS ``database.tmdl`` to the live level as part of saving -- exactly what Desktop's own Save
+    does. Root-caused 2026-08-07: Desktop silently runs the database ABOVE the declared level (we
+    measured live ``1606`` against a ``database.tmdl`` of ``1604``, server default ``1700``).
+    ``ImageSave`` serialises the *live* database, so without the alignment the cache is a 1606 image
+    in a 1604 project and the reopen hits Desktop's own **"Tabular databases do not support
+    CompatibilityLevel downgrade"** -- which surfaces with NO visible message, only an
+    ``Untitled - Power BI Desktop`` window and a bridge ``Host is not ready to accept operations``.
+
+    ⚠️ **Saving therefore EDITS the deployable artifact.** ``database.tmdl`` is part of what gets
+    deployed, and this raises its declared level. If a downstream target cannot accept the higher
+    level, do not pass ``--save`` -- the default (refresh in memory, persist nothing) exists exactly
+    for the validate-then-deploy path, and leaves the project byte-identical.
 
     Note the client throws "The server sent an unrecognizable response" while writing correctly, so
     success is judged by the FILE (exists, non-empty, newly written), never by the absence of an
@@ -235,10 +350,15 @@ def image_save(port: int, cache_path: Path) -> tuple[bool, str]:
     server = server_type()
     server.Connect(f"Data Source=localhost:{port}")
     try:
-        database_id = server.Databases[0].ID
+        database = server.Databases[0]
+        live_level = int(database.CompatibilityLevel)
+        aligned = _align_compatibility(database, model_dir)
+        if aligned:
+            print(f"  save   : {aligned}")
+
         stream = FileStream(str(cache_path), FileMode.Create, FileAccess.Write)
         try:
-            server.ImageSave(database_id, stream)
+            server.ImageSave(database.ID, stream)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             # Expected: the response parser trips even on a successful write. Fall through to the
             # file check, which is the real evidence.
@@ -249,7 +369,8 @@ def image_save(port: int, cache_path: Path) -> tuple[bool, str]:
         server.Disconnect()
 
     if cache_path.exists() and cache_path.stat().st_size > 0 and cache_path.stat().st_mtime > before:
-        return True, f"persisted via AMO ImageSave ({cache_path.stat().st_size / 1024:.1f} KB)"
+        size_kb = cache_path.stat().st_size / 1024
+        return True, f"persisted via AMO ImageSave ({size_kb:.1f} KB, compatibilityLevel {live_level})"
     return False, "ImageSave did not produce a cache file"
 
 
@@ -422,26 +543,61 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     writing to a destination that was never verified.
     """
     try:
-        ok, message = refresh(port, args.tables)
+        ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         text = f"{type(exc).__name__}: {exc}"
-        # A timeout here is almost always a credential modal Desktop is showing but the agent cannot
-        # see. Say so explicitly and name the human action, rather than emitting a bare stack trace
-        # that reads like a transient glitch worth retrying. Retrying cannot dismiss a sign-in dialog.
+        # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
+        # the credential one ("THIS NEEDS A HUMAN. Do not retry"), which is the single most expensive
+        # thing it could get wrong: that phrasing names the one blocker an agent is forbidden to
+        # retry, so a false positive turns a transient slowdown into a permanent dead end.
+        #
+        # Measured 2026-08-04: it fired on 2 of 5 Desktop instances opened on the SAME bundle, which
+        # refreshed cleanly on the other 3. Real cause: a 246,236-row, 11-table refresh took 38.8s on
+        # a good run and over 87s on a slow one, against a 90s ceiling. It cost that run ~45 minutes
+        # and produced a headline finding that was flatly wrong until it was re-tested.
+        #
+        # So: report the observation, offer both hypotheses, and name the arbiter that settles it.
+        # Never emit a stop-word instruction from an unverified heuristic.
         if "timeout" in text.lower() or "timed out" in text.lower():
-            print(f"REFRESH: NO_DATA - refresh timed out after {REFRESH_TIMEOUT_SECONDS}s ({text})")
             print(
-                "  LIKELY CAUSE: Power BI Desktop is showing a data-source sign-in modal that no\n"
-                "  automation can fill. Confirm with:\n"
+                f"REFRESH: TIMEOUT - no result within "
+                f"{REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS}s ({text})"
+            )
+            print(
+                "  CAUSE UNKNOWN - this script cannot distinguish these two, and they need\n"
+                "  opposite responses:\n"
+                "    (a) SLOW: a very large model. Refresh only what you need with --tables;\n"
+                "        do NOT simply wait longer.\n"
+                "    (b) BLOCKED: Desktop is showing a data-source sign-in modal no automation\n"
+                "        can fill. Retrying cannot dismiss it; a human must sign in once.\n"
+                "  SETTLE IT - run the arbiter, do not guess:\n"
                 f"    powershell -File scripts/probe_desktop_credential.ps1 -DesktopPid {pid}\n"
-                "  THIS NEEDS A HUMAN. Do not retry, and do not proceed to a full build: ask the user\n"
-                "  to sign in to the source once in Desktop, or to authorize an unvalidated build."
+                "  A one-row probe bundle narrows this, but does NOT settle it: a probe limited to a\n"
+                "  single row is fast once the source is WARM, yet measured 2026-08-05 a 1-row probe\n"
+                "  against a SUSPENDED Snowflake warehouse took 167 s (vs 21 s against an already\n"
+                "  running Databricks warehouse) - the auto-resume dominates, not the row count. So a\n"
+                "  slow probe is evidence of a cold source at least as often as a blocked one; use the\n"
+                "  arbiter above, and check whether the compute was suspended, before concluding (b)."
             )
             return 3
         print(f"REFRESH: ERROR {text}")
         return 2
     print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
 
+    # Persisting is the DEFAULT, because it is this script's stated purpose: "so the next agent (and
+    # the next Desktop open) sees real data instead of an empty model". It was off for a while
+    # because a persisted cache was believed to break the PBIP; root-caused 2026-08-07, that was a
+    # compatibility-level mismatch, and `image_save` now aligns `database.tmdl` the way Desktop's own
+    # Save does. With the hazard gone, the default that matches the purpose wins.
+    #
+    # Which default is safer is decided by the failure modes, not by taste. Forgetting `--no-save`
+    # bumps a declared compat level and leaves a cache: bounded, visible, reversible. Forgetting a
+    # `--save` opt-in hands the NEXT agent an empty model - measured this session, a probe came back
+    # NO_DATA - and an agent that queries it reports findings about nothing. The second is worse and
+    # more likely, since persisting is the reason to run this at all.
+    #
+    # `--no-save` is for read-only work (the validator is read-only BY CONTRACT and must pass it) and
+    # for validate-then-deploy, where the project must stay byte-identical.
     if args.no_save:
         return None
 
@@ -450,7 +606,7 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     saved, save_message = (False, "no cache path resolved")
     if cache is not None and not args.ui_save:
         try:
-            saved, save_message = image_save(port, cache)
+            saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
     if not saved:
@@ -507,7 +663,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
     parser.add_argument("--tables", nargs="*", help="Tables to refresh (default: whole database)")
-    parser.add_argument("--no-save", action="store_true", help="Refresh only; do NOT persist the cache")
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Accepted no-op: persisting is now the DEFAULT. Kept so existing callers still work",
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help=(
+            "Refresh in memory but persist NOTHING, leaving the project byte-identical. Use for "
+            "read-only work (validation, auditing) and for the validate-then-deploy path, because "
+            "saving raises database.tmdl's declared compatibilityLevel to the level Desktop runs at"
+        ),
+    )
     parser.add_argument("--verify-only", action="store_true", help="Skip refresh/save; just report the state")
     parser.add_argument(
         "--ui-save",
@@ -542,15 +711,30 @@ def main(argv: list[str] | None = None) -> int:
     persisted = cache is not None and after_stamp > before_stamp
 
     print(f"  data   : {rows} row(s) in '{table}'")
-    print(f"  cache  : {cache if cache else '<none>'}{' (updated)' if persisted else ''}")
+    # Say what HAPPENED, not where a file would go. Printing the path alone reads as "written" -
+    # it misled a reader on 2026-08-05 into believing a probe run had persisted a 1-row cache.
+    # For a probe that distinction matters twice over: a persisted 1-row `cache.abf` is a trap, and
+    # a cache whose compatibility level disagrees with the project's makes the PBIP unopenable (see
+    # `--no-save`; `image_save` prevents that by aligning `database.tmdl`).
+    if persisted:
+        print(f"  cache  : PERSISTED -> {cache}")
+    elif cache is None:
+        print("  cache  : not persisted (no cache path resolved)")
+    elif args.no_save:
+        print("  cache  : not persisted (--no-save; the project is byte-identical)")
+    else:
+        # Persisting was requested (the default) and nothing landed. Naming the wrong reason here
+        # sent me looking in the wrong place for ten minutes; the real one is on the 'save' line.
+        print("  cache  : not persisted (the write did not land - see 'save' above)")
 
     if rows <= 0:
         print("REFRESH: NO_DATA (refresh ran but the table is empty - check the source and credentials)")
         return 1
-    if not args.no_save and not args.verify_only and not persisted:
+    wanted_save = not args.no_save and not args.verify_only
+    if wanted_save and not persisted:
         print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
         return 1
-    print("REFRESH: DATA_OK" + ("" if args.no_save or args.verify_only else " + PERSISTED"))
+    print("REFRESH: DATA_OK" + (" + PERSISTED" if wanted_save else ""))
     return 0
 
 

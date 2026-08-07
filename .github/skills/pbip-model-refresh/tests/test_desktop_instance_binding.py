@@ -316,25 +316,116 @@ def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_p
 
 
 def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_path: Path, capsys) -> None:
-    """The gate must not cry wolf: the normal single-migration flow has to stay green."""
+    """The gate must not cry wolf: the normal single-migration flow has to stay green.
+
+    Passes `--save` explicitly: persisting became opt-in on 2026-08-04 (a present `cache.abf` makes
+    the PBIP unopenable), so this exercises the save path deliberately rather than by default.
+    """
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
 
-    def fake_image_save(port: int, cache_path: Path) -> tuple[bool, str]:
+    def fake_image_save(port: int, cache_path: Path, model_dir=None, align_compat: bool = False):
+        # Signature mirrors the real image_save, including the compatibility-level guard arguments
+        # added 2026-08-07. A stub that lags the real signature raises TypeError, which main()
+        # swallows into the UI-save fallback - so this test would go green against a broken call.
+        del port, model_dir, align_compat
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(b"cache")
         return True, "persisted"
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
 
-    assert refresh_pbip_model.main(["--pid", "111"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--save"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.read_bytes() == b"cache"
+
+
+def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, capsys) -> None:
+    """With `--no-save`, a refresh must NOT write `cache.abf` or touch the project.
+
+    Persisting is the DEFAULT (it is this script's stated purpose), so the opt-OUT is what needs
+    pinning. `--no-save` exists for read-only consumers: the validator is read-only by contract, and
+    saving rewrites `database.tmdl`'s declared compatibilityLevel - so a validator that forgot this
+    flag would mutate the very artifact it is judging.
+
+    This test used to assert the opposite (`test_not_saving_is_the_default`). That default came from
+    a real but MIS-ATTRIBUTED finding: a persisted cache was believed to make the PBIP unopenable,
+    when the actual cause was a compatibility-level mismatch between the cache and the project
+    (root-caused 2026-08-07). `image_save` now aligns them the way Desktop's own Save does.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _explode("image_save must not run"))
+    monkeypatch.setattr(refresh_pbip_model, "save", _explode("save must not run"))
+
+    assert refresh_pbip_model.main(["--pid", "111", "--no-save"]) == 0
+    out = capsys.readouterr().out
+    assert "REFRESH: DATA_OK" in out
+    assert "PERSISTED" not in out
+    assert not cache.exists(), "--no-save must not write cache.abf"
+
+
+def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
+    """With no flags at all, a refresh MUST persist.
+
+    This is the script's stated purpose - "so the next agent (and the next Desktop open) sees real
+    data instead of an empty model" - and it was off for a while only because of a misdiagnosed
+    defect. Pinned because the failure it prevents is silent and expensive: an agent handed an
+    unrefreshed model queries it, gets nothing, and reports findings about an empty model.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
+
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        del port, model_dir
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cache")
+        return True, "persisted"
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run"))
+
+    assert refresh_pbip_model.main(["--pid", "111"]) == 0
+    out = capsys.readouterr().out
+    assert "REFRESH: DATA_OK + PERSISTED" in out
+    assert cache.exists(), "a default refresh must persist cache.abf"
+
+
+def test_a_timeout_does_not_assert_a_credential_modal(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A refresh timeout must report the cause as UNKNOWN, never as "this needs a human".
+
+    Regression test for the most expensive defect found on 2026-08-04. The old message named a
+    data-source sign-in modal and said "THIS NEEDS A HUMAN. Do not retry" on ANY timeout - the one
+    blocker an agent is forbidden to retry - so a false positive converted a transient slowdown into
+    a permanent dead end. It fired on 2 of 5 Desktop instances opened on the SAME bundle that
+    refreshed cleanly on the other 3 (38.8s good run, >87s slow run, 90s ceiling).
+    """
+    _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", _explode("The XML for Analysis request timed out"))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    out = capsys.readouterr().out
+    assert exit_code == 3
+    assert "REFRESH: TIMEOUT" in out
+    assert "CAUSE UNKNOWN" in out
+    assert "THIS NEEDS A HUMAN" not in out, "a timeout heuristic must not emit a stop-word instruction"
+    assert "probe_desktop_credential" in out, "it must name the arbiter that settles the cause"
 
 
 def test_persisting_uses_the_exact_cache_path_the_gate_verified(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -355,12 +446,12 @@ def test_persisting_uses_the_exact_cache_path_the_gate_verified(monkeypatch, tmp
     monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda pid: resolved.pop(0) if resolved else None)
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (7, "Orders"))
     monkeypatch.setattr(refresh_pbip_model, "save", lambda pid: (True, "saved via UI"))
     monkeypatch.setattr(refresh_pbip_model, "image_save", _record)
 
-    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--save"])
     assert written == []
     assert exit_code == 1
     assert "NOT_PERSISTED" in capsys.readouterr().out

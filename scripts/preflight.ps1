@@ -33,7 +33,7 @@
   Exit: 0 if every CRITICAL + RECOMMENDED item is present; 1 if any is missing.
 #>
 #Requires -Version 5.1
-param([switch]$Update)
+param([switch]$Update, [switch]$CheckUpstream)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $copilot = Join-Path $HOME '.copilot'
@@ -236,20 +236,114 @@ foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote',
 Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
 Add-Cli 'powerbi-desktop' 'recommended' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
-# --- Power BI Desktop (Windows-only; this is why the bootstrap is PowerShell) ---
+# --- Is anything NEWER available upstream? (-CheckUpstream, opt-in) -------------------------------
+#
+# Everything above compares an installed version against a HARD-CODED number. That answers "is what I
+# have good enough", never "has the world moved". Measured 2026-08-06, that gap bit twice in one day:
+#
+#   * the deterministic engine went 2.60.0 -> 2.72.0 unnoticed, and issues were nearly filed against
+#     behaviour it had already replaced -- caught only by running `git fetch` by hand;
+#   * Power BI Desktop auto-updated and silently broke the bridge's exe discovery (see below).
+#
+# Deliberately OPT-IN and deliberately ADVISORY:
+#   * it needs the network and costs ~5s (measured), and the orchestrator runs plain preflight on
+#     EVERY invocation - a mandatory network round trip there would be a tax on every migration;
+#   * being behind is NOT an error. The timing rule still governs: upgrading mid-migration is worse
+#     than being slightly old. So this never fails the run and never upgrades anything - it tells you
+#     what to look at BETWEEN migrations.
+if ($CheckUpstream) {
+    foreach ($cliName in $cliFloor.Keys) {
+        $installed = Get-CliVersion $cliName
+        if (-not $installed) { continue }
+        $latest = (& npm view $cliPackage[$cliName] version 2>$null | Select-Object -First 1)
+        if ($latest -match '^\d+(\.\d+)+$') {
+            $behind = [version]$installed -lt [version]$latest
+            Add-Check "upstream: $cliName" 'optional' (-not $behind) `
+                $(if ($behind) { "$installed installed, $latest available" } else { "$installed (latest)" }) `
+                "Between migrations only: npm install -g $($cliPackage[$cliName])@latest, then re-verify the version-specific Gotchas in .github/agents/."
+        }
+    }
+
+    # The deterministic tier is a git clone, not an npm package, so ask the remote for its HEAD.
+    $enginePath = Join-Path (Split-Path -Parent $repoRoot) 'tableau-fabric-skills'
+    if (Test-Path (Join-Path $enginePath '.git')) {
+        $localHead  = (& git -C $enginePath rev-parse HEAD 2>$null)
+        $remoteHead = ((& git -C $enginePath ls-remote origin HEAD 2>$null) -split '\s+')[0]
+        if ($localHead -and $remoteHead) {
+            $current = $localHead -eq $remoteHead
+            Add-Check 'upstream: tableau-fabric-skills' 'optional' $current `
+                $(if ($current) { "current ($($localHead.Substring(0,7)))" } else { "local $($localHead.Substring(0,7)), remote $($remoteHead.Substring(0,7))" }) `
+                "git -C `"$enginePath`" pull --ff-only  - then RE-VERIFY any open issue against the new build before citing it."
+        }
+    }
+}
+
+
+#
+# TWO things are checked here, and the second one is the one that bites.
+#
+# 1. Is Desktop installed? (below)
+# 2. Can the BRIDGE find it? -- a different question with a different answer. Measured 2026-08-06:
+#    Desktop auto-updated 2.157.480.0 -> 2.157.627.0 mid-session. `Get-AppxPackage` (what THIS script
+#    uses) followed the move and reported [OK] with the new path, so preflight printed
+#    "Ready to migrate" -- and the very next `powerbi-desktop open` died with DESKTOP_EXE_NOT_FOUND,
+#    because the bridge resolves the exe from its OWN hard-coded list which still named ...480.0.
+#    A green preflight followed immediately by a broken Desktop call is the exact false-green class
+#    this script exists to prevent, so it must not happen again.
+#
+#    The bridge cannot be asked cheaply (only `open` resolves the exe; `status` returns
+#    not_connected without touching it), so instead of detecting the mismatch we REMOVE it:
+#    PBI_DESKTOP_PATH is honoured by the bridge and wins over its built-in discovery. Setting it
+#    makes Desktop auto-updates a non-event for every downstream call.
 $desktop = $null
-if ($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH }
+$desktopVia = ''
+if ($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH; $desktopVia = 'PBI_DESKTOP_PATH' }
+$appx = Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop -ErrorAction SilentlyContinue
 if (-not $desktop) {
-    $loc = (Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop).InstallLocation
-    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) { $desktop = (Join-Path $loc 'bin\PBIDesktop.exe') }
+    $loc = $appx.InstallLocation
+    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) { $desktop = (Join-Path $loc 'bin\PBIDesktop.exe'); $desktopVia = 'MSIX discovery' }
 }
 if (-not $desktop) {
     $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
-    if (Test-Path $classic) { $desktop = $classic }
+    if (Test-Path $classic) { $desktop = $classic; $desktopVia = 'classic install' }
 }
 Add-Check 'Power BI Desktop' 'recommended' ([bool]$desktop) `
-    $(if ($desktop) { $desktop } else { 'not found' }) `
+    $(if ($desktop) { "$desktop (via $desktopVia)" } else { 'not found' }) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
+
+# The Desktop APP version is tracked like the two npm CLIs are, because it moves on its own schedule
+# and takes the bridge's exe discovery with it.
+if ($appx) {
+    $desktopKnownGood = '2.157.627.0'
+    Add-Check 'version: Power BI Desktop' 'recommended' ($appx.Version -eq $desktopKnownGood) `
+        "$($appx.Version)$(if ($appx.Version -eq $desktopKnownGood) { ' (known-good)' } else { " (known-good $desktopKnownGood)" })" `
+        "Desktop moved to $($appx.Version). Not an error - but re-set PBI_DESKTOP_PATH (below) and re-verify any version-specific Desktop behaviour."
+}
+
+# The mismatch-remover. A set PBI_DESKTOP_PATH means the bridge and this script resolve the SAME exe;
+# unset means the bridge is guessing from a version-pinned list and may already be wrong.
+$pathPinned = [bool]($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH))
+Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
+    $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery' }) `
+    $(if ($desktop) { "setx PBI_DESKTOP_PATH `"$desktop`"   (then reopen the shell)" } else { 'install Power BI Desktop first' })
+
+# --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
+# Opening a model that spans more than one data source raises a modal ("Potential security risk: This
+# file uses multiple data sources...") BEFORE the model loads. Federated datasources are normal in real
+# Tableau workbooks, so most migrations hit it.
+#
+# It is worse for an agent than for a person: it blocks at LOAD, so it stalls before any refresh call
+# and no automation can dismiss it. Measured 2026-08-05, a run sat past 450s on this while
+# refresh_pbip_model.py's own 300s ceiling never fired - that ceiling wraps the XMLA refresh, not the
+# open. To a supervising agent it looks like a hang with no error.
+#
+# This is stated rather than checked ON PURPOSE. Desktop ships as an MSIX package and keeps the setting
+# in the package's private settings.dat hive, which needs SeRestorePrivilege to load and is locked while
+# Desktop runs; there is no supported read path. Asserting a check we cannot actually perform would be
+# worse than an honest reminder.
+Add-Check 'Privacy Levels (manual)' 'optional' $true `
+    'VERIFY BY HAND: Options > Global > Privacy > "Always ignore Privacy Level settings"' `
+    'Without it, any MULTI-SOURCE model blocks on a modal at open and an unattended refresh hangs with no error.'
 
 # --- .NET SDK (builds scripts/tmdl_validate for offline TMDL deserialization) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under

@@ -659,6 +659,27 @@ def _host_resolves(server: str) -> bool:
     the refresh HANGS exactly like a missing credential does, for the full timeout. So "a hang means
     a sign-in modal" is only true once the host is known to resolve. Checking here separates the two
     causes definitively, and turns a 200-second wrong answer into a sub-second right one.
+
+    **Why DNS and not a TCP connect to the port** - asked and measured 2026-08-06, answer is "TCP
+    buys nothing here". Against the six endpoints this repo has real verdicts for:
+
+        endpoint                          DNS      TCP:443/1433
+        Databricks (good)                 ok       ok   0.05s
+        Snowflake (good)                  ok       ok   0.10s
+        Azure SQL (good)                  ok       ok   0.09s
+        Databricks with a REVOKED PAT     ok       ok   0.24s
+        Snowflake, never authenticated    ok       ok   0.20s
+        nonexistent host                  FAIL     -
+
+    Every sad path we have ever produced is an APPLICATION-layer rejection - a revoked token gets a
+    403, an unauthenticated account gets a modal, an IP outside a network policy gets an auth error -
+    and all of them complete a TCP handshake first. The one failure DNS catches (a host that does not
+    exist) is caught more cheaply. So a TCP check would add a dependency, a timeout to tune, and a
+    new false-negative risk (Power BI Desktop can use a proxy this process does not) in exchange for
+    discriminating exactly nothing we have observed.
+
+    It would catch a firewall blocking the port outbound, which we have not encountered. Add it then,
+    with the measurement that motivated it - not speculatively.
     """
     try:
         socket.getaddrinfo(server, None)

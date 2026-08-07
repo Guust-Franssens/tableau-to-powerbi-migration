@@ -68,6 +68,14 @@ AUDIT = ".credential-gate-audit.log"
 # the tree, and a gate that blinds it produces worse reports, not safer ones.
 DENY_RIGHTS = "(OI)(CI)(WD,AD,WA)"
 
+# Both audit actions mean "the gate was armed"; they differ only in how strongly it is ENFORCED
+# (kernel ACL vs marker file). Every READER must treat them alike, or the gate's ordering guarantee
+# silently becomes Windows-only. Measured 2026-08-03 by simulating the non-Windows path: with only
+# `block` recognised, a `probe-cleared` recorded BEFORE a re-arm still counted as earned afterwards,
+# so backdated evidence survived exactly the event that exists to invalidate it. The distinct names
+# are kept because the enforcement difference is real and belongs in the log.
+BLOCK_ACTIONS = frozenset({"block", "block-marker-only"})
+
 
 def _audit(migration: Path, action: str, detail: str) -> None:
     """Append a tamper-evident-ish record of every gate transition."""
@@ -112,7 +120,7 @@ def _clear_was_earned(migration: Path) -> str | None:
         for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
             entry = json.loads(line)
             action, ts = entry.get("action"), entry.get("ts", "")
-            if action == "block":
+            if action in BLOCK_ACTIONS:
                 earned, blocked_at = None, ts  # a re-arm invalidates any earlier evidence
             elif action in {"probe-cleared", "authorize"} and ts >= blocked_at:
                 earned = action
@@ -159,16 +167,76 @@ def probe_dir(migration: Path) -> Path:
     return d
 
 
-def output_dirs(migration: Path) -> list[Path]:
-    """Directories whose contents are the harm: the built model and report.
+def denied_dirs(migration: Path, create: bool = True) -> list[Path]:
+    """Directories the ACL DENIES writes to while the gate is up. Enforcement surface only.
 
     Only `fabric/` is denied. The probe sandbox is `<migration>/_probe/`, a SIBLING that is never
     in this list and so is never touched by the deny - see `probe_dir` for why it sits outside the
     denied tree rather than inside it.
+
+    `create=False` is for read-only callers (`verify`, `status`): applying an ACL needs the
+    directory to exist, but INSPECTING the gate must not conjure one into every migration it looks
+    at.
+
+    ⚠️ This is deliberately NARROWER than what `audited_paths` verifies. Denying a directory the
+    build must write into would dead-end the migration; detecting that something was written there
+    anyway costs nothing. Enforcement and verification are different jobs and must not share a list.
     """
     fabric = migration / "fabric"
-    fabric.mkdir(parents=True, exist_ok=True)
+    if create:
+        fabric.mkdir(parents=True, exist_ok=True)
     return [fabric]
+
+
+# Model/report DEFINITION files: their existence means a model or report was built.
+DEFINITION_SUFFIXES = frozenset({".tmdl", ".pbism", ".pbir", ".pbip"})
+
+# MATERIALIZED SOURCE ROWS. These are a strictly LARGER harm than a definition file: a `.tmdl`
+# describes a model, but a materialized `.csv` IS the customer's data, sitting unencrypted on a
+# workstation, extracted from a source whose reachability was never proven.
+#
+# Measured 2026-08-04: a deterministic-tier run wrote **two 110 MB CSVs** of source rows to
+# `<out>/data/`, and `verify()` reported "OK - gate applied, no model/report artifacts exist",
+# because it only ever looked at `DEFINITION_SUFFIXES`. `.json` is deliberately absent from this
+# set - PBIR is made of `visual.json`/`report.json`, so including it would flag every report.
+MATERIALIZED_DATA_SUFFIXES = frozenset({".csv", ".tsv", ".parquet", ".hyper", ".xlsx", ".xls", ".dat"})
+
+# Directories that are NOT harm, and must be excluded or every migration self-reports a violation:
+#   `source/`    - the input workbook. Always present; it is what we were given, not what we built.
+#   `reference/` - Tableau-side screenshots used as fidelity ground truth.
+#   `_probe/`    - the sanctioned sandbox for the one-row reachability probe, which by design is
+#                  built WHILE the gate is up. Flagging it would make earning the clear impossible.
+AUDIT_EXCLUDED_DIRS = frozenset({"source", "reference", "_probe"})
+
+
+def audited_paths(migration: Path) -> list[Path]:
+    """Every file under `migration` whose existence would mean something was built or extracted.
+
+    Verification surface. Read-only: unlike `denied_dirs` this creates nothing, because `verify` is
+    a post-hoc check and must not have side effects on the tree it is judging.
+
+    Scans the WHOLE migration rather than one directory. The gate's guarantee is "no model, and no
+    extracted rows, for a source that was never reached" - so where the artifact landed is
+    irrelevant to whether the harm occurred. A build that writes outside `fabric/` (the deterministic
+    tier writes to `pbip/`, `semantic_models/` and `data/`) is exactly the case a `fabric/`-only scan
+    misses.
+    """
+    if not migration.exists():
+        return []
+    found: list[Path] = []
+    for path in migration.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            relative = path.relative_to(migration)
+        except ValueError:  # pragma: no cover - rglob results are always relative to migration
+            continue
+        if AUDIT_EXCLUDED_DIRS.intersection(relative.parts):
+            continue
+        suffix = path.suffix.lower()
+        if suffix in DEFINITION_SUFFIXES or suffix in MATERIALIZED_DATA_SUFFIXES:
+            found.append(path)
+    return found
 
 
 def _last_block_sources(migration: Path) -> list[str] | None:
@@ -182,7 +250,7 @@ def _last_block_sources(migration: Path) -> list[str] | None:
     try:
         for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
             entry = json.loads(line)
-            if entry.get("action") != "block":
+            if entry.get("action") not in BLOCK_ACTIONS:
                 continue
             detail = entry.get("detail", "")
             if not detail.startswith("sources="):
@@ -293,17 +361,21 @@ def apply_block(migration: Path, sources: list[str]) -> int:
         encoding="utf-8",
     )
 
-    if platform.system() != "Windows":
-        log.warning("Non-Windows: marker written, but ACL enforcement is Windows-only here.")
-        _audit(migration, "block-marker-only", "non-windows")
-        return 0
-
     # The sandbox is a SIBLING of fabric/, so it needs no grant and no particular ordering - see
-    # probe_dir(). Created here only so the path exists for the message below.
+    # probe_dir(). Created before the platform branch: the probe needs somewhere to build on every
+    # platform, and only the ENFORCEMENT is Windows-specific, not the workflow.
     probe = probe_dir(migration)
 
+    if platform.system() != "Windows":
+        log.warning("Non-Windows: marker written, but ACL enforcement is Windows-only here.")
+        log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
+        # Same `sources=` detail as the enforced path. Without it `_last_block_sources` cannot read
+        # this entry, so the redundant-re-arm check fails closed forever on non-Windows.
+        _audit(migration, "block-marker-only", f"sources={sources}")
+        return 0
+
     failed = 0
-    for d in output_dirs(migration):
+    for d in denied_dirs(migration):
         code, out = _icacls([str(d), "/deny", f"{_user()}:{DENY_RIGHTS}"])
         if code != 0:
             log.error("Could not deny write on %s: %s", d, out)
@@ -325,7 +397,7 @@ def clear_block(migration: Path, reason: str, earned: bool = False) -> int:
     never quietly confer the guarantee.
     """
     if platform.system() == "Windows":
-        for d in output_dirs(migration):
+        for d in denied_dirs(migration):
             code, out = _icacls([str(d), "/remove:d", _user()])
             if code != 0:
                 log.error("Could not clear deny ACE on %s: %s", d, out)
@@ -446,7 +518,9 @@ def status(migration: Path) -> int:
     override = (migration / OVERRIDE).exists()
     log.info("marker=%s override=%s", "BLOCKED" if blocked else "none", "yes" if override else "no")
     if platform.system() == "Windows":
-        for d in output_dirs(migration):
+        for d in denied_dirs(migration, create=False):
+            if not d.exists():
+                continue
             _, out = _icacls([str(d)])
             denied = "(DENY)" in out.upper() or ":(DENY)" in out.upper() or "(N)" in out.upper()
             log.info("acl on %s: %s", d.name, "deny-write present" if denied else "no deny ACE")
@@ -454,10 +528,17 @@ def status(migration: Path) -> int:
 
 
 def _has_deny_ace(migration: Path) -> bool:
-    """Is the kernel-level write-deny still applied? This is the real gate state."""
+    """Is the kernel-level write-deny still applied? This is the real gate state.
+
+    Reads `denied_dirs` WITHOUT creating them: this is called from `verify`, which must not mutate
+    the tree it judges. A directory that does not exist cannot carry a deny ACE, so skipping it is
+    also the correct answer, not merely the safe one.
+    """
     if platform.system() != "Windows":
         return (migration / MARKER).exists()
-    for d in output_dirs(migration):
+    for d in denied_dirs(migration, create=False):
+        if not d.exists():
+            continue
         _, out = _icacls([str(d)])
         if "(DENY)" in out.upper():
             return True
@@ -496,12 +577,8 @@ def verify(migration: Path) -> int:
     # Measured: `clear --reason "I decided it is fine"` lifted the ACL and the build proceeded with
     # no probe ever run. Enforcement cannot prevent that (clear has to exist for teardown), but it
     # must never pass silently, or the guarantee is gone via the front door.
-    built_any = any(
-        p.is_file() and p.suffix.lower() in {".tmdl", ".pbism", ".pbir", ".pbip"}
-        for d in output_dirs(migration)
-        for p in d.rglob("*")
-    )
-    if built_any and not deny and not _clear_was_earned(migration):
+    artifacts = audited_paths(migration)
+    if artifacts and not deny and not _clear_was_earned(migration):
         log.error("GATE VERIFY: UNEARNED CLEAR - artifacts exist, but no successful probe and no")
         log.error("  human authorization is recorded in the audit log. The gate was lifted without")
         log.error("  proving the source is reachable, so this model is UNVALIDATED. Do not ship it.")
@@ -509,18 +586,12 @@ def verify(migration: Path) -> int:
         violations += 1
 
     if (marker or deny) and not authentic:
-        built = [
-            p
-            for d in output_dirs(migration)
-            for p in d.rglob("*")
-            if p.is_file() and p.suffix.lower() in {".tmdl", ".pbism", ".pbir", ".pbip"}
-        ]
-        if built:
-            log.error("GATE VERIFY: VIOLATION - %d artifact(s) exist while the gate is applied:", len(built))
-            for p in built[:10]:
+        if artifacts:
+            log.error("GATE VERIFY: VIOLATION - %d artifact(s) exist while the gate is applied:", len(artifacts))
+            for p in artifacts[:10]:
                 log.error("  %s", p)
             log.error("Built against a source whose reachability was never proven. Do not ship them.")
-            _audit(migration, "violation", f"{len(built)} artifacts while blocked")
+            _audit(migration, "violation", f"{len(artifacts)} artifacts while blocked")
             violations += 1
 
     if violations:

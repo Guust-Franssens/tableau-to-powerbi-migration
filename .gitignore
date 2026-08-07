@@ -60,6 +60,12 @@ build/
 /_harvest/
 candidates.json
 
+# assess_estate.py output. This is a REAL CUSTOMER ESTATE: workbook and project names,
+# owner LUIDs, local group names and their membership counts, and per-object permission
+# grants. None of it belongs on a public repo, and the default `--out` is not a temp dir,
+# so ignore the conventional name rather than relying on everyone remembering.
+/_assessment*/
+
 # Power BI Desktop local cache/settings - machine-specific, regenerated automatically on open
 **/.pbi/cache.abf
 **/.pbi/localSettings.json
@@ -118,3 +124,12 @@ uv.lock
 
 # Throwaway agent-behaviour test fixtures (see scripts/probe_lab.py)
 _probe-lab/
+
+# Live multi-source test fixture: embeds real endpoint hostnames, so it is generated
+# on demand by scripts/make_live_source_fixture.py and never committed. tests/test_live_multisource.py
+# skips when it is absent, so a clean clone and CI stay green without it.
+tests/fixtures/live/
+
+
+# Tableau oracle capture - data-bearing (Tableau's computed values + rendered PNGs)
+_oracle/

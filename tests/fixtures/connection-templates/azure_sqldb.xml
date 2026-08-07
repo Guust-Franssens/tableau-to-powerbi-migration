@@ -1,0 +1,1 @@
+<connection application-intent='false' authentication='sqlserver' class='azure_sqldb' dbname='{{DATABASE}}' minimum-driver-version='SQL Server Native Client 10.0' multi-subnet-failover='false' odbc-native-protocol='yes' one-time-sql='' server='{{SERVER}}' username='{{USERNAME}}' />

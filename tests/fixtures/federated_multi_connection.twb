@@ -1,0 +1,42 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<!--
+  A `class='federated'` datasource wrapping THREE named connections, which is how Tableau models a
+  join across separate systems. Deliberately mixes a live SQL database, a live warehouse and a live
+  lakehouse so a parser that keeps only the first connection reports one live system where there are
+  three - the failure this fixture exists to prevent.
+
+  Attribute names are copied from a REAL Tableau-authored workbook, not invented: the Databricks
+  HTTP path is `v-http-path` (the `v-` prefix is Tableau's, and a fixture using `http-path` silently
+  tests nothing).
+
+  Kept minimal on purpose: no worksheets, no calcs. It tests connection parsing and nothing else.
+-->
+<workbook source-build='2023.1.0' version='18.1'>
+  <datasources>
+    <datasource caption='Orders+ (Multiple Connections)' name='federated.0abc' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='tableaumigration' name='sqlserver.0a'>
+            <connection authentication='sqlserver' class='azure_sqldb' dbname='Tableau-migration-db'
+                        one-time-sql='' server='tableaumigration.database.windows.net' username='Temp-Login' />
+          </named-connection>
+          <named-connection caption='esookcu-vg56333' name='snowflake.0b'>
+            <connection authentication='Username Password' class='snowflake' dbname='TABLEAUCONNECT'
+                        odbc-connect-string-extras='' one-time-sql='' schema='PUBLIC'
+                        server='esookcu-vg56333.snowflakecomputing.com' service='' username='FABRICMIGRATION'
+                        warehouse='COMPUTE_WH' />
+          </named-connection>
+          <named-connection caption='adb-7405612403187675' name='databricks.0c'>
+            <connection authentication='oauth' class='databricks' dbname='tableau_migration_databricks'
+                        v-http-path='/sql/1.0/warehouses/abc123' odbc-connect-string-extras='' one-time-sql=''
+                        schema='default' server='adb-7405612403187675.15.azuredatabricks.net' />
+          </named-connection>
+        </named-connections>
+        <relation connection='sqlserver.0a' name='Orders' table='[dbo].[Orders]' type='table' />
+      </connection>
+      <column caption='Sales' datatype='real' name='[Sales]' role='measure' type='quantitative' />
+    </datasource>
+  </datasources>
+  <worksheets />
+  <dashboards />
+</workbook>

@@ -10,11 +10,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from parse_tableau import _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
+from parse_tableau import _conn_attr, _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
 TDS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "standalone_datasource.tds"
+FEDERATED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "federated_multi_connection.twb"
 
 
 def test_parses_top_level_shape():
@@ -337,3 +338,135 @@ def test_parser_and_server_lineage_agree_on_the_dedup_key():
     assert parsed["id"] == "Sales Master"  # percent-decoded, not 'Sales%20Master'
     assert parsed["key"] == dedup_key("Finance", "Sales Master")
     assert parsed["key"] == "finance/sales master"
+
+
+def test_a_federated_datasource_reports_every_named_connection():
+    """A `class='federated'` datasource can wrap several live systems; report all of them.
+
+    Measured 2026-08-04 on a real tri-source workbook (Azure SQL + Snowflake + Databricks joined in
+    one Tableau datasource): the parser used `.find()` on the named-connection path, kept only the
+    first, and `preflight_source_credentials` therefore armed the credential gate for 1 of 3 live
+    systems while reporting the other two nowhere. Under-reporting live sources is the one direction
+    the gate must never fail in.
+    """
+    spec = parse_workbook(FEDERATED_FIXTURE)
+    conn = spec["data_sources"][0]["connection"]
+
+    classes = [c["class"] for c in conn["connections"]]
+    assert classes == ["azure_sqldb", "snowflake", "databricks"], "all three legs, in document order"
+    assert all(c["powerbi_target"] == "live_source" for c in conn["connections"])
+
+    servers = {c["server"] for c in conn["connections"]}
+    assert "esookcu-vg56333.snowflakecomputing.com" in servers
+    assert "adb-7405612403187675.15.azuredatabricks.net" in servers
+
+
+def test_the_primary_connection_stays_backwards_compatible():
+    """`connection` (singular) must keep describing the first leg.
+
+    The schema, the 16 committed example specs and every existing consumer predate `connections[]`,
+    so adding it must not move the primary.
+    """
+    conn = parse_workbook(FEDERATED_FIXTURE)["data_sources"][0]["connection"]
+    assert conn["class"] == "azure_sqldb"
+    assert conn["server"] == "tableaumigration.database.windows.net"
+    assert conn["powerbi_target"] == "live_source"
+
+
+def test_connector_specific_details_survive_per_leg():
+    """Each leg keeps the details its connector needs, not just class and server.
+
+    A Databricks M query needs the SQL-warehouse HTTP path and a Snowflake one needs the warehouse;
+    losing them per-leg would make the connection unusable even once the credential is supplied.
+    """
+    legs = {c["class"]: c for c in parse_workbook(FEDERATED_FIXTURE)["data_sources"][0]["connection"]["connections"]}
+    assert legs["databricks"].get("http_path") == "/sql/1.0/warehouses/abc123"
+    assert legs["snowflake"].get("warehouse") == "COMPUTE_WH"
+
+
+def test_shelf_encodings_carry_the_table_calc_addressing_inputs():
+    """The shelves are MODEL-layer input, not just report-layer decoration. Do not trim them.
+
+    Measured 2026-08-06 on the first real two-tier round trip. The deterministic tier stubs a
+    formula-authored table calc as ``category: missing_addressing_intent`` and says outright:
+
+        "This is a table calculation whose partition/order/scope (Tableau 'Compute Using') is not
+         carried by the .tds. Recover the addressing from worksheet context (the .twb
+         'ordering-type' + <order>/<sort> and the rows/cols shelves)."
+
+    That was the LARGEST stub category in that workbook (3 of 4). The three fields asserted below are
+    exactly what a caller needs to reconstruct the addressing:
+
+      * ``rows`` / ``columns``  - which pill is being computed and what it is computed ALONG;
+      * ``derivation``          - the grain of that axis (e.g. "tmn" = truncate-to-month), which
+                                  decides the ORDER BY, not merely the display format;
+      * ``manual_sort``         - an explicit ordering that overrides the natural one.
+
+    The hazard this guards against is specific and was nearly realised: while planning the persona
+    cuts, the parser's shelf extraction looked like duplicate work next to an engine that already
+    rebuilds visuals, and was a candidate for removal. It is not duplicate - it is the only surviving
+    source for the model-layer fallback path. A cut that removes it would not fail loudly; the calcs
+    would simply stay stubs, or worse, be authored with a guessed order.
+    """
+    spec = parse_workbook(FIXTURE)
+    worksheet = spec["worksheets"][0]
+    enc = worksheet["encodings"]
+
+    assert enc["rows"] and enc["columns"], "both shelves are needed to tell WHAT from ALONG-WHAT"
+    for shelf in ("rows", "columns"):
+        for pill in enc[shelf]:
+            assert "field_id" in pill
+            assert "derivation" in pill, f"{shelf} pill lost its derivation - the axis grain is what sets the ORDER BY"
+    assert "manual_sort" in worksheet, "an explicit sort overrides the natural order and must survive"
+
+
+FCP_WORKBOOK = """<workbook version='18.1'>
+  <document-format-change-manifest>
+    <_.fcp.DatabricksCatalog.true...DatabricksCatalog />
+  </document-format-change-manifest>
+  <datasources><datasource caption='D' name='d.0'><connection class='federated'>
+    <named-connections><named-connection name='dbx.0'>
+      <connection class='databricks' server='adb.azuredatabricks.net'
+        _.fcp.DatabricksCatalog.false...dbname='/sql/1.0/warehouses/LEGACY'
+        _.fcp.DatabricksCatalog.true...dbname='unity_catalog'
+        _.fcp.DatabricksCatalog.true...v-http-path='/sql/1.0/warehouses/abc123' />
+    </named-connection></named-connections>
+  </connection></datasource></datasources></workbook>"""
+
+
+def _fcp_connection_element():
+    """The real Tableau shape: a manifest entry making `.true` live, and BOTH dbname variants."""
+    from lxml import etree  # noqa: PLC0415
+
+    return etree.fromstring(FCP_WORKBOOK.encode()).find(".//named-connection/connection")
+
+
+def test_feature_flagged_attribute_is_resolved_when_only_the_FCP_spelling_exists():
+    """`v-http-path` exists ONLY behind the flag, so a bare-name read returns None and the M dies.
+
+    The existing federated fixture carries the BARE `v-http-path`, so it exercises the early-return
+    branch and proves nothing about this path - which is why this test builds the flagged shape
+    explicitly. Without it, a real Databricks .twbx yields `http_path: None` (measured 2026-08-05).
+    """
+    assert _conn_attr(_fcp_connection_element(), "v-http-path") == "/sql/1.0/warehouses/abc123"
+
+
+def test_the_LIVE_variant_wins_and_a_blind_prefix_strip_would_corrupt_the_catalog():
+    """`.true` and `.false` mean DIFFERENT things, so stripping the prefix is actively harmful.
+
+    For DatabricksCatalog the `.false` variant of `dbname` holds the LEGACY meaning (the HTTP path)
+    while `.true` holds the Unity catalog. A parser that strips the prefix and takes whichever it
+    meets last writes `/sql/1.0/warehouses/...` into `database` - a wrong value that still looks
+    like a value, so nothing downstream errors.
+    """
+    resolved = _conn_attr(_fcp_connection_element(), "dbname")
+    assert resolved == "unity_catalog"
+    assert not resolved.startswith("/sql/"), "the legacy .false variant overwrote the catalog"
+
+
+def test_a_plain_attribute_still_wins_over_any_flagged_variant():
+    """Control: the direct spelling is authoritative when present, so this cannot regress."""
+    from lxml import etree  # noqa: PLC0415
+
+    el = etree.fromstring(b"<connection dbname='plain' _.fcp.X.true...dbname='flagged' />")
+    assert _conn_attr(el, "dbname") == "plain"

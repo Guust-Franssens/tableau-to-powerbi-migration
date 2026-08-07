@@ -42,6 +42,8 @@ _LOD_RE = re.compile(r"\{\s*(FIXED|INCLUDE|EXCLUDE)\b", re.IGNORECASE)
 _TABLE_CALC_RE = re.compile(r"\b(WINDOW_\w+|RUNNING_\w+|INDEX|RANK\w*|LOOKUP|TOTAL|PREVIOUS_VALUE)\s*\(", re.IGNORECASE)
 _PARAM_EQUALITY_RE = re.compile(r"if\s*\[Parameters\]\.\[[^\]]+\]\s*=\s*\[[^\]]+\]\s*then", re.IGNORECASE)
 _BRACKET_TOKEN_RE = re.compile(r"\[([^\[\]]+)\]")
+# Tableau's feature-flagged attribute spelling: `_.fcp.<Feature>.<true|false>...<realAttrName>`
+_FCP_ATTR = re.compile(r"^_\.fcp\.(?P<feature>[^.]+)\.(?P<state>true|false)\.\.\.(?P<attr>.+)$")
 _SHELF_FIELD_RE = re.compile(r"\[([^\[\]]+)\]\.\[([^\[\]]+)\]")
 
 
@@ -128,6 +130,47 @@ def parse_parameters(root: etree._Element, ids: IdRegistry) -> list[dict[str, An
     return parameters
 
 
+def _conn_attr(conn_el: etree._Element, attr: str) -> str | None:
+    """Read a connection attribute, tolerating Tableau's feature-flagged spelling.
+
+    When a connector gains a capability behind a document-format flag, Tableau writes the attribute
+    as `_.fcp.<Feature>.<true|false>...<attr>` and ships BOTH variants, whose meanings differ. For
+    `DatabricksCatalog`: the `.true...` variant of `dbname` is the Unity catalog while the
+    `.false...` variant is the LEGACY meaning (it held the HTTP path), and only `.true...` carries
+    `v-http-path` at all.
+
+    So the plain name must be tried first, then the variant the `<document-format-change-manifest>`
+    declares live. A blind prefix-strip is actively harmful - it lets `.false...dbname` overwrite
+    the catalog with a `/sql/1.0/warehouses/...` string, a wrong value that still looks like a value.
+
+    Measured 2026-08-05: without this, a real Databricks `.twbx` yields `http_path: None` and
+    `database: None`, so the emitted M cannot connect. The deterministic tier had the same gap then;
+    re-checked 2026-08-07, it no longer does — `connection_to_m` now calls `_resolve_fcp_attributes`
+    before any connection reader, so its bare-name lookups are correct by construction. Both sides
+    are right, and neither is redundant: his feeds M generation, this feeds the live-vs-flat-file
+    classification that arms the credential gate.
+    """
+    direct = conn_el.get(attr)
+    if direct:
+        return direct
+
+    root = conn_el.getroottree().getroot()
+    manifest = root.find(".//document-format-change-manifest")
+    live = set()
+    for child in manifest if manifest is not None else []:
+        match = _FCP_ATTR.match(str(child.tag))
+        if match and match.group("state") == "true":
+            live.add(match.group("feature"))
+
+    for name, value in conn_el.attrib.items():
+        match = _FCP_ATTR.match(str(name))
+        if not match or match.group("attr") != attr:
+            continue
+        if (match.group("feature") in live) == (match.group("state") == "true"):
+            return value
+    return None
+
+
 def _capture_connect_details(connection: dict[str, Any], conn_el: etree._Element) -> None:
     """Carry the attributes needed to CONNECT, not just to describe.
 
@@ -146,14 +189,25 @@ def _capture_connect_details(connection: dict[str, Any], conn_el: etree._Element
         ("warehouse", "warehouse"),
         ("role", "role"),
     ):
-        value = (conn_el.get(attr) or "").strip()
+        value = (_conn_attr(conn_el, attr) or "").strip()
         if value:
             connection[spec_key] = value
 
 
 def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dict[str, Any]:
     """Resolve both the *original* source connection (e.g. excel-direct, sqlserver) and whether the
-    datasource runs off a packaged .hyper extract (Tableau Public workbooks always do)."""
+    datasource runs off a packaged .hyper extract (Tableau Public workbooks always do).
+
+    A `class='federated'` datasource can wrap SEVERAL named connections - a Tableau join across, say,
+    Azure SQL + Snowflake + Databricks is one datasource with three. `connection` (singular) keeps
+    describing the FIRST, because the schema, the 16 committed example specs and every consumer
+    predate this; the full list is added as `connections` so nothing downstream has to guess.
+
+    ⚠️ This is a SAFETY fix, not a completeness one. Measured 2026-08-04 on a tri-source workbook:
+    the parser reported one connection, so `preflight_source_credentials` armed the credential gate
+    for 1 of 3 live systems and reported the other two nowhere. Under-reporting live sources is the
+    one direction the gate must never fail in.
+    """
     outer_conn = ds_el.find("connection")
     connection: dict[str, Any] = {"class": "unknown", "mode": "live", "server": None, "database": None, "note": None}
     if outer_conn is None:
@@ -161,8 +215,8 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
         return connection
 
     # Both branches want the same treatment; pick the element that actually describes the source.
-    named_conn = outer_conn.find(".//named-connections/named-connection/connection")
-    source_el = named_conn
+    named_conns = outer_conn.findall(".//named-connections/named-connection/connection")
+    source_el = named_conns[0] if named_conns else None
     if source_el is None and outer_conn.get("class") not in (None, "federated"):
         source_el = outer_conn
     if source_el is not None:
@@ -183,7 +237,30 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
     connection["powerbi_target"], connection["powerbi_target_reason"] = powerbi_target(
         connection["class"], connection["mode"]
     )
+
+    # Every named connection, in document order, each independently classified. Emitted whenever a
+    # federated wrapper is present - including the single-connection case, so consumers can read one
+    # field unconditionally instead of branching on how many there are.
+    if named_conns:
+        connection["connections"] = [_describe_named_connection(el, connection["mode"]) for el in named_conns]
     return connection
+
+
+def _describe_named_connection(conn_el: etree._Element, mode: str) -> dict[str, Any]:
+    """One entry of `connection.connections[]`: class, server, database, and its own PBI target.
+
+    `mode` is inherited from the parent datasource: an extract caches the whole federated join, not
+    one leg of it, so every named connection under an extracted datasource is itself extract-backed.
+    """
+    described: dict[str, Any] = {
+        "class": conn_el.get("class", "unknown"),
+        "server": _conn_attr(conn_el, "server"),
+        "database": _conn_attr(conn_el, "dbname"),
+        "mode": mode,
+    }
+    _capture_connect_details(described, conn_el)
+    described["powerbi_target"], described["powerbi_target_reason"] = powerbi_target(described["class"], mode)
+    return described
 
 
 _CONTAINER_RELATION_TYPES = {"collection", "join", "union"}

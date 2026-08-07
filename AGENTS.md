@@ -40,9 +40,21 @@ schema-required `reportVersionAtImport`) — a stale CLI silently green-lights a
 
 | When | Run | Why |
 |---|---|---|
-| Session start (nothing in flight) | `preflight.ps1 -Update` | Safe; the CLI floor is a correctness floor |
-| Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without swapping tooling mid-flow |
+| Session start (nothing in flight) | `preflight.ps1 -Update -CheckUpstream` | Safe; the CLI floor is a correctness floor, and this is the one moment upgrading is allowed |
+| Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without swapping tooling mid-flow — and without a network round trip on every migration |
 | Mid-migration | **never** | Swapping the validator under a half-built report is worse than a slightly old one |
+
+**`-CheckUpstream` answers a question the version matrix cannot.** Every other check compares an
+installed version against a **hard-coded** number — that says "is what I have good enough", never
+"has the world moved". `-CheckUpstream` asks npm for the latest `powerbi-report-author` /
+`powerbi-desktop`, and asks the deterministic engine's git remote for its HEAD. It is **opt-in**
+(~3s of network) and **advisory** — it never upgrades and never fails the run, because being behind
+is not an error; the timing rule above still decides *when* acting on it is safe.
+
+Measured 2026-08-06, this gap bit twice in one day: the engine moved **2.60.0 → 2.72.0** unnoticed
+(issues were nearly filed against behaviour it had already replaced, caught only by a manual
+`git fetch`), and **Power BI Desktop auto-updated** and silently broke the bridge's exe discovery
+while preflight still reported "Ready to migrate".
 
 It cannot update the **skill bundles**: `copilot plugin update` hits a file lock while any Copilot
 session is running. That lock is narrower than it looks, though — it blocks renaming the plugin
@@ -311,42 +323,38 @@ the evidence and say so plainly.
 - **Surface complexity mismatches proactively.** If the parsed workbook implies more effort than the
   user assumes (many LOD/table-calc fields, extract-only data with no upstream, >20 floating-layout
   worksheets), say so before building rather than discovering it mid-migration.
-- **NEVER block silently on an external system — time-box it, then ASK.** This is a hard rule, from a
-  real user report: an agent sat on "Testing live Snowflake connectivity" for **129 minutes / 298 tool
-  calls**, retrying without ever surfacing the problem, until the user intervened and suggested taking
-  the credential from Power BI Desktop. Waiting is not progress, and a credential is something only a
-  human can supply — no number of retries will conjure one.
-  - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for **any** unresponsive external
-    system: a database/warehouse/gateway/tenant connection, an MCP server, an XMLA refresh, **and the
-    Power BI Desktop bridge** (`open`/`reload`/`screenshot`). **YOU run the clock; a library timeout
-    will not save you** — measured, a credential-blocked refresh under `CommandTimeout = 45` ran past
-    150 s (that setting aborts a slow *query* fine, but not a wait on a human). "Kill it and relaunch"
-    is an unbounded loop unless you cap the relaunches too — cap them at 2, then ask.
-  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. No
-    number of retries conjures a credential, so a refusal naming authentication, permissions or a
-    sign-in prompt is a **final answer**. Retry only a plainly transient timeout (a serverless
-    warehouse cold-starting), once.
+- **NEVER block silently on an external system — time-box it, then ASK.** Measured, from a real user
+  report: an agent sat on "Testing live Snowflake connectivity" for **129 minutes / 298 tool calls**,
+  retrying without ever surfacing the problem, until the user intervened. Waiting is not progress.
+  - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for any unresponsive external
+    system (database/warehouse/gateway, MCP server, XMLA refresh, the Power BI Desktop bridge). Cap
+    *relaunches* at 2 as well; "kill it and retry" is otherwise an unbounded loop.
+  - **Unless the tool tells you it IS the timer** — some of our scripts self-bound and announce their
+    own deadline. Measured: an agent applied this 2-minute cap to a script that was already the
+    bounded timer, killed it at 120 s, and so recorded **no verdict at all** — strictly worse than
+    waiting. Read the tool's own output before you decide it has hung.
+  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. A
+    refusal naming authentication, permissions or a sign-in prompt is a **final answer**; only a
+    plainly transient timeout (a serverless warehouse cold-starting) earns one retry.
   - **AUTOPILOT / auto-approve DOES NOT override a credential stop.** "Decide, don't ask" applies to
     *choices*; this is a physical dependency on a human — the credential sits behind a **modal
     sign-in dialog no automation can fill**. Stop and ask **even in an unattended run**, and end the
-    turn. A clear question costs the operator minutes; a confidently built, unvalidated model costs
-    the whole run and may go unnoticed.
-  - On hitting the cap, **STOP and ask the user a specific, actionable question** — name the system,
-    the server, what you tried, and the concrete options (e.g. "sign in interactively in Desktop", or
-    "give me a PAT/key"). Never re-run the same call hoping for a different result. Ask in your normal
-    reply — there is no `ask_user` tool.
-  - **Report elapsed time in your progress updates** whenever an operation exceeds ~60s, so a stall is
-    visible rather than looking like work.
-  - The same cap applies to any tool call that has hung once: the second identical retry needs a
-    reason, and the third needs the user.
+    turn. A clear question costs minutes; a confidently built, unvalidated model costs the whole run.
+  - On hitting the cap, **STOP and ask a specific, actionable question** — name the system, what you
+    tried, and the concrete options. Never re-run the same call hoping for a different result. Ask in
+    your normal reply — there is no `ask_user` tool.
+  - **Report elapsed time** whenever an operation exceeds ~60 s, so a stall is visible rather than
+    looking like work.
 - **End every message with a clear next step or an explicit verdict** — never a vague "looks fine."
 - **Durable learnings go in committed files** (the agent `Gotchas` sections and
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
   real migration permanently improves the toolkit.
 - **Clean up after yourself when you finish.** (a) **Close any Power BI Desktop instance you opened.**
-  In a parallel batch, orphaned Desktop instances (+ their child `msmdsrv`) cause Desktop-bridge
-  contention that blocks later agents from opening/rendering — a real bottleneck. Close the instance
-  you pinned your screenshots to: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
+  **Concurrent instances are fine** — the Desktop Bridge addresses one by `--pid` natively and every
+  port lookup is PID-scoped, so this is a **leak** rule, not a concurrency limit: each live instance
+  holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
+  your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
+  close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
   by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
   automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
   mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove

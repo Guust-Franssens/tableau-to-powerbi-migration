@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop and PERSIST the result to .pbi/cache.abf, headlessly via AMO Server.ImageSave with a UI-Automation fallback. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and OPTIONALLY persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is opt-in - `--save` - because a persisted cache can make the PBIP unopenable. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -40,6 +40,70 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
                                      [--no-save] [--verify-only] [--ui-save]
 ```
 
+**Persisting is the DEFAULT** — that is this script's stated purpose, *"so the next agent (and the
+next Desktop open) sees real data instead of an empty model"*. Pass **`--no-save`** for read-only
+work (the validator is read-only **by contract**) or for validate-then-deploy, where the project must
+stay byte-identical.
+
+> ⚠️ **Saving ALIGNS `database.tmdl`, and that alignment is what makes it work.**
+> **Root-caused 2026-08-07.** The earlier finding (3-vs-3 on 2026-08-04: a persisted `cache.abf`
+> made the PBIP open as **"Untitled - Power BI Desktop"** with the bridge reporting
+> `Host is not ready to accept operations`) was **real but mis-attributed**. Persisting is not
+> inherently destructive; persisting a cache whose compatibility level **disagrees with the
+> project's** is.
+>
+> **The mechanism.** Desktop silently runs the database at a HIGHER level than the project declares —
+> measured live `Database.CompatibilityLevel: 1606` against a `database.tmdl` of `1604`, on a server
+> whose default is `1700`. `ImageSave` serialises the **live** database, so without alignment the
+> cache is a 1606 image in a 1604 project. The reopen then hits Desktop's own **"Tabular databases do
+> not support CompatibilityLevel downgrade"**, which surfaces with **no visible message** — only the
+> `Untitled` window and the bridge error.
+>
+> **`--save` therefore aligns, always, with no flag.** That is exactly what Desktop's own Save does: a
+> UI Save was measured updating `database.tmdl` `1604 -> 1606` and writing `cache.abf` **at the same
+> timestamp**. An earlier version put the alignment behind `--align-compat` and refused otherwise;
+> that was removed as **ceremony rather than safety** — the only possible response to the refusal is
+> to re-run with the flag, so an agent simply learns to always pass it. Verified end to end: after
+> aligning, a cold reopen gives `PREFLIGHT: DATA_OK` with **no refresh**, and the write touches
+> **2 files** where a UI Save touches **79**.
+>
+> ⚠️ **Saving EDITS THE DEPLOYABLE ARTIFACT**, which is what `--no-save` is for. `database.tmdl` ships
+> with the model and its declared level goes up. A **read-only** consumer — auditing, validating,
+> grading fidelity — must pass `--no-save`, or it mutates the very artifact it is judging.
+>
+> ⚠️ **A refusal must never fall through to the UI-save fallback.** Measured while fixing this: an
+> early version *returned* a refusal, `main()` read it as "ImageSave unavailable" and drove Desktop's
+> UI instead — which wrote `cache.abf` anyway and rewrote **74 of 89 files**, performing precisely the
+> write that had just been refused. Anything that declines to write must stop the pipeline, not hand
+> off to a fallback that writes.
+>
+> ⚠️ **`MainWindowTitle` is a LOADING STATE before it is a verdict — do not read it early.** Without a
+> cache the title still reads `Untitled - Power BI Desktop` at t+25 s and only becomes the report name
+> by ~t+55 s. Reading at 25 s produced a false "it is broken" on a bundle that was merely still
+> opening. **Wait >= 90 s**, and prefer the bridge error over the title.
+>
+> ⚠️ **Never write TMDL with a BOM.** Desktop's project reader hard-rejects one —
+> `UTF8EncodingThrowOnBOM.CheckBom` -> *"Only text with UTF8 encoding without BOM is supported"* — and
+> the file does not open. This bit us during the investigation itself: a probe wrote `database.tmdl`
+> with `[System.Text.UTF8Encoding]::new($true)` and contaminated a whole test arm. In Python use
+> `encoding="utf-8"`; in PowerShell use `-Encoding utf8NoBOM` and never the `Out-File`/`Set-Content`
+> defaults. **This is a separate failure from the compatibility mismatch** — same symptom, different
+> cause, and only the Desktop crash report ("Frown") distinguishes them. Ask for one rather than
+> inferring from the window title.
+
+> ⚠️ **A refresh TIMEOUT is not evidence of a credential modal.** This script used to assert that,
+> and it was wrong: measured 2026-08-04 it fired on 2 of 5 Desktop instances opened on the *same*
+> bundle that refreshed cleanly on the other 3 (38.8 s on a good run, >87 s on a slow one, against a
+> 90 s ceiling — a ~3 s margin). It now reports `REFRESH: TIMEOUT` with the cause **UNKNOWN** and
+> names the arbiter (`scripts/probe_desktop_credential.ps1`).
+>
+> **The ceiling is 300 s and is deliberately NOT agent-tunable — there is no flag.** A knob here is
+> an attractive nuisance: an agent that hits a timeout reaches for a bigger number, and the one case
+> where waiting longer never helps is the credential wait, which this ceiling cannot interrupt
+> anyway. If a model legitimately needs longer, refresh less with `--tables`. Never emit a
+> "this needs a human" stop from an unverified timeout - that phrasing names the one blocker an
+> agent must not retry, so a false positive turns a slow refresh into a permanent dead end.
+
 Read-only preflight (proves credentials + source reachability without changing anything):
 
 ```
@@ -69,8 +133,12 @@ Re-localizing, reopening, refreshing and saving again produced a cache that **di
 `Stop-Process -Force` + reopen (`PREFLIGHT: DATA_OK`, no refresh). So "refresh last, after sanitize"
 does not rescue the cache: Desktop keys the cache to the definition it was built from.
 
-> **Hand-off rule:** leave the model **localized + refreshed + persisted** so the next agent gets data,
-> and tell whoever commits to run the sanitize step (which knowingly discards the cache).
+> **Hand-off rule:** leave the model **localized + refreshed**, and tell whoever commits to run the
+> sanitize step. ⚠️ **Revised 2026-08-04 — this used to say "+ persisted".** That was wrong, and it
+> was the more expensive of the two errors: persisting is what makes the PBIP unopenable (see the
+> `--save` warning above), so the guidance to always persist actively broke the hand-off it was
+> written to protect. Persist only with `--save`, only when the next step needs data to survive a
+> restart, and verify the PBIP still opens afterwards.
 
 **`powerbi-desktop reload` does NOT re-read edited TMDL.** Measured 2026-08-01: after editing two
 measures on disk, `reload` returned `{"success": true}` and `INFO.MEASURES()` still showed the **old**
@@ -84,8 +152,12 @@ number you read back.
 
 | Path | What it is | Status |
 |---|---|---|
-| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless. | **Default** |
+| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless. | **Opt-in (`--save`)** |
 | **UI Automation (`InvokePattern` on the "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Fallback / `--ui-save` |
+
+⚠️ **Read the `--save` warning above before using either.** Both write the same `cache.abf`, and a
+present cache was measured to make the PBIP unopenable. The mechanism below is sound and worth
+keeping - the error was making it the default, not building it.
 
 **Why ImageSave exists at all**, because the obvious answer says it should not: the guidance is that
 writing model state back to `.pbip`/`cache.abf` "is a separate Save action that only the Desktop UI
