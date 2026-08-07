@@ -274,6 +274,16 @@ def _load_amo():
     return Server
 
 
+class CompatibilityMismatch(RuntimeError):
+    """The live database's compatibility level disagrees with the project's declared one.
+
+    Raised rather than returned so it can never be mistaken for "ImageSave was unavailable". That
+    distinction is load-bearing: the caller falls back to driving Desktop's UI when ImageSave fails,
+    and a UI save writes a cache **and** rewrites ~74 files - so treating a deliberate refusal as a
+    failure would perform, by another route, exactly the write we just refused. Measured 2026-08-07.
+    """
+
+
 _COMPAT_RE = re.compile(r"^(?P<indent>\s*)compatibilityLevel:\s*(?P<level>\d+)\s*$", re.M)
 
 
@@ -298,28 +308,26 @@ def align_declared_compatibility(path: Path, level: int) -> None:
     path.write_text(new_text, encoding="utf-8", newline="")
 
 
-def _compat_guard(database, model_dir: Path | None, align_compat: bool) -> str | None:
+def _compat_guard(database, model_dir: Path | None, align_compat: bool) -> None:
     """Refuse (or align) when the live database's compatibility level differs from the project's.
 
-    Returns a refusal message, or ``None`` when it is safe to write. Split out from
-    :func:`image_save` so the decision is independently readable and testable.
+    Raises :class:`CompatibilityMismatch` to refuse; returns ``None`` when it is safe to write.
     """
     if model_dir is None:
-        return None
+        return
     live_level = int(database.CompatibilityLevel)
     declared, declared_path = read_declared_compatibility(model_dir)
     if declared is None or declared == live_level:
-        return None
+        return
     if not align_compat:
-        return (
-            f"REFUSED: live database is compatibilityLevel {live_level} but {declared_path.name} "
-            f"declares {declared}. Saving would write a {live_level} cache into a {declared} "
-            f"project, and the reopen fails with a CompatibilityLevel downgrade error and NO "
-            f"visible message. Re-run with --align-compat to update {declared_path.name} to "
-            f"{live_level} (this is exactly what Desktop's own Save does)."
+        raise CompatibilityMismatch(
+            f"live database is compatibilityLevel {live_level} but {declared_path.name} declares "
+            f"{declared}. Saving would write a {live_level} cache into a {declared} project, and the "
+            f"reopen fails with a CompatibilityLevel downgrade error and NO visible message. Re-run "
+            f"with --align-compat to update {declared_path.name} to {live_level} (this is exactly "
+            f"what Desktop's own Save does)."
         )
     align_declared_compatibility(declared_path, live_level)
-    return None
 
 
 def image_save(port: int, cache_path: Path, model_dir: Path | None = None, align_compat: bool = False):
@@ -353,9 +361,7 @@ def image_save(port: int, cache_path: Path, model_dir: Path | None = None, align
     try:
         database = server.Databases[0]
         live_level = int(database.CompatibilityLevel)
-        refusal = _compat_guard(database, model_dir, align_compat)
-        if refusal:
-            return False, refusal
+        _compat_guard(database, model_dir, align_compat)
 
         stream = FileStream(str(cache_path), FileMode.Create, FileAccess.Write)
         try:
@@ -606,6 +612,13 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     if cache is not None and not args.ui_save:
         try:
             saved, save_message = image_save(port, cache, model_dir=cache.parent.parent, align_compat=args.align_compat)
+        except CompatibilityMismatch as exc:
+            # A deliberate refusal, NOT a failure. Returning here is the whole point: the UI-save
+            # fallback below would write a cache anyway (and rewrite ~74 files), performing exactly
+            # the write we just refused. Measured 2026-08-07 when this fell through by accident.
+            print(f"  save   : REFUSED - {exc}")
+            print("REFRESH: NOT_PERSISTED (compatibility mismatch; nothing was written)")
+            return 2
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
     if not saved:
@@ -730,6 +743,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  cache  : PERSISTED -> {cache}")
     elif cache is None:
         print("  cache  : not persisted (no cache path resolved)")
+    elif args.save:
+        # --save WAS given but nothing landed. Saying "--save not given" here sent me looking in the
+        # wrong place for ten minutes; the real reason is always on the `save` line above.
+        print("  cache  : not persisted (--save was given but the write did not land - see 'save' above)")
     else:
         print("  cache  : not persisted (--save not given; this is the safe default)")
 
