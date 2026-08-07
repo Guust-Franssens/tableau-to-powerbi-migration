@@ -173,6 +173,9 @@ def _clear_but_keep_git(out: Path) -> None:
             if sys.version_info >= (3, 12):
                 shutil.rmtree(entry, onexc=_force_remove)
             else:
+                # pylint's deprecated-argument check is static, so it flags this branch even though
+                # it only ever runs on 3.11, where `onerror` is the CORRECT (and only) spelling.
+                # pylint: disable-next=deprecated-argument
                 shutil.rmtree(entry, onerror=lambda fn, path, _exc: _force_remove(fn, Path(path), None))
         else:
             entry.chmod(stat.S_IWRITE)
