@@ -68,6 +68,14 @@ AUDIT = ".credential-gate-audit.log"
 # the tree, and a gate that blinds it produces worse reports, not safer ones.
 DENY_RIGHTS = "(OI)(CI)(WD,AD,WA)"
 
+# Both audit actions mean "the gate was armed"; they differ only in how strongly it is ENFORCED
+# (kernel ACL vs marker file). Every READER must treat them alike, or the gate's ordering guarantee
+# silently becomes Windows-only. Measured 2026-08-03 by simulating the non-Windows path: with only
+# `block` recognised, a `probe-cleared` recorded BEFORE a re-arm still counted as earned afterwards,
+# so backdated evidence survived exactly the event that exists to invalidate it. The distinct names
+# are kept because the enforcement difference is real and belongs in the log.
+BLOCK_ACTIONS = frozenset({"block", "block-marker-only"})
+
 
 def _audit(migration: Path, action: str, detail: str) -> None:
     """Append a tamper-evident-ish record of every gate transition."""
@@ -112,7 +120,7 @@ def _clear_was_earned(migration: Path) -> str | None:
         for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
             entry = json.loads(line)
             action, ts = entry.get("action"), entry.get("ts", "")
-            if action == "block":
+            if action in BLOCK_ACTIONS:
                 earned, blocked_at = None, ts  # a re-arm invalidates any earlier evidence
             elif action in {"probe-cleared", "authorize"} and ts >= blocked_at:
                 earned = action
@@ -242,7 +250,7 @@ def _last_block_sources(migration: Path) -> list[str] | None:
     try:
         for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
             entry = json.loads(line)
-            if entry.get("action") != "block":
+            if entry.get("action") not in BLOCK_ACTIONS:
                 continue
             detail = entry.get("detail", "")
             if not detail.startswith("sources="):
@@ -353,14 +361,18 @@ def apply_block(migration: Path, sources: list[str]) -> int:
         encoding="utf-8",
     )
 
+    # The sandbox is a SIBLING of fabric/, so it needs no grant and no particular ordering - see
+    # probe_dir(). Created before the platform branch: the probe needs somewhere to build on every
+    # platform, and only the ENFORCEMENT is Windows-specific, not the workflow.
+    probe = probe_dir(migration)
+
     if platform.system() != "Windows":
         log.warning("Non-Windows: marker written, but ACL enforcement is Windows-only here.")
-        _audit(migration, "block-marker-only", "non-windows")
+        log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
+        # Same `sources=` detail as the enforced path. Without it `_last_block_sources` cannot read
+        # this entry, so the redundant-re-arm check fails closed forever on non-Windows.
+        _audit(migration, "block-marker-only", f"sources={sources}")
         return 0
-
-    # The sandbox is a SIBLING of fabric/, so it needs no grant and no particular ordering - see
-    # probe_dir(). Created here only so the path exists for the message below.
-    probe = probe_dir(migration)
 
     failed = 0
     for d in denied_dirs(migration):
