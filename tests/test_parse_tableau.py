@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from parse_tableau import _conn_attr, _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
+from parse_tableau import _conn_attr, _published_ds_name, _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
@@ -470,3 +470,51 @@ def test_a_plain_attribute_still_wins_over_any_flagged_variant():
 
     el = etree.fromstring(b"<connection dbname='plain' _.fcp.X.true...dbname='flagged' />")
     assert _conn_attr(el, "dbname") == "plain"
+
+
+def _repo_and_conn(repo_attrs: str, conn_class: str, dbname: str | None):
+    """One `<repository-location>` plus the connection dict the parser would hand alongside it."""
+    from lxml import etree  # noqa: PLC0415
+
+    repo = etree.fromstring(f"<repository-location {repo_attrs} />".encode())
+    return repo, {"class": conn_class, "database": dbname}
+
+
+def test_dbname_is_the_datasource_name_ONLY_for_sqlproxy():
+    """For sqlproxy, `dbname` IS the published datasource. For anything else it is a DATABASE.
+
+    Measured 2026-08-07 on a downloaded `.tds`: the connection is `snowflake` with
+    `dbname='MERIDIAN'`, so an unguarded rule 2 keyed the datasource `.../meridian` while the two
+    workbooks binding it keyed `.../meridiansaleslivesnowflake` from `derived-from`. The keys could
+    never join, so one shared datasource silently failed to de-duplicate into one semantic model -
+    and the failure is invisible, because both keys look reasonable on their own.
+    """
+    repo, conn = _repo_and_conn("id='MeridianSalesLiveSnowflake'", "snowflake", "MERIDIAN")
+    name, source = _published_ds_name(repo, conn)
+    assert name == "MeridianSalesLiveSnowflake"
+    assert source == "repository-location.id", "a physical database name must never become the key"
+
+
+def test_sqlproxy_dbname_still_wins_over_a_stale_repository_id():
+    """The guard must not break rule 2 where it is sound - `id` can be a stale leftover after a rename."""
+    repo, conn = _repo_and_conn("id='new'", "sqlproxy", "dandan003")
+    assert _published_ds_name(repo, conn) == ("dandan003", "connection.dbname")
+
+
+def test_derived_from_outranks_everything():
+    """Control: the publish URL is authoritative, whatever the connection class says."""
+    repo, conn = _repo_and_conn(
+        "id='stale' derived-from='https://x/datasources/Sales%20Master?rev=1.0'", "sqlproxy", "OTHER"
+    )
+    assert _published_ds_name(repo, conn) == ("Sales Master", "derived-from")
+
+
+def test_a_shared_datasource_and_its_workbooks_produce_ONE_key():
+    """The whole point: a `.tds` and the `.twb`s that bind it must land on the SAME key.
+
+    Without it, `published_datasource_registry.py` cannot match them, so one shared Tableau
+    datasource becomes N near-identical semantic models instead of one with N reports bound to it.
+    """
+    tds_repo, tds_conn = _repo_and_conn("id='Shared' site='s'", "snowflake", "PHYSICAL_DB")
+    twb_repo, twb_conn = _repo_and_conn("id='Shared' site='s'", "sqlproxy", "Shared")
+    assert _published_ds_name(tds_repo, tds_conn)[0] == _published_ds_name(twb_repo, twb_conn)[0] == "Shared"
