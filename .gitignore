@@ -66,6 +66,10 @@ candidates.json
 # so ignore the conventional name rather than relying on everyone remembering.
 /_assessment*/
 
+# harvest_estate_assets.py output: downloaded .twbx/.tdsx from a REAL site plus the parse
+# sweep over them. Vendor workbooks and customer content - never commit.
+/_sweep/
+
 # Power BI Desktop local cache/settings - machine-specific, regenerated automatically on open
 **/.pbi/cache.abf
 **/.pbi/localSettings.json
