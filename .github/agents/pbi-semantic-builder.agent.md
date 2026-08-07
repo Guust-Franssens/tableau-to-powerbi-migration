@@ -171,8 +171,10 @@ enrich it, and hand it over refreshed.
 7. **Enrich for AI — see the next section.** This is the part of the job nobody upstream does at all.
 8. **HANDOFF GATE — refresh, SAVE, and prove it before reporting done.** The report builder needs a
    model with data in it; an unrefreshed model makes every downstream screenshot meaningless.
-   `python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py --pid <literal pid> --save`,
-   then confirm rows came back. Edit → refresh → save, in that order.
+   `python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py --pid <literal pid>`,
+   then confirm rows came back. Persisting is the default — it also raises `database.tmdl`'s declared
+   `compatibilityLevel` to the level Desktop runs at, which is required for the cache to load and is
+   what Desktop's own Save does. Edit → refresh → save, in that order.
 9. **Report back**: model location, what you authored vs. what the engine did, every table-calc
    decision (visual calc vs measure, and why), anything you routed rather than fixed, and new
    `limitations_encountered` entries (`stage: "model_build"`).

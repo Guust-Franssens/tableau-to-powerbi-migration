@@ -584,14 +584,21 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
         return 2
     print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
 
-    # Not saving is the DEFAULT, but the reason has changed. The 3-vs-3 that produced this default
-    # (2026-08-04) was real but MIS-ATTRIBUTED: persisting is not inherently destructive, persisting
-    # a cache whose compatibility level disagrees with the project's is. `image_save` now aligns
-    # `database.tmdl` to the live level as part of saving (what Desktop's own Save does), so --save
-    # WORKS. The default stays off for a different and simpler reason: saving EDITS THE DEPLOYABLE
-    # ARTIFACT (it raises database.tmdl's declared level), and the common path here is validate-then-
-    # deploy, which wants the project left byte-identical. `--no-save` is a no-op for old callers.
-    if not args.save:
+    # Persisting is the DEFAULT, because it is this script's stated purpose: "so the next agent (and
+    # the next Desktop open) sees real data instead of an empty model". It was off for a while
+    # because a persisted cache was believed to break the PBIP; root-caused 2026-08-07, that was a
+    # compatibility-level mismatch, and `image_save` now aligns `database.tmdl` the way Desktop's own
+    # Save does. With the hazard gone, the default that matches the purpose wins.
+    #
+    # Which default is safer is decided by the failure modes, not by taste. Forgetting `--no-save`
+    # bumps a declared compat level and leaves a cache: bounded, visible, reversible. Forgetting a
+    # `--save` opt-in hands the NEXT agent an empty model - measured this session, a probe came back
+    # NO_DATA - and an agent that queries it reports findings about nothing. The second is worse and
+    # more likely, since persisting is the reason to run this at all.
+    #
+    # `--no-save` is for read-only work (the validator is read-only BY CONTRACT and must pass it) and
+    # for validate-then-deploy, where the project must stay byte-identical.
+    if args.no_save:
         return None
 
     # Preferred: a real API call. Falls back to driving the UI only if it fails, so a change in the
@@ -659,19 +666,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--save",
         action="store_true",
-        help=(
-            "Persist the refreshed model to .pbi/cache.abf via AMO ImageSave, so the next Desktop "
-            "open has data without re-refreshing. This also ALIGNS database.tmdl's compatibilityLevel "
-            "to the level Desktop actually runs the model at (e.g. 1604 -> 1606) - required, because "
-            "a cache at a different level than the project makes the PBIP silently unopenable, and it "
-            "is what Desktop's own Save does. OFF BY DEFAULT because it EDITS THE DEPLOYABLE ARTIFACT: "
-            "for validate-then-deploy, omit it and the project stays byte-identical"
-        ),
+        help="Accepted no-op: persisting is now the DEFAULT. Kept so existing callers still work",
     )
     parser.add_argument(
         "--no-save",
         action="store_true",
-        help="Deprecated no-op: not saving is now the default. Kept so existing callers still work",
+        help=(
+            "Refresh in memory but persist NOTHING, leaving the project byte-identical. Use for "
+            "read-only work (validation, auditing) and for the validate-then-deploy path, because "
+            "saving raises database.tmdl's declared compatibilityLevel to the level Desktop runs at"
+        ),
     )
     parser.add_argument("--verify-only", action="store_true", help="Skip refresh/save; just report the state")
     parser.add_argument(
@@ -709,26 +713,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  data   : {rows} row(s) in '{table}'")
     # Say what HAPPENED, not where a file would go. Printing the path alone reads as "written" -
     # it misled a reader on 2026-08-05 into believing a probe run had persisted a 1-row cache.
-    # For a probe that distinction matters twice over: a persisted 1-row `cache.abf` is a trap,
-    # and (measured, see `--save`) a present cache can make the PBIP unopenable.
+    # For a probe that distinction matters twice over: a persisted 1-row `cache.abf` is a trap, and
+    # a cache whose compatibility level disagrees with the project's makes the PBIP unopenable (see
+    # `--no-save`; `image_save` prevents that by aligning `database.tmdl`).
     if persisted:
         print(f"  cache  : PERSISTED -> {cache}")
     elif cache is None:
         print("  cache  : not persisted (no cache path resolved)")
-    elif args.save:
-        # --save WAS given but nothing landed. Saying "--save not given" here sent me looking in the
-        # wrong place for ten minutes; the real reason is always on the `save` line above.
-        print("  cache  : not persisted (--save was given but the write did not land - see 'save' above)")
+    elif args.no_save:
+        print("  cache  : not persisted (--no-save; the project is byte-identical)")
     else:
-        print("  cache  : not persisted (--save not given; this is the safe default)")
+        # Persisting was requested (the default) and nothing landed. Naming the wrong reason here
+        # sent me looking in the wrong place for ten minutes; the real one is on the 'save' line.
+        print("  cache  : not persisted (the write did not land - see 'save' above)")
 
     if rows <= 0:
         print("REFRESH: NO_DATA (refresh ran but the table is empty - check the source and credentials)")
         return 1
-    if args.save and not args.verify_only and not persisted:
+    wanted_save = not args.no_save and not args.verify_only
+    if wanted_save and not persisted:
         print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
         return 1
-    print("REFRESH: DATA_OK" + (" + PERSISTED" if args.save and not args.verify_only else ""))
+    print("REFRESH: DATA_OK" + (" + PERSISTED" if wanted_save else ""))
     return 0
 
 

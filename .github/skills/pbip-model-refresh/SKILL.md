@@ -37,10 +37,15 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
-                                     [--save] [--verify-only] [--ui-save]
+                                     [--no-save] [--verify-only] [--ui-save]
 ```
 
-> ⚠️ **`--save` ALIGNS `database.tmdl`, and that alignment is what makes it work.**
+**Persisting is the DEFAULT** — that is this script's stated purpose, *"so the next agent (and the
+next Desktop open) sees real data instead of an empty model"*. Pass **`--no-save`** for read-only
+work (the validator is read-only **by contract**) or for validate-then-deploy, where the project must
+stay byte-identical.
+
+> ⚠️ **Saving ALIGNS `database.tmdl`, and that alignment is what makes it work.**
 > **Root-caused 2026-08-07.** The earlier finding (3-vs-3 on 2026-08-04: a persisted `cache.abf`
 > made the PBIP open as **"Untitled - Power BI Desktop"** with the bridge reporting
 > `Host is not ready to accept operations`) was **real but mis-attributed**. Persisting is not
@@ -62,10 +67,9 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
 > aligning, a cold reopen gives `PREFLIGHT: DATA_OK` with **no refresh**, and the write touches
 > **2 files** where a UI Save touches **79**.
 >
-> ⚠️ **`--save` stays OFF by default because it EDITS THE DEPLOYABLE ARTIFACT.** `database.tmdl` ships
-> with the model, and saving raises its declared level. The common path — refresh, validate, deploy —
-> wants the project left byte-identical, so simply do not pass `--save`. Pass it only when a later
-> step genuinely needs the data to survive a Desktop restart, and be aware the artifact changed.
+> ⚠️ **Saving EDITS THE DEPLOYABLE ARTIFACT**, which is what `--no-save` is for. `database.tmdl` ships
+> with the model and its declared level goes up. A **read-only** consumer — auditing, validating,
+> grading fidelity — must pass `--no-save`, or it mutates the very artifact it is judging.
 >
 > ⚠️ **A refusal must never fall through to the UI-save fallback.** Measured while fixing this: an
 > early version *returned* a refusal, `main()` read it as "ImageSave unavailable" and drove Desktop's

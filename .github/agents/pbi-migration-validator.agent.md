@@ -150,7 +150,10 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
   assumption. The default flow produces a **local PBIP that is never published**, so use the offline
   path: `powerbi-modeling-mcp` → `connection_operations` **ConnectFolder** on the
   `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**. For a model already open in
-  Desktop, `python scripts/probe_desktop_query.py --pid <pid>` runs a one-row probe. Use
+  Desktop, `python scripts/probe_desktop_query.py --pid <pid>` runs a one-row probe. If the model has
+  no data yet, refresh it with **`refresh_pbip_model.py --pid <pid> --no-save`** — `--no-save` is not
+  optional for you: persisting is that script's default and it rewrites `database.tmdl`, so omitting
+  it would mutate the very artifact you are judging. Use
   `powerbi-remote` (`GetSemanticModelSchema` / `ExecuteQuery`) **only** if the model really was
   published to a workspace. (`semantic-model-consumption` is an optional convenience that ships in the
   `fabric-skills` plugin — it is *not* required by this repo's setup and is being deprecated upstream;
