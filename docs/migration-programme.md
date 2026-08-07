@@ -35,6 +35,37 @@ measured facts:
 (e.g. embedded-vs-published detection), it is his. If the output is *a decision for a human*, it is
 ours.
 
+### 0.1 Why we keep our own parser — measured, not assumed
+
+The predicate above *looks* like it retires `parse_tableau.py`: parsing a workbook is plainly
+"inside the workbook". Measured 2026-08-07, it does not, and the field surfaces say why.
+
+| | our `migration-spec.json` | his `handover/<wb>.json` |
+|---|---|---|
+| field paths | 128 | 201 |
+| `mark_type` / `encoding` | present | **0 occurrences** |
+| shelves, palettes, fonts, reference lines, sizes | present | absent |
+| `is_lod` / `is_table_calc` / `semantic_role` / `aggregation` | present | absent |
+| rebinds, prunes, `viz_fidelity` status, remediation worklist | absent | present |
+
+They are **not the same artifact and not competing**. His handover answers *"what must still be
+fixed"* — a worklist, keyed to the model he just built. Ours answers *"what did the Tableau viz mean
+and look like"* — mark type, encodings, shelf assignment, palette. That is the fidelity ground truth
+`pbi-report-builder` builds from and `pbi-migration-validator` judges against, and **nothing in his
+output carries it** because his engine does not need it: it converts, it does not adjudicate.
+
+So the parser stays, and it is not duplicated effort. Two consequences follow, though:
+
+- **Connection parsing IS duplicated, and he does it better.** His `connection_to_m.py` fully
+  handles feature-flagged `_.fcp.` attributes, *including* the Databricks trap where the HTTP path
+  hides in `_.fcp.DatabricksCatalog.true...v-http-path` — which is exactly our open issue #42.
+  Re-solving that on our side is re-solving it worse. Prefer his extraction for anything that feeds
+  **M generation**; keep ours only for the live-vs-flat-file *classification* that arms the
+  credential gate, which is ours by the boundary ("is it reachable" is around the workbook).
+- **`migration-spec.json` is load-bearing** — 38 tracked files reference it, including the
+  credential gate's arming point and all four personas. Any future move here is a **contract**
+  change, not a file deletion.
+
 ---
 
 ## 1. Phase model
