@@ -114,7 +114,7 @@ committed here as well as published.
 |---|---|
 | the emitted `.SemanticModel` | tables, columns, relationships, partitions, and most of the DAX — already built and openable |
 | `handover/<workbook>.json` → `model_translation_handoff.requests[]` | **your work queue**: the calcs the engine refused, each with `name`, `formula`, `role` (measure vs column — it already decided), `target_table`, `fields[]` (source table + type), `category`, `category_guidance`, `fallback_reason` |
-| → `openability_selfcheck` | what it already proved about the model's shape — do not re-prove it |
+| → `openability_selfcheck` | what it already proved about the model's shape **against its own parse** — do not re-prove *that*. Since engine 2.75.0 this includes `checks.endpoints_distinct`. It is blind to a mis-parse, which is why step 3 still cross-checks against the spec |
 | `migration-spec.json` | source intent its input format cannot carry: `worksheets[].encodings` (rows/columns/`derivation`/`manual_sort`) — the addressing for table calcs, and the parameter-equality idiom in a filter's `note` |
 
 **You do not decide measure-vs-column.** `translation_router` already classified every calc and
@@ -143,8 +143,12 @@ enrich it, and hand it over refreshed.
 3. **VERIFY the connection rather than choose it.** `connection_to_m` already decided the connector
    and storage mode. Your job is to confirm the model reaches every endpoint the spec declares —
    `probe_bundle.py --check-only --spec` reports `SOURCE_COLLAPSED` when N declared endpoints collapse
-   to fewer, which refreshes cleanly and returns the **wrong** data. Never silently rewrite his M; a
-   wrong connector is a finding to route, not a fix to apply.
+   to fewer, which refreshes cleanly and returns the **wrong** data. The engine's own
+   `endpoints_distinct` (2.75.0+) checks the same invariant but counts against **its own** parse, so
+   it cannot see a mis-parse and it stays silent when it cannot derive an endpoint count at all
+   (flat-file islands). Ours counts against `migration-spec.json`, parsed independently — that is why
+   both run, and why agreeing with it is a result rather than a formality. Never silently rewrite his
+   M; a wrong connector is a finding to route, not a fix to apply.
 4. **Author the residual DAX from `requests[]`** — each carries `name`, `formula`, `role`,
    `target_table`, `fields[]` (with source table and type), `category`, `category_guidance` and
    `fallback_reason`, which is enough to author without re-parsing the `.twbx`.

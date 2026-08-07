@@ -39,11 +39,15 @@ emitting model content, the split has been violated.
 The barrier
 -----------
 A `--approved-dax` re-run is **delete-and-recreate**, not merge: `migrate_estate.py` `rmtree`s the
-`.SemanticModel` folder (:880), the whole `.pbip` project dir (:3005) and `<name>.Report` (:3253)
+`.SemanticModel` folder (:879), the whole `.pbip` project dir (:3035) and `<name>.Report` (:3284)
 before rewriting them. Nothing a downstream agent wrote into that bundle survives. Worse, the
-stale-output guard (:5003) *exempts* the landing re-run, so the most destructive path is the one that
+stale-output guard (:5040) *exempts* the landing re-run, so the most destructive path is the one that
 needs no `--force`. Hence: all DAX lands in ONE run, and per-workbook work starts only afterwards.
 This script owns that ordering so no agent has to remember it.
+
+(Line numbers are against engine HEAD `81e6164`. They drift on every upstream release - the four
+`rmtree`/guard sites moved ~30 lines between 2.72.0 and 2.78.0 with no behaviour change - so re-derive
+them by symbol, not by number, if they do not match.)
 """
 
 from __future__ import annotations

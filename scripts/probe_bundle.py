@@ -422,10 +422,22 @@ def check_source_coverage(model_dir: Path, spec: Path | None) -> dict:
         Orders     -> Sql.Database(#"Server", #"Database")   correct
         Employees  -> Sql.Database(#"Server", #"Database")   WRONG - belongs to hr-sql / hrdb
 
-    Nothing catches this. Every parameter IS defined, so `check_m_parameters` returns clean; the
-    TMDL is well-formed, so `tmdl_lint` exits 0; the model refreshes without error. It then either
-    fails with a confusing "invalid object name" or - if a same-named table exists on the first
-    server - **returns the wrong data and looks completely healthy**.
+    Nothing caught this when the check was written. Every parameter IS defined, so
+    `check_m_parameters` returns clean; the TMDL is well-formed, so `tmdl_lint` exits 0; the model
+    refreshes without error. It then either fails with a confusing "invalid object name" or - if a
+    same-named table exists on the first server - **returns the wrong data and looks completely
+    healthy**.
+
+    ⚠️ **The engine now catches this natively too, and that is a good thing - this check is a
+    deliberate SECOND opinion, not the only defense.** Since upstream 2.75.0 (issue #93) its
+    `openability_gate.endpoints_distinct` compares the emitted endpoint parameter groups against an
+    `expected_endpoints` count derived from its own descriptor, and the verdict lands in
+    `report.json` at `workbooks[].openability_selfcheck.checks.endpoints_distinct`.
+    The two are not redundant, because they count from **different sources**: the engine compares its
+    build against its own parse, so a mis-parse is invisible to it; we compare against the endpoints
+    declared in `migration-spec.json`, parsed independently. Ours therefore still catches a bad
+    *parse*, and it stays silent where the engine's does (its check is skipped entirely when it
+    cannot derive `expected_endpoints`, e.g. flat-file islands with no parameterised endpoints).
 
     The invariant: a datasource declaring N distinct upstream endpoints must produce a model that
     resolves N distinct endpoints. Collapsing N -> 1 means every table after the first is pointed at
