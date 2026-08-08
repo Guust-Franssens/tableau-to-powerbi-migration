@@ -266,6 +266,75 @@ indicator *string* (e.g. `… Circle Col` → "Up"/"Down") cannot drive a Power 
 need a numeric/categorical driver on the visual). Such series render single-color; note the fidelity
 loss rather than forcing it.
 
+### 6a. ⚠️ An inline metric inside an X-iterator needs ONE EXTRA `CALCULATE` [seen, Sales & Customer Dashboards]
+
+This is the highest-cost defect class in this guide: it **compiles, returns plausible numbers, and is
+silently wrong**. Only a per-axis-point ground-truth comparison catches it.
+
+`CALCULATE` evaluates its **filter arguments in the OUTER filter context**, before applying its own
+context transition. So when you iterate an axis and inline the metric:
+
+```dax
+-- WRONG: returns the ANNUAL total for every month
+MAXX(VALUES('Date'[Month No]),
+     CALCULATE(DISTINCTCOUNT('Orders.csv'[Customer_ID]),
+               FILTER('Orders.csv', YEAR('Orders.csv'[Order_Date]) = _y)))
+```
+
+the `FILTER('Orders.csv', …)` never sees the iterated month — and, being a table filter on the fact
+table, it then *overrides* the month filter arriving through the date relationship. Measured: every
+month returned 693, the full-year distinct customer count.
+
+```dax
+-- RIGHT: one extra CALCULATE lands the context transition first
+MAXX(VALUES('Date'[Month No]),
+     CALCULATE(CALCULATE(DISTINCTCOUNT('Orders.csv'[Customer_ID]),
+                         FILTER('Orders.csv', YEAR('Orders.csv'[Order_Date]) = _y))))
+```
+
+Measured after the fix: 216 max / 53 min per month, matching the CSV exactly.
+
+**Why a measure reference doesn't need this.** `[My Measure]` inside an iterator expands to
+`CALCULATE([My Measure])` — you already get two nested `CALCULATE`s for free. That is why the same
+logic works when factored into a measure and breaks when inlined, which makes the bug look like magic
+during debugging. Rule of thumb: **if you inline a `CALCULATE(…, FILTER(fact, …))` inside `SUMX`/
+`MAXX`/`MINX`/`AVERAGEX`, wrap it once more.**
+
+### 6b. Window (WINDOW_MAX/MIN/AVG) calcs with no addressing spec
+
+Tableau records addressing only when it is non-default: if the `.twb` has **zero** `compute-using`,
+`addressing`, `partitioning` and `scope-isolation` elements, every `<table-calc>` is at the default
+**Table (across)** — one partition over the whole pane. The `ordering-type` attribute that *is*
+present records the layout direction (it flips `Rows`→`Columns` when the axis pill moves shelves), so
+it is irrelevant to order-invariant `WINDOW_MAX`/`MIN`/`AVG`.
+
+The faithful DAX is a no-arg `ALLSELECTED()` window over the axis column, which keeps the window
+responsive to slicers while ignoring the axis point:
+
+```dax
+Min/Max Sales =
+VAR _mx = CALCULATE(MAXX(VALUES('Date'[Month No]), CALCULATE([CY Sales])), ALLSELECTED())
+VAR _mn = CALCULATE(MINX(VALUES('Date'[Month No]), CALCULATE([CY Sales])), ALLSELECTED())
+VAR _v  = [CY Sales]
+RETURN IF(_v = _mx, "Max", IF(_v = _mn, "Min"))
+```
+
+**Prove it, don't assert it:** evaluate over the axis and check that **exactly one** point is `Max`
+and one is `Min`, and that those points match the max/min computed independently from the source data
+— then repeat with a different slicer selection to prove the window is not frozen.
+
+### 6c. Two mechanical traps when landing approved DAX
+
+- **`ADDCOLUMNS`/`SELECTCOLUMNS` extension-column references (`[@v]`) are rejected by the openability
+  gate.** `[@v]` is resolved lexically by the DAX engine, not a model object, but the gate reports
+  *"references [@v], which is neither a measure nor a column in the model"* and fails the run
+  (`definition_of_done: FAILED`). Rewrite the window without `ADDCOLUMNS` — `CALCULATE(MAXX(VALUES(…),
+  …), ALLSELECTED())` needs no extension column at all.
+- **A measure name containing `]` must have it DOUBLED in every DAX reference.** A Tableau LOD caption
+  kept verbatim, e.g. `{SUM([CY Sales])}`, is a legal measure *name* but referencing it naively is a
+  syntax error. Correct: `'_Measures'[{SUM([CY Sales]])}]`. Worth flagging to the report builder and
+  in the model's AI instructions, because nothing about the failure points at the bracket.
+
 ## 7. Visual pattern note — reference lines → Gauge visual
 
 Several worksheets (e.g. `CDD_0_1`) use a Tableau-specific trick: a single `Circle` mark plotted on a
