@@ -124,19 +124,14 @@ it must show up in `limitations_encountered`, not be silently dropped.
    published skill bundles still match `.github/skills/`. If it exits non-zero, **stop and surface the
    missing items with the printed install hints** — do not migrate against a half-configured machine.
    Proceed only once it reports "Ready to migrate."
-1. **INTAKE — confirm inputs AND intent, in ONE message, before touching anything.** Inferring intent
-   silently is how a run spends an hour being confidently wrong. Ask all four, then record the answers
-   in `migrations/workbooks/<name>/migration-brief.md` — it survives a dropped session, and it is what
-   a *stateless* subagent gets handed instead of re-deriving intent nobody wrote down:
-   1. **Scope** — this workbook, or several from one estate? Several ⇒ model-first ordering, below.
-   2. **Autonomy** — `guided` (ask at every choice) / **`standard`**, the default (decide reversible
-      things and log them; ask before anything costly or irreversible) / `autopilot` (decide, and flag
-      it in the summary). **No level clears step 6b** — autonomy governs choices, not physics.
-   3. **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? It decides real
-      translations (a dual-axis trick → a native combo chart), so pass it down in **every** delegation.
-   4. **On a wall — stop, or degrade?** Pre-authorising the fallback (no credential ⇒ build model-only
-      under `credential_gate.py authorize`, marked unvalidated) is what lets an unattended run survive
-      one instead of dying at 3 am.
+1. **Read the brief, then confirm inputs.** The *dispatcher* — the top-level session, per `AGENTS.md`
+   — decides **what** gets migrated and hands you one unit of work plus
+   `migrations/workbooks/<name>/migration-brief.md`: scope, **autonomy** (`guided` / `standard` /
+   `autopilot`), **fidelity bar** (faithful vs. modernise), and the **wall policy** (stop, or degrade
+   under `credential_gate.py authorize`). Obey it, and pass the fidelity bar and autonomy down in
+   **every** delegation — subagents are stateless and cannot infer them. **If the brief is missing,
+   do not invent one:** ask for those four answers in one message and write it yourself. Autonomy
+   governs choices, never physics — no level clears step 6b.
    Then the mechanics. You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
    `migrations/workbooks/<name>/` (create `source/`, and the spec will live at
    `migrations/workbooks/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
