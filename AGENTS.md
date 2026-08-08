@@ -300,6 +300,70 @@ the evidence and say so plainly.
 
 ---
 
+## Starting a migration — what to ask the user, and when
+
+This section is deliberately **outside** the synced block below: it is an *orchestrator/top-level*
+concern, and `tableau-migrator` is already at ~95 % of its character cap, so it carries a compact
+version of the gate (workflow step 1) while the reasoning lives here.
+
+**The problem was never that we ask too little. It is that every question arrives too late.** Before
+this section existed, the orchestrator had exactly four ask-moments and **all four were mid-flight**:
+the published-datasource decision (step 5, post-parse), the credential stop (step 6b, post-probe), a
+re-parse confirmation (step 3), and the retry cap (step 11). Each one interrupts work already in
+progress — and if the user has stepped away, the run dies there. Measured 2026-08-07: the `4-nocreds`
+end-to-end run did exactly that.
+
+Meanwhile **nothing was asked up front**, so scope, fidelity bar and autonomy were inferred silently.
+From the outside, an hour of confident work on a wrong assumption is indistinguishable from an hour
+of correct work.
+
+So: **two gates, not a running interrogation.**
+
+### Gate A — before any work (answerable from the request alone)
+
+Ask these four **together, in one message**, then write the answers to
+`migrations/workbooks/<name>/migration-brief.md`. The file is the point, for two reasons a subagent
+cannot solve on its own: it survives a **dropped session** (a closed terminal takes the orchestrator's
+entire working memory with it), and it is what a **stateless** subagent gets handed instead of
+re-deriving intent that was never written down.
+
+| # | Question | Why it cannot be inferred |
+|---|---|---|
+| 1 | **Scope** — this workbook, or several from one Tableau estate? | An estate is migrated **model-first** (`tableau_lineage.py --plan`): the published data source feeding 12 workbooks is the highest-leverage unit of work. Guessing "just this one" forfeits that ordering permanently. |
+| 2 | **Autonomy** — see the table below. Default `standard`. | The two failure modes are symmetric: too autonomous and a run spends 105 minutes without saying anything; too interactive and an overnight run stops on question 1 and achieves nothing. |
+| 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | This decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it, so pass it down in **every** delegation. |
+| 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
+
+**Autonomy levels, defined by behaviour at a decision point — not by vibe:**
+
+| level | reversible choice | costly or irreversible | credential wall |
+|---|---|---|---|
+| `guided` | ask | ask | ask |
+| **`standard`** (default) | decide, log it | **ask** | ask |
+| `autopilot` | decide, log it | decide, flag in the summary | **ask — always** |
+
+**Autonomy governs choices; it cannot govern physics.** No level clears the step-6b credential stop:
+that is a modal sign-in dialog no automation can fill. Question 4 pre-authorises the *fallback*
+(build model-only under `credential_gate.py authorize`, artifacts marked unvalidated) — it never
+pre-authorises pretending the source was reachable.
+
+### Gate B — after parse + probe, before building (only knowable then)
+
+Some decisions genuinely cannot be front-loaded: you do not know a workbook points at a published
+datasource until you parse it, or that a warehouse refuses Power BI until you probe it. Fine — but
+**present them as ONE block, not as four serial stops**. Serial stops are the same questions with
+strictly more waiting, and each one is another chance to catch the user absent.
+
+1. Published datasources → fetch the `.tds` and migrate it first, or proceed knowingly incomplete.
+2. Live sources that failed the probe → credential, or the Gate-A-authorised build-only path.
+3. Extract-only sources → materialize real rows, or model-only.
+4. The high-severity `limitations_encountered` digest → proceed, or narrow scope.
+
+Where Gate A question 4 already answered one of these, **apply the answer and say you did** — do not
+re-ask. The brief exists so the user answers each question once per migration, not once per session.
+
+---
+
 <!-- BEGIN:shared-conventions -->
 ## Shared agent conventions (all agents inherit these)
 

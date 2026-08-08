@@ -124,7 +124,20 @@ it must show up in `limitations_encountered`, not be silently dropped.
    published skill bundles still match `.github/skills/`. If it exits non-zero, **stop and surface the
    missing items with the printed install hints** — do not migrate against a half-configured machine.
    Proceed only once it reports "Ready to migrate."
-1. **Confirm inputs.** You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
+1. **INTAKE — confirm inputs AND intent, in ONE message, before touching anything.** Inferring intent
+   silently is how a run spends an hour being confidently wrong. Ask all four, then record the answers
+   in `migrations/workbooks/<name>/migration-brief.md` — it survives a dropped session, and it is what
+   a *stateless* subagent gets handed instead of re-deriving intent nobody wrote down:
+   1. **Scope** — this workbook, or several from one estate? Several ⇒ model-first ordering, below.
+   2. **Autonomy** — `guided` (ask at every choice) / **`standard`**, the default (decide reversible
+      things and log them; ask before anything costly or irreversible) / `autopilot` (decide, and flag
+      it in the summary). **No level clears step 6b** — autonomy governs choices, not physics.
+   3. **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? It decides real
+      translations (a dual-axis trick → a native combo chart), so pass it down in **every** delegation.
+   4. **On a wall — stop, or degrade?** Pre-authorising the fallback (no credential ⇒ build model-only
+      under `credential_gate.py authorize`, marked unvalidated) is what lets an unattended run survive
+      one instead of dying at 3 am.
+   Then the mechanics. You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
    `migrations/workbooks/<name>/` (create `source/`, and the spec will live at
    `migrations/workbooks/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
    from the workbook's title.
@@ -223,7 +236,13 @@ it must show up in `limitations_encountered`, not be silently dropped.
      happen before any report work begins. Do not run report and model fixes concurrently against one
      bundle.
 9. **Delegate to `pbi-report-builder`** — only AFTER step 8's landing re-run has finished, because
-   that re-run recreates the `.Report` folder and would destroy its work. Give it: the handover
+   that re-run recreates the `.Report` folder and would destroy its work. **Gate the handover:**
+   `python scripts/check_migration_progress.py --bundle <bundle> --handoff` must exit 0. Exit 1 means
+   a model has no `cache.abf`, or one **older** than its TMDL — the report builder would open an
+   EMPTY model and trigger its own refresh (minutes, plus a credential prompt on a live source).
+   Measured: a cache written at 22:22 against a Desktop opened at 22:19 did exactly that, and a stale
+   cache is worse than none because *something* loads so nothing looks wrong. Send it back to step 8.
+   Give it: the handover
    slice, the validator's classification from step 7, the model location, and the reference bundle.
    Its edits must land as re-runnable `_build/fix_*.py` scripts, not bundle-only edits.
 10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. Name
@@ -308,7 +327,15 @@ it must show up in `limitations_encountered`, not be silently dropped.
 | Tableau formula → DAX reference | `docs/tableau-dax-translation-guide.md` |
 
 Invoke them directly with **complete context** — they are stateless, so give each the full picture in
-one shot. **Invoke `pbi-migration-validator` with only ground-truth artifacts, never the build
+one shot (including the Gate-A brief from step 1: autonomy and fidelity bar change what they build).
+
+**Supervise what you delegate — elapsed time is NOT the signal.** Measured: two subagents both passed
+100 minutes on their first turn; one had written 178 deliverable files, the other **zero**. Poll every
+~15 min: `python scripts/check_migration_progress.py --bundle <b> --since-minutes 15` →
+`PROGRESSING` leave it alone · `STALLED` **ask it what it is blocked on** (a follow-up message), do
+**not** kill a slow-but-productive run · `SILENT` it finished, died, or is waiting on a human.
+
+**Invoke `pbi-migration-validator` with only ground-truth artifacts, never the build
 subagents' own reasoning or self-reported success** — its value depends on
 being an independent check, not an echo of "the builder said it's fine." If subagent delegation isn't
 available in the current environment, tell the user to run `/agent pbi-semantic-builder`,
@@ -322,14 +349,12 @@ the same context you would have.
   allow-list can remove your delegation tool and leave you unable to delegate at all. Rationale and
   measurements: `docs/agent-architecture.md` §2, §6.
 
-- **Clean up the Desktop batch (yours and orphans').** Subagents each open a Desktop instance, and in
-  a parallel batch these pile up: orphans from *finished* subagents (+ their child `msmdsrv`) hold the
-  bridge and block later agents (`BRIDGE_ERROR "Host is not ready"`). The shared convention tells each
-  subagent to close its own, but some don't — so **sweep between waves and before you summarize**:
-  `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"` → map each PID to a migration by
-  `MainWindowTitle` → `Stop-Process -Id <literal pid> -Force` the finished ones only (never one an
-  agent still needs, e.g. mid validator↔builder handoff). Literal PIDs only — the shell guard rejects
-  looped/variable `-Id`. Also confirm no scratch is staged in git.
+- **Sweep the Desktop batch — orphans included.** The shared convention has each subagent close its
+  own instance; some don't, and an orphan (+ its child `msmdsrv`) holds the bridge and blocks later
+  agents (`BRIDGE_ERROR "Host is not ready"`). So sweep between waves and before you summarize:
+  `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"`, map each PID to a migration by
+  `MainWindowTitle`, and close the **finished** ones only — never one still mid validator↔builder
+  handoff. Also confirm no scratch is staged in git.
 - **Keep this repo customer-agnostic.** Never hardcode a customer name into generated code, agent
   files or script identifiers — customer context belongs in `migrations/workbooks/<name>/` only.
 - **Never fabricate row data.** Extract-based (`.hyper`) sources have no live connection; don't invent
