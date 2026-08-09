@@ -379,11 +379,13 @@ def test_failure_classification_distinguishes_the_causes() -> None:
         ("[TABLE_OR_VIEW_NOT_FOUND] the table cannot be found", "BAD_TABLE"),
         ("Invalid object name 'dbo.orders'", "BAD_TABLE"),
         ("The credential was not provided; please sign in", "NO_CREDENTIAL"),
-        ("Exception: no catalog found on the instance", "UNREACHABLE"),
+        ("Exception: no catalog found on the instance", "ERROR"),
         ("something else entirely went wrong", "ERROR"),
     ]
     for text, expected in cases:
-        assert _classify_failure(text)[0] == expected, f"{text!r} should classify as {expected}"
+        assert _classify_failure(text, network_fault_observed=False)[0] == expected, (
+            f"{text!r} should classify as {expected}"
+        )
 
 
 def test_unknown_refresh_failure_is_not_reported_as_unreachable_and_keeps_the_message_head() -> None:
@@ -393,7 +395,7 @@ def test_unknown_refresh_failure_is_not_reported_as_unreachable_and_keeps_the_me
 
     head = "DataSource.Error: The connector returned an application-specific refusal before refresh."
     tail = "\n".join(f"   at Microsoft.PowerBI.Some.Stack.Frame{i}()" for i in range(80))
-    verdict, detail = _classify_failure(f"{head}\n{tail}")
+    verdict, detail = _classify_failure(f"{head}\n{tail}", network_fault_observed=False)
 
     assert verdict == "ERROR"
     assert head in detail
@@ -830,7 +832,7 @@ def test_identity_unverified_is_classified_as_error_not_unreachable() -> None:
         "credential problem. Raw: model  : identity unverified (no model folder resolved for this pid)\n"
         "REFRESH: ERROR RuntimeError: no catalog found on the Desktop Analysis Services instance"
     )
-    verdict, detail = _classify_failure(real_text)
+    verdict, detail = _classify_failure(real_text, network_fault_observed=False)
     assert verdict == "ERROR", f"a local pid-binding failure must classify as ERROR, got {verdict}"
     assert "local tooling failure" in detail.lower()
     assert "not a fact about the data source" in detail.lower()
@@ -861,6 +863,36 @@ def test_desktop_pid_binding_uses_exact_current_file_path_not_a_sibling_model(
     assert probe_live_source._pid_for_file(pbip) == 222
 
 
+def test_duplicate_exact_current_file_path_refuses_to_bind_and_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Duplicate exact-path matches are ambiguous, so the probe must kill nothing."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import probe_live_source  # noqa: PLC0415
+
+    pbip = tmp_path / "mig" / "_probe" / "run-a" / "Probe.pbip"
+    pbip.parent.mkdir(parents=True)
+    pbip.write_text("{}", encoding="utf-8")
+    status = {
+        "instances": [
+            {"pid": 333, "currentFilePath": str(pbip.resolve())},
+            {"pid": 444, "currentFilePath": str(pbip.resolve())},
+        ]
+    }
+    stop_calls = []
+
+    def fake_run(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        stop_calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args[0], 0, "", "")
+
+    monkeypatch.setattr(probe_live_source, "_npx", lambda _args, timeout: (0, json.dumps(status)))
+    monkeypatch.setattr(probe_live_source.subprocess, "run", fake_run)
+
+    assert probe_live_source._pid_for_file(pbip) is None
+    assert probe_live_source._close(333, pbip) is False
+    assert stop_calls == []
+
+
 def test_a_genuine_no_catalog_failure_still_classifies_as_unreachable() -> None:
     """Paired control: the fix must not swallow REAL load failures into ERROR."""
     sys.path.insert(0, str(REPO / "scripts"))
@@ -882,6 +914,37 @@ def test_no_catalog_with_reachable_network_is_not_reported_as_unreachable() -> N
     )
     assert verdict == "ERROR"
     assert "did not observe a network fault" in detail
+
+
+def test_refresh_timeout_is_not_final_no_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Timeouts can be transient source stalls, so they must not become final credential stops."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import probe_live_source  # noqa: PLC0415
+
+    def raise_timeout(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise subprocess.TimeoutExpired(cmd="refresh", timeout=1)
+
+    monkeypatch.setattr(probe_live_source.subprocess, "run", raise_timeout)
+
+    assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (1, "ERROR")
+    assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=True) == (
+        1,
+        "UNREACHABLE",
+    )
+
+
+def test_permission_failures_are_access_denied_not_credentials_or_retryable_errors() -> None:
+    """Permission refusals are final, but the remedy is grant access rather than sign in."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _classify_failure  # noqa: PLC0415
+
+    cases = [
+        "DataSource.Error: 403 Forbidden",
+        "permission denied for table FACT_ORDERS",
+        "SQL compilation error: insufficient privileges to operate on schema SALES",
+    ]
+    for text in cases:
+        assert _classify_failure(text, network_fault_observed=False)[0] == "ACCESS_DENIED"
 
 
 def test_the_probe_template_never_downgrades_the_tabular_compatibility_level() -> None:
