@@ -87,12 +87,23 @@ mark in the middle of the country** instead of one per state/city. No error, no 
 
 **Measured, same report, same model — the discriminator is the number of fields in `Category`:**
 
-| page | `Category` projections | rendered |
-|---|---|---|
-| Filled Map | `[State]` | ✅ one polygon per state, correctly graded |
-| Symbol Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid |
-| Pie Chart Map | `[Country, State, City]` | ❌ **one pie** at the US centroid |
-| Dark Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid |
+| page | `Category` projections | rendered | Tableau |
+|---|---|---|---|
+| Filled Map | `[State]` | ✅ one polygon per state | 49 |
+| Combined Map | `[State, City]` | ❌ renders at **State** | pane-1 LOD is **City** |
+| Symbol Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid | 604 |
+| Pie Chart Map | `[Country, State, City]` | ❌ **one pie** at the US centroid | 10 |
+| Dark Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid | 604 |
+| Density / Mapbox / Viz-in-Tooltip | `[Country, State, City]` | ❌ same | 604 |
+
+**`Combined Map` is the entry that generalises the rule.** It has no `Country`, yet still fails —
+rendering at `State` where Tableau plots at `City`. So the rule is not "`Country` poisons the well";
+it is that **any** multi-field Location well renders at its **top** level.
+
+**Objective confirmation** (better than eyeballing): isolating the bubble gradient colour and running
+connected-components over the map canvas gives **exactly one** blob per broken page, at canvas px
+(1139, 744) — which is `mapControls.centerLatitude 39.2795` / `centerLongitude −97.4361`, the centroid
+of the contiguous US. The mark *is* the "United States" geocode.
 
 **Root cause.** Stacking several geographic columns into `Category` builds a **drill hierarchy**, and
 azureMap renders at the **top** level until the user drills down. `Country` has one member
@@ -103,10 +114,19 @@ shelf configuration means "one mark per city" there and "one mark per country" h
 **This is a translation trap, not a Power BI bug.** A Tableau map worksheet with `Country`, `State`
 and `City` on Detail must not be transliterated field-for-field.
 
-**Fix.** Put **only the leaf geography** in `Category` and move the coarser levels to `Tooltips` (they
-are still needed for disambiguation — "Springfield" exists in many states, so either use a composite
-`City, State` column from the model or keep explicit Lat/Long). Confirm by counting marks, not by
-looking for an error.
+**Fix — and the obvious repair is ALSO wrong.** Put **only the leaf geography** in `Category`. But
+"the leaf" is not `City`: measured on Superstore (9,994 rows), there are **604 distinct
+`(City, State)` pairs** versus only **531 distinct `City` names**, because **57 city names recur
+across states — 130 of the 604 pairs, 21.5%** (`Springfield` in 4 states, `Columbia` in 4,
+`Columbus`/`Roseville`/`Burlington`/`Florence`/`Concord`/`Lancaster` in 3 each). Binding `City` alone
+merges or mis-geocodes a fifth of the marks and looks plausible while doing it.
+
+So the Location well needs a **composite `City, State` key** (or real Lat/Long at Average
+aggregation). That column usually does not exist in a migrated model, which makes the blocking half of
+this defect a **semantic-model** change, not a report edit — coordinate before "fixing" it in PBIR.
+
+**Verify by COUNTING MARKS against the source grain, never by looking for an error.** The target here
+is 604, and both 1 and 531 render without complaint.
 
 **Detection rule worth automating:** any `azureMap` whose `Category` well holds **more than one
 `Column` projection** is suspect. It is legal, it validates, and it is almost never what the Tableau
