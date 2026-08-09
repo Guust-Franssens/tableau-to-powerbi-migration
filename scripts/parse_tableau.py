@@ -45,6 +45,7 @@ _BRACKET_TOKEN_RE = re.compile(r"\[([^\[\]]+)\]")
 # Tableau's feature-flagged attribute spelling: `_.fcp.<Feature>.<true|false>...<realAttrName>`
 _FCP_ATTR = re.compile(r"^_\.fcp\.(?P<feature>[^.]+)\.(?P<state>true|false)\.\.\.(?P<attr>.+)$")
 _SHELF_FIELD_RE = re.compile(r"\[([^\[\]]+)\]\.\[([^\[\]]+)\]")
+_TABLEAU_LB_SENTINEL_RE = re.compile(r"^\s*[\u00c6\u00a0]+\s*$")
 
 
 def slugify(text: str) -> str:
@@ -624,7 +625,18 @@ def _text_from_runs(container: etree._Element | None) -> str | None:
     """Flatten a Tableau <formatted-text><run>...</run></formatted-text> block into plain text."""
     if container is None:
         return None
-    return "".join(run.text or "" for run in container.findall("run"))
+    parts: list[str] = []
+    pending_line_break = False
+    for run in container.findall("run"):
+        text = run.text or ""
+        if _TABLEAU_LB_SENTINEL_RE.match(text):
+            pending_line_break = True
+            continue
+        if pending_line_break and parts and not parts[-1].endswith("\n"):
+            parts.append("\n")
+        parts.append(text)
+        pending_line_break = False
+    return "".join(parts)
 
 
 def _build_worksheet_instance_map(

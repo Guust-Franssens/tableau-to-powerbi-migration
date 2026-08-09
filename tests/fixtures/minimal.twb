@@ -71,7 +71,10 @@
       <layout-options>
         <title>
           <formatted-text>
-            <run bold='true'>Sales Gauge</run>
+            <run fontsize='12'>Revenue by Region</run>
+            <run>&#198;
+</run>
+            <run fontsize='9'>FY1998</run>
           </formatted-text>
         </title>
       </layout-options>
@@ -111,6 +114,13 @@
         <rows>[federated.testds1].[sum:SALES:qk]</rows>
         <cols>[federated.testds1].[none:NAME:nk]</cols>
       </table>
+      <customized-tooltip>
+        <formatted-text>
+          <run>Sales:</run>
+          <run>&#160;</run>
+          <run>&lt;[federated.testds1].[sum:SALES:qk]&gt;</run>
+        </formatted-text>
+      </customized-tooltip>
       <simple-id uuid='{00000000-0000-0000-0000-000000000001}' />
     </worksheet>
     <worksheet name='Measure Values Chart'>

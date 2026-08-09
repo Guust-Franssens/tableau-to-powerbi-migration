@@ -76,6 +76,16 @@ def test_detail_and_tooltip_shelves_resolved():
     assert fields["Sales Scaled"] in tooltip_ids
 
 
+def test_formatted_text_soft_line_break_sentinels_do_not_leak():
+    """Tableau writes standalone U+00C6/U+00A0 runs as invisible soft line-break sentinels inside
+    formatted text. They must not leak into worksheet titles or customized tooltips."""
+    worksheet = parse_workbook(FIXTURE)["worksheets"][0]
+    assert worksheet["title_text"] == "Revenue by Region\nFY1998"
+    assert worksheet["customized_tooltip_text"] == "Sales:\n<[federated.testds1].[sum:SALES:qk]>"
+    assert "\u00c6" not in worksheet["title_text"]
+    assert "\u00a0" not in worksheet["customized_tooltip_text"]
+
+
 def test_join_relation_graph_extracted():
     """<relation type='join'> operands, join type, and on-clause conditions must be captured into the
     data source's joins[] so the semantic builder can rebuild Power BI relationships (here: an inner
