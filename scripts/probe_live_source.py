@@ -339,8 +339,8 @@ def _classify_failure(text: str, network_fault_observed: bool = True) -> tuple[s
             "ERROR",
             "the probe could not confirm which Power BI Desktop instance it was bound to, so it "
             "never queried the source. This is a LOCAL tooling failure, not a fact about the data "
-            "source - do not report a connection or credential problem from it. Usually another "
-            "Desktop instance was open; close them and re-run. Raw: " + raw,
+            "source - do not report a connection or credential problem from it. Re-run with the "
+            "probe's exact PBIP path identifiable in Desktop Bridge status. Raw: " + raw,
         )
     # "no catalog" reaching here means the model failed to load DESPITE the readiness wait, so it is
     # a genuine load failure rather than the race it used to be confused with.
@@ -470,20 +470,14 @@ def _pid_for_file(pbip: Path) -> int | None:
         payload = json.loads(out[out.index("{") : out.rindex("}") + 1])
     except (ValueError, json.JSONDecodeError):
         return None
-    target = str(pbip.resolve()).lower()
-    # The migration directory, NOT the probe folder. Every probe builds into a folder called
-    # `_probe`, so matching on that name binds to whichever instance answers first - measured
-    # 2026-08-02, two concurrent probes both bound to pid 15220 and the UNHAPPY one reported
-    # DATA_OK because it read the other model. The migration directory is unique per run.
-    owner = pbip.resolve().parent.parent.name.lower()
+    target = str(pbip.resolve()).casefold()
     instances = payload.get("instances") or payload.get("Instances") or []
     for inst in instances if isinstance(instances, list) else []:
-        current = str(inst.get("currentFilePath") or inst.get("CurrentFilePath") or "").lower()
+        current = str(inst.get("currentFilePath") or inst.get("CurrentFilePath") or "").casefold()
         pid = inst.get("pid") or inst.get("Pid")
         if not current or not pid:
             continue
-        # Desktop reports the .pbip, or a path inside its folder, depending on load stage.
-        if current == target or f"\\{owner}\\" in current:
+        if current == target:
             return int(pid)
     return None
 
@@ -495,23 +489,19 @@ def _open_desktop(pbip: Path) -> int:
     agent's pid, and binding to that would refresh somebody else's model while every downstream
     signal still looked healthy.
     """
-    before = _desktop_pids()
     code, out = _npx(["open", str(pbip), "--timeout", "120"], timeout=240)
     if code != 0:
         log.error("PROBE: ERROR could not open Power BI Desktop: %s", out.strip()[:300])
         raise SystemExit(1)
     for _ in range(20):
-        # Identity first - it is verifiable and concurrency-safe. Set-difference is only a fallback
-        # for the window before Desktop reports a currentFilePath, and it is narrowed to pids that
-        # did not exist before we started.
         pid = _pid_for_file(pbip)
         if pid:
             return pid
-        new = _desktop_pids() - before
-        if len(new) == 1:
-            return new.pop()
         time.sleep(2)
-    log.error("PROBE: ERROR Desktop did not start an identifiable new instance for %s", pbip.name)
+    log.error(
+        "PROBE: ERROR Desktop did not report an instance whose currentFilePath exactly matches %s",
+        pbip,
+    )
     raise SystemExit(1)
 
 
@@ -817,9 +807,10 @@ def _print_verdict_directive(verdict: str) -> None:
             "       whether the probe failed or merely never ran.\n"
             "    2. Do NOT report a connection or credential problem. Saying 'unreachable' here\n"
             "       sends the user to fix a server address that may be perfectly correct.\n"
-            "    3. Usually another Power BI Desktop instance was open and the probe could not\n"
-            "       confirm which one was ours. Close all Desktop instances and re-run ONCE.\n"
-            "       If it repeats, report the tooling failure itself and stop.\n"
+            "    3. Do NOT close all Desktop instances. In a parallel batch that can kill a\n"
+            "       sibling agent's work. Close only a Desktop instance you personally opened,\n"
+            "       by literal PID, or re-run after sibling probes finish. If it repeats,\n"
+            "       report the tooling failure itself and stop.\n"
             "################################################################"
         )
         return

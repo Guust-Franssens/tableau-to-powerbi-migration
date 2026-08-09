@@ -836,6 +836,31 @@ def test_identity_unverified_is_classified_as_error_not_unreachable() -> None:
     assert "not a fact about the data source" in detail.lower()
 
 
+def test_desktop_pid_binding_uses_exact_current_file_path_not_a_sibling_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A sibling Desktop instance in the same migration tree must never be selected."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import probe_live_source  # noqa: PLC0415
+
+    pbip = tmp_path / "mig" / "_probe" / "Probe.pbip"
+    pbip.parent.mkdir(parents=True)
+    pbip.write_text("{}", encoding="utf-8")
+    sibling = tmp_path / "mig" / "fabric" / "Sibling.pbip"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("{}", encoding="utf-8")
+    status = {
+        "instances": [
+            {"pid": 111, "currentFilePath": str(sibling.resolve())},
+            {"pid": 222, "currentFilePath": str(pbip.resolve())},
+        ]
+    }
+
+    monkeypatch.setattr(probe_live_source, "_npx", lambda _args, timeout: (0, json.dumps(status)))
+
+    assert probe_live_source._pid_for_file(pbip) == 222
+
+
 def test_a_genuine_no_catalog_failure_still_classifies_as_unreachable() -> None:
     """Paired control: the fix must not swallow REAL load failures into ERROR."""
     sys.path.insert(0, str(REPO / "scripts"))
