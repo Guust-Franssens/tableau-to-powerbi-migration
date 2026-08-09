@@ -786,6 +786,8 @@ def _parse_worksheet_filters(view: etree._Element, instance_map: dict[str, str])
             {
                 "field_id": instance_map.get(instance_name, f"UNRESOLVED:{instance_name}"),
                 "type": filt.get("class", "categorical"),
+                "direction": filt.get("direction"),
+                "max": filt.get("max"),
                 "exclude_nulls": exclude_nulls,
                 "members": [g.get("member", "") for g in filt.findall(".//groupfilter[@function='member']")],
                 "note": None,

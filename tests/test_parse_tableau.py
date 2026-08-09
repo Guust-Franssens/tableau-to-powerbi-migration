@@ -161,6 +161,23 @@ def test_relative_date_filter_class_captured():
     assert "relative-date" in filter_types
 
 
+def test_topn_filter_carries_limit_and_validates_against_schema():
+    """Tableau top-N filters serialize as class='topn' with direction/max attributes. They must not
+    crash schema validation, and the limit must survive for the report builder to recreate the filter."""
+    import json
+
+    import jsonschema
+
+    spec = parse_workbook(FIXTURE)
+    topn_filter = next(f for ws in spec["worksheets"] for f in ws["filters"] if f["type"] == "topn")
+    assert topn_filter["field_id"].endswith("__sales")
+    assert topn_filter["direction"] == "top"
+    assert topn_filter["max"] == "10"
+
+    schema = json.loads((Path(__file__).resolve().parent.parent / "docs" / "migration-spec.schema.json").read_text())
+    jsonschema.validate(spec, schema)
+
+
 def test_parameter_equality_filter_idiom_flagged():
     """The IF [Param]=[Dim] THEN [Dim] END + exclude-null pattern should be recognized and annotated
     so pbi-semantic-builder simplifies it to a plain slicer instead of recreating it as DAX."""

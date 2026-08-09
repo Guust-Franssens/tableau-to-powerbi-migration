@@ -93,6 +93,7 @@
           <filter class='relative-date' column='[federated.testds1].[none:NAME:nk]'>
             <groupfilter function='member' level='[none:NAME:nk]' member='%all%' />
           </filter>
+          <filter class='topn' column='[federated.testds1].[sum:SALES:qk]' direction='top' max='10' />
         </view>
         <panes>
           <pane>

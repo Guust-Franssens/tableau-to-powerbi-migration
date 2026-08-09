@@ -190,7 +190,9 @@
               "type": "object",
               "properties": {
                 "field_id": { "type": "string" },
-                "type": { "type": "string", "enum": ["categorical", "quantitative", "relative_date", "relative-date", "parameter_binding", "parameter-binding", "context"] },
+                "type": { "type": "string", "enum": ["categorical", "quantitative", "relative_date", "relative-date", "parameter_binding", "parameter-binding", "context", "topn"] },
+                "direction": { "type": ["string", "null"], "enum": ["top", "bottom", null] },
+                "max": { "type": ["string", "number", "null"] },
                 "exclude_nulls": { "type": "boolean", "default": false },
                 "members": { "type": "array", "items": { "type": "string" } },
                 "note": { "type": ["string", "null"], "description": "e.g. 'parameter-equality idiom: field = IF [Param]=[Dim] THEN [Dim] END, filtered to exclude null -> collapses to a plain PBI slicer on the dimension, no calculated column needed'" }
