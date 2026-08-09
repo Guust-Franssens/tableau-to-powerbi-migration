@@ -48,6 +48,18 @@ def test_writing_deliverables_is_PROGRESSING(tmp_path):
     assert _scan_now(tmp_path)[0] == "PROGRESSING"
 
 
+def test_baseline_excludes_dispatcher_setup_from_PROGRESSING(tmp_path):
+    """Files written before delegation are setup artifacts, not subagent progress."""
+    _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "tables" / "T.tmdl", minutes_ago=10)
+    baseline = datetime.now() - timedelta(minutes=5)
+    since = datetime.now() - timedelta(minutes=15)
+
+    state, detail = cmp_mod.verdict(cmp_mod.scan(tmp_path, since, baseline), window_minutes=15)
+
+    assert state == "SILENT"
+    assert "has this run started" in detail
+
+
 def test_scratch_only_across_a_full_window_is_STALLED(tmp_path):
     """The 105-minute run: busy, and producing nothing the user asked for."""
     for i in range(5):
@@ -91,6 +103,28 @@ def test_stale_activity_outside_the_window_is_SILENT(tmp_path):
     assert "credential" in detail, "must remind the reader that a blocked run looks like a dead one"
 
 
+def test_runtime_liveness_keeps_read_heavy_phase_from_SILENT(tmp_path):
+    """A rising tool-call count is external evidence that a quiet bundle is still being worked."""
+    (tmp_path / "bundle").mkdir()
+    scanned = cmp_mod.scan(tmp_path, datetime.now() - timedelta(minutes=30))
+
+    state, detail = cmp_mod.verdict(scanned, window_minutes=30, liveness="active")
+
+    assert state == "THINKING"
+    assert "runtime liveness signal is active" in detail
+
+
+def test_prior_deliverables_outside_fixed_window_report_THINKING_not_SILENT(tmp_path):
+    """Burst writers can be healthy even when the polling window lands between output bursts."""
+    _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "tables" / "T.tmdl", minutes_ago=20)
+    since = datetime.now() - timedelta(minutes=15)
+
+    state, detail = cmp_mod.verdict(cmp_mod.scan(tmp_path, since), window_minutes=15)
+
+    assert state == "THINKING"
+    assert "write in bursts" in detail
+
+
 # --- bucketing ------------------------------------------------------------------------------------
 
 
@@ -114,6 +148,11 @@ def test_files_land_in_the_right_bucket(relative, expected):
 def test_a_probe_sandbox_inside_a_bundle_is_scratch_not_deliverable():
     """`_probe/Probe.pbip` is a reachability sandbox. Counting it as output would mask a stall."""
     assert cmp_mod.classify(Path("mig/_probe/Probe.pbip")) == "scratch"
+
+
+def test_underscored_scratch_directory_is_scratch_not_deliverable():
+    """`_scratch` is the same intent as `scratch`, even when it contains a PBIP-shaped sandbox."""
+    assert cmp_mod.classify(Path("_scratch/orderprobe/run0/Probe.pbip")) == "scratch"
 
 
 # --- the handoff gate -----------------------------------------------------------------------------
