@@ -207,6 +207,12 @@ Everything below is what that skill *cannot* know: your place in this pipeline.
   The last one must exit 0. Report what you **deferred** (AI data schema, verified answers, "Approved
   for Copilot") in `limitations_encountered` — a migration that claims "AI-ready" without naming the
   deferred items is overstating its coverage.
+- **These paths assume the `migrations/workbooks/<slug>/fabric/` tree.** In the estate/bundle flow the
+  model lives at `<bundle>/pbip/<wb>/<Name>.SemanticModel`, and `check_ai_readiness.py` structurally
+  cannot run there. That is a **tooling gap, not a waiver**: point `set_ai_instructions.py --model` at
+  the real `.SemanticModel` path (it takes one), do the descriptions/synonyms work anyway, and record
+  the coverage you could not machine-check in `limitations_encountered`. Never report "AI-ready"
+  because a checker declined to run, and never silently skip the step — say which path you took.
 
 ## Gotchas
 

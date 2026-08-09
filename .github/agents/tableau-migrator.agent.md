@@ -164,12 +164,9 @@ it must show up in `limitations_encountered`, not be silently dropped.
    Re-parsing **overwrites the file in place** and destroys every `semantic_build` / `report_build` /
    `validate` limitation the subagents appended to it (routinely 20-50 entries) — i.e. exactly the raw
    material step 12's summary depends on. On a re-run, fix round, or resumed session, skip to step 3.
-   Only when the spec is absent (or the user explicitly confirms a re-parse of a changed source) run:
-   ```
-   python scripts/parse_tableau.py migrations/workbooks/<name>/source/<file>.twbx -o migrations/workbooks/<name>/migration-spec.json
-   ```
-   This validates its own output against `docs/migration-spec.schema.json` and fails fast on schema
-   violations. Read the console summary (counts of data sources/worksheets/dashboards/limitations).
+   Only when the spec is absent (or the user explicitly confirms a re-parse of a changed source) run
+   `python scripts/parse_tableau.py <name>/source/<file>.twbx -o <name>/migration-spec.json`, which
+   self-validates against `docs/migration-spec.schema.json`. Read the console summary (counts).
 4. **Triage before building anything.** Open `migration-spec.json`'s `limitations_encountered` array.
    Summarize it for the user in three buckets: high severity (LOD/table calc formulas needing manual
    DAX verification), medium (extract-based data sources needing a data-materialization decision), low
@@ -194,6 +191,9 @@ it must show up in `limitations_encountered`, not be silently dropped.
    to see *which* sources are live. It is a **classifier, not a connectivity test** — it opens no
    socket, so it can never tell you whether a source actually works. Only extract/flat sources → no
    gate; proceed. Any **live database** source → step 6b, which is where the decision is made.
+   **Both scripts here hard-require `--spec`, which the bundle flow never writes** (engine ≥2.99 emits
+   `report.json` + `handover/`). Classify from the handover slice's connection classes instead —
+   `excel-direct`/`textscan`/`hyper` are flat, everything else is live — and say you did.
 6b. **PROVE reachability with a real query, then let the result decide.**
    `python scripts/probe_live_source.py --spec <spec>` builds a one-table model, opens Desktop,
    refreshes, and requires a row back — the `SELECT 1`, executed *through Power BI* (a shell query

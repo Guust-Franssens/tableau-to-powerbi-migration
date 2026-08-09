@@ -63,7 +63,7 @@ breakdown — **use it to decide whether opening an entry is even worth a lookup
 | Category | Count | Do you need the cookbook? |
 |---|---|---|
 | **Typed entries whose role tables exactly match the CLI** (zero drift found) | **19** | ❌ **No.** Their Roles / formatting-object sections are literally transcribed `catalog describe` output. Call the CLI instead — it's live and can't go stale. Their only residual value is the Tableau-idiom mapping + tier verdict. |
-| **Idiom entries** — `error-bars`, `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars` | **6** | ✅ **Yes.** These are *not visual types*: `catalog describe error-bars` → `VISUAL_TYPE_UNKNOWN`. They document a technique applied to a host visual, which the CLI has no concept of. |
+| **Idiom entries** — `error-bars`, `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars`, `forecast` | **7** | ✅ **Yes.** These are *not visual types*: `catalog describe error-bars` → `VISUAL_TYPE_UNKNOWN`. They document a technique applied to a host visual, which the CLI has no concept of. `forecast` is the strongest case: the CLI *does* describe a `forecast` object, but only its cosmetics — the entry exists to tell you the model parameters are **not authorable at all**. |
 | **Render-truth entries** — `actionButton`, `shape`, `azureMap` | **3** | ✅ **Yes, critically.** These carry behaviour the CLI cannot know and in one case gets actively wrong. |
 
 **The canonical proof that CLI vocabulary ≠ render truth:** `catalog describe actionButton` reports
@@ -99,7 +99,7 @@ Legend: 🟢 render-proven · 🟡 structural template (CLI) · 🔴 needs human
 | `cardVisual` | superstore descriptive cards |
 | `gauge` | superstore descriptive gauges |
 | `tableEx` / `pivotTable` (matrix) | airline `ba1e195d` / tale-of-100 |
-| `azureMap` (choropleth reference-layer) | superstore prescriptive `9d3297e6` (render-verified, Desktop-built) |
+| `azureMap` (choropleth reference-layer) | superstore prescriptive `9d3297e6` (render-verified, Desktop-built) — ⚠️ **blank-render gate**: azureMap needs the *"Users can use the Azure Maps visual"* tenant setting + a signed-in Desktop, else it renders **empty with 0 validate errors and no error glyph**. 60-second minimal bisect + controls in `visuals/azureMap.md` (🟢 render-verified negative, `book_6-1-Maps` 2026-07-19) |
 | `slicer` (list/dropdown, single/multi) | all migrations |
 | `pageNavigator`, `textbox` | all migrations |
 | `shape` (fill + tileShape + **`visualLink` WebUrl**) | interactive-resume `bg-dtc` (🟢 render-verified: hexagon/oval badges + clickable Web-URL buttons; **embedded `text` object does NOT render → use textbox overlay**; see `visuals/shape.md`) |

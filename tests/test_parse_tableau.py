@@ -23,7 +23,7 @@ def test_parses_top_level_shape():
     assert spec["migration_spec_version"] == "1.0"
     assert len(spec["data_sources"]) == 1
     assert len(spec["worksheets"]) == 2
-    assert len(spec["dashboards"]) == 2
+    assert len(spec["dashboards"]) == 3
     assert len(spec["parameters"]) == 1
 
 
@@ -233,16 +233,70 @@ def test_floating_dashboard_captures_all_sibling_zones():
     assert floating["size"]["sizing_mode"] == "automatic"
     root_zone = floating["zones"]
     assert root_zone["type"] == "layout-floating"
-    assert len(root_zone["children"]) == 3
+    assert len(root_zone["children"]) == 7
+
+
+def test_standalone_legend_web_and_button_zones_are_not_collapsed_to_containers():
+    """Regression (book_8-1-Dashboards): Tableau types standalone legends 'color'/'size'/'shape',
+    Web Page objects 'web' and nav buttons 'dashboard-object'. None matched the parser's allow-list,
+    so all of them silently became generic 'layout-basic' CONTAINERS - invisible to downstream
+    consumers while still occupying real canvas (a web object filling 62%x46% of the page and a
+    10%-wide legend rail vanished). They must survive with their real type."""
+    spec = parse_workbook(FIXTURE)
+    floating = next(d for d in spec["dashboards"] if d["name"] == "floating")
+    by_id = {z["id"]: z for z in floating["zones"]["children"]}
+
+    color_legend, size_legend = by_id["30"], by_id["31"]
+    assert (color_legend["type"], color_legend["legend_kind"]) == ("legend", "color")
+    assert (size_legend["type"], size_legend["legend_kind"]) == ("legend", "size")
+    # a legend zone's name= is its OWNING WORKSHEET, which must still resolve
+    assert color_legend["worksheet_id"] == spec["worksheets"][0]["id"]
+
+    assert by_id["32"]["type"] == "web"
+    assert by_id["32"]["url"] == "http://example.com/embedded"
+    assert by_id["33"]["type"] == "button"
+
+
+def test_dashboard_object_limitations_flag_web_legend_and_button():
+    """Each recovered non-container object carries a Power BI capability consequence, so each must
+    reach limitations_encountered rather than being silently rendered (or silently dropped)."""
+    spec = parse_workbook(FIXTURE)
+    dash_id = next(d["id"] for d in spec["dashboards"] if d["name"] == "floating")
+    issues = [item["issue"] for item in spec["limitations_encountered"] if item["item"] == dash_id]
+    assert any("WEB PAGE object" in i and "http://example.com/embedded" in i for i in issues)
+    assert any("STANDALONE color legend" in i for i in issues)
+    assert any("navigation button" in i for i in issues)
 
 
 def test_floating_dashboard_paramctrl_and_bitmap_zone_types_resolved():
     spec = parse_workbook(FIXTURE)
     floating = next(d for d in spec["dashboards"] if d["name"] == "floating")
     children_by_type = {z["type"]: z for z in floating["zones"]["children"]}
-    assert set(children_by_type) == {"parameter", "worksheet", "image"}
+    assert {"parameter", "worksheet", "image"} <= set(children_by_type)
     assert children_by_type["parameter"]["field_id"] == spec["parameters"][0]["id"]
     assert children_by_type["worksheet"]["worksheet_id"] == spec["worksheets"][0]["id"]
+
+
+def test_empty_dashboard_survives_parse_and_validates_against_schema():
+    """A dashboard the author created and never populated serializes as a self-closing <zones/>.
+    Regression (book_8-1-Dashboards, an empty 'Commissions' dashboard): the parser emitted `{}` for
+    its zone tree, which violates the spec's own zone schema (type/x/y/w/h required) and failed the
+    WHOLE workbook parse over one empty dashboard. It must survive as a valid empty root zone and be
+    reported as an empty dashboard in limitations_encountered."""
+    import json
+
+    import jsonschema
+
+    spec = parse_workbook(FIXTURE)
+    empty = next(d for d in spec["dashboards"] if d["name"] == "empty")
+    assert empty["zones"]["type"] == "layout-basic"
+    assert empty["zones"]["children"] == []
+    assert any(
+        item["item"] == empty["id"] and "EMPTY in the Tableau source" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+    schema = json.loads((Path(__file__).resolve().parent.parent / "docs" / "migration-spec.schema.json").read_text())
+    jsonschema.validate(spec, schema)  # the crash was a schema failure, so assert the whole spec validates
 
 
 def test_embedded_datasource_is_not_flagged_as_published():

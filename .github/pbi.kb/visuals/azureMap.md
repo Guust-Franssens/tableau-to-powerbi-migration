@@ -62,6 +62,76 @@ That visual is an `azureMap` choropleth using a two-entry `objects.referenceLaye
 
 The same visual keeps the Power BI data binding minimal: `query.queryState.Category` contains only `'Sample Superstore'[State]`, allowing Azure Maps to data-bind the state names to the GeoJSON properties. `objects.mapControls` fixes the default style to grayscale light, hides style/navigation/selection controls, and pins the continental-US viewport; `objects.bubbleLayer` is still present with `show = true`, but the choropleth effect comes from `referenceLayer.polygonFillColor`.
 
+## 🟢 Render-verified NEGATIVE: azureMap draws NOTHING without the tenant entitlement
+
+**Verified 2026-07-19, Desktop MSIX 2.157.627.0, `book_6-1-Maps` maps migration.** Cost most of a
+render-verification pass. **Check this BEFORE debugging any azureMap encoding.**
+
+**Symptom.** Every `azureMap` on every page renders as a completely **empty container** — the visual
+title paints, and nothing else. **No basemap, no marks, no error glyph, no banner, and
+`powerbi-report-author validate` reports 0 errors / 0 warnings.** It looks exactly like a broken
+field binding, which is what makes it expensive: you will "fix" correct JSON for hours.
+
+**Root cause.** The Azure Maps visual is a *cloud service* client. It requires the tenant setting
+**"Users can use the Azure Maps visual"** (Admin portal → Tenant settings → Visual options) **plus an
+authenticated Power BI session**. Without the entitlement the visual degrades **silently to blank**
+rather than reporting an error. Learn:
+<https://learn.microsoft.com/en-us/azure/azure-maps/power-bi-visual-manage-access> (accessed
+2026-07-19); tenant-setting changes rolled out June 2025 and can take 24–48 h to propagate.
+
+**The 60-second bisect that settles it — do this first.** Temporarily replace ONE azureMap's
+`visual.json` with the *minimal* case: `visualType: "azureMap"` plus a single `Category` Column
+projection and **no `objects` key at all**.
+
+- Minimal case renders a basemap → the environment is fine, the bug is in **your encoding**; add
+  `mapControls` → `referenceLayer` → `bubbleLayer` back one at a time.
+- Minimal case is **also blank** → **environmental**. Stop editing PBIR; no report-layer change can
+  fix it. Escalate for sign-in / tenant enablement.
+
+Confirm Desktop actually re-read your file: the visual **title auto-changes to the bound column name**
+(e.g. `State`) once the title override is gone. If the title does not change, you are debugging a
+stale render, not your JSON.
+
+**Controls worth running to avoid a misdiagnosis** (all four pointed to "environmental" here):
+
+| Control | Result that exonerates your encoding |
+|---|---|
+| A non-map visual on the same report | `columnChart` rendered fully with correct data → model, refresh and bindings are healthy |
+| Network reachability | `atlas.microsoft.com` responds; boundary-GeoJSON host returns 200 → not a firewall/offline issue |
+| Dwell then re-screenshot | Byte-**identical** PNG after 35 s → not async tile loading |
+| MSIX `LocalCache` user profile | No `Microsoft\Power BI Desktop` settings folder → client was never signed in |
+
+**Consequences for sign-off.** A report whose maps are all `azureMap` **cannot be render-verified** in
+an unentitled/offline environment. That is a legitimate blocker to report, **not** a reason to fall
+back to Bing `map`/`filledMap` — those are deprecated and reverting is a fidelity + standards
+regression. Ship the azureMap encoding, mark the map visuals **structurally verified only**, and say
+so explicitly.
+
+**Recurrence 2026-08-08, `book_8-1-Dashboards` (dashboards/layout migration).** Identical symptom,
+same machine, same Desktop MSIX 2.157.627.0 — an `azureMap` bubble map (Location `Orders[City]`,
+Size `Sum(Sales)`, `bubbleLayer.fillColor` diverging FillRule) rendered as an empty container while
+`validate` reported 0 errors. **The entitlement gap is therefore persistent on this machine, not a
+one-off.** Two additions to the guidance above:
+
+- **Exonerating control that is nearly free:** if any *non-map* visual on the **same page** renders
+  with correct data, model/refresh/binding are healthy and you have already excluded the expensive
+  hypothesis without touching the map's JSON. Do this before the minimal-case bisect.
+- **The "never fall back to Bing" rule has one documented exception.** That rule optimises for
+  fidelity + standards. When the deliverable being graded is **whole-page layout/gestalt**, a blank
+  visual is not a neutral "unverified" state — it silently deletes its share of the canvas (here
+  **28.86%**), which corrupts the very property under test. In that case the legacy `map` is the
+  better temporary choice; it is 🟢 **render-verified 2026-08-08** to draw sized bubbles on a live
+  basemap. Costs, both must be logged: `PBIR_VISUAL_TYPE_DEPRECATED`, and an **in-visual "This visual
+  type is being retired soon" banner** with an *Upgrade map* button that eats ~12% of the visual's
+  height (this is distinct from, and additional to, the once-per-session Bing nag modal). Keep the
+  azureMap encoding reachable behind a flag and state the deviation in the handover so the
+  orchestrator can overrule it cheaply.
+- **Bing `map` geocoding caveat found the same day:** `Location` = a bare city column mis-geocodes
+  ambiguous US city names onto other continents. Adding Country/State to the *same* well does **not**
+  add geocoding context — the Bing visual turns a multi-field Location into a **drill hierarchy** and
+  renders the **top** level, so a single-valued Country column collapses every bubble into one. The
+  real fix is a model-layer concatenated `"City, State"` column with `dataCategory` `Place`.
+
 ## Open questions / needs-human-capture
 
 - 🟥 Need one render-verified PBIR exemplar each for `pathLayer`, `heatMapLayer`, clustered `bubbleLayer`, and built-in `filledMap` layer. The installed catalog exposes the objects and Learn describes the UX, but structural validity is not enough for cookbook-grade PBIR generation.

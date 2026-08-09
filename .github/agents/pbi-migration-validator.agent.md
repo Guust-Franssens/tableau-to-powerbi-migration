@@ -127,7 +127,13 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
    *believed* it was doing — which is exactly where the `status: "rebuilt"` blind spot hides.
 2. **`migration-spec.json`** — ground truth for what's *supposed* to exist (worksheet list, mark
    types, encodings, reference lines, filters, parameters). This is what makes your review
-   structurally grounded instead of just "vibes-based pixel comparison."
+   structurally grounded instead of just "vibes-based pixel comparison." **NOT REQUIRED, and often
+   absent:** the estate/bundle flow (engine ≥2.99) emits `report.json` + `handover/<wb>.json` instead
+   and never writes a spec. The handover slice carries the same structural ground truth — use it, and
+   fall back to the `.twb` itself (unzip the `.twbx`; the shelf XML is authoritative for encodings).
+   Measured 2026-08-08 on `book_5-2-LOD`: given a bundle plus a numeric oracle, one sign-off model
+   **refused to review at all** for want of this file while a second reviewed it fully. A missing
+   *spec* is never a reason to decline — a missing *ground truth* is, so say which you actually lack.
 3. **Tableau reference screenshots**, one whole-dashboard capture per dashboard at minimum, ideally
    per-worksheet crops too. **Ground truth lives at `migrations/workbooks/<slug>/reference/` (with a
    `manifest.json`) — look there FIRST; all existing migrations already have one.** If it's empty, use
