@@ -1,15 +1,21 @@
 """Quick data facts from the extracted CSVs (stdlib csv only - no pandas)."""
-import csv, os, statistics
+
+import csv
+import os
+import statistics
 from collections import Counter
 
 DATA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data"))
+
 
 def load(name):
     with open(os.path.join(DATA, name), encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
+
 def col(rows, c):
     return [r[c] for r in rows]
+
 
 # 1. per_capita_fnr
 fnr = load("ds.per_capita_electricity_fossil_nuclear_renewables.csv")
@@ -28,7 +34,9 @@ for e in ("World",):
             r = rr[0]
             ff, nu, re_ = float(r[ff_col]), float(r[nu_col]), float(r[re_col])
             tot = ff + nu + re_
-            print(f"  {e} {yr}: FF={ff:.3f} Nuc={nu:.3f} Ren={re_:.3f} tot={tot:.3f} -> FF%={ff/tot:.5f} Nuc%={nu/tot:.5f} Ren%={re_/tot:.5f}")
+            print(
+                f"  {e} {yr}: FF={ff:.3f} Nuc={nu:.3f} Ren={re_:.3f} tot={tot:.3f} -> FF%={ff / tot:.5f} Nuc%={nu / tot:.5f} Ren%={re_ / tot:.5f}"
+            )
 
 # 2. pivoted
 piv = load("ds.pivoted_per_capita_electricity_generation_by_source.csv")
@@ -39,13 +47,19 @@ print("PIVOTED years:", pyrs[0], "..", pyrs[-1])
 for code, yr in [("USA", 2022), ("FRA", 2022)]:
     sub = [r for r in piv if r["Code"] == code and int(r["Year"]) == yr]
     by = {r["Fuel Source"]: float(r["Electricity generation per capita"]) for r in sub}
-    ff = by.get("Fossil Fuel", 0.0); nu = by.get("Nuclear", 0.0); rn = by.get("Renewables", 0.0)
+    ff = by.get("Fossil Fuel", 0.0)
+    nu = by.get("Nuclear", 0.0)
+    rn = by.get("Renewables", 0.0)
     tot = ff + nu + rn
     if tot:
-        print(f"  {code} {yr}: FF={ff:.3f} Nuc={nu:.3f} Ren={rn:.3f} -> FF%={ff/tot:.5f} Nuc%={nu/tot:.5f} Ren%={rn/tot:.5f}")
+        print(
+            f"  {code} {yr}: FF={ff:.3f} Nuc={nu:.3f} Ren={rn:.3f} -> FF%={ff / tot:.5f} Nuc%={nu / tot:.5f} Ren%={rn / tot:.5f}"
+        )
 
 # 3. elec generation
-eg = load("ds.elec_generation_per_capita_regions.csv")
+eg = load(
+    "ds.elec_generation_per_capita_regions.Extract.Elec generation per capita _ regions.csv_B3B07BC3AEC34A68859236D28C71EB13.csv"
+)
 egents = set(col(eg, "Entity"))
 egregs = set(col(eg, "Region"))
 print("\nELEC GEN rows:", len(eg), "| distinct Entity:", len(egents), "| distinct Region:", len(egregs))
@@ -60,10 +74,12 @@ for reg in sorted(egregs):
         print(f"    {reg:35} n={len(vals):3} avg={statistics.mean(vals):.3f}")
 # Global avg (all entities) 2022
 allv = [float(r["Per capita electricity - kWh"]) for r in eg if int(r["Year"]) == 2022]
-print(f"  GLOBAL avg per-capita 2022 (all rows): {statistics.mean(allv):.3f}  (n={len(allv)})  [Tableau constant 'Global avg in 2022'=3616.7]")
+print(
+    f"  GLOBAL avg per-capita 2022 (all rows): {statistics.mean(allv):.3f}  (n={len(allv)})  [Tableau constant 'Global avg in 2022'=3616.7]"
+)
 
 # 4. tree.csv child vs Entity
-tree = load("ds.tree.csv")
+tree = load("ds.tree.Extract.tree.csv_D5C7546A97E64FBE8DB0BCDADDF65312.csv")
 egmax = max(int(y) for y in col(eg, "Year"))
 print("\nTREE rows:", len(tree), "| type:", dict(Counter(col(tree, "type"))))
 children = set(c for c in col(tree, "child") if c)
@@ -75,4 +91,6 @@ print("  sample child NOT in Entity:", sorted(list(children - egents))[:12])
 # CY Consumption ground-truth: FIXED [child]: sum(IF Year=CY THEN percapita) for a country/region child
 for ch in ["Norway", "Iceland", "East Asia & Pacific", "World"]:
     v = [float(r["Per capita electricity - kWh"]) for r in eg if r["Entity"] == ch and int(r["Year"]) == egmax]
-    print(f"  CY Consumption[child={ch!r}] (Entity match, {egmax} sum) = {sum(v):.3f}  (n={len(v)}, inChildren={ch in children})")
+    print(
+        f"  CY Consumption[child={ch!r}] (Entity match, {egmax} sum) = {sum(v):.3f}  (n={len(v)}, inChildren={ch in children})"
+    )

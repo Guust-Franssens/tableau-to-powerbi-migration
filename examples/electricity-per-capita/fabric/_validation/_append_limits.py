@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import jsonschema
+
 P = str(Path(__file__).resolve().parents[2] / "migration-spec.json")
 d = json.load(open(P, encoding="utf-8"))
 lim = d["limitations_encountered"]
@@ -15,7 +17,7 @@ NEW = [
     },
     {
         "item": "extract.tree.hyper (multi-table extract not fully exported)",
-        "issue": "The 'tree' source's tree.hyper packages TWO tables - tree.csv (3,320 geometry rows, exported to ds.tree.csv) AND 'Elec generation' (6,061 consumption rows) - but the extractor exported only the geometry table. The consumption columns the tree calcs reference ([Per capita electricity - kWh], [Year], [Region], [Entity]) are ABSENT from ds.tree.csv. They were sourced from ds.elec_generation_per_capita_regions.csv (identical data) and the tree consumption calcs (CY, CY Consumption, Max year, Calculation2, Elec gen at 2022, 'Max year (copy)') were relocated onto the 'Elec Generation' table (child=Entity). Parser/extraction gap: multi-table .hyper sources should export every referenced table, not just the first.",
+        "issue": "The 'tree' source's tree.hyper packages TWO tables - tree.csv (3,320 geometry rows, exported to ds.tree.Extract.tree.csv_D5C7546A97E64FBE8DB0BCDADDF65312.csv) AND 'Elec generation' (6,061 consumption rows) - but the extractor exported only the geometry table. The consumption columns the tree calcs reference ([Per capita electricity - kWh], [Year], [Region], [Entity]) are ABSENT from the tree.csv relation. They were sourced from ds.elec_generation_per_capita_regions.Extract.Elec generation per capita _ regions.csv_B3B07BC3AEC34A68859236D28C71EB13.csv (identical data) and the tree consumption calcs (CY, CY Consumption, Max year, Calculation2, Elec gen at 2022, 'Max year (copy)') were relocated onto the 'Elec Generation' table (child=Entity). Extractor note: multi-table .hyper sources now export namespaced relation CSVs; consumers must bind to the specific relation they need, not a data-source-level alias.",
         "severity": "medium",
         "stage": "semantic_build",
     },
@@ -62,9 +64,6 @@ with open(P, "w", encoding="utf-8") as f:
     json.dump(d, f, indent=2, ensure_ascii=False)
 
 print(f"appended {len(NEW)} entries ({before} -> {len(lim)})")
-
-# re-validate against schema
-import jsonschema
 
 schema = json.load(
     open(

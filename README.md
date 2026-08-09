@@ -238,6 +238,7 @@ python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.tw
 
 # If the workbook uses .hyper extracts (no live DB), pull the real row data too:
 python scripts\extract_hyper_data.py migrations\workbooks\<name>\source\<workbook>.twbx `
+    migrations\workbooks\<name>\migration-spec.json `
     -o migrations\workbooks\<name>\data
 ```
 
