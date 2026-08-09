@@ -445,6 +445,7 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
     internal_name = col.get("name", "")
     caption = col.get("caption") or internal_name.strip("[]")
     calc_el = col.find("calculation")
+    calc_class = calc_el.get("class") if calc_el is not None else None
     formula = calc_el.get("formula") if calc_el is not None else None
     aliases = {a.get("key", "").strip('"'): a.get("value", "") for a in col.findall("aliases/alias")}
 
@@ -453,7 +454,7 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
         "internal_name": internal_name,
         "caption": caption,
         "table_id": table_id,
-        "kind": "calculated" if formula is not None else "column",
+        "kind": "bin" if calc_class == "bin" else "calculated" if formula is not None else "column",
         "data_type": col.get("datatype", "string"),
         "role": col.get("role", "dimension"),
         "default_aggregation": None,
@@ -465,6 +466,9 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
     if formula is not None:
         entry["tableau_formula"] = formula
         entry.update(_classify_calculation(formula))
+    if calc_class == "bin":
+        entry["bin_size"] = calc_el.get("bin-size")
+        entry["bin_source_column"] = calc_el.get("column")
     return entry
 
 

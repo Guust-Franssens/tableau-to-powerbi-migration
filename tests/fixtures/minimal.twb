@@ -33,6 +33,9 @@
       </connection>
       <column caption='Name' datatype='string' name='[NAME]' role='dimension' type='nominal' />
       <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />
+      <column caption='Sales (bin)' datatype='real' name='[Sales (bin)]' role='dimension' type='ordinal'>
+        <calculation class='bin' column='[Sales]' bin-size='200' new-bin='true' peg='0' />
+      </column>
       <column caption='City filter' datatype='string' name='[Calculation_1]' role='dimension' type='nominal'>
         <calculation class='tableau' formula='if [Parameters].[Parameter 1]=[NAME] then [NAME] END' />
       </column>

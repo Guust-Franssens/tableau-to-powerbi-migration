@@ -44,6 +44,16 @@ def test_calculated_field_and_dependencies():
     assert fields["Sales"]["id"] in fields["Sales Scaled"]["referenced_fields"]
 
 
+def test_bin_field_preserves_bin_class_and_size():
+    """Tableau histogram bins serialize as calculation class='bin' with a bin-size, not as a normal
+    formula-authored calculation. The parser must preserve the bin kind and width."""
+    fields = {f["caption"]: f for f in parse_workbook(FIXTURE)["data_sources"][0]["fields"]}
+    sales_bin = fields["Sales (bin)"]
+    assert sales_bin["kind"] == "bin"
+    assert sales_bin["bin_size"] == "200"
+    assert sales_bin["bin_source_column"] == "[Sales]"
+
+
 def test_extract_connection_mode_detected():
     spec = parse_workbook(FIXTURE)
     connection = spec["data_sources"][0]["connection"]

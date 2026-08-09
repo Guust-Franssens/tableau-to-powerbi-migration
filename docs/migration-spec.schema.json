@@ -132,6 +132,8 @@
                   "additionalProperties": { "type": "string" }
                 },
                 "tableau_formula": { "type": ["string", "null"], "description": "Raw formula text, required when kind=calculated" },
+                "bin_size": { "type": ["string", "number", "null"], "description": "Raw Tableau calculation@bin-size when kind=bin" },
+                "bin_source_column": { "type": ["string", "null"], "description": "Raw Tableau calculation@column that the bin groups when kind=bin" },
                 "referenced_fields": { "type": "array", "items": { "type": "string" }, "description": "field ids this calculation depends on" },
                 "is_lod": { "type": "boolean", "default": false },
                 "is_table_calc": { "type": "boolean", "default": false },
