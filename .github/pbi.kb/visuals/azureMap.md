@@ -62,6 +62,56 @@ That visual is an `azureMap` choropleth using a two-entry `objects.referenceLaye
 
 The same visual keeps the Power BI data binding minimal: `query.queryState.Category` contains only `'Sample Superstore'[State]`, allowing Azure Maps to data-bind the state names to the GeoJSON properties. `objects.mapControls` fixes the default style to grayscale light, hides style/navigation/selection controls, and pins the continental-US viewport; `objects.bubbleLayer` is still present with `show = true`, but the choropleth effect comes from `referenceLayer.polygonFillColor`.
 
+## 🟢 Render-verified POSITIVE: the measure-driven choropleth works, exactly as encoded
+
+**Verified 2026-08-09, Desktop MSIX 2.157.627.0, `book_6-1-Maps`, signed-in session on an entitled
+tenant.** Supersedes the "structurally verified only" caveat this file previously carried.
+
+The `referenceLayer` recipe above renders a genuine choropleth: US state polygons filled from the
+bound measure, California and New York darkest, Texas mid-tone, the remaining states graded, and
+unmapped geography left grey. `mapControls.defaultStyle` is honoured literally — `'night'` produced a
+a true dark basemap, `'road'` the standard one. So the encoding in "Known-good encoding" above is now
+**render-verified, not inferred**.
+
+**The entitlement caveat below is still true** — it is about an *unauthenticated* session, not about
+the encoding. Both states look identical to `validate`.
+
+## 🔴 Render-verified DEFECT: a multi-field Location well collapses every mark to ONE
+
+**Verified 2026-08-09, same session. This is the highest-value entry in this file** — it is
+validation-invisible, renders "successfully", and silently destroys the entire point of the map.
+
+**Symptom.** The map draws, the basemap is correct, the legend is correct, and there is **exactly one
+mark in the middle of the country** instead of one per state/city. No error, no warning,
+`validate` clean.
+
+**Measured, same report, same model — the discriminator is the number of fields in `Category`:**
+
+| page | `Category` projections | rendered |
+|---|---|---|
+| Filled Map | `[State]` | ✅ one polygon per state, correctly graded |
+| Symbol Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid |
+| Pie Chart Map | `[Country, State, City]` | ❌ **one pie** at the US centroid |
+| Dark Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid |
+
+**Root cause.** Stacking several geographic columns into `Category` builds a **drill hierarchy**, and
+azureMap renders at the **top** level until the user drills down. `Country` has one member
+("United States"), so every row aggregates into a single mark at that country's centroid. Tableau
+does the opposite: geographic fields on **Detail** plot at the **finest** level present, so the same
+shelf configuration means "one mark per city" there and "one mark per country" here.
+
+**This is a translation trap, not a Power BI bug.** A Tableau map worksheet with `Country`, `State`
+and `City` on Detail must not be transliterated field-for-field.
+
+**Fix.** Put **only the leaf geography** in `Category` and move the coarser levels to `Tooltips` (they
+are still needed for disambiguation — "Springfield" exists in many states, so either use a composite
+`City, State` column from the model or keep explicit Lat/Long). Confirm by counting marks, not by
+looking for an error.
+
+**Detection rule worth automating:** any `azureMap` whose `Category` well holds **more than one
+`Column` projection** is suspect. It is legal, it validates, and it is almost never what the Tableau
+source meant.
+
 ## 🟢 Render-verified NEGATIVE: azureMap draws NOTHING without the tenant entitlement
 
 **Verified 2026-07-19, Desktop MSIX 2.157.627.0, `book_6-1-Maps` maps migration.** Cost most of a
