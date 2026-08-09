@@ -51,6 +51,7 @@ SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
 # A Desktop model load is 60-90s and a refresh + ImageSave was measured at 93s, so a window shorter
 # than this cannot distinguish "loading" from "stuck" and must not try.
 SHORT_WINDOW_MINUTES = 10
+BURST_GRACE_MULTIPLIER = 2
 LIVENESS_ACTIVE = "active"
 LIVENESS_UNKNOWN = "unknown"
 
@@ -100,9 +101,10 @@ def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dic
     overall_buckets: dict[str, dict[str, Any]] = {
         b: {"count": 0, "newest": None, "example": None} for b in ("deliverable", "scratch", "other")
     }
-    total = 0
     newest_overall: datetime | None = None
+    now = datetime.now()
     cutoff = max(since, baseline) if baseline else since
+    observed_minutes = max(0.0, (now - cutoff).total_seconds() / 60)
     for path in bundle.rglob("*"):
         if not path.is_file():
             continue
@@ -110,7 +112,6 @@ def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dic
             written = datetime.fromtimestamp(path.stat().st_mtime)
         except OSError:
             continue
-        total += 1
         if baseline and written < baseline:
             continue
         relative = path.relative_to(bundle)
@@ -132,15 +133,75 @@ def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dic
     return {
         "buckets": buckets,
         "overall_buckets": overall_buckets,
-        "files_total": total,
+        "files_total": sum(bucket["count"] for bucket in overall_buckets.values()),
         "newest_overall": newest_overall,
         "baseline": baseline,
+        "observed_minutes": observed_minutes,
     }
 
 
 def _age_minutes(written: datetime) -> float:
     """Minutes since a filesystem write."""
     return (datetime.now() - written).total_seconds() / 60
+
+
+def _window_text(scanned: dict[str, Any], window_minutes: int) -> str:
+    """Human label for the actual observed window after a baseline is applied."""
+    observed = scanned.get("observed_minutes", window_minutes)
+    if abs(observed - window_minutes) < 0.5:
+        return f"{window_minutes}m"
+    return f"{observed:.0f}m observed after baseline"
+
+
+def _quiet_verdict(scanned: dict[str, Any], window_minutes: int, liveness: str, window: str) -> tuple[str, str]:
+    """Verdict for a window with no current writes in any bucket."""
+    if liveness == LIVENESS_ACTIVE:
+        newest_overall = scanned.get("newest_overall")
+        file_signal = (
+            "no file writes" if not newest_overall else f"last file write {_age_minutes(newest_overall):.0f}m ago"
+        )
+        return (
+            "THINKING",
+            (
+                f"{file_signal}, but the external runtime liveness signal is active (tool-call count is climbing). "
+                "Treat this as a read-heavy phase and re-check; file mtimes alone cannot prove a stall."
+            ),
+        )
+
+    prior_deliverable = scanned.get("overall_buckets", {}).get("deliverable", {})
+    if prior_deliverable.get("newest"):
+        age = _age_minutes(prior_deliverable["newest"])
+        burst_grace = window_minutes * BURST_GRACE_MULTIPLIER
+        if age <= burst_grace:
+            return (
+                "THINKING",
+                (
+                    f"no deliverables in the last {window}, but this bundle has recent deliverable output "
+                    f"(last {age:.0f}m ago: {prior_deliverable.get('example')}). Agents write in bursts; "
+                    "use this age and runtime liveness before interrupting it."
+                ),
+            )
+        return (
+            "SILENT",
+            (
+                f"nothing written in the last {window}; last deliverable was {age:.0f}m ago "
+                f"({prior_deliverable.get('example')}). Finished, blocked on a human, or dead - "
+                "check whether it is waiting on a credential before assuming it is stuck."
+            ),
+        )
+
+    newest_overall = scanned.get("newest_overall")
+    if newest_overall is None:
+        baseline_note = " after baseline" if scanned.get("baseline") else " at all"
+        return "SILENT", f"no files written{baseline_note} - has this run started?"
+    quiet = (datetime.now() - newest_overall).total_seconds()
+    return (
+        "SILENT",
+        (
+            f"nothing written for {quiet / 60:.0f}m. Finished, blocked on a human, or dead - "
+            "check whether it is waiting on a credential before assuming it is stuck."
+        ),
+    )
 
 
 def verdict(scanned: dict[str, Any], window_minutes: int, liveness: str = LIVENESS_UNKNOWN) -> tuple[str, str]:
@@ -162,51 +223,18 @@ def verdict(scanned: dict[str, Any], window_minutes: int, liveness: str = LIVENE
     deliverable = scanned["buckets"]["deliverable"]
     scratch = scanned["buckets"]["scratch"]
     other = scanned["buckets"]["other"]
-    prior_deliverable = scanned.get("overall_buckets", {}).get("deliverable", {})
+    observed_minutes = scanned.get("observed_minutes", window_minutes)
+    window = _window_text(scanned, window_minutes)
 
-    if liveness == LIVENESS_ACTIVE and not deliverable["count"]:
-        newest_overall = scanned.get("newest_overall")
-        file_signal = "no file writes" if not newest_overall else f"last write {_age_minutes(newest_overall):.0f}m ago"
-        state, detail = (
-            "THINKING",
-            (
-                f"{file_signal}, but the external runtime liveness signal is active (tool-call count is climbing). "
-                "Treat this as a read-heavy phase and re-check; file mtimes alone cannot prove a stall."
-            ),
-        )
-    elif deliverable["count"]:
-        state, detail = "PROGRESSING", f"{deliverable['count']} deliverable file(s) in the last {window_minutes}m."
+    if deliverable["count"]:
+        state, detail = "PROGRESSING", f"{deliverable['count']} deliverable file(s) in the last {window}."
     elif not scratch["count"] and not other["count"]:
-        if prior_deliverable.get("newest"):
-            age = _age_minutes(prior_deliverable["newest"])
-            state, detail = (
-                "THINKING",
-                (
-                    f"no deliverables in the last {window_minutes}m, but this bundle already has deliverable output "
-                    f"(last {age:.0f}m ago: {prior_deliverable.get('example')}). Agents write in bursts; "
-                    "use this age and runtime liveness before interrupting it."
-                ),
-            )
-        else:
-            # `newest_overall` deliberately ignores the window - see scan().
-            newest_overall = scanned.get("newest_overall")
-            if newest_overall is None:
-                baseline_note = " after baseline" if scanned.get("baseline") else " at all"
-                state, detail = "SILENT", f"no files written{baseline_note} - has this run started?"
-            else:
-                quiet = (datetime.now() - newest_overall).total_seconds()
-                state, detail = (
-                    "SILENT",
-                    (
-                        f"nothing written for {quiet / 60:.0f}m. Finished, blocked on a human, or dead - "
-                        "check whether it is waiting on a credential before assuming it is stuck."
-                    ),
-                )
-    elif window_minutes < SHORT_WINDOW_MINUTES:
+        state, detail = _quiet_verdict(scanned, window_minutes, liveness, window)
+    elif observed_minutes < SHORT_WINDOW_MINUTES:
         state, detail = (
             "THINKING",
             (
-                f"{scratch['count']} scratch file(s), nothing deliverable yet, but a {window_minutes}m "
+                f"{scratch['count']} scratch file(s), nothing deliverable yet, but a {window} "
                 f"window is too short to judge (a Desktop load is ~90s and a refresh ~93s). Re-check "
                 f"over >= {SHORT_WINDOW_MINUTES}m."
             ),
@@ -215,7 +243,7 @@ def verdict(scanned: dict[str, Any], window_minutes: int, liveness: str = LIVENE
         state, detail = (
             "STALLED",
             (
-                f"{scratch['count']} scratch file(s) but ZERO deliverables in {window_minutes}m. "
+                f"{scratch['count']} scratch file(s) but ZERO deliverables in {window}. "
                 "Busy and producing nothing the user asked for - ASK IT WHAT IT IS BLOCKED ON."
             ),
         )
@@ -225,11 +253,13 @@ def verdict(scanned: dict[str, Any], window_minutes: int, liveness: str = LIVENE
 def render(bundle: Path, scanned: dict[str, Any], state: str, detail: str, window: int) -> str:
     """The human-readable check-in."""
     lines = [f"PROGRESS [{state}] {bundle.name} - {detail}", ""]
+    window_label = _window_text(scanned, window)
     for name in ("deliverable", "scratch", "other"):
         bucket = scanned["buckets"][name]
         when = bucket["newest"].strftime("%H:%M:%S") if bucket["newest"] else "-"
         lines.append(
-            f"  {name:12} {bucket['count']:>4} file(s) in last {window}m   newest {when}  {bucket['example'] or ''}"
+            f"  {name:12} {bucket['count']:>4} file(s) in last {window_label}   newest {when}  "
+            f"{bucket['example'] or ''}"
         )
     if state == "STALLED":
         lines += [
@@ -339,6 +369,13 @@ def main(argv: list[str] | None = None) -> int:
                 LOG.info("  %s", note)
         return {"READY": 0, "NOT_READY": 1, "NO_MODEL": 2}[state]
 
+    if args.baseline is None:
+        LOG.error(
+            "PROGRESS: ERROR --baseline <iso8601> is required in progress mode so dispatcher setup files "
+            "cannot be credited as agent progress."
+        )
+        return 2
+
     since = datetime.now() - timedelta(minutes=args.since_minutes)
     scanned = scan(args.bundle, since, args.baseline)
     state, detail = verdict(scanned, args.since_minutes, args.liveness)
@@ -349,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
             "state": state,
             "detail": detail,
             "window_minutes": args.since_minutes,
+            "observed_minutes": round(scanned["observed_minutes"], 2),
             "baseline": args.baseline.isoformat(timespec="seconds") if args.baseline else None,
             "liveness": args.liveness,
             "checked_at": datetime.now().isoformat(timespec="seconds"),

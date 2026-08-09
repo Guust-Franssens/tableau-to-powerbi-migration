@@ -325,10 +325,15 @@ Invoke them directly with **complete context** — they are stateless, so give e
 one shot (including the Gate-A brief from step 1: autonomy and fidelity bar change what they build).
 
 **Supervise what you delegate — elapsed time is NOT the signal.** Measured: two subagents both passed
-100 minutes on their first turn; one had written 178 deliverable files, the other **zero**. Poll every
-~15 min: `python scripts/check_migration_progress.py --bundle <b> --since-minutes 15` →
-`PROGRESSING` leave it alone · `STALLED` **ask it what it is blocked on** (a follow-up message), do
-**not** kill a slow-but-productive run · `SILENT` it finished, died, or is waiting on a human.
+100 minutes on their first turn; one had written 178 deliverable files, the other **zero**. Record the
+delegation timestamp before launch (PowerShell: `$baseline=(Get-Date).ToString('o')`) and poll every
+~15 min: `python scripts/check_migration_progress.py --bundle <b> --since-minutes 15 --baseline
+<baseline>` (add `--liveness active` only when the runtime/tool-call count increased since the previous
+poll) → `PROGRESSING` leave it alone · `THINKING` file output is not decisive yet; re-check with the
+same baseline and liveness context · `STALLED` **ask it what it is blocked on** (a follow-up message),
+do **not** kill a slow-but-productive run · `SILENT` it finished, died, or is waiting on a human. The
+baseline is mandatory because setup artifacts written by the dispatcher are otherwise indistinguishable
+from agent progress.
 
 **Invoke `pbi-migration-validator` with only ground-truth artifacts, never the build
 subagents' own reasoning or self-reported success** — its value depends on
