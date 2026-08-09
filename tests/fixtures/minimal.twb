@@ -42,6 +42,9 @@
       <column caption='Sales Scaled' datatype='real' name='[Calculation_2]' role='measure' type='quantitative'>
         <calculation class='tableau' formula='SUM([SALES])*100' />
       </column>
+      <column caption='Grand Total' datatype='real' name='[Grand Total]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='{SUM([Sales])}' />
+      </column>
       <column caption='cities.csv' datatype='table' name='[__tableau_internal_object_id__].[cities.csv_ABC123]' role='measure' type='quantitative' />
       <column caption='City Point' datatype='spatial' name='[Calculation_3]' role='measure' type='nominal'>
         <calculation class='tableau' formula='MAKEPOINT([LAT],[LON])' />

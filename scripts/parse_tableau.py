@@ -38,7 +38,11 @@ logger = logging.getLogger("parse_tableau")
 
 SPEC_VERSION = "1.0"
 
-_LOD_RE = re.compile(r"\{\s*(FIXED|INCLUDE|EXCLUDE)\b", re.IGNORECASE)
+_LOD_KEYWORD_RE = re.compile(r"\{\s*(FIXED|INCLUDE|EXCLUDE)\b", re.IGNORECASE)
+_KEYWORDLESS_LOD_RE = re.compile(
+    r"\{[^{}]*\b(SUM|AVG|COUNT|COUNTD|MIN|MAX|ATTR|MEDIAN|STDEV|STDEVP|VAR|VARP|AGG)\s*\(",
+    re.IGNORECASE,
+)
 _TABLE_CALC_RE = re.compile(r"\b(WINDOW_\w+|RUNNING_\w+|INDEX|RANK\w*|LOOKUP|TOTAL|PREVIOUS_VALUE)\s*\(", re.IGNORECASE)
 _PARAM_EQUALITY_RE = re.compile(r"if\s*\[Parameters\]\.\[[^\]]+\]\s*=\s*\[[^\]]+\]\s*then", re.IGNORECASE)
 _BRACKET_TOKEN_RE = re.compile(r"\[([^\[\]]+)\]")
@@ -434,7 +438,7 @@ def _classify_calculation(formula: str) -> dict[str, bool | str | None]:
     if "Pivot Field Names" in formula or "Pivot Field Values" in formula:
         reshape_hint = "pivot_derived"
     return {
-        "is_lod": bool(_LOD_RE.search(formula)),
+        "is_lod": bool(_LOD_KEYWORD_RE.search(formula) or _KEYWORDLESS_LOD_RE.search(formula)),
         "is_table_calc": bool(_TABLE_CALC_RE.search(formula)),
         "reshape_hint": reshape_hint,
     }

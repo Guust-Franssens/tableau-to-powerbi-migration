@@ -54,6 +54,19 @@ def test_bin_field_preserves_bin_class_and_size():
     assert sales_bin["bin_source_column"] == "[Sales]"
 
 
+def test_keywordless_aggregate_lod_is_flagged_high_severity():
+    """A Tableau LOD may be table-scoped with no FIXED/INCLUDE/EXCLUDE keyword, e.g. {SUM([Sales])}.
+    It still needs the high-severity grain/filter-context warning."""
+    spec = parse_workbook(FIXTURE)
+    fields = {f["caption"]: f for f in spec["data_sources"][0]["fields"]}
+    grand_total = fields["Grand Total"]
+    assert grand_total["is_lod"] is True
+    assert any(
+        item["item"] == grand_total["id"] and item["severity"] == "high" and "LOD expression" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+
+
 def test_extract_connection_mode_detected():
     spec = parse_workbook(FIXTURE)
     connection = spec["data_sources"][0]["connection"]
