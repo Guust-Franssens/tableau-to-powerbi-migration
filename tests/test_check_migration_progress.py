@@ -48,6 +48,30 @@ def test_writing_deliverables_is_PROGRESSING(tmp_path):
     assert _scan_now(tmp_path)[0] == "PROGRESSING"
 
 
+def test_baseline_excludes_dispatcher_setup_from_PROGRESSING(tmp_path):
+    """Files written before delegation are setup artifacts, not subagent progress."""
+    _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "tables" / "T.tmdl", minutes_ago=10)
+    baseline = datetime.now() - timedelta(minutes=5)
+    since = datetime.now() - timedelta(minutes=15)
+
+    state, detail = cmp_mod.verdict(cmp_mod.scan(tmp_path, since, baseline), window_minutes=15)
+
+    assert state == "SILENT"
+    assert "has this run started" in detail
+
+
+def test_baseline_shortens_the_observed_window_in_the_verdict(tmp_path):
+    """A 15m configured window with a 5m baseline has only observed 5m of agent work."""
+    _touch(tmp_path / "_work" / "probe.py")
+    baseline = datetime.now() - timedelta(minutes=5)
+    since = datetime.now() - timedelta(minutes=15)
+
+    state, detail = cmp_mod.verdict(cmp_mod.scan(tmp_path, since, baseline), window_minutes=15)
+
+    assert state == "THINKING"
+    assert "5m observed after baseline" in detail
+
+
 def test_scratch_only_across_a_full_window_is_STALLED(tmp_path):
     """The 105-minute run: busy, and producing nothing the user asked for."""
     for i in range(5):
@@ -70,6 +94,18 @@ def test_RECENCY_MUST_NOT_RESCUE_a_window_with_no_deliverables(tmp_path):
     assert _scan_now(tmp_path, window_minutes=30)[0] == "STALLED"
 
 
+def test_LIVENESS_MUST_NOT_RESCUE_scratch_only_across_a_full_window(tmp_path):
+    """A rising tool-call count proves activity, not deliverable progress."""
+    for i in range(5):
+        _touch(tmp_path / "_work" / f"probe{i}.py", minutes_ago=i)
+    since = datetime.now() - timedelta(minutes=30)
+
+    state, detail = cmp_mod.verdict(cmp_mod.scan(tmp_path, since), window_minutes=30, liveness="active")
+
+    assert state == "STALLED"
+    assert "ZERO deliverables" in detail
+
+
 def test_a_short_window_refuses_to_judge(tmp_path):
     """A Desktop load is ~90s and a refresh ~93s, so a short window cannot tell loading from stuck."""
     _touch(tmp_path / "_work" / "probe.py")
@@ -89,6 +125,39 @@ def test_stale_activity_outside_the_window_is_SILENT(tmp_path):
     state, detail = _scan_now(tmp_path, window_minutes=30)
     assert state == "SILENT"
     assert "credential" in detail, "must remind the reader that a blocked run looks like a dead one"
+
+
+def test_runtime_liveness_keeps_read_heavy_phase_from_SILENT(tmp_path):
+    """A rising tool-call count is external evidence that a quiet bundle is still being worked."""
+    (tmp_path / "bundle").mkdir()
+    scanned = cmp_mod.scan(tmp_path, datetime.now() - timedelta(minutes=30))
+
+    state, detail = cmp_mod.verdict(scanned, window_minutes=30, liveness="active")
+
+    assert state == "THINKING"
+    assert "runtime liveness signal is active" in detail
+
+
+def test_prior_deliverables_outside_fixed_window_report_THINKING_not_SILENT(tmp_path):
+    """Burst writers can be healthy even when the polling window lands between output bursts."""
+    _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "tables" / "T.tmdl", minutes_ago=20)
+    since = datetime.now() - timedelta(minutes=15)
+
+    state, detail = cmp_mod.verdict(cmp_mod.scan(tmp_path, since), window_minutes=15)
+
+    assert state == "THINKING"
+    assert "write in bursts" in detail
+
+
+def test_ancient_deliverables_do_not_create_unbounded_THINKING(tmp_path):
+    """Historical output is useful context, not an indefinite all-clear."""
+    _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "tables" / "T.tmdl", minutes_ago=7 * 24 * 60)
+    since = datetime.now() - timedelta(minutes=15)
+
+    state, detail = cmp_mod.verdict(cmp_mod.scan(tmp_path, since), window_minutes=15)
+
+    assert state == "SILENT"
+    assert "last deliverable" in detail
 
 
 # --- bucketing ------------------------------------------------------------------------------------
@@ -114,6 +183,16 @@ def test_files_land_in_the_right_bucket(relative, expected):
 def test_a_probe_sandbox_inside_a_bundle_is_scratch_not_deliverable():
     """`_probe/Probe.pbip` is a reachability sandbox. Counting it as output would mask a stall."""
     assert cmp_mod.classify(Path("mig/_probe/Probe.pbip")) == "scratch"
+
+
+def test_underscored_scratch_directory_is_scratch_not_deliverable():
+    """`_scratch` is the same intent as `scratch`, even when it contains a PBIP-shaped sandbox."""
+    assert cmp_mod.classify(Path("_scratch/orderprobe/run0/Probe.pbip")) == "scratch"
+
+
+def test_temp_component_does_not_match_template():
+    """Scratch matching stays component-normalized, not substring-based."""
+    assert cmp_mod.classify(Path("template/Model.SemanticModel/definition/tables/T.tmdl")) == "deliverable"
 
 
 # --- the handoff gate -----------------------------------------------------------------------------
@@ -166,19 +245,31 @@ def _run(*args) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, check=False)
 
 
+def _baseline_arg(minutes_ago: int = 60) -> str:
+    return (datetime.now() - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+
+
 def test_exit_codes_let_a_caller_GATE_on_the_result(tmp_path):
     """The orchestrator runs this before assigning the report phase, so the code must be usable."""
     _touch(tmp_path / "_work" / "p.py")
-    assert _run("--bundle", str(tmp_path), "--since-minutes", "30", "--json").returncode == 1
+    baseline = _baseline_arg()
+    assert _run("--bundle", str(tmp_path), "--since-minutes", "30", "--baseline", baseline, "--json").returncode == 1
     _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "t.tmdl")
-    assert _run("--bundle", str(tmp_path), "--since-minutes", "30", "--json").returncode == 0
+    assert _run("--bundle", str(tmp_path), "--since-minutes", "30", "--baseline", baseline, "--json").returncode == 0
 
 
 def test_json_output_is_machine_readable(tmp_path):
     _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "t.tmdl")
-    payload = json.loads(_run("--bundle", str(tmp_path), "--json").stdout)
+    payload = json.loads(_run("--bundle", str(tmp_path), "--baseline", _baseline_arg(), "--json").stdout)
     assert payload["state"] == "PROGRESSING"
     assert payload["buckets"]["deliverable"]["count"] == 1
+
+
+def test_progress_mode_fails_closed_without_a_baseline(tmp_path):
+    _touch(tmp_path / "pbip" / "M.SemanticModel" / "definition" / "t.tmdl")
+    proc = _run("--bundle", str(tmp_path), "--json")
+    assert proc.returncode == 2
+    assert "--baseline" in proc.stderr + proc.stdout
 
 
 def test_a_missing_bundle_is_reported_not_crashed():
@@ -190,7 +281,7 @@ def test_a_missing_bundle_is_reported_not_crashed():
 def test_STALLED_output_says_ASK_rather_than_kill(tmp_path):
     """The verdict must route to a question. Killing a slow-but-productive run is the worse error."""
     _touch(tmp_path / "_work" / "p.py")
-    out = _run("--bundle", str(tmp_path), "--since-minutes", "30")
+    out = _run("--bundle", str(tmp_path), "--since-minutes", "30", "--baseline", _baseline_arg())
     combined = out.stdout + out.stderr
     assert "ASK IT WHAT IT IS BLOCKED ON" in combined
     assert "Do NOT kill it" in combined
