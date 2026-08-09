@@ -5,9 +5,9 @@ purpose: Inspect, and where appropriate extract, the .hyper file(s) packaged ins
                     ONLY appropriate Hyper access for a live source. Use it instead of hand-rolling
                     a throwaway tableauhyperapi script.
 
-         default  : export one CSV per migration-spec.json data source, so a FLAT-FILE source
-                    (Excel/CSV/JSON - `connection.powerbi_target == "flat_file"`) becomes a
-                    self-contained model that shows real numbers in Power BI Desktop.
+         default  : export one CSV per Hyper relation in every migration-spec.json extract data source,
+                    so a FLAT-FILE source (Excel/CSV/JSON - `connection.powerbi_target == "flat_file"`)
+                    becomes a self-contained model that shows real numbers in Power BI Desktop.
 
          IMPORTANT: a .hyper is Tableau's CACHE. When the original source is a live system
          (`powerbi_target == "live_source"`: Snowflake, SQL Server, Databricks, ...) the semantic
@@ -23,6 +23,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -35,19 +37,29 @@ logger = logging.getLogger("extract_hyper_data")
 
 
 def extract_hyper_files(workbook_path: Path, dest_dir: Path) -> dict[str, Path]:
-    """Unzip every packaged .hyper file from the .twbx into dest_dir. Returns {file_name: extracted_path}."""
+    """Unzip every packaged .hyper file from the .twbx into dest_dir.
+
+    Returns {archive_member: extracted_path}. Extracted file names include the archive member path so
+    two same-named packaged extracts cannot overwrite one another.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     extracted: dict[str, Path] = {}
     with zipfile.ZipFile(workbook_path) as zf:
         for entry in zf.namelist():
             if not entry.lower().endswith(".hyper"):
                 continue
-            file_name = Path(entry).name
-            out_path = dest_dir / file_name
+            out_path = dest_dir / f"{len(extracted):03d}_{_safe_name(entry)}"
             out_path.write_bytes(zf.read(entry))
-            extracted[file_name] = out_path
+            extracted[entry] = out_path
     logger.info("Extracted %d .hyper file(s) to %s", len(extracted), dest_dir)
     return extracted
+
+
+def _safe_name(value: object) -> str:
+    """Return a filesystem-safe stem for Hyper archive members or qualified table names."""
+    raw = str(value).replace('"', "").replace("[", "").replace("]", "")
+    cleaned = re.sub(r"[^0-9A-Za-z _.-]+", "_", raw.replace("\\", "_").replace("/", "_")).strip(" ._")
+    return cleaned or "table"
 
 
 def _quote_ident(name: str) -> str:
@@ -55,36 +67,89 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def export_table_to_csv(connection: Connection, csv_path: Path) -> int:
-    """Export the first (and only expected) table in the Hyper file's extract schema to CSV. Returns
-    the row count exported.
-
-    Note: SchemaName.__str__ returns a SQL-quoted form (e.g. '"public"'), not the bare name, so schema
-    selection is done by finding the first schema that actually contains a table rather than by
-    string-matching a schema name."""
-    table = next(
-        (t for s in connection.catalog.get_schema_names() for t in connection.catalog.get_table_names(schema=s)),
-        None,
-    )
-    if table is None:
-        raise ValueError("No tables found in any schema")
-    table_def = connection.catalog.get_table_definition(table)
-    columns = [c.name.unescaped for c in table_def.columns]
-
+def _copy_sql(table: object, columns: list[str], csv_path: Path) -> str:
+    """Build the Hyper COPY command for a table export."""
     quoted_cols = ", ".join(_quote_ident(c) for c in columns)
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    connection.execute_command(
-        f"COPY (SELECT {quoted_cols} FROM {table}) TO '{csv_path.as_posix()}' "
-        "WITH (FORMAT CSV, HEADER TRUE, DELIMITER ',')"
-    )
-    return connection.execute_scalar_query(f"SELECT COUNT(*) FROM {table}")
+    escaped_path = csv_path.as_posix().replace("'", "''")
+    return f"COPY (SELECT {quoted_cols} FROM {table}) TO '{escaped_path}' WITH (FORMAT CSV, HEADER TRUE, DELIMITER ',')"
 
 
-def extract_data_sources(migration_spec: dict[str, Any], hyper_dir: Path, output_dir: Path) -> dict[str, Any]:
-    """For every extract-based data source in the spec, export its Hyper table to a CSV named after the
-    data source id. Returns a manifest {ds_id: {csv_path, row_count}} plus records any failures inline."""
+def export_tables_to_csv(connection: Connection, output_dir: Path) -> dict[str, dict[str, Any]]:
+    """Export every table in one Hyper file to CSV, keyed by qualified table name."""
+    results: dict[str, dict[str, Any]] = {}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for schema in connection.catalog.get_schema_names():
+        for table in connection.catalog.get_table_names(schema=schema):
+            table_def = connection.catalog.get_table_definition(table)
+            columns = [c.name.unescaped for c in table_def.columns]
+            csv_path = output_dir / f"{_safe_name(table)}.csv"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            connection.execute_command(_copy_sql(table, columns, csv_path))
+            results[str(table)] = {
+                "csv_path": str(csv_path.resolve()),
+                "columns": columns,
+                "row_count": connection.execute_scalar_query(f"SELECT COUNT(*) FROM {table}"),
+            }
+    if not results:
+        raise ValueError("No tables found in any schema")
+    return results
+
+
+def _resolve_hyper_path(hyper_files: dict[str, Path], hyper_file: str) -> Path | None:
+    """Find an extracted Hyper member by exact archive path first, then unique basename."""
+    if hyper_file in hyper_files:
+        return hyper_files[hyper_file]
+    matches = [path for member, path in hyper_files.items() if Path(member).name == Path(hyper_file).name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _manifest_relation(qualified_name: str, info: dict[str, Any]) -> dict[str, Any]:
+    """Format one exported relation for extract_manifest.json."""
+    return {
+        "qualified_name": qualified_name,
+        "csv_path": info["csv_path"],
+        "row_count": info["row_count"],
+        "columns": info["columns"],
+    }
+
+
+def _assert_no_silent_loss(ds_id: str, relation_count: int, relations: list[dict[str, Any]]) -> None:
+    """Fail if the manifest would hide that fewer CSV files exist than Hyper relations."""
+    csv_paths = {relation["csv_path"] for relation in relations}
+    if len(csv_paths) != relation_count:
+        raise RuntimeError(
+            f"{ds_id} has {relation_count} relation(s), but only {len(csv_paths)} CSV file(s) were written"
+        )
+
+
+def _export_hyper_file(
+    hyper_path: Path,
+    output_dir: Path,
+    written: dict[str, dict[str, Any]],
+    hyper: HyperProcess,
+) -> dict[str, dict[str, Any]]:
+    """Export one Hyper file into staged CSVs, then merge first-wins by qualified table name."""
+    with tempfile.TemporaryDirectory(prefix="hyper_csv_", dir=output_dir) as stage:
+        with Connection(endpoint=hyper.endpoint, database=str(hyper_path)) as connection:
+            staged = export_tables_to_csv(connection, Path(stage))
+        for qualified_name, info in staged.items():
+            if qualified_name not in written:
+                final_csv = output_dir / Path(info["csv_path"]).name
+                shutil.copyfile(info["csv_path"], final_csv)
+                written[qualified_name] = {**info, "csv_path": str(final_csv.resolve())}
+            staged[qualified_name] = written[qualified_name]
+        return staged
+
+
+def extract_data_sources(
+    migration_spec: dict[str, Any],
+    hyper_files: dict[str, Path],
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Export every relation in every extract-backed data source and return a manifest by data source."""
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {}
+    written: dict[str, dict[str, Any]] = {}
 
     with HyperProcess(telemetry=Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
         for ds in migration_spec["data_sources"]:
@@ -92,17 +157,28 @@ def extract_data_sources(migration_spec: dict[str, Any], hyper_dir: Path, output
             if connection_info["mode"] != "extract":
                 continue
             hyper_file_name = Path(connection_info.get("hyper_file", "")).name
-            hyper_path = hyper_dir / hyper_file_name
-            if not hyper_path.exists():
-                logger.warning("Hyper file not found for %s: %s", ds["id"], hyper_path)
-                manifest[ds["id"]] = {"error": f"hyper file not found: {hyper_path}"}
+            hyper_path = _resolve_hyper_path(hyper_files, connection_info.get("hyper_file", ""))
+            if hyper_path is None:
+                logger.warning("Hyper file not found for %s: %s", ds["id"], hyper_file_name)
+                manifest[ds["id"]] = {"error": f"hyper file not found: {hyper_file_name}"}
                 continue
 
-            csv_path = output_dir / f"{ds['id']}.csv"
-            with Connection(endpoint=hyper.endpoint, database=str(hyper_path)) as connection:
-                row_count = export_table_to_csv(connection, csv_path)
-            manifest[ds["id"]] = {"csv_path": str(csv_path), "row_count": row_count}
-            logger.info("Exported %s -> %s (%d rows)", ds["id"], csv_path, row_count)
+            exported = _export_hyper_file(hyper_path, output_dir, written, hyper)
+            relations = [_manifest_relation(name, info) for name, info in sorted(exported.items())]
+            _assert_no_silent_loss(ds["id"], len(exported), relations)
+            manifest[ds["id"]] = {
+                "hyper_file": connection_info.get("hyper_file"),
+                "joins": ds.get("joins", []),
+                "relation_count": len(relations),
+                "total_row_count": sum(relation["row_count"] for relation in relations),
+                "relations": relations,
+            }
+            logger.info(
+                "Exported %s -> %d relation(s), %d row(s)",
+                ds["id"],
+                len(relations),
+                manifest[ds["id"]]["total_row_count"],
+            )
 
     return manifest
 
@@ -176,8 +252,8 @@ def main() -> None:
     migration_spec = json.loads(args.migration_spec.read_text(encoding="utf-8"))
     _warn_on_live_sources(migration_spec)
     hyper_dir = args.output / "_hyper_raw"
-    extract_hyper_files(args.workbook, hyper_dir)
-    manifest = extract_data_sources(migration_spec, hyper_dir, args.output)
+    hyper_files = extract_hyper_files(args.workbook, hyper_dir)
+    manifest = extract_data_sources(migration_spec, hyper_files, args.output)
 
     manifest_path = args.output / "extract_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
