@@ -49,6 +49,7 @@ Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
     PROBE: DATA_OK <n> row(s) from <table>     the source is genuinely reachable, build for real
     PROBE: SKIPPED <reason>                    not a live source - nothing to prove
     PROBE: NO_CREDENTIAL <detail>              a human must sign in; no retry can fix this
+    PROBE: ACCESS_DENIED <detail>              permissions must change; signing in again is not enough
     PROBE: UNREACHABLE <detail>                refresh failed for a non-credential reason
     PROBE: ERROR <detail>                      the probe itself could not run
 """
@@ -101,12 +102,22 @@ CREDENTIAL_MARKERS = (
     "authentication",
     "unauthorized",
     "access token",
-    "forbidden",
     "login",
     "oauth",
     "10054",
     "forcibly closed",
     "unrecognizable response",
+)
+
+ACCESS_DENIED_MARKERS = (
+    "403",
+    "forbidden",
+    "access denied",
+    "permission denied",
+    "insufficient privilege",
+    "insufficient privileges",
+    "does not have permission",
+    "not authorized",
 )
 
 
@@ -293,7 +304,15 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
     raise ValueError(f"no probe connector for connection class '{klass}' - add one in build_m_query()")
 
 
-def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
+def _error_excerpt(text: str, limit: int = 1200) -> str:
+    """Keep the exception message head; stack traces grow at the tail."""
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit] + "\n... [truncated after the message head]"
+
+
+def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str]:  # noqa: PLR0911
     """Map a refresh failure to a verdict.
 
     The distinction is the point of the whole script: NO_CREDENTIAL is final and needs a human, while
@@ -316,6 +335,7 @@ def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
     """
     # pylint: disable=too-many-return-statements
     low = text.lower()
+    raw = _error_excerpt(text)
     # Deliberately "identity unverified" alone, NOT "model identity unverified". Measured
     # 2026-08-03 (gpt-5.6-sol, live happy-path run): the real producer text is
     # "model  : identity unverified (no model folder resolved for this pid)" - note the extra
@@ -330,26 +350,39 @@ def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
             "ERROR",
             "the probe could not confirm which Power BI Desktop instance it was bound to, so it "
             "never queried the source. This is a LOCAL tooling failure, not a fact about the data "
-            "source - do not report a connection or credential problem from it. Usually another "
-            "Desktop instance was open; close them and re-run. Raw: " + text[-200:],
+            "source - do not report a connection or credential problem from it. Re-run with the "
+            "probe's exact PBIP path identifiable in Desktop Bridge status. Raw: " + raw,
         )
     # "no catalog" reaching here means the model failed to load DESPITE the readiness wait, so it is
     # a genuine load failure rather than the race it used to be confused with.
     if "no catalog" in low or "no model folder resolved" in low:
+        if not network_fault_observed:
+            return (
+                "ERROR",
+                "unclassified refresh/load failure: Power BI did not produce a model catalog, but "
+                "the probe did not observe a network fault. Do not report this as UNREACHABLE or "
+                "send anyone to fix server/http_path without stronger evidence. Raw: " + raw,
+            )
         return (
             "UNREACHABLE",
             "the probe model failed to load even after waiting - the data source did not resolve. "
             "Check server and http_path in the spec before treating this as a credential problem. "
-            "Raw: " + text[-200:],
+            "Raw: " + raw,
         )
     # Order matters: check BAD_TABLE before NO_CREDENTIAL. A "not found" message proves the server
     # answered us, so it can never be a credential problem, but the text often also mentions the
     # connection and would otherwise trip a credential marker.
     if any(marker in low for marker in BAD_TABLE_MARKERS):
         return "BAD_TABLE", text
+    if any(marker in low for marker in ACCESS_DENIED_MARKERS):
+        return "ACCESS_DENIED", text
     if any(marker in low for marker in CREDENTIAL_MARKERS):
         return "NO_CREDENTIAL", text
-    return "UNREACHABLE", text
+    return (
+        "ERROR",
+        "unclassified refresh failure: the probe ran, but the error did not match a credential, "
+        "bad-table, or observed network fault signature. Do not report it as UNREACHABLE. Raw: " + raw,
+    )
 
 
 def _npx(args: list[str], timeout: int) -> tuple[int, str]:
@@ -374,12 +407,21 @@ def _desktop_pids() -> set[int]:
     return {int(line) for line in proc.stdout.split() if line.strip().isdigit()}
 
 
-def _close(pid: int) -> None:
+def _close(pid: int, pbip: Path) -> bool:
+    """Close Desktop only if the PID still uniquely owns this probe PBIP."""
+    if _matching_pids_for_file(pbip) != [pid]:
+        log.error(
+            "PROBE: ERROR not closing Desktop pid %d because bridge status no longer uniquely matches %s",
+            pid,
+            pbip,
+        )
+        return False
     subprocess.run(
         ["powershell", "-NoProfile", "-Command", f"Stop-Process -Id {pid} -Force -EA SilentlyContinue"],
         capture_output=True,
         check=False,
     )
+    return True
 
 
 def _resolve_probe_target(spec_path: Path, source_index: int) -> tuple[dict, list[str], str] | None:
@@ -421,13 +463,33 @@ def _write_probe_model(spec_path: Path, m_query: str, table: str, column: str) -
     exists to satisfy. Keeping the sandbox outside the denied tree needs no grant, no ordering, and
     no heal path. See `credential_gate.probe_dir`.
     """
-    probe_root = spec_path.parent / "_probe"
+    probe_root = spec_path.parent / "_probe" / f"run-{uuid.uuid4().hex}"
     probe_root.mkdir(parents=True, exist_ok=True)
     for rel, content in _pbip_files("Probe", m_query, table, column).items():
         target = probe_root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
     return probe_root
+
+
+def _matching_pids_for_file(pbip: Path) -> list[int]:
+    """Return Desktop PIDs whose bridge status exactly matches this PBIP path."""
+    code, out = _npx(["status"], timeout=60)
+    if code != 0:
+        return []
+    try:
+        payload = json.loads(out[out.index("{") : out.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return []
+    target = str(pbip.resolve()).casefold()
+    instances = payload.get("instances") or payload.get("Instances") or []
+    matches = []
+    for inst in instances if isinstance(instances, list) else []:
+        current = str(inst.get("currentFilePath") or inst.get("CurrentFilePath") or "").casefold()
+        pid = inst.get("pid") or inst.get("Pid")
+        if current == target and pid:
+            matches.append(int(pid))
+    return matches
 
 
 def _pid_for_file(pbip: Path) -> int | None:
@@ -443,28 +505,11 @@ def _pid_for_file(pbip: Path) -> int | None:
        binding can be *verified* rather than inferred. The gotchas skill states the rule directly -
        trust `status` + `currentFilePath`, never the pid `open` hands back.
     """
-    code, out = _npx(["status"], timeout=60)
-    if code != 0:
-        return None
-    try:
-        payload = json.loads(out[out.index("{") : out.rindex("}") + 1])
-    except (ValueError, json.JSONDecodeError):
-        return None
-    target = str(pbip.resolve()).lower()
-    # The migration directory, NOT the probe folder. Every probe builds into a folder called
-    # `_probe`, so matching on that name binds to whichever instance answers first - measured
-    # 2026-08-02, two concurrent probes both bound to pid 15220 and the UNHAPPY one reported
-    # DATA_OK because it read the other model. The migration directory is unique per run.
-    owner = pbip.resolve().parent.parent.name.lower()
-    instances = payload.get("instances") or payload.get("Instances") or []
-    for inst in instances if isinstance(instances, list) else []:
-        current = str(inst.get("currentFilePath") or inst.get("CurrentFilePath") or "").lower()
-        pid = inst.get("pid") or inst.get("Pid")
-        if not current or not pid:
-            continue
-        # Desktop reports the .pbip, or a path inside its folder, depending on load stage.
-        if current == target or f"\\{owner}\\" in current:
-            return int(pid)
+    matches = _matching_pids_for_file(pbip)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        log.error("PROBE: ERROR %d Desktop instances report the same probe PBIP path: %s", len(matches), pbip)
     return None
 
 
@@ -475,23 +520,19 @@ def _open_desktop(pbip: Path) -> int:
     agent's pid, and binding to that would refresh somebody else's model while every downstream
     signal still looked healthy.
     """
-    before = _desktop_pids()
     code, out = _npx(["open", str(pbip), "--timeout", "120"], timeout=240)
     if code != 0:
         log.error("PROBE: ERROR could not open Power BI Desktop: %s", out.strip()[:300])
         raise SystemExit(1)
     for _ in range(20):
-        # Identity first - it is verifiable and concurrency-safe. Set-difference is only a fallback
-        # for the window before Desktop reports a currentFilePath, and it is narrowed to pids that
-        # did not exist before we started.
         pid = _pid_for_file(pbip)
         if pid:
             return pid
-        new = _desktop_pids() - before
-        if len(new) == 1:
-            return new.pop()
         time.sleep(2)
-    log.error("PROBE: ERROR Desktop did not start an identifiable new instance for %s", pbip.name)
+    log.error(
+        "PROBE: ERROR Desktop did not report an instance whose currentFilePath exactly matches %s",
+        pbip,
+    )
     raise SystemExit(1)
 
 
@@ -544,7 +585,22 @@ def _wait_for_catalog(pid: int, timeout_sec: int = 240) -> bool:
     return False
 
 
-def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> tuple[int, str]:
+def _classify_catalog_timeout(conn: dict) -> str:
+    """Classify a model-load timeout without guessing a network fault."""
+    if _network_fault_observed(conn):
+        log.error(
+            "PROBE: UNREACHABLE Power BI Desktop never finished loading the probe model, "
+            "and a DNS/TCP check also observed a network fault. Check server/http_path."
+        )
+        return "UNREACHABLE"
+    log.error(
+        "PROBE: ERROR Power BI Desktop never finished loading the probe model, but no "
+        "network fault was observed. This is unclassified; do not report UNREACHABLE."
+    )
+    return "ERROR"
+
+
+def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_observed: bool) -> tuple[int, str]:
     """Refresh the probe table and turn the result into a verdict. Returns (exit code, verdict).
 
     Deliberately does NOT lift the gate - the caller does that, and only once EVERY live source has
@@ -588,21 +644,28 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> tuple[int, 
             check=False,
         )
     except subprocess.TimeoutExpired:
+        if network_fault_observed:
+            log.error(
+                "PROBE: UNREACHABLE refresh did not return within %ds, and a DNS/TCP check also "
+                "observed a network fault. Do not classify this as a credential wall.",
+                timeout_sec,
+            )
+            return 1, "UNREACHABLE"
         log.error(
-            "PROBE: NO_CREDENTIAL refresh did not return within %ds. A refresh that HANGS (rather "
-            "than failing) is the shape of Power BI Desktop waiting on a sign-in dialog that only a "
-            "human can answer.",
+            "PROBE: ERROR refresh did not return within %ds, but no network fault was observed. "
+            "A timeout can be a transient source stall or a sign-in modal, so it is not enough "
+            "evidence for final NO_CREDENTIAL.",
             timeout_sec,
         )
-        return 1, "NO_CREDENTIAL"
+        return 1, "ERROR"
 
     log.info("refresh finished in %.0fs", time.monotonic() - started)
     text = (refresh.stdout + refresh.stderr).strip()
     if "DATA_OK" in text:
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
         return 0, "DATA_OK"
-    verdict, detail = _classify_failure(text)
-    log.error("PROBE: %s %s", verdict, detail[-400:] or "refresh returned no data")
+    verdict, detail = _classify_failure(text, network_fault_observed=network_fault_observed)
+    log.error("PROBE: %s %s", verdict, detail or "refresh returned no data")
     return 1, verdict
 
 
@@ -688,6 +751,36 @@ def _host_resolves(server: str) -> bool:
         return False
 
 
+def _default_port(conn: dict) -> int:
+    """Return the TCP port that the Power BI connector will normally contact."""
+    explicit = str(conn.get("port") or "").strip()
+    if explicit.isdigit():
+        return int(explicit)
+    klass = (conn.get("class") or "").lower()
+    if klass in {"sqlserver", "azure_sql_dw", "azuresqldw"}:
+        return 1433
+    return 443
+
+
+def _tcp_connects(server: str, port: int, timeout_sec: float = 3.0) -> bool:
+    """Best-effort network discriminator for failure classification, not a substitute probe."""
+    try:
+        with socket.create_connection((server, port), timeout=timeout_sec):
+            return True
+    except OSError:
+        return False
+
+
+def _network_fault_observed(conn: dict) -> bool:
+    """Return True only when DNS or TCP actually showed a network fault."""
+    server = normalize_host(conn.get("server") or "")
+    if not server:
+        return False
+    if not _host_resolves(server):
+        return True
+    return not _tcp_connects(server, _default_port(conn))
+
+
 def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep: bool) -> int:
     """Probe every live source (or one, if `source_index` is given). Gate lifts only if ALL pass.
 
@@ -750,9 +843,10 @@ def _print_verdict_directive(verdict: str) -> None:
             "       whether the probe failed or merely never ran.\n"
             "    2. Do NOT report a connection or credential problem. Saying 'unreachable' here\n"
             "       sends the user to fix a server address that may be perfectly correct.\n"
-            "    3. Usually another Power BI Desktop instance was open and the probe could not\n"
-            "       confirm which one was ours. Close all Desktop instances and re-run ONCE.\n"
-            "       If it repeats, report the tooling failure itself and stop.\n"
+            "    3. Do NOT close all Desktop instances. In a parallel batch that can kill a\n"
+            "       sibling agent's work. Close only a Desktop instance you personally opened,\n"
+            "       by literal PID, or re-run after sibling probes finish. If it repeats,\n"
+            "       report the tooling failure itself and stop.\n"
             "################################################################"
         )
         return
@@ -782,6 +876,22 @@ def _print_verdict_directive(verdict: str) -> None:
             "\n"
             "  Tell the user to sign in interactively in Power BI Desktop (or supply a PAT/key),\n"
             "  then re-run. Name the server and warehouse in your message.\n"
+            "################################################################"
+        )
+        return
+    if verdict == "ACCESS_DENIED":
+        log.error(
+            "\n"
+            "################################################################\n"
+            "#  STOP - ACCESS DENIED. A PERMISSION OWNER MUST ACT.\n"
+            "################################################################\n"
+            "  Power BI reached the source, but the authenticated identity is not allowed to\n"
+            "  read the requested object. This is final until permissions change.\n"
+            "\n"
+            "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
+            "    2. Do NOT retry unchanged, and do NOT send the user to fix a hostname.\n"
+            "    3. Ask the source owner to grant the Power BI identity access to the server,\n"
+            "       database/schema, warehouse, or table named in the probe output.\n"
             "################################################################"
         )
         return
@@ -849,36 +959,29 @@ def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts:
         log.error("PROBE: ERROR %s", exc)
         return 1, "ERROR"
 
-    probe_root = _write_probe_model(spec_path, m_query, table, column)
-    log.info("probe model built: %s", probe_root)
+    pbip = _write_probe_model(spec_path, m_query, table, column) / "Probe.pbip"
+    log.info("probe model built: %s", pbip.parent)
     log.info("target: %s", note)
 
     pid = None
     try:
-        pid = _open_desktop(probe_root / "Probe.pbip")
+        pid = _open_desktop(pbip)
         log.info("desktop pid %d", pid)
         if not _wait_for_catalog(pid):
-            log.error(
-                "PROBE: UNREACHABLE Power BI Desktop never finished loading the probe model. After "
-                "waiting, the Analysis Services instance still has no catalog. The likeliest cause "
-                "is that the data source did not resolve (wrong HTTP path / warehouse, or no "
-                "network route) - but note the host DID resolve in DNS, so a very slow Desktop "
-                "start can also land here. Re-run once before editing the spec; if it repeats, "
-                "check server and http_path."
-            )
+            verdict = _classify_catalog_timeout(conn)
             # Recorded HERE, not by the caller. Everything below this line - the `finally` that
             # shuts Desktop down - is slow, and a measurement that is not written down did not
             # happen as far as any later reader is concerned.
-            _record_attempt(spec_path.parent, "UNREACHABLE", f"{table} -> UNREACHABLE (no catalog)")
-            return 1, "UNREACHABLE"
+            _record_attempt(spec_path.parent, verdict, f"{table} -> {verdict} (no catalog)")
+            return 1, verdict
         log.info("model loaded - refreshing")
-        rc, verdict = _refresh_and_classify(pid, table, timeout_sec)
+        rc, verdict = _refresh_and_classify(pid, table, timeout_sec, _network_fault_observed(conn))
         _record_attempt(spec_path.parent, verdict, f"{table} -> {verdict}")
         return rc, verdict
     finally:
         if pid and not keep:
-            _close(pid)
-            log.info("closed desktop pid %d", pid)
+            if _close(pid, pbip):
+                log.info("closed desktop pid %d", pid)
 
 
 def main(argv: list[str] | None = None) -> int:
