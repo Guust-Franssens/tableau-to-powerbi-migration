@@ -380,10 +380,24 @@ def test_failure_classification_distinguishes_the_causes() -> None:
         ("Invalid object name 'dbo.orders'", "BAD_TABLE"),
         ("The credential was not provided; please sign in", "NO_CREDENTIAL"),
         ("Exception: no catalog found on the instance", "UNREACHABLE"),
-        ("something else entirely went wrong", "UNREACHABLE"),
+        ("something else entirely went wrong", "ERROR"),
     ]
     for text, expected in cases:
         assert _classify_failure(text)[0] == expected, f"{text!r} should classify as {expected}"
+
+
+def test_unknown_refresh_failure_is_not_reported_as_unreachable_and_keeps_the_message_head() -> None:
+    """A fallback verdict must not invent a network fault or hide the useful exception message."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _classify_failure  # noqa: PLC0415
+
+    head = "DataSource.Error: The connector returned an application-specific refusal before refresh."
+    tail = "\n".join(f"   at Microsoft.PowerBI.Some.Stack.Frame{i}()" for i in range(80))
+    verdict, detail = _classify_failure(f"{head}\n{tail}")
+
+    assert verdict == "ERROR"
+    assert head in detail
+    assert "unclassified" in detail.lower()
 
 
 def test_lineage_check_fails_closed_on_an_unknown_chain() -> None:
@@ -827,8 +841,22 @@ def test_a_genuine_no_catalog_failure_still_classifies_as_unreachable() -> None:
     sys.path.insert(0, str(REPO / "scripts"))
     from probe_live_source import _classify_failure  # noqa: PLC0415
 
-    verdict, _ = _classify_failure("no catalog found on the Desktop Analysis Services instance")
+    verdict, _ = _classify_failure(
+        "no catalog found on the Desktop Analysis Services instance", network_fault_observed=True
+    )
     assert verdict == "UNREACHABLE"
+
+
+def test_no_catalog_with_reachable_network_is_not_reported_as_unreachable() -> None:
+    """UNREACHABLE must be earned by an observed network fault, not guessed from no-catalog text."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    from probe_live_source import _classify_failure  # noqa: PLC0415
+
+    verdict, detail = _classify_failure(
+        "no catalog found on the Desktop Analysis Services instance", network_fault_observed=False
+    )
+    assert verdict == "ERROR"
+    assert "did not observe a network fault" in detail
 
 
 def test_the_probe_template_never_downgrades_the_tabular_compatibility_level() -> None:

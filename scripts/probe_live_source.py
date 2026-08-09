@@ -293,7 +293,15 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
     raise ValueError(f"no probe connector for connection class '{klass}' - add one in build_m_query()")
 
 
-def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
+def _error_excerpt(text: str, limit: int = 1200) -> str:
+    """Keep the exception message head; stack traces grow at the tail."""
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit] + "\n... [truncated after the message head]"
+
+
+def _classify_failure(text: str, network_fault_observed: bool = True) -> tuple[str, str]:  # noqa: PLR0911
     """Map a refresh failure to a verdict.
 
     The distinction is the point of the whole script: NO_CREDENTIAL is final and needs a human, while
@@ -316,6 +324,7 @@ def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
     """
     # pylint: disable=too-many-return-statements
     low = text.lower()
+    raw = _error_excerpt(text)
     # Deliberately "identity unverified" alone, NOT "model identity unverified". Measured
     # 2026-08-03 (gpt-5.6-sol, live happy-path run): the real producer text is
     # "model  : identity unverified (no model folder resolved for this pid)" - note the extra
@@ -331,16 +340,23 @@ def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
             "the probe could not confirm which Power BI Desktop instance it was bound to, so it "
             "never queried the source. This is a LOCAL tooling failure, not a fact about the data "
             "source - do not report a connection or credential problem from it. Usually another "
-            "Desktop instance was open; close them and re-run. Raw: " + text[-200:],
+            "Desktop instance was open; close them and re-run. Raw: " + raw,
         )
     # "no catalog" reaching here means the model failed to load DESPITE the readiness wait, so it is
     # a genuine load failure rather than the race it used to be confused with.
     if "no catalog" in low or "no model folder resolved" in low:
+        if not network_fault_observed:
+            return (
+                "ERROR",
+                "unclassified refresh/load failure: Power BI did not produce a model catalog, but "
+                "the probe did not observe a network fault. Do not report this as UNREACHABLE or "
+                "send anyone to fix server/http_path without stronger evidence. Raw: " + raw,
+            )
         return (
             "UNREACHABLE",
             "the probe model failed to load even after waiting - the data source did not resolve. "
             "Check server and http_path in the spec before treating this as a credential problem. "
-            "Raw: " + text[-200:],
+            "Raw: " + raw,
         )
     # Order matters: check BAD_TABLE before NO_CREDENTIAL. A "not found" message proves the server
     # answered us, so it can never be a credential problem, but the text often also mentions the
@@ -349,7 +365,11 @@ def _classify_failure(text: str) -> tuple[str, str]:  # noqa: PLR0911
         return "BAD_TABLE", text
     if any(marker in low for marker in CREDENTIAL_MARKERS):
         return "NO_CREDENTIAL", text
-    return "UNREACHABLE", text
+    return (
+        "ERROR",
+        "unclassified refresh failure: the probe ran, but the error did not match a credential, "
+        "bad-table, or observed network fault signature. Do not report it as UNREACHABLE. Raw: " + raw,
+    )
 
 
 def _npx(args: list[str], timeout: int) -> tuple[int, str]:
@@ -544,7 +564,24 @@ def _wait_for_catalog(pid: int, timeout_sec: int = 240) -> bool:
     return False
 
 
-def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> tuple[int, str]:
+def _classify_catalog_timeout(conn: dict) -> str:
+    """Classify a model-load timeout without guessing a network fault."""
+    if _network_fault_observed(conn):
+        log.error(
+            "PROBE: UNREACHABLE Power BI Desktop never finished loading the probe model, "
+            "and a DNS/TCP check also observed a network fault. Check server/http_path."
+        )
+        return "UNREACHABLE"
+    log.error(
+        "PROBE: ERROR Power BI Desktop never finished loading the probe model, but no "
+        "network fault was observed. This is unclassified; do not report UNREACHABLE."
+    )
+    return "ERROR"
+
+
+def _refresh_and_classify(
+    pid: int, table: str, timeout_sec: int, network_fault_observed: bool = True
+) -> tuple[int, str]:
     """Refresh the probe table and turn the result into a verdict. Returns (exit code, verdict).
 
     Deliberately does NOT lift the gate - the caller does that, and only once EVERY live source has
@@ -601,8 +638,8 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int) -> tuple[int, 
     if "DATA_OK" in text:
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
         return 0, "DATA_OK"
-    verdict, detail = _classify_failure(text)
-    log.error("PROBE: %s %s", verdict, detail[-400:] or "refresh returned no data")
+    verdict, detail = _classify_failure(text, network_fault_observed=network_fault_observed)
+    log.error("PROBE: %s %s", verdict, detail or "refresh returned no data")
     return 1, verdict
 
 
@@ -686,6 +723,36 @@ def _host_resolves(server: str) -> bool:
         return True
     except (socket.gaierror, UnicodeError, ValueError):
         return False
+
+
+def _default_port(conn: dict) -> int:
+    """Return the TCP port that the Power BI connector will normally contact."""
+    explicit = str(conn.get("port") or "").strip()
+    if explicit.isdigit():
+        return int(explicit)
+    klass = (conn.get("class") or "").lower()
+    if klass in {"sqlserver", "azure_sql_dw", "azuresqldw"}:
+        return 1433
+    return 443
+
+
+def _tcp_connects(server: str, port: int, timeout_sec: float = 3.0) -> bool:
+    """Best-effort network discriminator for failure classification, not a substitute probe."""
+    try:
+        with socket.create_connection((server, port), timeout=timeout_sec):
+            return True
+    except OSError:
+        return False
+
+
+def _network_fault_observed(conn: dict) -> bool:
+    """Return True only when DNS or TCP actually showed a network fault."""
+    server = normalize_host(conn.get("server") or "")
+    if not server:
+        return False
+    if not _host_resolves(server):
+        return True
+    return not _tcp_connects(server, _default_port(conn))
 
 
 def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep: bool) -> int:
@@ -858,21 +925,14 @@ def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts:
         pid = _open_desktop(probe_root / "Probe.pbip")
         log.info("desktop pid %d", pid)
         if not _wait_for_catalog(pid):
-            log.error(
-                "PROBE: UNREACHABLE Power BI Desktop never finished loading the probe model. After "
-                "waiting, the Analysis Services instance still has no catalog. The likeliest cause "
-                "is that the data source did not resolve (wrong HTTP path / warehouse, or no "
-                "network route) - but note the host DID resolve in DNS, so a very slow Desktop "
-                "start can also land here. Re-run once before editing the spec; if it repeats, "
-                "check server and http_path."
-            )
+            verdict = _classify_catalog_timeout(conn)
             # Recorded HERE, not by the caller. Everything below this line - the `finally` that
             # shuts Desktop down - is slow, and a measurement that is not written down did not
             # happen as far as any later reader is concerned.
-            _record_attempt(spec_path.parent, "UNREACHABLE", f"{table} -> UNREACHABLE (no catalog)")
-            return 1, "UNREACHABLE"
+            _record_attempt(spec_path.parent, verdict, f"{table} -> {verdict} (no catalog)")
+            return 1, verdict
         log.info("model loaded - refreshing")
-        rc, verdict = _refresh_and_classify(pid, table, timeout_sec)
+        rc, verdict = _refresh_and_classify(pid, table, timeout_sec, _network_fault_observed(conn))
         _record_attempt(spec_path.parent, verdict, f"{table} -> {verdict}")
         return rc, verdict
     finally:
