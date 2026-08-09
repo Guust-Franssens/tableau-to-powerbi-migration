@@ -10,6 +10,7 @@ Every test here exists because the 16 committed examples all live in the ONE-lev
 that only affects the two-level user trees is invisible to every other test in the suite.
 """
 
+import json
 import re
 import subprocess
 import sys
@@ -21,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
+# pylint: disable=wrong-import-position
 from published_datasource_registry import _by_path_from_report, _near_misses, _normalize_key
 from set_data_folder import ABSOLUTE_USER_PATH_RE, _tree_and_slug_for
 from tableau_lineage import dedup_key
@@ -275,6 +277,44 @@ def test_every_script_is_documented_in_the_scripts_readme() -> None:
         "NOTE: this reads `git ls-files`, so a brand-new script is invisible to it until you "
         "`git add` it - run pytest AFTER staging, or CI will catch what your local run did not."
     )
+
+
+def test_tracked_hook_configs_do_not_point_at_missing_scripts() -> None:
+    """A tracked hook that names a gitignored probe script breaks the next clean clone.
+
+    The subagentStart probe was intentionally kept out of the public repo, but its tracked hook config
+    was left behind. The failure is invisible until the hook fires, so the layout test now checks every
+    script path embedded in a tracked hook command.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", ".github/hooks/*.json"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    configs = [REPO_ROOT / rel for rel in sorted(filter(None, tracked.split("\0")))]
+    assert configs, "no tracked hook configs found - this guard now proves nothing"
+
+    missing = []
+    for config in configs:
+        payload = json.loads(config.read_text(encoding="utf-8"))
+        commands = [
+            entry.get(shell, "")
+            for event_entries in payload.get("hooks", {}).values()
+            for entry in event_entries
+            for shell in ("powershell", "bash")
+        ]
+        references = [
+            match for command in commands for match in re.findall(r"scripts[/\\][\w./\\-]+\.(?:py|ps1|sh)", command)
+        ]
+        for reference in references:
+            script = REPO_ROOT / Path(reference.replace("\\", "/"))
+            if not script.is_file():
+                rel_config = config.relative_to(REPO_ROOT).as_posix()
+                missing.append(f"{rel_config}: {reference}")
+
+    assert not missing, "tracked hook config(s) reference missing script(s):\n  " + "\n  ".join(missing)
 
 
 def test_no_committed_file_leaks_an_absolute_user_path() -> None:

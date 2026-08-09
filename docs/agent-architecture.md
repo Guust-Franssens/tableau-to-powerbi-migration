@@ -145,12 +145,11 @@ Notes worth knowing before building on it:
   hook for their sessions. That is the decisive argument against moving anything load-bearing out of
   the personas and into a hook — see §5.
 
-⚠️ **Measured 2026-07-31: the probe hook never executed.** `.github/hooks/subagent-context.json` +
-`scripts/hooks/probe_subagent_start.ps1` wrote **no** `_hook_probe.log` line when a custom subagent
-was invoked, and the subagent reported nothing prepended to its prompt (it begins directly with its
-own `#` heading). The session predated the hook file, which is consistent with hooks being snapshotted
-at session start — so this is "not loaded", **not** "fires but wrong output field". Re-run in a fresh
-session to separate the two; §6.2 has the outcome table.
+⚠️ **Measured 2026-07-31: the first probe never executed.** A temporary subagentStart probe wrote
+**no** log line when a custom subagent was invoked, and the subagent reported nothing prepended to its
+prompt (it begins directly with its own `#` heading). The session predated the hook file, which is
+consistent with hooks being snapshotted at session start — so this is "not loaded", **not** "fires but
+wrong output field". A fresh-session rerun separated the two; §6.2 has the outcome table.
 
 ## 5. What currently lives where
 
@@ -408,10 +407,9 @@ back in a persona.
       `explore` and generalising to custom personas is invalid — they differ by 22 vs 11 tools.
 
 2. **Does `subagentStart` fire and inject? — ✅ RESOLVED 2026-07-31: YES, both halves.**
-   `.github/hooks/subagent-context.json` + `scripts/hooks/probe_subagent_start.ps1` log the payload to
-   `_hook_probe.log` and inject `HOOK_SENTINEL_ORBIT_58231`. In a session started *after* the hook file
-   existed, invoking `pbi-migration-validator` produced **both**: the log line, and the subagent
-   quoting its first user-turn line verbatim as
+   A temporary probe hook logged the payload and injected `HOOK_SENTINEL_ORBIT_58231`. In a session
+   started *after* the hook file existed, invoking `pbi-migration-validator` produced **both**: the
+   log line, and the subagent quoting its first user-turn line verbatim as
 
    > `HOOK_SENTINEL_ORBIT_58231 - injected by subagentStart at 2026-07-31T16:13:45.5445600+02:00.`
 

@@ -89,7 +89,6 @@ scripts/probe_lab.py
 scripts/provision_snowflake_fixture.py
 scripts/setup_snowflake_keypair.py
 scripts/snowflake_fixture.sql
-scripts/hooks/probe_subagent_start.ps1
 tests/test_gate_matrix.py
 _probe-lab/
 _matrix/
