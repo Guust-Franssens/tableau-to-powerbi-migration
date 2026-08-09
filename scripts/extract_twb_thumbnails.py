@@ -36,6 +36,7 @@ Caveats (deliberately stated, because over-claiming here is the failure mode thi
 * A worksheet never displayed before saving may be missing or blank; ``--strict`` fails on zero.
 * Dashboards are not thumbnailed per se -- these are worksheet renders.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,6 +70,7 @@ def read_twb_bytes(src: pathlib.Path) -> bytes:
 
 
 def extract(src: pathlib.Path, out_dir: pathlib.Path) -> list[tuple[str, pathlib.Path, int]]:
+    """Write every worksheet thumbnail in `src` to `out_dir`; return (name, path, bytes) per PNG."""
     root = ET.fromstring(read_twb_bytes(src))
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[tuple[str, pathlib.Path, int]] = []
@@ -98,16 +100,19 @@ def extract(src: pathlib.Path, out_dir: pathlib.Path) -> list[tuple[str, pathlib
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    """CLI entry point: extract worksheet thumbnails from a .twb/.twbx into a reference folder."""
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("workbook", type=pathlib.Path, help="path to a .twb or .twbx")
     ap.add_argument(
-        "-o", "--out", type=pathlib.Path, required=True,
+        "-o",
+        "--out",
+        type=pathlib.Path,
+        required=True,
         help="output folder for the PNGs (e.g. migrations/workbooks/<slug>/reference)",
     )
     ap.add_argument(
-        "--strict", action="store_true",
+        "--strict",
+        action="store_true",
         help="exit 1 if the workbook embeds no usable thumbnails",
     )
     args = ap.parse_args()

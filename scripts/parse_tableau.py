@@ -1182,6 +1182,19 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _flatten_zones(zone: dict[str, Any]) -> list[dict[str, Any]]:
+    """Depth-first flatten of a dashboard zone tree into one list, parents before children.
+
+    Module-level rather than a closure inside the per-dashboard loop: pylint's `cell-var-from-loop`
+    is right in principle even when the closure is invoked in the same iteration, and a plain
+    function is easier to test than a nested one.
+    """
+    out = [zone]
+    for child in zone.get("children") or []:
+        out.extend(_flatten_zones(child))
+    return out
+
+
 def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """Scan the parsed spec for known risk areas (extract-based sources, LOD/table calcs, unresolved
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
@@ -1228,6 +1241,19 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
             )
         for f in ds["fields"]:
             limitations.extend(_field_limitations(f))
+    limitations.extend(_worksheet_limitations(spec))
+    limitations.extend(_dashboard_limitations(spec))
+    return limitations
+
+
+def _worksheet_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Worksheet-level limitations: unresolved shelf/mark references, forecast shelves, and the
+    Measure Names/Values pivot.
+
+    Split out of `collect_limitations` for the same reason as `_dashboard_limitations`: three
+    independent scans in one function pushed it past pylint's locals/branch thresholds.
+    """
+    limitations: list[dict[str, Any]] = []
     for ws in spec["worksheets"]:
         pivot = ws.get("measure_names_values_pivot")
         for enc_name in ("rows", "columns"):
@@ -1309,6 +1335,17 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                     "stage": "parse",
                 }
             )
+    limitations.extend(_dashboard_limitations(spec))
+    return limitations
+
+
+def _dashboard_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dashboard-layout limitations: empty dashboards, and zone types Power BI cannot re-create.
+
+    Split out of `collect_limitations` so that function stays under pylint's locals/branch
+    thresholds - the dashboard scan is independent of the data-source and worksheet scans.
+    """
+    limitations: list[dict[str, Any]] = []
     for dash in spec.get("dashboards", []):
         zones = dash.get("zones") or {}
         if not zones.get("children") and not zones.get("worksheet_id"):
@@ -1325,14 +1362,7 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                     "stage": "parse",
                 }
             )
-        flat: list[dict[str, Any]] = []
-
-        def _flatten(z: dict[str, Any]) -> None:
-            flat.append(z)
-            for child in z.get("children") or []:
-                _flatten(child)
-
-        _flatten(zones)
+        flat = _flatten_zones(zones)
         canvas = (zones.get("w") or 0) * (zones.get("h") or 0)
         for z in flat:
             if z["type"] == "web":

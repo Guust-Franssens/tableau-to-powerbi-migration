@@ -116,7 +116,10 @@ def _os_environ() -> dict[str, str]:
 def parse_ours(path: Path) -> dict[str, Any]:
     """Run OUR parser. Returns {ok, error, sheets, dashboards, calcs, data_sources}."""
     try:
-        from parse_tableau import parse_workbook  # noqa: PLC0415
+        # Imported here, not at module scope, deliberately: an ImportError from the parser IS one of
+        # the findings this sweep collects, so it must be caught by the handler below rather than
+        # killing the process at import time.
+        from parse_tableau import parse_workbook  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
         spec = parse_workbook(path)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught

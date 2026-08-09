@@ -275,6 +275,27 @@ measure, **`sortByColumn` is the mechanism that works** — and it is the model'
   `PathID`+`PointOrder` wells. Origin+destination lat/long as four columns on a single fact row **cannot**
   draw an arc — the report is then stuck with endpoint bubbles. This is a model-shape decision, not a
   report one.
+- **Azure Map POINT maps: the model owes the report a single LEAF geography column, because the
+  Location well is a DRILL HIERARCHY** [seen, `book_6-1-Maps` Superstore, 2026-08-09]. Tableau plots
+  geographic fields on Detail at the **finest** level present, so `Country / State / City` draws one
+  mark per city. Azure Maps does the opposite: *"When entering multiple values into the Location
+  field, you create a geo-hierarchy"*
+  ([learn](https://learn.microsoft.com/azure/azure-maps/power-bi-visual-geocode)) and renders the
+  **current (top)** level. Measured: `DISTINCTCOUNT('Orders'[Country]) = 1`, so 6 of 7 azureMap
+  visuals collapsed to **one mark at the US centroid** — and it renders, refreshes and validates
+  cleanly, so only a screenshot catches it. ⚠️ **The leaf must be the qualified key, not the bare
+  city**: on this 9,994-row extract `City` alone is 531 values but `(City, State)` is **604** — 57
+  city names repeat across states (4 Springfields), so `City` alone silently merges/mis-geocodes
+  **21.5%** of marks. Emit `column 'City, State' = IF(OR(t[City]="", t[State]=""), BLANK(), t[City] &
+  ", " & t[State])` with **`dataCategory: Address`** (the free-form category — a partial address
+  geocodes to the city centroid; that doc explicitly warns against stuffing composite values into
+  `City`/`StateOrProvince`) and `summarizeBy: none`. Concatenating location fields into one mapped
+  column is first-party guidance
+  ([learn](https://learn.microsoft.com/power-bi/create-reports/desktop-tips-and-tricks-for-creating-reports#improve-geocoding-with-more-specific-locations)).
+  A comma **is legal** in a Tabular object name (verified against a live engine: TOM accepted the
+  create and `'Orders'[City, State]` parses — brackets delimit). Do **not** reach for Lat/Long unless
+  the source actually has them: Tableau's `Latitude (generated)` is its geocoder's *output*, not
+  workbook data, so synthesising coordinates means importing a gazetteer the migration never had.
 - **Provision EVERY dashboard-visible metric.** If a Tableau dashboard shows a KPI tile/value, the model
   must have a backing measure or column for it — the report builder works against a *frozen* model and can
   only render a static placeholder card for a metric that has no backing field (seen: 3 Airline tiles).

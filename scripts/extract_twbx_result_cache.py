@@ -146,6 +146,7 @@ def _typecheck(entry: dict[str, Any]) -> list[str]:
 
 
 def read_key(text: str) -> dict[str, Any]:
+    """Parse a cache entry's `.key` sidecar: whether it carries LOD calcs, and its field names."""
     return {
         "has_lod_calcs": "has-lod-calcs=&apos;true&apos;" in text,
         "fields": sorted(set(_KEY_FIELD_RE.findall(text))),
@@ -153,6 +154,7 @@ def read_key(text: str) -> dict[str, Any]:
 
 
 def extract(twbx: pathlib.Path) -> list[dict[str, Any]]:
+    """Return every decoded result-cache entry in `twbx`, LOD-bearing ones first."""
     entries: dict[str, dict[str, Any]] = {}
     with zipfile.ZipFile(twbx) as z:
         for name in z.namelist():
@@ -181,6 +183,7 @@ def extract(twbx: pathlib.Path) -> list[dict[str, Any]]:
 
 
 def main() -> int:
+    """CLI entry point: decode a .twbx's result cache and print (or write) the entries."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("twbx", type=pathlib.Path)
     ap.add_argument("--out", type=pathlib.Path, help="write JSON here (default: stdout summary only)")
@@ -201,8 +204,10 @@ def main() -> int:
         entries = [e for e in entries if any(pat.search(f) for f in e["fields"])]
 
     if not entries:
-        print("[WARN] no result-cache entries matched -- this .twbx may have been saved without a "
-              "query cache, or the worksheets were never rendered before saving.")
+        print(
+            "[WARN] no result-cache entries matched -- this .twbx may have been saved without a "
+            "query cache, or the worksheets were never rendered before saving."
+        )
         return 1
 
     for e in entries:
@@ -227,7 +232,7 @@ def main() -> int:
                     "version": 1,
                     "source": str(args.twbx),
                     "note": "Values computed by Tableau Desktop itself and cached inside the .twbx; "
-                            "absence of an entry is not evidence of absence.",
+                    "absence of an entry is not evidence of absence.",
                     "entries": entries,
                 },
                 indent=2,
