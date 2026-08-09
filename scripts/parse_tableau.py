@@ -38,13 +38,15 @@ logger = logging.getLogger("parse_tableau")
 
 SPEC_VERSION = "1.0"
 
-_LOD_RE = re.compile(r"\{\s*(FIXED|INCLUDE|EXCLUDE)\b", re.IGNORECASE)
+_LOD_KEYWORD_RE = re.compile(r"\{\s*(FIXED|INCLUDE|EXCLUDE)\b", re.IGNORECASE)
+_KEYWORDLESS_LOD_RE = re.compile(r"\{[^{}]*\b[A-Z][A-Z0-9_]*\s*\(", re.IGNORECASE)
 _TABLE_CALC_RE = re.compile(r"\b(WINDOW_\w+|RUNNING_\w+|INDEX|RANK\w*|LOOKUP|TOTAL|PREVIOUS_VALUE)\s*\(", re.IGNORECASE)
 _PARAM_EQUALITY_RE = re.compile(r"if\s*\[Parameters\]\.\[[^\]]+\]\s*=\s*\[[^\]]+\]\s*then", re.IGNORECASE)
 _BRACKET_TOKEN_RE = re.compile(r"\[([^\[\]]+)\]")
 # Tableau's feature-flagged attribute spelling: `_.fcp.<Feature>.<true|false>...<realAttrName>`
 _FCP_ATTR = re.compile(r"^_\.fcp\.(?P<feature>[^.]+)\.(?P<state>true|false)\.\.\.(?P<attr>.+)$")
 _SHELF_FIELD_RE = re.compile(r"\[([^\[\]]+)\]\.\[([^\[\]]+)\]")
+_TABLEAU_LB_SENTINEL_RE = re.compile(r"^\s*[\u00c6\u00a0]+\s*$")
 
 
 def slugify(text: str) -> str:
@@ -433,7 +435,7 @@ def _classify_calculation(formula: str) -> dict[str, bool | str | None]:
     if "Pivot Field Names" in formula or "Pivot Field Values" in formula:
         reshape_hint = "pivot_derived"
     return {
-        "is_lod": bool(_LOD_RE.search(formula)),
+        "is_lod": bool(_LOD_KEYWORD_RE.search(formula) or _KEYWORDLESS_LOD_RE.search(formula)),
         "is_table_calc": bool(_TABLE_CALC_RE.search(formula)),
         "reshape_hint": reshape_hint,
     }
@@ -444,6 +446,7 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
     internal_name = col.get("name", "")
     caption = col.get("caption") or internal_name.strip("[]")
     calc_el = col.find("calculation")
+    calc_class = calc_el.get("class") if calc_el is not None else None
     formula = calc_el.get("formula") if calc_el is not None else None
     aliases = {a.get("key", "").strip('"'): a.get("value", "") for a in col.findall("aliases/alias")}
 
@@ -452,7 +455,7 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
         "internal_name": internal_name,
         "caption": caption,
         "table_id": table_id,
-        "kind": "calculated" if formula is not None else "column",
+        "kind": "bin" if calc_class == "bin" else "calculated" if formula is not None else "column",
         "data_type": col.get("datatype", "string"),
         "role": col.get("role", "dimension"),
         "default_aggregation": None,
@@ -464,6 +467,10 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
     if formula is not None:
         entry["tableau_formula"] = formula
         entry.update(_classify_calculation(formula))
+    if calc_class == "bin":
+        entry["bin_size"] = calc_el.get("bin-size") or calc_el.get("size")
+        entry["bin_source_column"] = calc_el.get("column") or calc_el.get("formula")
+        entry["bin_size_parameter"] = calc_el.get("size-parameter")
     return entry
 
 
@@ -624,7 +631,18 @@ def _text_from_runs(container: etree._Element | None) -> str | None:
     """Flatten a Tableau <formatted-text><run>...</run></formatted-text> block into plain text."""
     if container is None:
         return None
-    return "".join(run.text or "" for run in container.findall("run"))
+    parts: list[str] = []
+    pending_line_break = False
+    for run in container.findall("run"):
+        text = run.text or ""
+        if _TABLEAU_LB_SENTINEL_RE.match(text):
+            pending_line_break = True
+            continue
+        if pending_line_break and parts and not parts[-1].endswith("\n"):
+            parts.append("\n")
+        parts.append(text)
+        pending_line_break = False
+    return "".join(parts)
 
 
 def _build_worksheet_instance_map(
@@ -786,6 +804,8 @@ def _parse_worksheet_filters(view: etree._Element, instance_map: dict[str, str])
             {
                 "field_id": instance_map.get(instance_name, f"UNRESOLVED:{instance_name}"),
                 "type": filt.get("class", "categorical"),
+                "direction": filt.get("direction"),
+                "max": filt.get("max"),
                 "exclude_nulls": exclude_nulls,
                 "members": [g.get("member", "") for g in filt.findall(".//groupfilter[@function='member']")],
                 "note": None,
@@ -947,7 +967,7 @@ def _parse_zone(
         zone["worksheet_id"] = worksheet_ids_by_name.get(zone_el.get("name", ""))
     text_el = zone_el.find("formatted-text")
     if text_el is not None:
-        zone["text_html"] = "".join(run.text or "" for run in text_el.findall("run"))
+        zone["text_html"] = _text_from_runs(text_el)
     bg = zone_el.find("zone-style/format[@attr='background-color']")
     if bg is not None:
         zone["background_color"] = bg.get("value")

@@ -44,6 +44,60 @@ def test_calculated_field_and_dependencies():
     assert fields["Sales"]["id"] in fields["Sales Scaled"]["referenced_fields"]
 
 
+def test_bin_field_preserves_bin_class_and_size():
+    """Tableau histogram bins serialize as calculation class='bin' with a bin-size, not as a normal
+    formula-authored calculation. The parser must preserve the bin kind and width."""
+    fields = {f["caption"]: f for f in parse_workbook(FIXTURE)["data_sources"][0]["fields"]}
+    sales_bin = fields["Sales (bin)"]
+    assert sales_bin["kind"] == "bin"
+    assert sales_bin["bin_size"] == "200"
+    assert sales_bin["bin_source_column"] == "[Sales]"
+
+
+def test_modern_bin_field_preserves_size_formula_and_parameter():
+    """Modern Tableau bin XML can use size/formula or size-parameter/formula instead of
+    bin-size/column; those real variants must retain their bin semantics too."""
+    fields = {f["caption"]: f for f in parse_workbook(FIXTURE)["data_sources"][0]["fields"]}
+
+    pivot_bin = fields["Pivot Values (bin)"]
+    assert pivot_bin["kind"] == "bin"
+    assert pivot_bin["bin_size"] == "0.1"
+    assert pivot_bin["bin_source_column"] == "[Pivot Field Values]"
+    assert pivot_bin["bin_size_parameter"] is None
+
+    parameter_bin = fields["Profit (parameter bin)"]
+    assert parameter_bin["kind"] == "bin"
+    assert parameter_bin["bin_size"] is None
+    assert parameter_bin["bin_source_column"] == "[Profit]"
+    assert parameter_bin["bin_size_parameter"] == "[Parameters].[Parameter 2]"
+
+
+def test_keywordless_aggregate_lod_is_flagged_high_severity():
+    """A Tableau LOD may be table-scoped with no FIXED/INCLUDE/EXCLUDE keyword, e.g. {SUM([Sales])}.
+    It still needs the high-severity grain/filter-context warning."""
+    spec = parse_workbook(FIXTURE)
+    fields = {f["caption"]: f for f in spec["data_sources"][0]["fields"]}
+    grand_total = fields["Grand Total"]
+    assert grand_total["is_lod"] is True
+    assert any(
+        item["item"] == grand_total["id"] and item["severity"] == "high" and "LOD expression" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+
+
+def test_keywordless_corr_lod_is_flagged_high_severity():
+    """Tableau documents {CORR([Sales], [Profit])} as a valid table-scoped LOD; detection must not
+    drift behind Tableau's aggregate-function list."""
+    spec = parse_workbook(FIXTURE)
+    fields = {f["caption"]: f for f in spec["data_sources"][0]["fields"]}
+    corr = fields["Sales Profit Correlation"]
+    assert corr["is_lod"] is True
+    assert any(
+        item["item"] == corr["id"] and item["severity"] == "high" and "LOD expression" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+
+
 def test_extract_connection_mode_detected():
     spec = parse_workbook(FIXTURE)
     connection = spec["data_sources"][0]["connection"]
@@ -74,6 +128,16 @@ def test_detail_and_tooltip_shelves_resolved():
     fields = {f["caption"]: f["id"] for f in spec["data_sources"][0]["fields"]}
     assert fields["Name"] in detail_ids
     assert fields["Sales Scaled"] in tooltip_ids
+
+
+def test_formatted_text_soft_line_break_sentinels_do_not_leak():
+    """Tableau writes standalone U+00C6/U+00A0 runs as invisible soft line-break sentinels inside
+    formatted text. They must not leak into worksheet titles or customized tooltips."""
+    worksheet = parse_workbook(FIXTURE)["worksheets"][0]
+    assert worksheet["title_text"] == "Revenue by Region\nFY1998"
+    assert worksheet["customized_tooltip_text"] == "Sales:\n<[federated.testds1].[sum:SALES:qk]>"
+    assert "\u00c6" not in worksheet["title_text"]
+    assert "\u00a0" not in worksheet["customized_tooltip_text"]
 
 
 def test_join_relation_graph_extracted():
@@ -161,6 +225,23 @@ def test_relative_date_filter_class_captured():
     assert "relative-date" in filter_types
 
 
+def test_topn_filter_carries_limit_and_validates_against_schema():
+    """Tableau top-N filters serialize as class='topn' with direction/max attributes. They must not
+    crash schema validation, and the limit must survive for the report builder to recreate the filter."""
+    import json
+
+    import jsonschema
+
+    spec = parse_workbook(FIXTURE)
+    topn_filter = next(f for ws in spec["worksheets"] for f in ws["filters"] if f["type"] == "topn")
+    assert topn_filter["field_id"].endswith("__sales")
+    assert topn_filter["direction"] == "top"
+    assert topn_filter["max"] == "10"
+
+    schema = json.loads((Path(__file__).resolve().parent.parent / "docs" / "migration-spec.schema.json").read_text())
+    jsonschema.validate(spec, schema)
+
+
 def test_parameter_equality_filter_idiom_flagged():
     """The IF [Param]=[Dim] THEN [Dim] END + exclude-null pattern should be recognized and annotated
     so pbi-semantic-builder simplifies it to a plain slicer instead of recreating it as DAX."""
@@ -190,7 +271,8 @@ def test_dashboard_zone_tree_resolves_worksheet_reference():
     worksheet_zone = next(z for z in top_zone["children"] if z["type"] == "worksheet")
     assert worksheet_zone["worksheet_id"] == spec["worksheets"][0]["id"]
     text_zone = next(z for z in top_zone["children"] if z["type"] == "text")
-    assert text_zone["text_html"] == "Footer note"
+    assert text_zone["text_html"] == "Footer\nnote"
+    assert "\u00c6" not in text_zone["text_html"]
 
 
 def test_limitations_are_collected_not_silently_dropped():

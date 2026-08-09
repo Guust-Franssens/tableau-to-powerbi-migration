@@ -33,11 +33,26 @@
       </connection>
       <column caption='Name' datatype='string' name='[NAME]' role='dimension' type='nominal' />
       <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />
+      <column caption='Sales (bin)' datatype='real' name='[Sales (bin)]' role='dimension' type='ordinal'>
+        <calculation class='bin' column='[Sales]' bin-size='200' new-bin='true' peg='0' />
+      </column>
+      <column caption='Pivot Values (bin)' datatype='real' name='[Pivot Values (bin)]' role='dimension' type='ordinal'>
+        <calculation class='bin' formula='[Pivot Field Values]' size='0.1' />
+      </column>
+      <column caption='Profit (parameter bin)' datatype='real' name='[Profit (parameter bin)]' role='dimension' type='ordinal'>
+        <calculation class='bin' formula='[Profit]' size-parameter='[Parameters].[Parameter 2]' />
+      </column>
       <column caption='City filter' datatype='string' name='[Calculation_1]' role='dimension' type='nominal'>
         <calculation class='tableau' formula='if [Parameters].[Parameter 1]=[NAME] then [NAME] END' />
       </column>
       <column caption='Sales Scaled' datatype='real' name='[Calculation_2]' role='measure' type='quantitative'>
         <calculation class='tableau' formula='SUM([SALES])*100' />
+      </column>
+      <column caption='Grand Total' datatype='real' name='[Grand Total]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='{SUM([Sales])}' />
+      </column>
+      <column caption='Sales Profit Correlation' datatype='real' name='[Sales Profit Correlation]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='{CORR([Sales], [Profit])}' />
       </column>
       <column caption='cities.csv' datatype='table' name='[__tableau_internal_object_id__].[cities.csv_ABC123]' role='measure' type='quantitative' />
       <column caption='City Point' datatype='spatial' name='[Calculation_3]' role='measure' type='nominal'>
@@ -71,7 +86,10 @@
       <layout-options>
         <title>
           <formatted-text>
-            <run bold='true'>Sales Gauge</run>
+            <run fontsize='12'>Revenue by Region</run>
+            <run>&#198;
+</run>
+            <run fontsize='9'>FY1998</run>
           </formatted-text>
         </title>
       </layout-options>
@@ -93,6 +111,7 @@
           <filter class='relative-date' column='[federated.testds1].[none:NAME:nk]'>
             <groupfilter function='member' level='[none:NAME:nk]' member='%all%' />
           </filter>
+          <filter class='topn' column='[federated.testds1].[sum:SALES:qk]' direction='top' max='10' />
         </view>
         <panes>
           <pane>
@@ -110,6 +129,13 @@
         <rows>[federated.testds1].[sum:SALES:qk]</rows>
         <cols>[federated.testds1].[none:NAME:nk]</cols>
       </table>
+      <customized-tooltip>
+        <formatted-text>
+          <run>Sales:</run>
+          <run>&#160;</run>
+          <run>&lt;[federated.testds1].[sum:SALES:qk]&gt;</run>
+        </formatted-text>
+      </customized-tooltip>
       <simple-id uuid='{00000000-0000-0000-0000-000000000001}' />
     </worksheet>
     <worksheet name='Measure Values Chart'>
@@ -150,7 +176,9 @@
           <zone h='50000' id='2' name='Sales Gauge' w='100000' x='0' y='0' />
           <zone forceUpdate='true' h='10000' id='3' type='text' w='100000' x='0' y='50000'>
             <formatted-text>
-              <run>Footer note</run>
+              <run>Footer</run>
+              <run>&#198;</run>
+              <run>note</run>
             </formatted-text>
           </zone>
         </zone>
