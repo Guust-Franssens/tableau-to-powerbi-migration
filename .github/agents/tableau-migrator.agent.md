@@ -124,7 +124,15 @@ it must show up in `limitations_encountered`, not be silently dropped.
    published skill bundles still match `.github/skills/`. If it exits non-zero, **stop and surface the
    missing items with the printed install hints** — do not migrate against a half-configured machine.
    Proceed only once it reports "Ready to migrate."
-1. **Confirm inputs.** You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
+1. **Read the brief, then confirm inputs.** The *dispatcher* — the top-level session, per `AGENTS.md`
+   — decides **what** gets migrated and hands you one unit of work plus
+   `migrations/workbooks/<name>/migration-brief.md`: scope, **autonomy** (`guided` / `standard` /
+   `autopilot`), **fidelity bar** (faithful vs. modernise), and the **wall policy** (stop, or degrade
+   under `credential_gate.py authorize`). Obey it, and pass the fidelity bar and autonomy down in
+   **every** delegation — subagents are stateless and cannot infer them. **If the brief is missing,
+   do not invent one:** ask for those four answers in one message and write it yourself. Autonomy
+   governs choices, never physics — no level clears step 6b.
+   Then the mechanics. You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
    `migrations/workbooks/<name>/` (create `source/`, and the spec will live at
    `migrations/workbooks/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
    from the workbook's title.
@@ -156,12 +164,9 @@ it must show up in `limitations_encountered`, not be silently dropped.
    Re-parsing **overwrites the file in place** and destroys every `semantic_build` / `report_build` /
    `validate` limitation the subagents appended to it (routinely 20-50 entries) — i.e. exactly the raw
    material step 12's summary depends on. On a re-run, fix round, or resumed session, skip to step 3.
-   Only when the spec is absent (or the user explicitly confirms a re-parse of a changed source) run:
-   ```
-   python scripts/parse_tableau.py migrations/workbooks/<name>/source/<file>.twbx -o migrations/workbooks/<name>/migration-spec.json
-   ```
-   This validates its own output against `docs/migration-spec.schema.json` and fails fast on schema
-   violations. Read the console summary (counts of data sources/worksheets/dashboards/limitations).
+   Only when the spec is absent (or the user explicitly confirms a re-parse of a changed source) run
+   `python scripts/parse_tableau.py <name>/source/<file>.twbx -o <name>/migration-spec.json`, which
+   self-validates against `docs/migration-spec.schema.json`. Read the console summary (counts).
 4. **Triage before building anything.** Open `migration-spec.json`'s `limitations_encountered` array.
    Summarize it for the user in three buckets: high severity (LOD/table calc formulas needing manual
    DAX verification), medium (extract-based data sources needing a data-materialization decision), low
@@ -186,6 +191,9 @@ it must show up in `limitations_encountered`, not be silently dropped.
    to see *which* sources are live. It is a **classifier, not a connectivity test** — it opens no
    socket, so it can never tell you whether a source actually works. Only extract/flat sources → no
    gate; proceed. Any **live database** source → step 6b, which is where the decision is made.
+   **Both scripts here hard-require `--spec`, which the bundle flow never writes** (engine ≥2.99 emits
+   `report.json` + `handover/`). Classify from the handover slice's connection classes instead —
+   `excel-direct`/`textscan`/`hyper` are flat, everything else is live — and say you did.
 6b. **PROVE reachability with a real query, then let the result decide.**
    `python scripts/probe_live_source.py --spec <spec>` builds a one-table model, opens Desktop,
    refreshes, and requires a row back — the `SELECT 1`, executed *through Power BI* (a shell query
@@ -223,7 +231,13 @@ it must show up in `limitations_encountered`, not be silently dropped.
      happen before any report work begins. Do not run report and model fixes concurrently against one
      bundle.
 9. **Delegate to `pbi-report-builder`** — only AFTER step 8's landing re-run has finished, because
-   that re-run recreates the `.Report` folder and would destroy its work. Give it: the handover
+   that re-run recreates the `.Report` folder and would destroy its work. **Gate the handover:**
+   `python scripts/check_migration_progress.py --bundle <bundle> --handoff` must exit 0. Exit 1 means
+   a model has no `cache.abf`, or one **older** than its TMDL — the report builder would open an
+   EMPTY model and trigger its own refresh (minutes, plus a credential prompt on a live source).
+   Measured: a cache written at 22:22 against a Desktop opened at 22:19 did exactly that, and a stale
+   cache is worse than none because *something* loads so nothing looks wrong. Send it back to step 8.
+   Give it: the handover
    slice, the validator's classification from step 7, the model location, and the reference bundle.
    Its edits must land as re-runnable `_build/fix_*.py` scripts, not bundle-only edits.
 10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. Name
@@ -308,7 +322,15 @@ it must show up in `limitations_encountered`, not be silently dropped.
 | Tableau formula → DAX reference | `docs/tableau-dax-translation-guide.md` |
 
 Invoke them directly with **complete context** — they are stateless, so give each the full picture in
-one shot. **Invoke `pbi-migration-validator` with only ground-truth artifacts, never the build
+one shot (including the Gate-A brief from step 1: autonomy and fidelity bar change what they build).
+
+**Supervise what you delegate — elapsed time is NOT the signal.** Measured: two subagents both passed
+100 minutes on their first turn; one had written 178 deliverable files, the other **zero**. Poll every
+~15 min: `python scripts/check_migration_progress.py --bundle <b> --since-minutes 15` →
+`PROGRESSING` leave it alone · `STALLED` **ask it what it is blocked on** (a follow-up message), do
+**not** kill a slow-but-productive run · `SILENT` it finished, died, or is waiting on a human.
+
+**Invoke `pbi-migration-validator` with only ground-truth artifacts, never the build
 subagents' own reasoning or self-reported success** — its value depends on
 being an independent check, not an echo of "the builder said it's fine." If subagent delegation isn't
 available in the current environment, tell the user to run `/agent pbi-semantic-builder`,
@@ -322,14 +344,12 @@ the same context you would have.
   allow-list can remove your delegation tool and leave you unable to delegate at all. Rationale and
   measurements: `docs/agent-architecture.md` §2, §6.
 
-- **Clean up the Desktop batch (yours and orphans').** Subagents each open a Desktop instance, and in
-  a parallel batch these pile up: orphans from *finished* subagents (+ their child `msmdsrv`) hold the
-  bridge and block later agents (`BRIDGE_ERROR "Host is not ready"`). The shared convention tells each
-  subagent to close its own, but some don't — so **sweep between waves and before you summarize**:
-  `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"` → map each PID to a migration by
-  `MainWindowTitle` → `Stop-Process -Id <literal pid> -Force` the finished ones only (never one an
-  agent still needs, e.g. mid validator↔builder handoff). Literal PIDs only — the shell guard rejects
-  looped/variable `-Id`. Also confirm no scratch is staged in git.
+- **Sweep the Desktop batch — orphans included.** The shared convention has each subagent close its
+  own instance; some don't, and an orphan (+ its child `msmdsrv`) holds the bridge and blocks later
+  agents (`BRIDGE_ERROR "Host is not ready"`). So sweep between waves and before you summarize:
+  `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"`, map each PID to a migration by
+  `MainWindowTitle`, and close the **finished** ones only — never one still mid validator↔builder
+  handoff. Also confirm no scratch is staged in git.
 - **Keep this repo customer-agnostic.** Never hardcode a customer name into generated code, agent
   files or script identifiers — customer context belongs in `migrations/workbooks/<name>/` only.
 - **Never fabricate row data.** Extract-based (`.hyper`) sources have no live connection; don't invent

@@ -545,6 +545,34 @@ def _has_deny_ace(migration: Path) -> bool:
     return False
 
 
+def _gate_was_ever_applied(migration: Path) -> bool:
+    """Did this migration EVER have a gate, or was one never needed?
+
+    `verify`'s unearned-clear check asks "was the lift earned?", which is only a meaningful question
+    if something was ever lifted. For an extract-only migration -- every datasource a packaged
+    `.hyper`/flat file -- step 6 correctly never applies a gate at all, so there is no lift, nothing
+    to earn, and no probe to run (`probe_live_source.py` has no live source to probe).
+
+    Measured 2026-08-08 on `book_5-2-LOD` (one embedded `excel-direct` datasource, zero live
+    sources): `verify` reported `UNEARNED CLEAR - ... this model is UNVALIDATED. Do not ship it.` and
+    exited 1 against a migration that was never gated. That is a false BLOCK on the *final* gate, and
+    it fires for every extract-only migration -- i.e. exactly the shape most likely to be run
+    offline, where a spurious "do not ship" is most likely to be believed.
+
+    The signal is the audit log: `apply_block` writes a BLOCK_ACTIONS entry before it does anything
+    else, so a gate that was ever applied always left one. Same trust model as `_clear_was_earned`
+    (an accountability trail, not proof) -- and no weaker, because anyone who could delete the log to
+    fake "never gated" could equally append a fake `probe-cleared` to fake "earned".
+    """
+    try:
+        for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
+            if json.loads(line).get("action") in BLOCK_ACTIONS:
+                return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def verify(migration: Path) -> int:
     """Authoritative post-hoc check: did anything get built while the gate was up?
 
@@ -556,6 +584,9 @@ def verify(migration: Path) -> int:
       2. an override file exists with no matching `authorize` audit entry (forged);
       3. the ACL is gone while the marker remains (someone lifted enforcement out of band);
       4. artifacts were built after a bare `clear` that earned nothing (UNEARNED CLEAR).
+
+    None of which applies when a gate was never raised in the first place - see
+    `_gate_was_ever_applied`.
     """
     marker = (migration / MARKER).exists()
     override_file = (migration / OVERRIDE).exists()
@@ -578,7 +609,7 @@ def verify(migration: Path) -> int:
     # no probe ever run. Enforcement cannot prevent that (clear has to exist for teardown), but it
     # must never pass silently, or the guarantee is gone via the front door.
     artifacts = audited_paths(migration)
-    if artifacts and not deny and not _clear_was_earned(migration):
+    if artifacts and not deny and not _clear_was_earned(migration) and _gate_was_ever_applied(migration):
         log.error("GATE VERIFY: UNEARNED CLEAR - artifacts exist, but no successful probe and no")
         log.error("  human authorization is recorded in the audit log. The gate was lifted without")
         log.error("  proving the source is reachable, so this model is UNVALIDATED. Do not ship it.")
@@ -600,6 +631,13 @@ def verify(migration: Path) -> int:
         log.info("GATE VERIFY: OK - build-only run authorized by a human (audit-backed).")
     elif marker or deny:
         log.info("GATE VERIFY: OK - gate applied, no model/report artifacts exist.")
+    elif not _gate_was_ever_applied(migration):
+        # Say WHY it passed, so an extract-only pass is never confused with a gate that was lifted.
+        log.info("GATE VERIFY: OK - no gate was ever applied to this migration (no 'block' entry in")
+        log.info("  the audit log), so there was no lift to earn. Expected for an extract-only")
+        log.info("  migration where every datasource is a packaged/flat file and step 6 correctly")
+        log.info("  raised no gate. NOTE: this attests the gate's own history, not that the source")
+        log.info("  classification was right - that is step 6/6b's job.")
     else:
         log.info("GATE VERIFY: OK - gate not applied.")
     return 0

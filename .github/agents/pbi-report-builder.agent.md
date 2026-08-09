@@ -205,7 +205,15 @@ it is slow, and `validate` will not catch a wrong encoding.
 ## Workflow
 
 0. Invoke `powerbi-report-gotchas` (step 0, before touching PBIR).
-1. **Read the baseline before changing anything.** Open the rebuilt report and screenshot every page
+1. **Assert the model is WARM before you open Desktop — and never self-refresh.** The semantic builder
+   hands over a model already refreshed and **saved** to `<Name>.SemanticModel/.pbi/cache.abf`. Check
+   that file exists **and post-dates** the newest `definition/*.tmdl`
+   (`python scripts/check_migration_progress.py --bundle <b> --handoff` does exactly this). If it is
+   missing or stale, **stop and ask** — do not trigger your own refresh. Measured: a Desktop opened two
+   minutes *before* the cache was written loaded an EMPTY model; and a refresh on a live source hits a
+   modal credential prompt no automation can fill. Consequence for step 1: an empty render is then an
+   **unrefreshed-model artifact, not a binding defect** — never "fix" bindings that are already correct.
+   **Read the baseline before changing anything.** Open the rebuilt report and screenshot every page
    against `reference/`. **Judge the GESTALT first** - proportions, density, header/slicer bands,
    where the eye lands - before looking at any single visual. This is the highest-value step and the
    easiest to skip: measured on iteration 1, polishing visuals one at a time produced a page where

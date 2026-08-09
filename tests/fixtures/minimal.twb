@@ -162,7 +162,17 @@
         <zone h='6000' id='10' param='[Parameters].[Parameter 1]' type='paramctrl' w='30000' x='0' y='0' />
         <zone h='50000' id='11' name='Sales Gauge' w='100000' x='0' y='6000' />
         <zone h='10000' id='12' type='bitmap' w='20000' x='0' y='56000' />
+        <zone h='8000' id='30' name='Sales Gauge' param='[federated.abc].[sum:Sales:qk]' type='color' w='10000' x='90000' y='0' />
+        <zone h='9000' id='31' name='Sales Gauge' param='[federated.abc].[sum:Sales:qk]' type='size' w='10000' x='90000' y='8000' />
+        <zone h='20000' id='32' param='http://example.com/embedded' type='web' w='40000' x='0' y='70000' />
+        <zone h='5000' id='33' type='dashboard-object' w='10000' x='90000' y='17000'>
+          <button action='tabdoc:goto-sheet window-id=&quot;{ABC}&quot;' />
+        </zone>
       </zones>
+    </dashboard>
+    <dashboard name='empty'>
+      <size maxheight='800' maxwidth='1000' minheight='800' minwidth='1000' />
+      <zones />
     </dashboard>
   </dashboards>
   <actions>

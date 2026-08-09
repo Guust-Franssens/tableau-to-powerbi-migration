@@ -300,6 +300,96 @@ the evidence and say so plainly.
 
 ---
 
+## Starting a migration — the DISPATCHER's job
+
+**Who this is for:** the regular Copilot CLI session that auto-loads this file — the one the human
+actually talks to. It is **not** `tableau-migrator`. That persona is a *per-unit worker*: it migrates
+one workbook against a plan someone else already made. Deciding **what** to migrate, **in what
+order**, and **to where** happens up here, before any persona is invoked.
+
+That distinction is easy to get wrong (this section's first draft duplicated the whole intake into
+`tableau-migrator` and pushed it to 100 % of its character cap). The rule: **the dispatcher decides
+and writes the brief; `tableau-migrator` reads the brief and executes.**
+
+### Step 1 — work out what you are actually pointing at
+
+Do not ask "which workbook?" until you know what kind of thing you were handed. The four input shapes
+take genuinely different first moves, and picking the wrong one is expensive rather than merely wrong
+— a site migrated workbook-by-workbook rebuilds a near-identical semantic model N times, and those
+copies then drift.
+
+| You were given | First move | Because |
+|---|---|---|
+| **A Tableau Server/Cloud site** (URL + PAT) | `python scripts/assess_estate.py --out _assessment` → then `python scripts/tableau_lineage.py --plan` | Assess emits *a decision, not an inventory*: what exists, what is **actually used**, how hard each workbook is, who can see it. Lineage then orders it **model-first** — the published data source feeding 12 workbooks is the highest-leverage unit in the estate. **You cannot create Tableau credentials**; a Tableau user must supply a PAT. |
+| **A folder of `.twb`/`.twbx`** | `python scripts/run_estate.py --input <folder> --output <bundle>` | Sweeps the whole folder through the deterministic tier and emits per-workbook handover slices. No server, so ordering is derived from the parsed specs rather than Tableau's metadata API. |
+| **One `.twb`/`.twbx`** | `python scripts/parse_tableau.py <file> -o <spec>` → dispatch `@tableau-migrator` | The simple path. Still write a brief. |
+| **A `.tds`/`.tdsx`** (data source, no workbook) | `parse_tableau.py` accepts it directly | This is **phase 1** of a model-first estate: a semantic model with **no report**. Also the fix for a `sqlproxy` published source, whose calcs live on the server and are therefore *under-reported* by any workbook that merely points at it. |
+
+**Where does the output go?** Be honest about this rather than promising: **local PBIP is the only
+supported target today.** There is no publish step in this repo — `pbi-deployer` is phase 2 and does
+not exist yet. Getting a finished model/report into a Fabric workspace is a manual `fab import` or a
+Desktop publish. So the target question is not "local or Fabric?" but *"note the destination
+workspace in the brief so the manual publish is unambiguous."* Do not imply an automated deploy.
+
+### Step 2 — four questions, asked ONCE, in one message
+
+**The problem was never that we ask too little. It is that every question arrived too late.** Before
+this section existed, the orchestrator had four ask-moments and **all four were mid-flight**: the
+published-datasource decision (post-parse), the credential stop (post-probe), a re-parse confirmation,
+and the retry cap. Each interrupts work already in progress — and if the user has stepped away, the
+run dies there. Measured 2026-08-07: the `4-nocreds` end-to-end run did exactly that.
+
+Meanwhile nothing was asked up front, so fidelity bar and autonomy were inferred silently. From the
+outside, an hour of confident work on a wrong assumption is indistinguishable from an hour of correct
+work.
+
+Step 1 answers *scope* by investigation, so only these are genuinely questions:
+
+| # | Question | Why it cannot be inferred |
+|---|---|---|
+| 1 | **Confirm the plan from step 1** — this ordering, these workbooks, this destination? | Assessment says what is *used*; only the human knows what is *wanted*. |
+| 2 | **Autonomy** — see the table below. Default `standard`. | The failure modes are symmetric: too autonomous and a run spends 105 minutes saying nothing; too interactive and an overnight run stops on question 1 and achieves nothing. |
+| 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | It decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it. |
+| 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
+
+**Autonomy levels, defined by behaviour at a decision point — not by vibe:**
+
+| level | reversible choice | costly or irreversible | credential wall |
+|---|---|---|---|
+| `guided` | ask | ask | ask |
+| **`standard`** (default) | decide, log it | **ask** | ask |
+| `autopilot` | decide, log it | decide, flag in the summary | **ask — always** |
+
+**Autonomy governs choices; it cannot govern physics.** No level clears the credential stop: that is a
+modal sign-in dialog no automation can fill. Question 4 pre-authorises the *fallback* (build
+model-only under `credential_gate.py authorize`, artifacts marked unvalidated) — never pretending a
+source was reachable.
+
+### Step 3 — write the brief, then dispatch
+
+Write the answers to `migrations/workbooks/<name>/migration-brief.md`. **The file is the point**, for
+two reasons no persona can solve alone: it survives a **dropped session** (a closed terminal takes
+this session's entire working memory with it — measured, 2026-08-08), and it is what a **stateless**
+subagent receives instead of re-deriving intent nobody wrote down. Then invoke `@tableau-migrator`
+per unit of work, handing it the brief.
+
+### Gate B — after parse + probe, before building
+
+Some decisions genuinely cannot be front-loaded: you do not know a workbook points at a published
+datasource until you parse it, or that a warehouse refuses Power BI until you probe it. Fine — but
+`tableau-migrator` must present them as **ONE block, not four serial stops**. Serial stops are the
+same questions with strictly more waiting, and each is another chance to catch the user absent.
+
+1. Published datasources → fetch the `.tds` and migrate it first, or proceed knowingly incomplete.
+2. Live sources that failed the probe → credential, or the authorised build-only path.
+3. Extract-only sources → materialize real rows, or model-only.
+4. The high-severity `limitations_encountered` digest → proceed, or narrow scope.
+
+Where step 2 question 4 already answered one, **apply it and say so** — do not re-ask. The brief
+exists so each question is answered once per migration, not once per session.
+
+---
+
 <!-- BEGIN:shared-conventions -->
 ## Shared agent conventions (all agents inherit these)
 

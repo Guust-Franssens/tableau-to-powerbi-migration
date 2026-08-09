@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from parse_tableau import _conn_attr, _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
+from parse_tableau import _conn_attr, _published_ds_name, _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
@@ -23,7 +23,7 @@ def test_parses_top_level_shape():
     assert spec["migration_spec_version"] == "1.0"
     assert len(spec["data_sources"]) == 1
     assert len(spec["worksheets"]) == 2
-    assert len(spec["dashboards"]) == 2
+    assert len(spec["dashboards"]) == 3
     assert len(spec["parameters"]) == 1
 
 
@@ -233,16 +233,70 @@ def test_floating_dashboard_captures_all_sibling_zones():
     assert floating["size"]["sizing_mode"] == "automatic"
     root_zone = floating["zones"]
     assert root_zone["type"] == "layout-floating"
-    assert len(root_zone["children"]) == 3
+    assert len(root_zone["children"]) == 7
+
+
+def test_standalone_legend_web_and_button_zones_are_not_collapsed_to_containers():
+    """Regression (book_8-1-Dashboards): Tableau types standalone legends 'color'/'size'/'shape',
+    Web Page objects 'web' and nav buttons 'dashboard-object'. None matched the parser's allow-list,
+    so all of them silently became generic 'layout-basic' CONTAINERS - invisible to downstream
+    consumers while still occupying real canvas (a web object filling 62%x46% of the page and a
+    10%-wide legend rail vanished). They must survive with their real type."""
+    spec = parse_workbook(FIXTURE)
+    floating = next(d for d in spec["dashboards"] if d["name"] == "floating")
+    by_id = {z["id"]: z for z in floating["zones"]["children"]}
+
+    color_legend, size_legend = by_id["30"], by_id["31"]
+    assert (color_legend["type"], color_legend["legend_kind"]) == ("legend", "color")
+    assert (size_legend["type"], size_legend["legend_kind"]) == ("legend", "size")
+    # a legend zone's name= is its OWNING WORKSHEET, which must still resolve
+    assert color_legend["worksheet_id"] == spec["worksheets"][0]["id"]
+
+    assert by_id["32"]["type"] == "web"
+    assert by_id["32"]["url"] == "http://example.com/embedded"
+    assert by_id["33"]["type"] == "button"
+
+
+def test_dashboard_object_limitations_flag_web_legend_and_button():
+    """Each recovered non-container object carries a Power BI capability consequence, so each must
+    reach limitations_encountered rather than being silently rendered (or silently dropped)."""
+    spec = parse_workbook(FIXTURE)
+    dash_id = next(d["id"] for d in spec["dashboards"] if d["name"] == "floating")
+    issues = [item["issue"] for item in spec["limitations_encountered"] if item["item"] == dash_id]
+    assert any("WEB PAGE object" in i and "http://example.com/embedded" in i for i in issues)
+    assert any("STANDALONE color legend" in i for i in issues)
+    assert any("navigation button" in i for i in issues)
 
 
 def test_floating_dashboard_paramctrl_and_bitmap_zone_types_resolved():
     spec = parse_workbook(FIXTURE)
     floating = next(d for d in spec["dashboards"] if d["name"] == "floating")
     children_by_type = {z["type"]: z for z in floating["zones"]["children"]}
-    assert set(children_by_type) == {"parameter", "worksheet", "image"}
+    assert {"parameter", "worksheet", "image"} <= set(children_by_type)
     assert children_by_type["parameter"]["field_id"] == spec["parameters"][0]["id"]
     assert children_by_type["worksheet"]["worksheet_id"] == spec["worksheets"][0]["id"]
+
+
+def test_empty_dashboard_survives_parse_and_validates_against_schema():
+    """A dashboard the author created and never populated serializes as a self-closing <zones/>.
+    Regression (book_8-1-Dashboards, an empty 'Commissions' dashboard): the parser emitted `{}` for
+    its zone tree, which violates the spec's own zone schema (type/x/y/w/h required) and failed the
+    WHOLE workbook parse over one empty dashboard. It must survive as a valid empty root zone and be
+    reported as an empty dashboard in limitations_encountered."""
+    import json
+
+    import jsonschema
+
+    spec = parse_workbook(FIXTURE)
+    empty = next(d for d in spec["dashboards"] if d["name"] == "empty")
+    assert empty["zones"]["type"] == "layout-basic"
+    assert empty["zones"]["children"] == []
+    assert any(
+        item["item"] == empty["id"] and "EMPTY in the Tableau source" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+    schema = json.loads((Path(__file__).resolve().parent.parent / "docs" / "migration-spec.schema.json").read_text())
+    jsonschema.validate(spec, schema)  # the crash was a schema failure, so assert the whole spec validates
 
 
 def test_embedded_datasource_is_not_flagged_as_published():
@@ -470,3 +524,51 @@ def test_a_plain_attribute_still_wins_over_any_flagged_variant():
 
     el = etree.fromstring(b"<connection dbname='plain' _.fcp.X.true...dbname='flagged' />")
     assert _conn_attr(el, "dbname") == "plain"
+
+
+def _repo_and_conn(repo_attrs: str, conn_class: str, dbname: str | None):
+    """One `<repository-location>` plus the connection dict the parser would hand alongside it."""
+    from lxml import etree  # noqa: PLC0415
+
+    repo = etree.fromstring(f"<repository-location {repo_attrs} />".encode())
+    return repo, {"class": conn_class, "database": dbname}
+
+
+def test_dbname_is_the_datasource_name_ONLY_for_sqlproxy():
+    """For sqlproxy, `dbname` IS the published datasource. For anything else it is a DATABASE.
+
+    Measured 2026-08-07 on a downloaded `.tds`: the connection is `snowflake` with
+    `dbname='MERIDIAN'`, so an unguarded rule 2 keyed the datasource `.../meridian` while the two
+    workbooks binding it keyed `.../meridiansaleslivesnowflake` from `derived-from`. The keys could
+    never join, so one shared datasource silently failed to de-duplicate into one semantic model -
+    and the failure is invisible, because both keys look reasonable on their own.
+    """
+    repo, conn = _repo_and_conn("id='MeridianSalesLiveSnowflake'", "snowflake", "MERIDIAN")
+    name, source = _published_ds_name(repo, conn)
+    assert name == "MeridianSalesLiveSnowflake"
+    assert source == "repository-location.id", "a physical database name must never become the key"
+
+
+def test_sqlproxy_dbname_still_wins_over_a_stale_repository_id():
+    """The guard must not break rule 2 where it is sound - `id` can be a stale leftover after a rename."""
+    repo, conn = _repo_and_conn("id='new'", "sqlproxy", "dandan003")
+    assert _published_ds_name(repo, conn) == ("dandan003", "connection.dbname")
+
+
+def test_derived_from_outranks_everything():
+    """Control: the publish URL is authoritative, whatever the connection class says."""
+    repo, conn = _repo_and_conn(
+        "id='stale' derived-from='https://x/datasources/Sales%20Master?rev=1.0'", "sqlproxy", "OTHER"
+    )
+    assert _published_ds_name(repo, conn) == ("Sales Master", "derived-from")
+
+
+def test_a_shared_datasource_and_its_workbooks_produce_ONE_key():
+    """The whole point: a `.tds` and the `.twb`s that bind it must land on the SAME key.
+
+    Without it, `published_datasource_registry.py` cannot match them, so one shared Tableau
+    datasource becomes N near-identical semantic models instead of one with N reports bound to it.
+    """
+    tds_repo, tds_conn = _repo_and_conn("id='Shared' site='s'", "snowflake", "PHYSICAL_DB")
+    twb_repo, twb_conn = _repo_and_conn("id='Shared' site='s'", "sqlproxy", "Shared")
+    assert _published_ds_name(tds_repo, tds_conn)[0] == _published_ds_name(twb_repo, twb_conn)[0] == "Shared"

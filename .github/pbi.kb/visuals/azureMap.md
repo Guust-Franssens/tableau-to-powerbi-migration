@@ -62,6 +62,146 @@ That visual is an `azureMap` choropleth using a two-entry `objects.referenceLaye
 
 The same visual keeps the Power BI data binding minimal: `query.queryState.Category` contains only `'Sample Superstore'[State]`, allowing Azure Maps to data-bind the state names to the GeoJSON properties. `objects.mapControls` fixes the default style to grayscale light, hides style/navigation/selection controls, and pins the continental-US viewport; `objects.bubbleLayer` is still present with `show = true`, but the choropleth effect comes from `referenceLayer.polygonFillColor`.
 
+## 🟢 Render-verified POSITIVE: the measure-driven choropleth works, exactly as encoded
+
+**Verified 2026-08-09, Desktop MSIX 2.157.627.0, `book_6-1-Maps`, signed-in session on an entitled
+tenant.** Supersedes the "structurally verified only" caveat this file previously carried.
+
+The `referenceLayer` recipe above renders a genuine choropleth: US state polygons filled from the
+bound measure, California and New York darkest, Texas mid-tone, the remaining states graded, and
+unmapped geography left grey. `mapControls.defaultStyle` is honoured literally — `'night'` produced a
+a true dark basemap, `'road'` the standard one. So the encoding in "Known-good encoding" above is now
+**render-verified, not inferred**.
+
+**The entitlement caveat below is still true** — it is about an *unauthenticated* session, not about
+the encoding. Both states look identical to `validate`.
+
+## 🔴 Render-verified DEFECT: a multi-field Location well collapses every mark to ONE
+
+**Verified 2026-08-09, same session. This is the highest-value entry in this file** — it is
+validation-invisible, renders "successfully", and silently destroys the entire point of the map.
+
+**Symptom.** The map draws, the basemap is correct, the legend is correct, and there is **exactly one
+mark in the middle of the country** instead of one per state/city. No error, no warning,
+`validate` clean.
+
+**Measured, same report, same model — the discriminator is the number of fields in `Category`:**
+
+| page | `Category` projections | rendered | Tableau |
+|---|---|---|---|
+| Filled Map | `[State]` | ✅ one polygon per state | 49 |
+| Combined Map | `[State, City]` | ❌ renders at **State** | pane-1 LOD is **City** |
+| Symbol Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid | 604 |
+| Pie Chart Map | `[Country, State, City]` | ❌ **one pie** at the US centroid | 10 |
+| Dark Map | `[Country, State, City]` | ❌ **one bubble** at the US centroid | 604 |
+| Density / Mapbox / Viz-in-Tooltip | `[Country, State, City]` | ❌ same | 604 |
+
+**`Combined Map` is the entry that generalises the rule.** It has no `Country`, yet still fails —
+rendering at `State` where Tableau plots at `City`. So the rule is not "`Country` poisons the well";
+it is that **any** multi-field Location well renders at its **top** level.
+
+**Objective confirmation** (better than eyeballing): isolating the bubble gradient colour and running
+connected-components over the map canvas gives **exactly one** blob per broken page, at canvas px
+(1139, 744) — which is `mapControls.centerLatitude 39.2795` / `centerLongitude −97.4361`, the centroid
+of the contiguous US. The mark *is* the "United States" geocode.
+
+**Root cause.** Stacking several geographic columns into `Category` builds a **drill hierarchy**, and
+azureMap renders at the **top** level until the user drills down. `Country` has one member
+("United States"), so every row aggregates into a single mark at that country's centroid. Tableau
+does the opposite: geographic fields on **Detail** plot at the **finest** level present, so the same
+shelf configuration means "one mark per city" there and "one mark per country" here.
+
+**This is a translation trap, not a Power BI bug.** A Tableau map worksheet with `Country`, `State`
+and `City` on Detail must not be transliterated field-for-field.
+
+**Fix — and the obvious repair is ALSO wrong.** Put **only the leaf geography** in `Category`. But
+"the leaf" is not `City`: measured on Superstore (9,994 rows), there are **604 distinct
+`(City, State)` pairs** versus only **531 distinct `City` names**, because **57 city names recur
+across states — 130 of the 604 pairs, 21.5%** (`Springfield` in 4 states, `Columbia` in 4,
+`Columbus`/`Roseville`/`Burlington`/`Florence`/`Concord`/`Lancaster` in 3 each). Binding `City` alone
+merges or mis-geocodes a fifth of the marks and looks plausible while doing it.
+
+So the Location well needs a **composite `City, State` key** (or real Lat/Long at Average
+aggregation). That column usually does not exist in a migrated model, which makes the blocking half of
+this defect a **semantic-model** change, not a report edit — coordinate before "fixing" it in PBIR.
+
+**Verify by COUNTING MARKS against the source grain, never by looking for an error.** The target here
+is 604, and both 1 and 531 render without complaint.
+
+**Detection rule worth automating:** any `azureMap` whose `Category` well holds **more than one
+`Column` projection** is suspect. It is legal, it validates, and it is almost never what the Tableau
+source meant.
+
+## 🟢 Render-verified NEGATIVE: azureMap draws NOTHING without the tenant entitlement
+
+**Verified 2026-07-19, Desktop MSIX 2.157.627.0, `book_6-1-Maps` maps migration.** Cost most of a
+render-verification pass. **Check this BEFORE debugging any azureMap encoding.**
+
+**Symptom.** Every `azureMap` on every page renders as a completely **empty container** — the visual
+title paints, and nothing else. **No basemap, no marks, no error glyph, no banner, and
+`powerbi-report-author validate` reports 0 errors / 0 warnings.** It looks exactly like a broken
+field binding, which is what makes it expensive: you will "fix" correct JSON for hours.
+
+**Root cause.** The Azure Maps visual is a *cloud service* client. It requires the tenant setting
+**"Users can use the Azure Maps visual"** (Admin portal → Tenant settings → Visual options) **plus an
+authenticated Power BI session**. Without the entitlement the visual degrades **silently to blank**
+rather than reporting an error. Learn:
+<https://learn.microsoft.com/en-us/azure/azure-maps/power-bi-visual-manage-access> (accessed
+2026-07-19); tenant-setting changes rolled out June 2025 and can take 24–48 h to propagate.
+
+**The 60-second bisect that settles it — do this first.** Temporarily replace ONE azureMap's
+`visual.json` with the *minimal* case: `visualType: "azureMap"` plus a single `Category` Column
+projection and **no `objects` key at all**.
+
+- Minimal case renders a basemap → the environment is fine, the bug is in **your encoding**; add
+  `mapControls` → `referenceLayer` → `bubbleLayer` back one at a time.
+- Minimal case is **also blank** → **environmental**. Stop editing PBIR; no report-layer change can
+  fix it. Escalate for sign-in / tenant enablement.
+
+Confirm Desktop actually re-read your file: the visual **title auto-changes to the bound column name**
+(e.g. `State`) once the title override is gone. If the title does not change, you are debugging a
+stale render, not your JSON.
+
+**Controls worth running to avoid a misdiagnosis** (all four pointed to "environmental" here):
+
+| Control | Result that exonerates your encoding |
+|---|---|
+| A non-map visual on the same report | `columnChart` rendered fully with correct data → model, refresh and bindings are healthy |
+| Network reachability | `atlas.microsoft.com` responds; boundary-GeoJSON host returns 200 → not a firewall/offline issue |
+| Dwell then re-screenshot | Byte-**identical** PNG after 35 s → not async tile loading |
+| MSIX `LocalCache` user profile | No `Microsoft\Power BI Desktop` settings folder → client was never signed in |
+
+**Consequences for sign-off.** A report whose maps are all `azureMap` **cannot be render-verified** in
+an unentitled/offline environment. That is a legitimate blocker to report, **not** a reason to fall
+back to Bing `map`/`filledMap` — those are deprecated and reverting is a fidelity + standards
+regression. Ship the azureMap encoding, mark the map visuals **structurally verified only**, and say
+so explicitly.
+
+**Recurrence 2026-08-08, `book_8-1-Dashboards` (dashboards/layout migration).** Identical symptom,
+same machine, same Desktop MSIX 2.157.627.0 — an `azureMap` bubble map (Location `Orders[City]`,
+Size `Sum(Sales)`, `bubbleLayer.fillColor` diverging FillRule) rendered as an empty container while
+`validate` reported 0 errors. **The entitlement gap is therefore persistent on this machine, not a
+one-off.** Two additions to the guidance above:
+
+- **Exonerating control that is nearly free:** if any *non-map* visual on the **same page** renders
+  with correct data, model/refresh/binding are healthy and you have already excluded the expensive
+  hypothesis without touching the map's JSON. Do this before the minimal-case bisect.
+- **The "never fall back to Bing" rule has one documented exception.** That rule optimises for
+  fidelity + standards. When the deliverable being graded is **whole-page layout/gestalt**, a blank
+  visual is not a neutral "unverified" state — it silently deletes its share of the canvas (here
+  **28.86%**), which corrupts the very property under test. In that case the legacy `map` is the
+  better temporary choice; it is 🟢 **render-verified 2026-08-08** to draw sized bubbles on a live
+  basemap. Costs, both must be logged: `PBIR_VISUAL_TYPE_DEPRECATED`, and an **in-visual "This visual
+  type is being retired soon" banner** with an *Upgrade map* button that eats ~12% of the visual's
+  height (this is distinct from, and additional to, the once-per-session Bing nag modal). Keep the
+  azureMap encoding reachable behind a flag and state the deviation in the handover so the
+  orchestrator can overrule it cheaply.
+- **Bing `map` geocoding caveat found the same day:** `Location` = a bare city column mis-geocodes
+  ambiguous US city names onto other continents. Adding Country/State to the *same* well does **not**
+  add geocoding context — the Bing visual turns a multi-field Location into a **drill hierarchy** and
+  renders the **top** level, so a single-valued Country column collapses every bubble into one. The
+  real fix is a model-layer concatenated `"City, State"` column with `dataCategory` `Place`.
+
 ## Open questions / needs-human-capture
 
 - 🟥 Need one render-verified PBIR exemplar each for `pathLayer`, `heatMapLayer`, clustered `bubbleLayer`, and built-in `filledMap` layer. The installed catalog exposes the objects and Learn describes the UX, but structural validity is not enough for cookbook-grade PBIR generation.

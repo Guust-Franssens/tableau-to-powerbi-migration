@@ -271,13 +271,23 @@ def _published_ds_name(repo: etree._Element, connection: dict[str, Any]) -> tupl
 
     Precedence is deliberate, and was derived from real published workbooks:
       1. the last path segment of `derived-from` (the authoritative publish URL);
-      2. the sqlproxy connection's `dbname`;
+      2. the **sqlproxy** connection's `dbname` -- and ONLY sqlproxy's, see below;
       3. the `repository-location@id` attribute -- LAST, because it can go stale.
     Real-world evidence (github.com/vimosh0812/ai-bi-assistant, `new-ds.twb`): a Tableau Cloud
     workbook published against datasource `dandan003` carried `id='new'` (a leftover from a rename)
     while `derived-from`, `dbname` and `caption` all agreed on `dandan003`. Keying on `id` would have
     given two workbooks that share ONE datasource two different keys -- defeating the de-duplication
     this key exists for.
+
+    ⚠️ **Rule 2 is guarded on the connection CLASS, and must stay guarded.** For a `sqlproxy`
+    connection, `dbname` IS the published datasource's name -- that is what makes the rule sound.
+    For any other class it is the *physical database*, which is a completely different thing.
+    Measured 2026-08-07 on a downloaded `.tds`: the connection is `snowflake` with
+    `dbname='MERIDIAN'`, so an unguarded rule 2 keyed the datasource as
+    `fabric-migration-lab/meridian` while the two workbooks binding it keyed as
+    `fabric-migration-lab/meridiansaleslivesnowflake` (via `derived-from`). The keys could never
+    join, so the datasource-to-workbook seam silently did not de-duplicate -- and the failure is
+    invisible, because both keys look perfectly reasonable on their own.
     """
     derived = repo.get("derived-from")
     if derived:
@@ -287,9 +297,10 @@ def _published_ds_name(repo: etree._Element, connection: dict[str, Any]) -> tupl
             # as "Sales%20Master". Decode it so the key matches the plain name the Tableau REST /
             # Metadata API returns for the same datasource.
             return unquote(segment), "derived-from"
-    dbname = connection.get("database")
-    if dbname:
-        return dbname, "connection.dbname"
+    if (connection.get("class") or "").lower() == "sqlproxy":
+        dbname = connection.get("database")
+        if dbname:
+            return dbname, "connection.dbname"
     return repo.get("id"), "repository-location.id"
 
 
@@ -866,11 +877,27 @@ def _parse_zone(
     those are this spec's friendlier aliases), and overloads the zone's 'param' attribute for two
     unrelated purposes depending on context: on a layout-flow container it is the flow direction
     ('horz'/'vert'); on a parameter/filter/legend control it is a '[Parameters].[Name]' reference
-    that must resolve to the referenced parameter's field_id, not be treated as a direction."""
+    that must resolve to the referenced parameter's field_id, not be treated as a direction.
+
+    Tableau also serializes STANDALONE LEGENDS as zones typed 'color'/'size'/'shape' (each carrying
+    name=<owning worksheet>), Web Page objects as type='web' (param=<URL>), and navigation buttons
+    as type='dashboard-object' with a <button> child. None of these are containers. Collapsing them
+    into 'layout-basic' (the old else-branch) made them INVISIBLE to every downstream consumer while
+    they still occupied real canvas - on book_8-1-Dashboards that silently discarded a Web Page
+    object filling 62% x 46% of the page plus a 10%-wide rail of three legends and a nav button, so
+    the dashboard's whole-page gestalt could not be reconstructed from the spec at all."""
     raw_type = zone_el.get("type")
     has_name = bool(zone_el.get("name"))
+    legend_kinds = {"color", "size", "shape"}
     type_aliases = {"paramctrl": "parameter", "bitmap": "image"}
-    raw_type = type_aliases.get(raw_type, raw_type)
+    legend_kind = raw_type if raw_type in legend_kinds else None
+    if legend_kind:
+        raw_type = "legend"
+    elif raw_type == "dashboard-object":
+        # A generic dashboard object; the child element says what it actually is.
+        raw_type = "button" if zone_el.find("button") is not None else "blank"
+    else:
+        raw_type = type_aliases.get(raw_type, raw_type)
     if raw_type is None:
         zone_type = "worksheet" if has_name else "layout-basic"
     elif raw_type in (
@@ -883,6 +910,9 @@ def _parse_zone(
         "filter",
         "parameter",
         "legend",
+        "web",
+        "button",
+        "blank",
     ):
         zone_type = raw_type
     else:
@@ -895,6 +925,8 @@ def _parse_zone(
         "w": float(zone_el.get("w", 0)),
         "h": float(zone_el.get("h", 0)),
         "direction": None,
+        "legend_kind": legend_kind,
+        "url": None,
         "worksheet_id": None,
         "field_id": None,
         "text_html": None,
@@ -904,6 +936,8 @@ def _parse_zone(
     param_attr = zone_el.get("param", "")
     if zone_type == "layout-flow":
         zone["direction"] = {"horz": "horizontal", "vert": "vertical"}.get(param_attr)
+    elif zone_type == "web":
+        zone["url"] = param_attr or None
     elif zone_type in ("parameter", "filter", "legend") and param_attr:
         # param_attr is often dotted, e.g. '[Parameters].[Insight 1]' - split first to isolate the
         # final bracketed segment, THEN strip its brackets (stripping first would eat into the
@@ -998,6 +1032,8 @@ def parse_dashboards(
                 "w": 100000.0,
                 "h": 100000.0,
                 "direction": None,
+                "legend_kind": None,
+                "url": None,
                 "worksheet_id": None,
                 "field_id": None,
                 "text_html": None,
@@ -1005,7 +1041,27 @@ def parse_dashboards(
                 "children": [_parse_zone(z, worksheet_ids_by_name, param_ids_by_name) for z in top_zones],
             }
         else:
-            zones = {}
+            # An EMPTY dashboard (Tableau serializes a self-closing <zones/>) is a real, legal
+            # authoring state -- a dashboard the author created and never populated. Emitting {}
+            # here violates the spec's own zone schema (type/x/y/w/h are required), which failed
+            # the WHOLE workbook parse over one empty dashboard. Synthesize a valid empty root so
+            # the dashboard survives into the spec (collect_limitations flags it as empty).
+            zones = {
+                "id": "",
+                "type": "layout-basic",
+                "x": 0.0,
+                "y": 0.0,
+                "w": 100000.0,
+                "h": 100000.0,
+                "direction": None,
+                "legend_kind": None,
+                "url": None,
+                "worksheet_id": None,
+                "field_id": None,
+                "text_html": None,
+                "background_color": None,
+                "children": [],
+            }
         dashboards.append(
             {
                 "id": ids.make("dash", name),
@@ -1126,6 +1182,19 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _flatten_zones(zone: dict[str, Any]) -> list[dict[str, Any]]:
+    """Depth-first flatten of a dashboard zone tree into one list, parents before children.
+
+    Module-level rather than a closure inside the per-dashboard loop: pylint's `cell-var-from-loop`
+    is right in principle even when the closure is invoked in the same iteration, and a plain
+    function is easier to test than a nested one.
+    """
+    out = [zone]
+    for child in zone.get("children") or []:
+        out.extend(_flatten_zones(child))
+    return out
+
+
 def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """Scan the parsed spec for known risk areas (extract-based sources, LOD/table calcs, unresolved
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
@@ -1172,6 +1241,19 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
             )
         for f in ds["fields"]:
             limitations.extend(_field_limitations(f))
+    limitations.extend(_worksheet_limitations(spec))
+    limitations.extend(_dashboard_limitations(spec))
+    return limitations
+
+
+def _worksheet_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Worksheet-level limitations: unresolved shelf/mark references, forecast shelves, and the
+    Measure Names/Values pivot.
+
+    Split out of `collect_limitations` for the same reason as `_dashboard_limitations`: three
+    independent scans in one function pushed it past pylint's locals/branch thresholds.
+    """
+    limitations: list[dict[str, Any]] = []
     for ws in spec["worksheets"]:
         pivot = ws.get("measure_names_values_pivot")
         for enc_name in ("rows", "columns"):
@@ -1191,6 +1273,58 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                         "stage": "parse",
                     }
                 )
+        # Mark encodings (color/size/shape/detail/label/tooltip) were never scanned for unresolved
+        # references, so a dropped MARK field - which changes what the chart actually shows - was
+        # silently absent from limitations while a dropped ROW field was reported. Scan them too.
+        for enc_name in ("color", "size", "shape", "label", "detail", "tooltip"):
+            enc_val = ws["encodings"].get(enc_name)
+            for enc in enc_val if isinstance(enc_val, list) else [enc_val]:
+                if not isinstance(enc, dict):
+                    continue
+                field_id = str(enc.get("field_id", ""))
+                if not field_id.startswith("UNRESOLVED:"):
+                    continue
+                limitations.append(
+                    {
+                        "item": ws["id"],
+                        "issue": (
+                            f"could not resolve the {enc_name.upper()} mark encoding {field_id} - the "
+                            "chart will render WITHOUT this encoding, which changes what it shows"
+                        ),
+                        "severity": "medium",
+                        "stage": "parse",
+                    }
+                )
+        # Tableau's built-in Forecast (Analytics pane) synthesizes columns that exist in NO data
+        # source: a 'fVal:' forecast value and a nominal 'Forecast Indicator' (Actual/Estimate).
+        # Downstream tooling reports these as ordinary unresolved fields and advises "bind it to the
+        # matching model column" - there IS no such column, and never will be, so that remediation
+        # sends a builder hunting for something that cannot exist. Name the real capability gap.
+        forecast_shelves = [
+            shelf_field
+            for enc_name in ("rows", "columns")
+            for shelf_field in ws["encodings"].get(enc_name) or []
+            if isinstance(shelf_field, dict) and str(shelf_field.get("derivation") or "").startswith("fVal")
+        ]
+        if forecast_shelves:
+            limitations.append(
+                {
+                    "item": ws["id"],
+                    "issue": (
+                        f"worksheet '{ws['name']}' uses TABLEAU'S BUILT-IN FORECAST (Analytics pane): the "
+                        "shelf carries a synthesized 'fVal' forecast value and the marks are coloured by "
+                        "the generated 'Forecast Indicator' (Actual vs Estimate). Both are produced by "
+                        "Tableau's exponential-smoothing model at render time and exist in NO data source, "
+                        "so there is nothing to bind them to. Power BI's nearest native equivalent is the "
+                        "analytics-pane Forecast line (line charts only, and it does not split marks into "
+                        "Actual/Estimate). FAITHFUL options: (a) implement the forecast in DAX/Power Query "
+                        "and materialise an Actual/Estimate flag, or (b) ship actuals only and log the gap. "
+                        "Do NOT treat this as a broken field binding"
+                    ),
+                    "severity": "high",
+                    "stage": "parse",
+                }
+            )
         if pivot is not None:
             limitations.append(
                 {
@@ -1201,6 +1335,81 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
                     "stage": "parse",
                 }
             )
+    limitations.extend(_dashboard_limitations(spec))
+    return limitations
+
+
+def _dashboard_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dashboard-layout limitations: empty dashboards, and zone types Power BI cannot re-create.
+
+    Split out of `collect_limitations` so that function stays under pylint's locals/branch
+    thresholds - the dashboard scan is independent of the data-source and worksheet scans.
+    """
+    limitations: list[dict[str, Any]] = []
+    for dash in spec.get("dashboards", []):
+        zones = dash.get("zones") or {}
+        if not zones.get("children") and not zones.get("worksheet_id"):
+            limitations.append(
+                {
+                    "item": dash["id"],
+                    "issue": (
+                        f"dashboard '{dash['name']}' is EMPTY in the Tableau source (<zones/> carries no "
+                        "objects at all) - there is nothing to lay out, so no Power BI page is owed for "
+                        "it. A downstream 'no supported visuals on this dashboard' warning about this "
+                        "dashboard is FAITHFUL, not a migration defect"
+                    ),
+                    "severity": "low",
+                    "stage": "parse",
+                }
+            )
+        flat = _flatten_zones(zones)
+        canvas = (zones.get("w") or 0) * (zones.get("h") or 0)
+        for z in flat:
+            if z["type"] == "web":
+                share = ((z["w"] * z["h"]) / canvas * 100) if canvas else 0
+                limitations.append(
+                    {
+                        "item": dash["id"],
+                        "issue": (
+                            f"dashboard '{dash['name']}' embeds a Tableau WEB PAGE object "
+                            f"(url: {z.get('url') or 'unknown'}) occupying ~{share:.0f}% of the canvas. "
+                            "Power BI has no native web-embed visual in a PBIR report (only an "
+                            "AppSource custom visual), so this object cannot be re-created faithfully; "
+                            "the canvas space it occupies must still be accounted for or the page's "
+                            "proportions will not match the source"
+                        ),
+                        "severity": "medium",
+                        "stage": "parse",
+                    }
+                )
+            elif z["type"] == "legend":
+                limitations.append(
+                    {
+                        "item": dash["id"],
+                        "issue": (
+                            f"dashboard '{dash['name']}' places a STANDALONE {z.get('legend_kind') or ''} "
+                            f"legend (for worksheet id {z.get('worksheet_id')}) as its own dashboard object "
+                            "occupying real canvas space. Power BI has no standalone legend object - a "
+                            "legend is a property of its visual - so the faithful translation is to enable "
+                            "that visual's own legend and reclaim/reserve the rail space deliberately"
+                        ),
+                        "severity": "low",
+                        "stage": "parse",
+                    }
+                )
+            elif z["type"] == "button":
+                limitations.append(
+                    {
+                        "item": dash["id"],
+                        "issue": (
+                            f"dashboard '{dash['name']}' contains a Tableau navigation button "
+                            "(goto-sheet). Power BI's equivalent is a button with a page-navigation "
+                            "action; verify the target page exists in the migrated report"
+                        ),
+                        "severity": "low",
+                        "stage": "parse",
+                    }
+                )
     return limitations
 
 

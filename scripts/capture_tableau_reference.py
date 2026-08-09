@@ -108,13 +108,17 @@ def _slug_for(name: str) -> str:
 
 
 def _source_workbook(slug_dir: Path) -> Path | None:
-    src = slug_dir / "source"
-    if not src.is_dir():
-        return None
-    for pattern in ("*.twbx", "*.twb"):
-        found = sorted(src.glob(pattern))
-        if found:
-            return found[0]
+    # 'source/' is this repo's per-workbook convention; 'in/' is the estate-bundle layout the
+    # dispatcher lays down (in/ + out/), which otherwise silently yielded "no workbook found" and
+    # skipped the embedded-thumbnail provider even though the .twbx was right there.
+    for sub in ("source", "in"):
+        src = slug_dir / sub
+        if not src.is_dir():
+            continue
+        for pattern in ("*.twbx", "*.twb"):
+            found = sorted(src.glob(pattern))
+            if found:
+                return found[0]
     return None
 
 

@@ -205,11 +205,55 @@ A **literal** RHS (`'…'[Completed Flights] = 1`) and an **explicit** `FILTER(A
 |---|---|
 | `{FIXED [Dim] : SUM([Measure])}` | `CALCULATE(SUM('T'[Measure]), ALLEXCEPT('T', 'T'[Dim]))` |
 | `{EXCLUDE [Dim] : SUM([Measure])}` | `CALCULATE(SUM('T'[Measure]), ALL('T'[Dim]))` (combine with `ALLEXCEPT`/`VALUES` of other dims actually in view) |
-| `{INCLUDE [Dim] : SUM([Measure])}` | Usually needs a finer grain first: `SUMX(VALUES('T'[Dim]), CALCULATE(SUM('T'[Measure])))` — treat case-by-case, verify grain matches the visual |
+| `{INCLUDE [Dim] : SUM([Measure])}` | Needs a finer grain first: `<OUTER>X(VALUES('T'[Dim]), CALCULATE(SUM('T'[Measure])))` — **`<OUTER>` is read off the SHELF, not the formula**; see below |
 
 LOD expressions are the highest-risk translation category — always validate the DAX result against
 a known Tableau value (via `semantic-model-consumption` EVALUATE, or a Python replica against the
-extract CSV when no live engine) before trusting it.
+extract CSV when no live engine) before trusting it. **With no Tableau site to query, try
+`scripts/extract_twbx_result_cache.py <wb>.twbx` first**: a packaged `.twbx` usually carries
+`TwbxExternalCache/TwbxResultsCacheV3/` — Tableau Desktop's *own* cached result tuples for the
+queries it last ran, LOD queries included (the `.key` sidecar even flags `has-lod-calcs='true'`).
+That is real ground truth, not a re-derivation, so it can falsify your DAX rather than merely agree
+with it. Caveat to state whenever you use it: the cache holds only what Desktop happened to run
+before the last save, so **absence is not evidence**.
+
+**⚠️ The outer aggregation is a SECOND decision, and it is not in the LOD formula
+[seen, `book_5-2-LOD`].** A Tableau LOD is an *expression*, not a measure: the aggregation that
+collapses it to one number per mark lives on the **shelf**, as the pill's `derivation` attribute in
+the `.twb` (`<column-instance … derivation='Avg' …>`), and the same LOD field is routinely dropped on
+two shelves with two different derivations. So translating `{INCLUDE [Customer Name] : SUM([Sales])}`
+requires reading the worksheet, not just the calculation:
+
+```dax
+-- shelf says derivation='Avg'  ->  AVERAGEX, the average customer's spend
+Avg Sales per Customer = AVERAGEX(VALUES('Orders'[Customer_Name]), CALCULATE(SUM('Orders'[Sales])))
+-- shelf says derivation='Sum'  ->  SUMX, which for INCLUDE is just SUM(Sales) again
+```
+
+Copying the table's old hard-coded `SUMX` here returned **2,297,200 instead of 3,349** — a ~686×
+error (686 = the distinct customers in view). Nothing structural catches it: the DAX is valid, the
+grain is right, the measure renders, and the number is merely *wrong*. Grep every worksheet for the
+LOD's `field_id` and translate one measure **per distinct derivation**.
+
+**Three arithmetic grain traps worth asserting on any LOD, in DAX or Python** — each is cheap and
+each fails loudly when the grain is wrong, unlike eyeballing a total:
+
+1. **`SUM(INCLUDE-LOD)` must equal `SUM([Measure])` exactly.** INCLUDE only *adds* a grouping level,
+   so summing back over it is lossless. Any drift means the added grain double-counts or drops rows.
+2. **`SUM(LOD) / AVG(LOD)` must be a whole number**, and that integer is the distinct count of the
+   LOD's dimension in the current view (686 / 674 / 629 / 512 across four panes, exactly). A
+   non-integer means the outer aggregation and the grain disagree.
+3. **An EXCLUDE measure must be CONSTANT across the excluded dimension** while the plain aggregate
+   varies. Put both on one visual and check the spread is `0.000000`, not "looks flat".
+
+Note trap 2's corollary: an INCLUDE LOD summed across four regions can legitimately exceed the
+workbook's distinct customer count (2,501 marks vs 793 customers) because a customer buying in two
+regions is counted in both. "Fixing" that back to 793 silently destroys the grain — the inflated
+number is the correct one.
+
+**A keyword-less `{SUM([Sales])}` is still an LOD** — it is a FIXED at the *empty* grain, i.e. a
+grand total (`CALCULATE(SUM('T'[Sales]), ALL('T'))`), and it is easy to misread as an ordinary
+aggregate. Parser-side coverage: `Yarbrdab000/tableau-fabric-skills` issue #49.
 
 **Gotcha [seen, Shipping]: use `DIVIDE`, never `/`, for a FIXED-LOD *ratio* calc column.** Real
 extracts contain zero/blank denominators (Shipping had 67 shipment ids with `SUM(Pay)=0`). `DIVIDE`
@@ -265,6 +309,146 @@ as a probable source bug — don't silently "fix" it.
 indicator *string* (e.g. `… Circle Col` → "Up"/"Down") cannot drive a Power BI data-color rule (those
 need a numeric/categorical driver on the visual). Such series render single-color; note the fidelity
 loss rather than forcing it.
+
+### 6a. ⚠️ An inline metric inside an X-iterator needs ONE EXTRA `CALCULATE` [seen, Sales & Customer Dashboards]
+
+This is the highest-cost defect class in this guide: it **compiles, returns plausible numbers, and is
+silently wrong**. Only a per-axis-point ground-truth comparison catches it.
+
+`CALCULATE` evaluates its **filter arguments in the OUTER filter context**, before applying its own
+context transition. So when you iterate an axis and inline the metric:
+
+```dax
+-- WRONG: returns the ANNUAL total for every month
+MAXX(VALUES('Date'[Month No]),
+     CALCULATE(DISTINCTCOUNT('Orders.csv'[Customer_ID]),
+               FILTER('Orders.csv', YEAR('Orders.csv'[Order_Date]) = _y)))
+```
+
+the `FILTER('Orders.csv', …)` never sees the iterated month — and, being a table filter on the fact
+table, it then *overrides* the month filter arriving through the date relationship. Measured: every
+month returned 693, the full-year distinct customer count.
+
+```dax
+-- RIGHT: one extra CALCULATE lands the context transition first
+MAXX(VALUES('Date'[Month No]),
+     CALCULATE(CALCULATE(DISTINCTCOUNT('Orders.csv'[Customer_ID]),
+                         FILTER('Orders.csv', YEAR('Orders.csv'[Order_Date]) = _y))))
+```
+
+Measured after the fix: 216 max / 53 min per month, matching the CSV exactly.
+
+**Why a measure reference doesn't need this.** `[My Measure]` inside an iterator expands to
+`CALCULATE([My Measure])` — you already get two nested `CALCULATE`s for free. That is why the same
+logic works when factored into a measure and breaks when inlined, which makes the bug look like magic
+during debugging. Rule of thumb: **if you inline a `CALCULATE(…, FILTER(fact, …))` inside `SUMX`/
+`MAXX`/`MINX`/`AVERAGEX`, wrap it once more.**
+
+**The `FILTER` is the trigger — don't cargo-cult the extra wrap** [confirmed, book_5-1-Table-Calcs].
+A bare `CALCULATE(SUM('Orders'[Sales]))` inside `RANKX`/`AVERAGEX` is *pure context transition* with no
+filter argument, so there is nothing to mis-evaluate in the outer context and **one `CALCULATE` is
+correct**. Both table calcs in that workbook verified exact against source ground truth with a single
+wrap. Apply this section when you see a `FILTER(<fact>, …)` (or any table-filter argument) inline
+inside the iterator — not to every `CALCULATE` you meet.
+
+### 6b. Window (WINDOW_MAX/MIN/AVG) calcs with no addressing spec
+
+> ⚠️ **Scope — check BOTH preconditions before using this recipe** [added after book_5-1-Table-Calcs,
+> where it was wrong on both measures in the workbook]. The whole-partition `ALLSELECTED()` form below
+> is faithful **only** when:
+>
+> 1. **The Tableau call has NO offset arguments.** `WINDOW_AVG(SUM([Sales]))` is whole-partition;
+>    `WINDOW_AVG(SUM([Sales]), -N, 0)` is a *trailing N+1 window* and needs §6b-bis instead. Measured
+>    cost of getting this wrong: the `ALLSELECTED()` form returned **1 distinct value across all 48
+>    months — a flat line — max error 38,479.96** against the same workbook's real trailing average.
+> 2. **The calc is genuinely order-invariant.** `WINDOW_MAX`/`MIN`/`AVG` are; `RANK`, `RUNNING_*`,
+>    `INDEX`, `LOOKUP` and `PREVIOUS_VALUE` are **not** — for those, addressing *is* the semantics and
+>    must be read off the workbook, never defaulted.
+
+Tableau records addressing only when it is non-default: if the `.twb` has **zero** `compute-using`,
+`addressing`, `partitioning`, `scope-isolation` **and `ordering-field`** elements, every `<table-calc>`
+is at the default **Table (across)** — one partition over the whole pane.
+
+> ⚠️ **`ordering-field` belongs in that list and is easy to miss — it is stored as an ATTRIBUTE of
+> `<table-calc>`, not as a child element**, so an element-only scan reports "no addressing spec" on a
+> file that plainly has one. Measured, `book_5-1-Table-Calcs`: the four element markers counted
+> **0 / 0 / 0 / 0**, yet the view-level `<table-calc ordering-field='[federated…].[Sub-Category]'
+> ordering-type='Field' />` (`.twb:430`, `:473`) sets "Compute Using → Sub-Category". Taking the
+> element count at face value would have ranked **across months instead of across sub-categories** —
+> a wrong answer that still returns one rank-1 per row and looks entirely plausible.
+> Note also that a **datasource-level** `<table-calc ordering-type='Rows'/>` (`.twb:375`) can be
+> **overridden per view** — read the worksheet's own element, not just the datasource default.
+
+The `ordering-type` attribute records the layout direction (it flips `Rows`→`Columns` when the axis
+pill moves shelves), so it is irrelevant to order-invariant `WINDOW_MAX`/`MIN`/`AVG` — **but that is a
+statement about order-invariant calcs only**, not a general claim that `ordering-*` never carries
+evaluation order (see the box above).
+
+The faithful DAX is a no-arg `ALLSELECTED()` window over the axis column, which keeps the window
+responsive to slicers while ignoring the axis point:
+
+```dax
+Min/Max Sales =
+VAR _mx = CALCULATE(MAXX(VALUES('Date'[Month No]), CALCULATE([CY Sales])), ALLSELECTED())
+VAR _mn = CALCULATE(MINX(VALUES('Date'[Month No]), CALCULATE([CY Sales])), ALLSELECTED())
+VAR _v  = [CY Sales]
+RETURN IF(_v = _mx, "Max", IF(_v = _mn, "Min"))
+```
+
+**Prove it, don't assert it:** evaluate over the axis and check that **exactly one** point is `Max`
+and one is `Min`, and that those points match the max/min computed independently from the source data
+— then repeat with a different slicer selection to prove the window is not frozen.
+
+### 6b-bis. Offset windows: `WINDOW_AVG(expr, -N, 0)` → `WINDOW(-N, REL, 0, REL, …, ORDERBY(…))`
+
+[seen, book_5-1-Table-Calcs] A Tableau offset window is **axis-position relative** — "the previous N
+rows *present in the view*", not a calendar interval — which is exactly what DAX `WINDOW(…, REL, …)`
+expresses. Requires compatibility level **1606+** and a live Desktop to verify (measured working at
+declared `compatibilityLevel: 1606`, so the older "1702+" folklore is too conservative).
+
+```dax
+Moving Average =
+VAR _p = 'Time Period'[Time Period Value]      -- the migrated Tableau parameter
+RETURN AVERAGEX(
+    WINDOW(-_p, REL, 0, REL,
+        SUMMARIZE(ALLSELECTED('Orders'), 'Date'[Month Start]),   -- see the axis-membership trap
+        ORDERBY('Date'[Month Start], ASC)),
+    CALCULATE(SUM('Orders'[Sales])))
+```
+
+Three things that are easy to get wrong, all measured:
+
+- **`(-N, 0)` is a trailing `N + 1` window, not `N`** — it spans N rows back *through the current row
+  inclusive*. With Tableau's default parameter value 10 that is an **11-month** average. Reproduce the
+  off-by-one faithfully and say so in the measure description; do not "correct" it to N.
+- **Truncate at the partition start, don't blank it.** Tableau averages row 1 against itself alone, and
+  bare `WINDOW` agrees. Adding a "full window only" guard is a fidelity regression, not a safety check.
+- ⚠️ **Axis-membership trap: `ALLSELECTED('Date'[Month Start])` is NOT the same axis Tableau draws.**
+  A generated date table usually spans further than the fact table (here `CALENDAR(...)` ran to
+  `YEAR(MAX(Ship_Date))` = 2019 giving **60 months**, while Orders covers **48**). The `ALLSELECTED` on
+  the *date column* therefore renders **58 points — a 12-month phantom tail** of months Tableau never
+  shows, each averaging a shrinking set of real months. `SUMMARIZE(ALLSELECTED(<fact>), <axis col>)`
+  restricts the window to months that actually have marks and rendered **exactly 48 = Tableau's mark
+  count**, agreeing to `0.000000000` on every real month. Both forms are identical on the real months,
+  so **only a point-COUNT check catches this — a value comparison will not.**
+
+**Prove it with a parameter sweep.** A frozen or off-by-one window looks perfectly plausible at one
+setting. Evaluate every axis point at **≥2 different parameter values** and assert the results differ
+(`P=2 / 10 / 30` → 3 distinct values at the same month), then check the leading edge explicitly, where
+fewer than N predecessors exist.
+
+
+### 6c. Two mechanical traps when landing approved DAX
+
+- **`ADDCOLUMNS`/`SELECTCOLUMNS` extension-column references (`[@v]`) are rejected by the openability
+  gate.** `[@v]` is resolved lexically by the DAX engine, not a model object, but the gate reports
+  *"references [@v], which is neither a measure nor a column in the model"* and fails the run
+  (`definition_of_done: FAILED`). Rewrite the window without `ADDCOLUMNS` — `CALCULATE(MAXX(VALUES(…),
+  …), ALLSELECTED())` needs no extension column at all.
+- **A measure name containing `]` must have it DOUBLED in every DAX reference.** A Tableau LOD caption
+  kept verbatim, e.g. `{SUM([CY Sales])}`, is a legal measure *name* but referencing it naively is a
+  syntax error. Correct: `'_Measures'[{SUM([CY Sales]])}]`. Worth flagging to the report builder and
+  in the model's AI instructions, because nothing about the failure points at the bracket.
 
 ## 7. Visual pattern note — reference lines → Gauge visual
 

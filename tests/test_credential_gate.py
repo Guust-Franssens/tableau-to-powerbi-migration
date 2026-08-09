@@ -1001,3 +1001,69 @@ def test_the_rearm_skip_is_order_insensitive_on_sources(tmp_path: Path) -> None:
 
     assert not (mig / ".credential-gate-BLOCKED.json").exists(), "reordered but identical sources must not re-arm"
     assert _audit_actions(mig)[-1] == "block-skipped"
+
+
+def test_an_extract_only_migration_that_was_never_gated_verifies_CLEAN(tmp_path: Path) -> None:
+    """The false BLOCK on the final gate, pinned.
+
+    Measured 2026-08-08 (`book_5-2-LOD`, one embedded `excel-direct` datasource, zero live sources):
+    workflow step 15 runs `verify` on EVERY migration, but step 6 correctly raises no gate when
+    nothing is live. `verify` then found artifacts, no deny-ACE and no `probe-cleared`/`authorize`
+    entry, and concluded the gate had been lifted unearned - reporting `UNEARNED CLEAR ... this model
+    is UNVALIDATED. Do not ship it.` and exiting 1 for a migration that was never gated and had
+    nothing to probe.
+
+    Two reasons this mattered more than a cosmetic wrong message: it fires on exactly the shape most
+    likely to be run fully offline, and it fires at the LAST step, after all the work - the point
+    where a spurious "do not ship" is most expensive and most likely to be believed.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "fabric" / "model.tmdl").write_text("table Orders")  # a real, audited artifact
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"a never-gated extract-only migration must verify clean:\n{out}"
+    assert "UNEARNED" not in out
+    # The verdict must say WHY it passed, so this is never mistaken for a gate that WAS lifted.
+    assert "no gate was ever applied" in out
+
+
+def test_a_genuinely_unearned_clear_is_STILL_reported(tmp_path: Path) -> None:
+    """Control - the whole point of the check above must survive the fix.
+
+    Identical to the test above except a gate really was applied and then lifted by a bare `clear`
+    (which earns nothing). Artifacts built after that are unvalidated, and `verify` must still say so.
+    If this ever passes with exit 0, the fix has laundered the bypass it was supposed to leave alone.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    run_gate("block", str(mig), "--sources", "shipment")
+    run_gate("clear", str(mig), "--reason", "I decided it is fine")  # NOT --earned
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 1, f"artifacts after an unearned clear must still BLOCK:\n{out}"
+    assert "UNEARNED CLEAR" in out
+
+
+def test_an_earned_clear_still_verifies_clean_for_a_live_source(tmp_path: Path) -> None:
+    """Control - the legitimate live-source path is unchanged by the never-gated branch.
+
+    Asserts the reason as well as the exit code: this must pass because the probe EARNED the lift,
+    not because it fell through the `_gate_was_ever_applied` escape hatch.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    run_gate("block", str(mig), "--sources", "shipment")
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, out
+    assert "no gate was ever applied" not in out, "this migration WAS gated - it passed by earning the lift"

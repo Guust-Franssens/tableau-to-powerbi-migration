@@ -39,10 +39,29 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   A wrong value is not a field reference, so it passes validation but **silently aggregates wrong**.
   *(This corrects an earlier version of this file which claimed Max=2, Min=3, Count=4; the
   `powerbi-report-authoring` references had it right.)*
-- **Projection-level `format` overrides** (`proj.format = "0.00%"`) and **`expansionStates`** both pass
-  validation but their Desktop honouring is unconfirmed offline — `expansionStates` in particular is a
-  **no-op on initial render** (matrix still shows collapsed); don't burn cycles chasing it, document a
-  collapsed default or use a flat `tableEx` when the grain is one row per leaf.
+- **Projection-level `format` overrides ARE honoured by Desktop.** 🟢 render-verified (Desktop
+  2.157.627.0, table-calcs migration): `proj.format = "MMMM yyyy"` on a `pivotTable` Rows projection
+  rendered `January 2015` (from a `Short Date` model format), and `proj.format = "#,0"` on a Values
+  projection rendered `6,928` instead of `6,928.00`. This is the **report-layer** way to restyle a
+  column you do not own — prefer it over asking the model owner to change `formatString`.
+  *(This corrects an earlier version of this file which listed it as "unconfirmed offline".)*
+  **`expansionStates`** remains unconfirmed and is a **no-op on initial render** (matrix still shows
+  collapsed); don't burn cycles chasing it, document a collapsed default or use a flat `tableEx` when
+  the grain is one row per leaf.
+- **`labels.labelPosition = 'InsideCenter'` is silently IGNORED on a `lineChart`.** 🟢 render-verified
+  (Desktop 2.157.627.0). `formatting describe-object lineChart labels` lists it in the enum and
+  `validate` returns 0 errors, but the render is byte-identical to `Auto` **and** to `Above` — Desktop
+  always draws a line chart's data label *above* its marker. Deceptive rather than obviously broken: on
+  a bump chart (ranks 1..N in every column) an offset label still lands neatly inside *a* marker, just
+  the **wrong one**, so every number reads one row off. Diagnose by rendering the labels **black** — a
+  stray label with no marker under it appears at the edge of the plot. Fix with the lineChart-only
+  numerics **`labels.maximumOffset` / `labels.minimumOffset`**; measured sweep at `markerSize = 14`:
+  `0` ≈ half a row low, `-10` slightly high, **`-20` dead-centre**, `-30` slightly low, `-40` a full row
+  below. The offset is a pixel quantity cancelling a pixel quantity, so it is independent of plot height
+  (survives resize) but **coupled to `markerSize`** — re-sweep if the marker size changes.
+  Vocabulary is **type-dependent**: `labelOverflow` is columnChart-only, `maximumOffset`/`minimumOffset`
+  are lineChart-only, `labelDensity`/`show`/`color`/`labelPosition` exist on both — so a script that
+  flips a visual's type must also swap the label property set (see §3).
 - **A measure used as a visual-level filter at a FINER grain than it evaluates silently zeroes the
   visual.** A scatter carrying a `Region Filter` measure at Sub-Category grain has
   `SELECTEDVALUE('…'[Region])` blank, so the filter is false for every point → empty visual. When the
@@ -75,6 +94,60 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   scatter renders normally. This is a second, independent instance of a validation-invisible bug class
   (§1's core warning) — always reload+screenshot a scatter/chart that legends by the same field it
   categorizes by, even after a clean `validate`.
+- **Adding a `Rows` (small-multiples) field SILENTLY DROPS a measure-driven `sortDefinition`; the
+  category axis reverts to alphabetical.** 🟢 render-verified by controlled before/after
+  (`book_5-2-LOD`, `powerbi-report-author` CLI 0.1.4). A `clusteredBarChart` sorted Sub-Category DESC
+  by `'_Measures'[Sales across Regions]` rendered correctly (Phones, Chairs, Storage…). Moving
+  `Region` from a second `Category` level into `Rows` — **changing nothing else** — re-rendered it as
+  Accessories, Appliances, Art… `validate` still returned 0 errors, and the `sortDefinition` node is
+  still physically present and still correct in `visual.json`. So neither a schema check nor a
+  "did my sort survive?" JSON assertion can detect this; only a screenshot can.
+  **It also holds when the sort targets an ON-AXIS measure — retargeting is not a fix.** 🟢
+  render-verified, same report, three runs (Desktop 2.157.627.0, 2026-08-08): (1) sort → off-axis
+  `_Measures[Sales across Regions]` + `Rows` → alphabetical; (2) sort → the on-axis
+  `Sum(Orders[Sales])` that the bars are drawn from + `Rows` → **still alphabetical**; (3) that same
+  sort node with `Rows` REMOVED → perfect DESC (Phones, Chairs, Storage…). Runs 2 vs 3 are a clean
+  isolation — byte-identical `sortDefinition`, identical Category/Y/Tooltips, only the `Rows` well
+  differs — so the panes are the cause, not the sort target. Worth knowing because "the sort field
+  isn't on an axis" is the obvious first hypothesis and it is *wrong*: don't spend a cycle on it.
+  ⚠️ **Do NOT cite Learn for this — the docs do not say it.** An earlier revision of this entry
+  claimed corroboration from Learn's small-multiples *Considerations and limitations*; that list
+  (re-fetched 2026-08-08) covers no-data items, scroll-to-load, Analyze/Summarize, rectangular
+  select, axis zoom, concatenate labels, total labels, zoom sliders, trend lines and forecasting —
+  **sorting is not on it**. The companion page *Interact with small multiples in Power BI* reads the
+  other way: "you can sort multiple aspects of a visual at once. Sort by the category, and also by
+  the axis in each multiple." Desktop does not do that. So this limitation is **real but
+  undocumented**, which is exactly why it can only be found by rendering — cite the measurement.
+  **Consequence for migrations:** when a source tool expresses *both* "this discrete pill forms
+  panes" *and* "sort this axis by a measure" (a Tableau `<cols>` pane pill + `<computed-sort>` is
+  exactly this pair), Power BI's native small multiples can honour only one. Decide which property
+  carries more meaning, implement that, and log the other as an accepted limitation — do not assume a
+  structurally intact `sortDefinition` means the sort is live. The only recovery candidate is a
+  numeric rank column plus **Sort by Column** on the category, which is a **semantic-model** change
+  (route it to the model owner), and community reports say even that is unreliable under small
+  multiples. Still retarget the sort onto a field the visual actually projects on an axis before
+  logging the limitation: it costs nothing, it is render-neutral, and it leaves the one encoding
+  that is correct on its own terms, so the order appears for free if Desktop ever honours it.
+
+- **A measure's `SourceRef.Entity` must be the measure's HOME table, not the table it aggregates.**
+  🟢 verified at query level. `Sales (w/o Category)` = `CALCULATE(SUM('Orders'[Sales]),
+  REMOVEFILTERS('Orders'[Category]))` reads `Orders`, but is *defined* on a `_Measures` table — so
+  `{"Measure":{"Expression":{"SourceRef":{"Entity":"Orders"}},"Property":"Sales (w/o Category)"}}` is
+  wrong, and `"_Measures"` is right (`queryRef` follows: `_Measures.Sales (w/o Category)`). `validate`
+  returns **0 errors / 0 warnings** on the broken form — it checks that a reference is well-formed, not
+  that the `(entity, property)` pair exists in the model — and the failure is
+  `'Orders'[Sales (w/o Category)]` → *"Column … in table 'Orders' cannot be found or may not be used"*
+  only at query time. **A measure reference has TWO sites that must agree**: the projection *and* the
+  `filterConfig` `From` clause (`{"Name":"f","Entity":…}`); the previous pass fixed neither and shipped.
+  Two traps worth naming: (a) a **dedicated measures table is the common convention**, so on any model
+  with one, the fact-table entity is wrong for *every* measure — if your codegen has a single `ENTITY`
+  constant, columns and measures must not share it; (b) **verifying the measure's semantics in DAX is
+  not verifying the reference** — the previous pass ran `'_Measures'[…]` (correct) while the PBIR
+  encoded `'Orders'[…]` (wrong), and the green DAX result was read as proof. Prove the **exact
+  entity/property path the PBIR encodes**, and keep a negative control: the wrong path must *error*.
+- **On a visual that cannot render (an unlicensed azureMap, a tooltip-only page), this class of bug is
+  undetectable by screenshot** — a wrong measure reference and an environmental blank look identical.
+  Fall back to executing the encoded path against the live model.
 
 ## 2. Data colours and conditional formatting
 
@@ -104,6 +177,19 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   nativeQueryRef).
 - **`displayName` on a projection is the header-rename mechanism** — Desktop auto-labels non-default
   aggregations "Average of X"; `nativeQueryRef` does not control the header.
+- **When two re-runnable fix scripts must commute across a VISUAL-TYPE change, the type-specific
+  property set must live in exactly one module.** A script that flips `columnChart` → `lineChart` and a
+  separate script that writes label properties cannot be order-independent if each hard-codes its own
+  vocabulary — run type-flip-last and you keep the old type's properties (`labelOverflow` on a
+  lineChart), run it first and you lose the new type's. Fix: expose `apply_<layer>(doc, visual_type)`
+  **and** `strip_foreign_<layer>_props(doc, visual_type)` from one module; whichever script runs last
+  re-applies the correct set for the final type and strips the other's leftovers, so both orders land
+  byte-identical. Prove it by hashing the whole `definition/` tree across several shuffled orders, not
+  by reasoning about it.
+- **Normalise JSON key order when you write PBIR back.** Two scripts that *insert* different formatting
+  cards into `visual.objects` produce byte-different-but-semantically-identical files depending on run
+  order, which makes a genuine order-independence proof impossible to distinguish from a real defect.
+  Sort keys on write once, in the shared helper.
 - **Reference-line `value` needs a type-suffixed numeric literal** (`{Literal:{Value:"100D"}}`); a bare
   `"100"` parses to 0 and pins the line to the axis baseline with **no validation error**.
 - **Theme: custom `visualStyles` are strictly validated per-visual-object and `fillPoint` is not valid
@@ -117,6 +203,18 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   field can already be stored pre-scaled (`12.83` meaning "12.83%", not `0.1283`). Power BI's `0.00%`
   multiplies by 100 for display, so an already-scaled value renders **100× inflated** (`1283%`). Sample
   a raw value via DAX before choosing `0.00%` (true fraction) vs `0.00"%"` (literal suffix).
+- **`validate` does NOT check that `definition.pbir`'s model reference resolves.** 🟢 verified: a
+  `.Report` whose `datasetReference.byPath.path` named a `.SemanticModel` folder that **exists nowhere
+  in the bundle** returned `errorCount: 0`. Validation covers the report definition, not whether the
+  dataset it points at is on disk — so a report that **cannot possibly open** validates clean. Check
+  the path yourself (resolve it relative to the `.Report` folder and confirm a `definition/` inside).
+  Two migration-specific traps make this likely rather than exotic: (a) an engine that emits the report
+  **twice** (a `reports/` deliverable plus a packaged `pbip/`) gives each copy a *different* relative
+  path, and only the one beside the model is right — the copies being byte-identical everywhere else
+  hides it; (b) the model folder is often named after the **data source**, not the workbook, so a
+  workbook-named guess dangles. Deleting a redundant copy is usually the wrong fix if the engine's own
+  manifests declare it as `output_folder` — repoint it instead, and prefer a relative cross-tree
+  `byPath` (`../../pbip/<name>/<Model>.SemanticModel`), which does resolve.
 
 ## 4. Crosstabs and tables — a recurring fragility class
 
@@ -148,6 +246,24 @@ typically a flat table under the hood rather than a true cross-tab.
 `map`/`filledMap` are legacy Bing → a `PBIR_VISUAL_TYPE_DEPRECATED` warning **plus** a once-per-session
 Desktop "Bing maps are going away" nag modal that the bridge screenshot does **not** surface.
 
+**Bing `map` colour saturation is INERT — a §1-class validation-invisible bug.** 🔴 render-verified
+NEGATIVE (2026-08-08, Desktop MSIX 2.157.627.0). `formatting describe-object map dataPoint` *does*
+list `fillRule` with `displayName: "Color saturation"` (`type: unknown`), so a
+`linearGradient3` over a projected measure looks correct and `validate` returns **0 errors** — but
+Desktop renders **one flat hue**. Proof used: of 604 bubbles, 138 had negative values and the minimum
+(−13,838) belonged to the *second-largest* bubble on the map, which an orange minimum stop must render
+unmistakably orange; a pixel scan found **zero** orange pixels, and the max-value and min-value bubbles
+rendered *identically pale*. **Do not read bubble lightness as a colour encoding** — on a bubble map
+apparent lightness tracks **radius** (stroke-to-fill ratio), so small bubbles look dark and large ones
+look pale whether or not any gradient is bound. Binding the measure to a `Gradient`
+("Color saturation") **data role** instead does not rescue it: `catalog describe map` exposes only
+`Category`/`Series`/`Y`/`X`/`Size`/`Tooltips`, `validate` raises `PBIR_ROLE_UNKNOWN`, and Desktop then
+fails to produce canvas-capture metadata at all (`clip` height `0`) until it is removed. **Consequence:
+a source `color = <measure>` encoding is not reproducible on Bing `map`** — it needs `azureMap` (whose
+`bubbleLayer.fillColor` *does* honour the same FillRule), which in turn needs the Azure Maps tenant
+entitlement. Treat that as a tenant/human action and log the gap rather than shipping a map that
+silently drops one whole encoding channel.
+
 **Measure-driven choropleth — the sanctioned azureMap pattern, ground-truth encoding:**
 
 - `query.queryState.Category` = the location **key column** (e.g. `State`) as a `Column` projection.
@@ -177,6 +293,29 @@ fidelity win over the dual-axis workaround) — but it needs **one data row per 
 stores origin+destination lat/long as columns on a single row, the arc cannot render, and that reshape
 is a **semantic-model decision**: coordinate with the model owner up front for any `MAKELINE`/
 `MAKEPOINT`-style route map, or fall back to endpoint bubbles with a documented note.
+
+**Undocumented azureMap properties** — none appear in the CLI `catalog describe` output, so they are
+recorded here rather than rediscovered. ⚠️ **Confidence: structural only.** They are accepted by
+`validate` (0/0) and survive a Desktop reload, but they were authored in an environment where azureMap
+cannot draw (see the licensing note above), so *no one has seen them take visual effect*. Treat the
+property **names** as verified and their **rendered behaviour** as unconfirmed; upgrade to 🟢 on the
+first signed-in render.
+
+- **`bubbleLayer.sizeByValue`** (boolean) — the switch that makes the `Size` well actually drive bubble
+  radius. Expected behaviour without it: `Size` is projected but every bubble draws at the fixed
+  `bubbleRadius`, silently dropping the magnitude encoding. Pair with `minBubbleRadius` / `maxRadius`
+  to bound the ramp.
+- **`mapControls.defaultStyle`** accepts more than `'road'`: **`'satellite'`** and **`'night'`** are both
+  accepted, and are the faithful targets for a Mapbox-satellite or dark-basemap source worksheet.
+  (`'blank'` is also accepted but rendered empty/tiny with `autoZoom` — see above.) Literal form is a
+  quoted string: `{"Literal":{"Value":"'satellite'"}}`.
+- **`visualTooltip`** — binds a **canvas tooltip page** to a visual, and is how a Tableau "viz in
+  tooltip" worksheet is reproduced. It is a **`visualContainerObjects`** entry, *not* a
+  `visual.objects` one. Exact shape (three properties):
+  `show` = `true`, `type` = `'Canvas'`, `section` = **the target page's `name`/folder id**
+  (e.g. `'page-tooltip-over-time'`) — the page **id, not its `displayName`**, which is the easy
+  mistake. The tooltip *page itself* is render-verified; the *hover binding* is not, because the map
+  that would trigger it cannot draw here.
 
 ## 6. Scatter
 
@@ -230,6 +369,23 @@ A "dimension-on-rows dot strip" → scatter with `Category` = the dimension (Det
 These are about translating a migration spec faithfully; they generalise to any source tool that has
 shelves, tooltips and manual sorts.
 
+- **A `.twb`/`.twbx` DOES contain Tableau-rendered reference images — check before declaring "no
+  reference exists".** Every worksheet embeds a base64 PNG in a `<thumbnail>` element (192×192, one per
+  worksheet). Three separate agents on one migration asserted no reference was obtainable because there
+  was no Tableau Server/Public URL; the ground truth was inside the file the whole time. They are small,
+  so use them for **shape, mark type, layering, axis direction, label presence, header formatting and
+  actual numbers** — not font/pixel claims. This is decisive evidence: on one migration the thumbnails
+  overturned a confidently-reasoned static mapping (see next entry).
+- **Tableau's `<mark class='Automatic'/>` resolves to LINE when a date field sits on Columns — even a
+  discrete date part.** Reading `Automatic` + a discrete `:ok` date pill as "bars" is a natural but
+  wrong inference, and it produced a `columnChart` with the rank measure on `Y` and 17 categories on
+  `Series` — which **stacks**, summing 17 ranks into a meaningless ~153 bar, for a source that was a
+  classic bump chart of 17 crossing lines. The engine reported it `tier: rebuilt, status: rebuilt` with
+  no warning, because stacking is structurally valid. **Never resolve `Automatic` from the XML alone
+  when a date is on Columns — check the thumbnail.**
+- **`columnChart` + `Series` STACKS. Never use it for a ranking/index measure.** Stacking is only
+  meaningful for additive quantities; ranks, indices, percentages and averages are not additive, so a
+  stacked encoding of them is always wrong and never raises a validation error.
 - **Nested shelf grouping** — a `(a / b)` shelf notation is a layout/hierarchy nesting, **not** a
   calculation. Translate to a multi-field axis or a legend + axis combination, matching the nesting
   order.
