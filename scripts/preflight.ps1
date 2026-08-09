@@ -30,7 +30,8 @@
 
 .NOTES
   Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 [-Update]
-  Exit: 0 if every CRITICAL + RECOMMENDED item is present; 1 if any is missing.
+  Exit: 0 if every CRITICAL item is present; 1 if any CRITICAL item is missing.
+        RECOMMENDED and OPTIONAL items are surfaced as warnings but do not stop a migration.
 #>
 #Requires -Version 5.1
 param([switch]$Update, [switch]$CheckUpstream)
@@ -129,8 +130,8 @@ foreach ($cliName in $cliFloor.Keys) {
     } else {
         "Version moved past the matrix in AGENTS.md - re-verify the version-specific Gotchas in .github/agents/ before trusting them."
     }
-    # Below the floor is a real (recommended-tier) failure; above known-good is only an advisory.
-    Add-Check "version: $cliName" $(if ($floorOk) { 'optional' } else { 'recommended' }) $(-not $drifted -and $floorOk) $detail $hint
+    # Below the floor is a real correctness failure; above known-good is only an advisory.
+    Add-Check "version: $cliName" $(if ($floorOk) { 'optional' } else { 'critical' }) $(-not $drifted -and $floorOk) $detail $hint
 }
 
 # --- PBIR JSON-schema reachability (does `validate` actually run its schema layer this session?) ---
@@ -198,23 +199,23 @@ if ($migrationPlugin) {
         if (-not (Test-Path $theirs)) { $missing += $name; continue }
         if ((Test-Path $mine) -and ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash)) { $drift += $name }
     }
-    # TIERING MATTERS, and the first version got it wrong: a single 'recommended' check made preflight
-    # exit 1 on drift, which BLOCKED every migration - and the fix (reinstall the plugin) is impossible
-    # while a Copilot session is running, because the session file-locks the plugin directory. A gate
-    # you cannot satisfy at the moment it fires is a bad gate. So the two shapes are split by how bad
-    # they actually are:
-    #   NOT INSTALLED -> 'recommended' (blocks). A shipped bundle absent locally is a real capability
+    # TIERING MATTERS. A 'recommended' check must not produce the same exit as a missing 'critical'
+    # dependency: preflight is step 0 for every migration, and agents stop on a non-zero exit. These
+    # checks still print loudly because they affect the quality and reproducibility of a migration,
+    # but their tier now matches their outcome: warn, do not halt.
+    #
+    # The two shapes are still split because they mean different repairs:
+    #   NOT INSTALLED -> a shipped bundle absent locally is a real capability
     #                    loss: the agent cannot invoke that skill by name at all.
-    #   STALE         -> 'recommended' (blocks). This was 'optional' until 2026-08-01, on the theory
+    #   STALE         -> this was 'optional' until 2026-08-01, on the theory
     #                    that an older revision is "a degradation, not a correctness break". That is
     #                    FALSE, and it cost a whole experiment. The plugin copy SHADOWS .github/skills,
     #                    so a stale bundle means the agent silently executes DIFFERENT CODE than the
     #                    repo shows - with no diff to notice. Measured: refresh_pbip_model.py had just
     #                    gained an XMLA CommandTimeout in the repo; the plugin copy had none, the agent
     #                    ran the copy without it, and the resulting timing was used to "prove" a
-    #                    conclusion about behaviour the executed code did not even contain.
-    #                    Unfixable mid-session is exactly WHY it must block at session start, when it
-    #                    is still fixable, rather than warn once and be scrolled past.
+    #                    conclusion about behaviour the executed code did not even contain. Keep this
+    #                    warning visible and actionable, but do not encode a warning tier as exit 1.
     $detail = if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" } else { "$($shipped.Count) bundle(s) present" }
     Add-Check 'skill bundles installed' 'recommended' ($missing.Count -eq 0) $detail `
         'copilot plugin install powerbi-migration-skills@powerbi-migration-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
@@ -361,21 +362,25 @@ Add-Check 'ODBC Driver 18 (SQL)' 'optional' ($odbc -contains 'ODBC Driver 18 for
     'Only for direct SQL Analytics Endpoint / Warehouse queries.'
 
 # --- Render ---
-$blocking = 0
+$criticalMissing = 0
+$recommendedWarnings = 0
 foreach ($tier in @('critical', 'recommended', 'optional')) {
     Write-Host ''
     Write-Host "== $($tier.ToUpper()) =="
     foreach ($r in ($results | Where-Object { $_.Tier -eq $tier })) {
-        $mark = if ($r.Ok) { 'OK  ' } elseif ($tier -eq 'optional') { 'warn' } else { 'MISS' }
+        $mark = if ($r.Ok) { 'OK  ' } elseif ($tier -eq 'critical') { 'MISS' } else { 'WARN' }
         Write-Host ("  [{0}] {1,-44} {2}" -f $mark, $r.Name, $r.Detail)
-        if (-not $r.Ok -and $tier -ne 'optional') { Write-Host "         -> $($r.Hint)"; $blocking++ }
+        if (-not $r.Ok -and $tier -eq 'critical') { Write-Host "         -> $($r.Hint)"; $criticalMissing++ }
+        elseif (-not $r.Ok -and $tier -eq 'recommended') { Write-Host "         (recommended) $($r.Hint)"; $recommendedWarnings++ }
         elseif (-not $r.Ok -and $r.Hint) { Write-Host "         (optional) $($r.Hint)" }
     }
 }
 Write-Host ''
-if ($blocking -gt 0) {
-    Write-Host "PREFLIGHT: $blocking critical/recommended item(s) missing - resolve before migrating."
+if ($criticalMissing -gt 0) {
+    $suffix = if ($recommendedWarnings -gt 0) { " ($recommendedWarnings recommended warning(s) also present)." } else { '' }
+    Write-Host "PREFLIGHT: $criticalMissing critical item(s) missing - resolve before migrating.$suffix"
     exit 1
 }
-Write-Host 'PREFLIGHT: all critical + recommended dependencies present. Ready to migrate.'
+$suffix = if ($recommendedWarnings -gt 0) { " $recommendedWarnings recommended warning(s) present; review before relying on affected capabilities." } else { '' }
+Write-Host "PREFLIGHT: all critical dependencies present. Ready to migrate.$suffix"
 exit 0
