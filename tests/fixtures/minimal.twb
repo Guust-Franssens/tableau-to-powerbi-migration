@@ -36,6 +36,12 @@
       <column caption='Sales (bin)' datatype='real' name='[Sales (bin)]' role='dimension' type='ordinal'>
         <calculation class='bin' column='[Sales]' bin-size='200' new-bin='true' peg='0' />
       </column>
+      <column caption='Pivot Values (bin)' datatype='real' name='[Pivot Values (bin)]' role='dimension' type='ordinal'>
+        <calculation class='bin' formula='[Pivot Field Values]' size='0.1' />
+      </column>
+      <column caption='Profit (parameter bin)' datatype='real' name='[Profit (parameter bin)]' role='dimension' type='ordinal'>
+        <calculation class='bin' formula='[Profit]' size-parameter='[Parameters].[Parameter 2]' />
+      </column>
       <column caption='City filter' datatype='string' name='[Calculation_1]' role='dimension' type='nominal'>
         <calculation class='tableau' formula='if [Parameters].[Parameter 1]=[NAME] then [NAME] END' />
       </column>
@@ -44,6 +50,9 @@
       </column>
       <column caption='Grand Total' datatype='real' name='[Grand Total]' role='measure' type='quantitative'>
         <calculation class='tableau' formula='{SUM([Sales])}' />
+      </column>
+      <column caption='Sales Profit Correlation' datatype='real' name='[Sales Profit Correlation]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='{CORR([Sales], [Profit])}' />
       </column>
       <column caption='cities.csv' datatype='table' name='[__tableau_internal_object_id__].[cities.csv_ABC123]' role='measure' type='quantitative' />
       <column caption='City Point' datatype='spatial' name='[Calculation_3]' role='measure' type='nominal'>
@@ -167,7 +176,9 @@
           <zone h='50000' id='2' name='Sales Gauge' w='100000' x='0' y='0' />
           <zone forceUpdate='true' h='10000' id='3' type='text' w='100000' x='0' y='50000'>
             <formatted-text>
-              <run>Footer note</run>
+              <run>Footer</run>
+              <run>&#198;</run>
+              <run>note</run>
             </formatted-text>
           </zone>
         </zone>

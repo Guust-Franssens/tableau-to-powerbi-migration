@@ -54,6 +54,24 @@ def test_bin_field_preserves_bin_class_and_size():
     assert sales_bin["bin_source_column"] == "[Sales]"
 
 
+def test_modern_bin_field_preserves_size_formula_and_parameter():
+    """Modern Tableau bin XML can use size/formula or size-parameter/formula instead of
+    bin-size/column; those real variants must retain their bin semantics too."""
+    fields = {f["caption"]: f for f in parse_workbook(FIXTURE)["data_sources"][0]["fields"]}
+
+    pivot_bin = fields["Pivot Values (bin)"]
+    assert pivot_bin["kind"] == "bin"
+    assert pivot_bin["bin_size"] == "0.1"
+    assert pivot_bin["bin_source_column"] == "[Pivot Field Values]"
+    assert pivot_bin["bin_size_parameter"] is None
+
+    parameter_bin = fields["Profit (parameter bin)"]
+    assert parameter_bin["kind"] == "bin"
+    assert parameter_bin["bin_size"] is None
+    assert parameter_bin["bin_source_column"] == "[Profit]"
+    assert parameter_bin["bin_size_parameter"] == "[Parameters].[Parameter 2]"
+
+
 def test_keywordless_aggregate_lod_is_flagged_high_severity():
     """A Tableau LOD may be table-scoped with no FIXED/INCLUDE/EXCLUDE keyword, e.g. {SUM([Sales])}.
     It still needs the high-severity grain/filter-context warning."""
@@ -63,6 +81,19 @@ def test_keywordless_aggregate_lod_is_flagged_high_severity():
     assert grand_total["is_lod"] is True
     assert any(
         item["item"] == grand_total["id"] and item["severity"] == "high" and "LOD expression" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+
+
+def test_keywordless_corr_lod_is_flagged_high_severity():
+    """Tableau documents {CORR([Sales], [Profit])} as a valid table-scoped LOD; detection must not
+    drift behind Tableau's aggregate-function list."""
+    spec = parse_workbook(FIXTURE)
+    fields = {f["caption"]: f for f in spec["data_sources"][0]["fields"]}
+    corr = fields["Sales Profit Correlation"]
+    assert corr["is_lod"] is True
+    assert any(
+        item["item"] == corr["id"] and item["severity"] == "high" and "LOD expression" in item["issue"]
         for item in spec["limitations_encountered"]
     )
 
@@ -240,7 +271,8 @@ def test_dashboard_zone_tree_resolves_worksheet_reference():
     worksheet_zone = next(z for z in top_zone["children"] if z["type"] == "worksheet")
     assert worksheet_zone["worksheet_id"] == spec["worksheets"][0]["id"]
     text_zone = next(z for z in top_zone["children"] if z["type"] == "text")
-    assert text_zone["text_html"] == "Footer note"
+    assert text_zone["text_html"] == "Footer\nnote"
+    assert "\u00c6" not in text_zone["text_html"]
 
 
 def test_limitations_are_collected_not_silently_dropped():

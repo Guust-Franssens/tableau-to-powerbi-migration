@@ -39,10 +39,7 @@ logger = logging.getLogger("parse_tableau")
 SPEC_VERSION = "1.0"
 
 _LOD_KEYWORD_RE = re.compile(r"\{\s*(FIXED|INCLUDE|EXCLUDE)\b", re.IGNORECASE)
-_KEYWORDLESS_LOD_RE = re.compile(
-    r"\{[^{}]*\b(SUM|AVG|COUNT|COUNTD|MIN|MAX|ATTR|MEDIAN|STDEV|STDEVP|VAR|VARP|AGG)\s*\(",
-    re.IGNORECASE,
-)
+_KEYWORDLESS_LOD_RE = re.compile(r"\{[^{}]*\b[A-Z][A-Z0-9_]*\s*\(", re.IGNORECASE)
 _TABLE_CALC_RE = re.compile(r"\b(WINDOW_\w+|RUNNING_\w+|INDEX|RANK\w*|LOOKUP|TOTAL|PREVIOUS_VALUE)\s*\(", re.IGNORECASE)
 _PARAM_EQUALITY_RE = re.compile(r"if\s*\[Parameters\]\.\[[^\]]+\]\s*=\s*\[[^\]]+\]\s*then", re.IGNORECASE)
 _BRACKET_TOKEN_RE = re.compile(r"\[([^\[\]]+)\]")
@@ -471,8 +468,9 @@ def _build_field_entry(col: etree._Element, ds_id: str, table_id: str | None, id
         entry["tableau_formula"] = formula
         entry.update(_classify_calculation(formula))
     if calc_class == "bin":
-        entry["bin_size"] = calc_el.get("bin-size")
-        entry["bin_source_column"] = calc_el.get("column")
+        entry["bin_size"] = calc_el.get("bin-size") or calc_el.get("size")
+        entry["bin_source_column"] = calc_el.get("column") or calc_el.get("formula")
+        entry["bin_size_parameter"] = calc_el.get("size-parameter")
     return entry
 
 
@@ -969,7 +967,7 @@ def _parse_zone(
         zone["worksheet_id"] = worksheet_ids_by_name.get(zone_el.get("name", ""))
     text_el = zone_el.find("formatted-text")
     if text_el is not None:
-        zone["text_html"] = "".join(run.text or "" for run in text_el.findall("run"))
+        zone["text_html"] = _text_from_runs(text_el)
     bg = zone_el.find("zone-style/format[@attr='background-color']")
     if bg is not None:
         zone["background_color"] = bg.get("value")
