@@ -110,7 +110,62 @@ def test_default_export_writes_every_relation_across_every_extract(tmp_path: Pat
     assert manifest["ds.big"]["total_row_count"] == 5
     assert manifest["ds.big"]["joins"] == [{"left": "Orders.csv_FACT", "right": "Products.csv_DIM", "type": "inner"}]
     assert len(all_relations) == 3
-    assert big_relations["Extract.Orders.csv_FACT.csv"]["row_count"] == 3
-    assert _csv_row_count(output_dir / "Extract.Orders.csv_FACT.csv") == 3
-    assert _csv_row_count(output_dir / "Extract.Products.csv_DIM.csv") == 2
-    assert _csv_row_count(output_dir / "Extract.Customers.csv_DIM.csv") == 4
+    assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"] == 3
+    assert _csv_row_count(output_dir / "ds.big.Extract.Orders.csv_FACT.csv") == 3
+    assert _csv_row_count(output_dir / "ds.big.Extract.Products.csv_DIM.csv") == 2
+    assert _csv_row_count(output_dir / "ds.small.csv") == 4
+
+
+def test_same_qualified_table_name_in_distinct_extracts_keeps_both_datasources(tmp_path: Path) -> None:
+    """One-table extracts often all expose "Extract"."Extract"; distinct data sources must not dedupe."""
+    orders_hyper = tmp_path / "orders.hyper"
+    annotations_hyper = tmp_path / "annotations.hyper"
+    _create_hyper(
+        orders_hyper,
+        {"Extract": (["Order ID", "Sales"], [("o1", "10"), ("o2", "20"), ("o3", "30")])},
+    )
+    _create_hyper(annotations_hyper, {"Extract": (["Label"], [("overview",)])})
+
+    workbook = tmp_path / "same_table_name.twbx"
+    with zipfile.ZipFile(workbook, "w") as archive:
+        archive.write(orders_hyper, "Data/orders/orders.hyper")
+        archive.write(annotations_hyper, "Data/annotations/annotations.hyper")
+
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "id": "ds.orders",
+                        "connection": {"mode": "extract", "hyper_file": "Data/orders/orders.hyper"},
+                        "joins": [],
+                    },
+                    {
+                        "id": "ds.annotations",
+                        "connection": {"mode": "extract", "hyper_file": "Data/annotations/annotations.hyper"},
+                        "joins": [],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    output_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT), str(workbook), str(spec), "-o", str(output_dir)],
+        check=True,
+        cwd=SCRIPT.parents[1],
+    )
+
+    manifest = json.loads((output_dir / "extract_manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["ds.orders"]["relation_count"] == 1
+    assert manifest["ds.annotations"]["relation_count"] == 1
+    assert manifest["ds.orders"]["relations"][0]["qualified_name"] == '"Extract"."Extract"'
+    assert manifest["ds.annotations"]["relations"][0]["qualified_name"] == '"Extract"."Extract"'
+    assert manifest["ds.orders"]["relations"][0]["row_count"] == 3
+    assert manifest["ds.annotations"]["relations"][0]["row_count"] == 1
+    assert _csv_row_count(output_dir / "ds.orders.csv") == 3
+    assert _csv_row_count(output_dir / "ds.annotations.csv") == 1

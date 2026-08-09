@@ -122,23 +122,29 @@ def _assert_no_silent_loss(ds_id: str, relation_count: int, relations: list[dict
         )
 
 
+def _relation_csv_path(output_dir: Path, ds_id: str, qualified_name: str, relation_count: int) -> Path:
+    """Keep the old single-relation filename contract; namespace only multi-relation exports."""
+    if relation_count == 1:
+        return output_dir / f"{_safe_name(ds_id)}.csv"
+    return output_dir / f"{_safe_name(ds_id)}.{_safe_name(qualified_name)}.csv"
+
+
 def _export_hyper_file(
     hyper_path: Path,
     output_dir: Path,
-    written: dict[str, dict[str, Any]],
+    ds_id: str,
     hyper: HyperProcess,
 ) -> dict[str, dict[str, Any]]:
-    """Export one Hyper file into staged CSVs, then merge first-wins by qualified table name."""
+    """Export one data source's Hyper file without deduping across other extracts."""
     with tempfile.TemporaryDirectory(prefix="hyper_csv_", dir=output_dir) as stage:
         with Connection(endpoint=hyper.endpoint, database=str(hyper_path)) as connection:
             staged = export_tables_to_csv(connection, Path(stage))
+        exported: dict[str, dict[str, Any]] = {}
         for qualified_name, info in staged.items():
-            if qualified_name not in written:
-                final_csv = output_dir / Path(info["csv_path"]).name
-                shutil.copyfile(info["csv_path"], final_csv)
-                written[qualified_name] = {**info, "csv_path": str(final_csv.resolve())}
-            staged[qualified_name] = written[qualified_name]
-        return staged
+            final_csv = _relation_csv_path(output_dir, ds_id, qualified_name, len(staged))
+            shutil.copyfile(info["csv_path"], final_csv)
+            exported[qualified_name] = {**info, "csv_path": str(final_csv.resolve())}
+        return exported
 
 
 def extract_data_sources(
@@ -149,7 +155,6 @@ def extract_data_sources(
     """Export every relation in every extract-backed data source and return a manifest by data source."""
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {}
-    written: dict[str, dict[str, Any]] = {}
 
     with HyperProcess(telemetry=Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
         for ds in migration_spec["data_sources"]:
@@ -163,7 +168,7 @@ def extract_data_sources(
                 manifest[ds["id"]] = {"error": f"hyper file not found: {hyper_file_name}"}
                 continue
 
-            exported = _export_hyper_file(hyper_path, output_dir, written, hyper)
+            exported = _export_hyper_file(hyper_path, output_dir, ds["id"], hyper)
             relations = [_manifest_relation(name, info) for name, info in sorted(exported.items())]
             _assert_no_silent_loss(ds["id"], len(exported), relations)
             manifest[ds["id"]] = {
