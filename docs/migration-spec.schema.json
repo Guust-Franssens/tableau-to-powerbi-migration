@@ -277,7 +277,8 @@
       "description": "Appended to by every pipeline stage (parser + subagents). Raw material for the capabilities & limitations writeup.",
       "items": {
         "type": "object",
-        "required": ["item", "issue", "severity"],
+        "required": ["item", "issue", "severity", "stage"],
+        "additionalProperties": false,
         "properties": {
           "item": { "type": "string", "description": "id of the affected worksheet/dashboard/field" },
           "issue": { "type": "string" },

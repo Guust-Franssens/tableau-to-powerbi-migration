@@ -231,8 +231,9 @@ it must show up in `limitations_encountered`, not be silently dropped.
      happen before any report work begins. Do not run report and model fixes concurrently against one
      bundle.
 9. **Delegate to `pbi-report-builder`** — only AFTER step 8's landing re-run has finished, because
-   that re-run recreates the `.Report` folder and would destroy its work. **Gate the handover:**
-   `python scripts/check_migration_progress.py --bundle <bundle> --handoff` must exit 0. Exit 1 means
+   that re-run recreates the `.Report` folder and would destroy its work. **Spec+handoff gates (both
+   exit 0):** `python scripts/validate_spec.py <spec>`;
+   `python scripts/check_migration_progress.py --bundle <bundle> --handoff`. Exit 1 means
    a model has no `cache.abf`, or one **older** than its TMDL — the report builder would open an
    EMPTY model and trigger its own refresh (minutes, plus a credential prompt on a live source).
    Measured: a cache written at 22:22 against a Desktop opened at 22:19 did exactly that, and a stale
@@ -240,7 +241,8 @@ it must show up in `limitations_encountered`, not be silently dropped.
    Give it: the handover
    slice, the validator's classification from step 7, the model location, and the reference bundle.
    Its edits must land as re-runnable `_build/fix_*.py` scripts, not bundle-only edits.
-10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. Name
+10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. First
+   rerun `python scripts/validate_spec.py <spec>`; block on failure. Name
    the mode explicitly; it is a different job from step 7's triage. It sees the artifacts, the
    reference bundle and the triage classifications, but **not the builders' rationale** — and it is
    told the classifications are **claims to verify, not settled facts**, including the ones an earlier
