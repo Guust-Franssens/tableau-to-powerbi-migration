@@ -23,7 +23,7 @@ Power BI visual, and it is mechanical:
 | `Pie` | Pie Chart Map | `azureMap` + `bubbleLayer` + `Series` | ⚠️ **no true equivalent** — see §3 |
 | `Multipolygon` + `Pie` (two classes, one sheet) | Combined Map | `azureMap` with **`referenceLayer` *and* `bubbleLayer`** | see §3 — this is the valuable one |
 
-## 2. The basemap is also stated in the source
+## 2. The basemap source style is also stated in the source
 
 `mapControls.defaultStyle` does not need to be guessed from a thumbnail. Per worksheet the `.twb`
 carries a `<style-rule element='map'>` and a `<mapsource>`:
@@ -36,13 +36,14 @@ for ws in ET.parse(twb).getroot().iter("worksheet"):
     sources = [e.get("name") for e in ws.iter("mapsource")]
 ```
 
-Observed across the fixture:
+**Extracting the Tableau side is exact and mechanical. Choosing the Azure Maps equivalent is a
+separate judgement, and only the first row is render-verified:**
 
-| Tableau | Azure Maps `defaultStyle` | seen in |
-|---|---|---|
-| `mapsource='Tableau'`, no `map-style` | `grayscale_light` | 6 of 9 worksheets |
-| `map-style='tableau-z-black'` | `night` | Dark Map |
-| `mapsource='Satellite'` | `satellite` | Mapbox |
+| Tableau source style | Azure `defaultStyle` | confidence | evidence |
+|---|---|---|---|
+| `mapsource='Tableau'`, no `map-style` | `grayscale_light` | ✅ verified | 6 of 9 worksheets share this config; 3 have reference thumbnails, all light grey |
+| `map-style='tableau-z-black'` | `night` | ⚠️ inferred | source read from the `.twb` (Dark Map); target is a name match, no side-by-side render captured |
+| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source read from the `.twb` (Mapbox); target not render-compared |
 
 `washout` (0.0 in most sheets) has no direct Azure Maps control; it is a basemap opacity treatment
 and is safe to drop, but worth recording as a fidelity note rather than silently ignoring.
