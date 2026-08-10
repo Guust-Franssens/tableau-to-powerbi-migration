@@ -334,6 +334,10 @@ A "dimension-on-rows dot strip" → scatter with `Category` = the dimension (Det
   `application.state.get` / `report.snapshot.capture` / `file.reload`). PBIP stores no data cache, so a
   freshly-opened import report renders **empty** ("tables have incomplete or no data"). **A clean
   screenshot with empty visuals is an unrefreshed-model artifact, not a binding defect.**
+- **A blank or sparse screenshot is not evidence of a blank or sparse page.** `azureMap` and other
+  remote/progressive visuals can look plausible while still missing marks; re-capture with
+  `python scripts/capture_powerbi_pages.py <report.Report> <out-dir> --pid <pid>` and require
+  consecutive byte-identical frames before trusting the image.
 - **First check whether you even need to refresh.** A model handed over already refreshed AND saved
   persists to `<Name>.SemanticModel/.pbi/cache.abf` and survives reopening. Run
   `python scripts/refresh_pbip_model.py --pid <pid> --verify-only` — `DATA_OK` means you are done. On
