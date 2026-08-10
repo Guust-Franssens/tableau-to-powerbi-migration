@@ -2,7 +2,7 @@
 """
 purpose: Capture every Power BI report page, waiting until each page's render has actually stabilised.
 usage:   python scripts/capture_powerbi_pages.py <report.Report> <output-dir> [--pid PID]
-                                                [--poll 4] [--max-wait 75]
+                                                [--poll 4] [--stable-seconds 8] [--max-wait 75]
 
 Why this exists - and why the obvious version is wrong
 ------------------------------------------------------
@@ -32,9 +32,9 @@ Three things that do not work
 
 What works
 ----------
-Capture repeatedly and compare consecutive frames. When two successive captures of the same page are
-byte-identical, the render has converged. That is a measurement of stability rather than an assumption
-about timing, so it self-tunes to a cold or warm Desktop.
+Capture repeatedly and compare frames across a minimum stable dwell. When the same page stays
+byte-identical for that dwell, the render has converged. That is a measurement of stability rather
+than an assumption about timing, so it self-tunes to a cold or warm Desktop.
 """
 
 from __future__ import annotations
@@ -68,6 +68,7 @@ class CaptureOptions:
     """Timing options for one page capture."""
 
     poll: float
+    stable_seconds: float
     max_wait: float
 
 
@@ -127,28 +128,32 @@ def capture_stable(
     options: CaptureOptions,
     runtime: CaptureRuntime = DEFAULT_RUNTIME,
 ) -> CaptureResult:
-    """Screenshot until two consecutive frames match, copying the converged/newest frame to `dest`."""
+    """Screenshot until one frame digest remains stable for the configured dwell."""
     scratch = dest.parent / f".{dest.stem}.frames"
     if scratch.exists():
         shutil.rmtree(scratch)
     scratch.mkdir(parents=True)
 
     started = runtime.clock()
-    previous_digest: str | None = None
+    stable_digest: str | None = None
+    stable_since = started
     frames = 0
     newest_frame: Path | None = None
     try:
         while runtime.clock() - started < options.max_wait:
+            captured_at = runtime.clock()
             frame = scratch / f"{frames}.png"
             frames += 1
             if not runtime.screenshotter(page_id, pid, frame):
                 return CaptureResult(False, False, runtime.clock() - started, frames)
             newest_frame = frame
             digest = frame_digest(frame)
-            if digest == previous_digest:
+            if digest != stable_digest:
+                stable_digest = digest
+                stable_since = captured_at
+            elif captured_at - stable_since >= options.stable_seconds:
                 shutil.copyfile(frame, dest)
                 return CaptureResult(True, True, runtime.clock() - started, frames)
-            previous_digest = digest
             runtime.sleep(options.poll)
 
         if newest_frame is not None:
@@ -164,17 +169,25 @@ def _safe_filename(name: str) -> str:
     return "".join(char if char not in '<>:"/\\|?*' else "_" for char in name).strip() or "page"
 
 
-def capture_report(report: Path, out_dir: Path, pid: str, poll: float, max_wait: float) -> int:
+def capture_report(
+    report: Path,
+    out_dir: Path,
+    pid: str,
+    options: CaptureOptions,
+    runtime: CaptureRuntime = DEFAULT_RUNTIME,
+) -> int:
     """Capture every page in `report`; return a process exit code."""
     out_dir.mkdir(parents=True, exist_ok=True)
     started = time.time()
     unstable: list[str] = []
     failed: list[str] = []
     report_pages = pages(report)
-    options = CaptureOptions(poll=poll, max_wait=max_wait)
+    if not report_pages:
+        print(f"FAILED: no pages found under {report / 'definition' / 'pages'}")
+        return 1
 
     for page_id, name in report_pages:
-        result = capture_stable(page_id, pid, out_dir / f"{_safe_filename(name)}.png", options)
+        result = capture_stable(page_id, pid, out_dir / f"{_safe_filename(name)}.png", options, runtime)
         tag = "OK" if result.captured and result.converged else ("UNSTABLE" if result.captured else "FAIL")
         print(
             f"  {tag:<9}{name:<26} settled in {result.seconds:5.1f}s over {result.frames} frames "
@@ -201,6 +214,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("outdir", type=Path, help="Folder where page PNGs should be written")
     parser.add_argument("--pid", required=True, help="Power BI Desktop PID to capture from")
     parser.add_argument("--poll", type=float, default=4.0, help="Seconds between frames for one page")
+    parser.add_argument(
+        "--stable-seconds",
+        type=float,
+        default=8.0,
+        help="Minimum byte-identical dwell before treating a page as converged",
+    )
     parser.add_argument("--max-wait", type=float, default=75.0, help="Max seconds to wait for one page")
     return parser.parse_args(argv)
 
@@ -208,7 +227,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    return capture_report(args.report, args.outdir, args.pid, args.poll, args.max_wait)
+    options = CaptureOptions(poll=args.poll, stable_seconds=args.stable_seconds, max_wait=args.max_wait)
+    return capture_report(args.report, args.outdir, args.pid, options)
 
 
 if __name__ == "__main__":
