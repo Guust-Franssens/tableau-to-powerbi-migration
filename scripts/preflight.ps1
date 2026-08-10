@@ -30,7 +30,8 @@
 
 .NOTES
   Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 [-Update]
-  Exit: 0 if every CRITICAL + RECOMMENDED item is present; 1 if any is missing.
+  Exit: 0 if every CRITICAL item is present; 1 if any CRITICAL item is missing.
+        RECOMMENDED and OPTIONAL items are surfaced as warnings but do not stop a migration.
 #>
 #Requires -Version 5.1
 param([switch]$Update, [switch]$CheckUpstream)
@@ -129,8 +130,8 @@ foreach ($cliName in $cliFloor.Keys) {
     } else {
         "Version moved past the matrix in AGENTS.md - re-verify the version-specific Gotchas in .github/agents/ before trusting them."
     }
-    # Below the floor is a real (recommended-tier) failure; above known-good is only an advisory.
-    Add-Check "version: $cliName" $(if ($floorOk) { 'optional' } else { 'recommended' }) $(-not $drifted -and $floorOk) $detail $hint
+    # Below the floor is a real correctness failure; above known-good is only an advisory.
+    Add-Check "version: $cliName" $(if ($floorOk) { 'optional' } else { 'critical' }) $(-not $drifted -and $floorOk) $detail $hint
 }
 
 # --- PBIR JSON-schema reachability (does `validate` actually run its schema layer this session?) ---
@@ -198,32 +199,41 @@ if ($migrationPlugin) {
         if (-not (Test-Path $theirs)) { $missing += $name; continue }
         if ((Test-Path $mine) -and ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash)) { $drift += $name }
     }
-    # TIERING MATTERS, and the first version got it wrong: a single 'recommended' check made preflight
-    # exit 1 on drift, which BLOCKED every migration - and the fix (reinstall the plugin) is impossible
-    # while a Copilot session is running, because the session file-locks the plugin directory. A gate
-    # you cannot satisfy at the moment it fires is a bad gate. So the two shapes are split by how bad
-    # they actually are:
-    #   NOT INSTALLED -> 'recommended' (blocks). A shipped bundle absent locally is a real capability
+    # TIERING MATTERS. A 'recommended' check must not produce the same exit as a missing 'critical'
+    # dependency: preflight is step 0 for every migration, and agents stop on a non-zero exit. These
+    # bundle checks are not advisory, though: AGENTS.md documents both NOT INSTALLED and STALE as
+    # blockers, because a stale installed bundle means a subagent executes different code than the
+    # repo shows, which already invalidated one measurement in this repo.
+    #
+    # The two shapes are still split because they mean different repairs:
+    #   NOT INSTALLED -> a shipped bundle absent locally is a real capability
     #                    loss: the agent cannot invoke that skill by name at all.
-    #   STALE         -> 'recommended' (blocks). This was 'optional' until 2026-08-01, on the theory
+    #   STALE         -> this was 'optional' until 2026-08-01, on the theory
     #                    that an older revision is "a degradation, not a correctness break". That is
     #                    FALSE, and it cost a whole experiment. The plugin copy SHADOWS .github/skills,
     #                    so a stale bundle means the agent silently executes DIFFERENT CODE than the
     #                    repo shows - with no diff to notice. Measured: refresh_pbip_model.py had just
     #                    gained an XMLA CommandTimeout in the repo; the plugin copy had none, the agent
     #                    ran the copy without it, and the resulting timing was used to "prove" a
-    #                    conclusion about behaviour the executed code did not even contain.
-    #                    Unfixable mid-session is exactly WHY it must block at session start, when it
-    #                    is still fixable, rather than warn once and be scrolled past.
+    #                    conclusion about behaviour the executed code did not even contain. Keep this
+    #                    warning visible and actionable, but do not encode a warning tier as exit 1.
     $detail = if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" } else { "$($shipped.Count) bundle(s) present" }
-    Add-Check 'skill bundles installed' 'recommended' ($missing.Count -eq 0) $detail `
+    Add-Check 'skill bundles installed' 'critical' ($missing.Count -eq 0) $detail `
         'copilot plugin install powerbi-migration-skills@powerbi-migration-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
 
-    Add-Check 'skill bundles match published plugin' 'recommended' ($drift.Count -eq 0) `
+    Add-Check 'skill bundles match published plugin' 'critical' ($drift.Count -eq 0) `
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
         'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push. Do not trust a measurement taken against a stale bundle.'
 }
 
+# Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
+# depends on it, even when the dependency only fails later at handoff/validation time. Audited
+# 2026-08-10 under that exit semantics:
+#   * powerbi-migration-skills plugin: repo-local skills still load in this repo; the critical bundle
+#     checks above enforce correctness when the installed plugin is present and shadowing the repo.
+#   * powerbi-modeling-mcp: useful authoring accelerator; local PBIP/TMDL edits can still proceed.
+#   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
+#     is enforced by the critical PBI_DESKTOP_PATH pin below.
 # --- MCP servers ---
 $mcp = Read-CopilotJson 'mcp-config.json'
 foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote', 'optional'))) {
@@ -233,8 +243,8 @@ foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote',
         'Add via /mcp, or copy from .vscode/mcp.json into ~/.copilot/mcp-config.json (mcpServers).'
 }
 
-Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
-Add-Cli 'powerbi-desktop' 'recommended' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
+Add-Cli 'npx' 'critical' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
+Add-Cli 'powerbi-desktop' 'critical' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
 # --- Is anything NEWER available upstream? (-CheckUpstream, opt-in) -------------------------------
 #
@@ -307,7 +317,7 @@ if (-not $desktop) {
     $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
     if (Test-Path $classic) { $desktop = $classic; $desktopVia = 'classic install' }
 }
-Add-Check 'Power BI Desktop' 'recommended' ([bool]$desktop) `
+Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `
     $(if ($desktop) { "$desktop (via $desktopVia)" } else { 'not found' }) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
 
@@ -323,7 +333,7 @@ if ($appx) {
 # The mismatch-remover. A set PBI_DESKTOP_PATH means the bridge and this script resolve the SAME exe;
 # unset means the bridge is guessing from a version-pinned list and may already be wrong.
 $pathPinned = [bool]($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH))
-Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
+Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'critical' $pathPinned `
     $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery' }) `
     $(if ($desktop) { "setx PBI_DESKTOP_PATH `"$desktop`"   (then reopen the shell)" } else { 'install Power BI Desktop first' })
 
@@ -350,7 +360,7 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
 # check could never pass. TOM now comes from the NuGet package Microsoft.AnalysisServices.NetCore.retail.amd64,
 # restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
-Add-Cli 'dotnet' 'recommended' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
+Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'
@@ -361,21 +371,25 @@ Add-Check 'ODBC Driver 18 (SQL)' 'optional' ($odbc -contains 'ODBC Driver 18 for
     'Only for direct SQL Analytics Endpoint / Warehouse queries.'
 
 # --- Render ---
-$blocking = 0
+$criticalMissing = 0
+$recommendedWarnings = 0
 foreach ($tier in @('critical', 'recommended', 'optional')) {
     Write-Host ''
     Write-Host "== $($tier.ToUpper()) =="
     foreach ($r in ($results | Where-Object { $_.Tier -eq $tier })) {
-        $mark = if ($r.Ok) { 'OK  ' } elseif ($tier -eq 'optional') { 'warn' } else { 'MISS' }
+        $mark = if ($r.Ok) { 'OK  ' } elseif ($tier -eq 'critical') { 'MISS' } else { 'WARN' }
         Write-Host ("  [{0}] {1,-44} {2}" -f $mark, $r.Name, $r.Detail)
-        if (-not $r.Ok -and $tier -ne 'optional') { Write-Host "         -> $($r.Hint)"; $blocking++ }
+        if (-not $r.Ok -and $tier -eq 'critical') { Write-Host "         -> $($r.Hint)"; $criticalMissing++ }
+        elseif (-not $r.Ok -and $tier -eq 'recommended') { Write-Host "         (recommended) $($r.Hint)"; $recommendedWarnings++ }
         elseif (-not $r.Ok -and $r.Hint) { Write-Host "         (optional) $($r.Hint)" }
     }
 }
 Write-Host ''
-if ($blocking -gt 0) {
-    Write-Host "PREFLIGHT: $blocking critical/recommended item(s) missing - resolve before migrating."
+if ($criticalMissing -gt 0) {
+    $suffix = if ($recommendedWarnings -gt 0) { " ($recommendedWarnings recommended warning(s) also present)." } else { '' }
+    Write-Host "PREFLIGHT: $criticalMissing critical item(s) missing - resolve before migrating.$suffix"
     exit 1
 }
-Write-Host 'PREFLIGHT: all critical + recommended dependencies present. Ready to migrate.'
+$suffix = if ($recommendedWarnings -gt 0) { " $recommendedWarnings recommended warning(s) present; review before relying on affected capabilities." } else { '' }
+Write-Host "PREFLIGHT: all critical dependencies present. Ready to migrate.$suffix"
 exit 0
