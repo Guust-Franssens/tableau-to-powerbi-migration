@@ -201,8 +201,9 @@ if ($migrationPlugin) {
     }
     # TIERING MATTERS. A 'recommended' check must not produce the same exit as a missing 'critical'
     # dependency: preflight is step 0 for every migration, and agents stop on a non-zero exit. These
-    # checks still print loudly because they affect the quality and reproducibility of a migration,
-    # but their tier now matches their outcome: warn, do not halt.
+    # bundle checks are not advisory, though: AGENTS.md documents both NOT INSTALLED and STALE as
+    # blockers, because a stale installed bundle means a subagent executes different code than the
+    # repo shows, which already invalidated one measurement in this repo.
     #
     # The two shapes are still split because they mean different repairs:
     #   NOT INSTALLED -> a shipped bundle absent locally is a real capability
@@ -217,14 +218,21 @@ if ($migrationPlugin) {
     #                    conclusion about behaviour the executed code did not even contain. Keep this
     #                    warning visible and actionable, but do not encode a warning tier as exit 1.
     $detail = if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" } else { "$($shipped.Count) bundle(s) present" }
-    Add-Check 'skill bundles installed' 'recommended' ($missing.Count -eq 0) $detail `
+    Add-Check 'skill bundles installed' 'critical' ($missing.Count -eq 0) $detail `
         'copilot plugin install powerbi-migration-skills@powerbi-migration-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
 
-    Add-Check 'skill bundles match published plugin' 'recommended' ($drift.Count -eq 0) `
+    Add-Check 'skill bundles match published plugin' 'critical' ($drift.Count -eq 0) `
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
         'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push. Do not trust a measurement taken against a stale bundle.'
 }
 
+# Recommended means "warn, do not halt." Audited 2026-08-10 under that exit semantics:
+#   * powerbi-migration-skills plugin: repo-local skills still load in this repo; the critical bundle
+#     checks above enforce correctness when the installed plugin is present and shadowing the repo.
+#   * powerbi-modeling-mcp / npx / dotnet: useful authoring and validation accelerators, but local
+#     PBIP/TMDL edits can still proceed without them.
+#   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
+#     is enforced by the critical PBI_DESKTOP_PATH pin below.
 # --- MCP servers ---
 $mcp = Read-CopilotJson 'mcp-config.json'
 foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote', 'optional'))) {
@@ -235,7 +243,7 @@ foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote',
 }
 
 Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
-Add-Cli 'powerbi-desktop' 'recommended' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
+Add-Cli 'powerbi-desktop' 'critical' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
 # --- Is anything NEWER available upstream? (-CheckUpstream, opt-in) -------------------------------
 #
@@ -308,7 +316,7 @@ if (-not $desktop) {
     $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
     if (Test-Path $classic) { $desktop = $classic; $desktopVia = 'classic install' }
 }
-Add-Check 'Power BI Desktop' 'recommended' ([bool]$desktop) `
+Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `
     $(if ($desktop) { "$desktop (via $desktopVia)" } else { 'not found' }) `
     'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
 
@@ -324,7 +332,7 @@ if ($appx) {
 # The mismatch-remover. A set PBI_DESKTOP_PATH means the bridge and this script resolve the SAME exe;
 # unset means the bridge is guessing from a version-pinned list and may already be wrong.
 $pathPinned = [bool]($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH))
-Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
+Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'critical' $pathPinned `
     $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery' }) `
     $(if ($desktop) { "setx PBI_DESKTOP_PATH `"$desktop`"   (then reopen the shell)" } else { 'install Power BI Desktop first' })
 
