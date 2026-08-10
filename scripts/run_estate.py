@@ -58,7 +58,9 @@ import logging
 import subprocess
 import sys
 import time
+import uuid
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from migration_bundle import sha256_file, write_engine_receipt
@@ -74,6 +76,10 @@ EXIT_OK = 0
 EXIT_ENGINE_FAILED = 1
 EXIT_DOD_FAILED = 3
 EXIT_COLLISION = 4
+GENERATED_ARTIFACTS_KEY = "generated_artifacts"
+VOLATILE_GENERATED_DIRS = {".pbi"}
+SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
+SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
 
 
 def run_engine(engine: Path, src: Path, out: Path, approved_dax: Path | None) -> tuple[int, str]:
@@ -92,6 +98,66 @@ def run_engine(engine: Path, src: Path, out: Path, approved_dax: Path | None) ->
     log.info("ENGINE: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return proc.returncode, (proc.stdout + proc.stderr)
+
+
+def _is_scratch_path(relative: Path) -> bool:
+    """Whether a relative path is migration scratch rather than a generated deliverable."""
+    return any(part.lower().lstrip("._") in SCRATCH_INTENTS for part in relative.parts)
+
+
+def _is_generated_artifact(path: Path, bundle: Path, earliest_mtime: float | None = None) -> bool:
+    """Stable deterministic-tier output that should stay explainable after agent work.
+
+    Power BI refreshes and Desktop autosaves write under ``.pbi``; those sidecars are deliberately
+    outside the hash set so a normal refresh does not look like tampering.
+    """
+    if not path.is_file():
+        return False
+    if earliest_mtime is not None and path.stat().st_mtime < earliest_mtime:
+        return False
+    relative = path.relative_to(bundle)
+    lower_parts = [part.lower() for part in relative.parts]
+    if _is_scratch_path(relative) or any(part in VOLATILE_GENERATED_DIRS for part in lower_parts):
+        return False
+    if path.suffix.lower() == ".pbip":
+        return True
+    return any(part.endswith((".semanticmodel", ".report")) for part in lower_parts)
+
+
+def generated_artifact_hashes(bundle: Path, earliest_mtime: float | None = None) -> dict[str, str]:
+    """All stable generated artifacts in a bundle, keyed by POSIX relative path."""
+    files = {}
+    for path in sorted(bundle.rglob("*")):
+        if _is_generated_artifact(path, bundle, earliest_mtime):
+            files[path.relative_to(bundle).as_posix()] = sha256_file(path)
+    return files
+
+
+def write_generated_artifact_manifest(
+    bundle: Path, report: dict | None = None, earliest_mtime: float | None = None
+) -> Path:
+    """Upsert generated-file hashes into ``input_manifest.json`` after the engine run.
+
+    The deterministic engine already owns this manifest for source inputs. Adding a separate key keeps
+    that contract intact while giving downstream checks a baseline for generated TMDL/PBIR drift.
+    """
+    manifest_path = bundle / "input_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            manifest = {"engine_input_manifest": manifest}
+    else:
+        manifest = {}
+    manifest[GENERATED_ARTIFACTS_KEY] = {
+        "version": 1,
+        "run_id": uuid.uuid4().hex,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "report_generated_at": (report or {}).get("generated_at"),
+        "report_sha256": sha256_file(bundle / "report.json") if (bundle / "report.json").is_file() else None,
+        "files": generated_artifact_hashes(bundle, earliest_mtime),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
 
 
 def check_definition_of_done(report: dict) -> tuple[bool, str]:
@@ -307,9 +373,10 @@ def main(argv: list[str] | None = None) -> int:
     # --- phase 1: the engine ------------------------------------------------------------------
     if not args.slice_only:
         started = time.monotonic()
+        phases.append({"phase": "engine_run", "started_wall": time.time()})
         code, output = run_engine(args.engine, args.input, args.output, args.approved_dax)
         elapsed = time.monotonic() - started
-        phases.append({"phase": "engine_run", "elapsed_sec": round(elapsed, 1), "exit_code": code})
+        phases[-1].update({"elapsed_sec": round(elapsed, 1), "exit_code": code})
         log.info("ENGINE: exit %d in %.0fs", code, elapsed)
         if code != 0:
             print(output[-2000:], file=sys.stderr)
@@ -318,6 +385,13 @@ def main(argv: list[str] | None = None) -> int:
 
     report = read_report(args.output)
     if not args.slice_only:
+        # Order matters: the manifest UPSERTS into input_manifest.json, and the receipt HASHES that
+        # same file. Receipt-first would leave input_manifest_sha256 stale on every legitimate run,
+        # so _receipt_matches_bundle() would reject the bundle the engine just produced.
+        log.info(
+            "GENERATED_ARTIFACTS: hashes -> %s",
+            write_generated_artifact_manifest(args.output, report, phases[0]["started_wall"] - 1),
+        )
         write_receipt_phase(args.output, phases)
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------

@@ -34,6 +34,7 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
+- **Declare generated edits.** TMDL/PBIR/`.pbip`: file/change/why + replay script + hash record.
 - **Surface complexity mismatches proactively.** If the parsed workbook implies more effort than the
   user assumes (many LOD/table-calc fields, extract-only data with no upstream, >20 floating-layout
   worksheets), say so before building rather than discovering it mid-migration.
@@ -235,7 +236,7 @@ it is slow, and `validate` will not catch a wrong encoding.
    survive a landing re-run.
 7. Report back: what you repaired, what you left as an accepted limitation *and why*, any
    `viz_fidelity` row you believe is a false claim (route it back, never silently fix), and new
-   `limitations_encountered` entries (`stage: "report_build"`).
+   `limitations_encountered` entries (`stage: "report_build"`); then run `python scripts/validate_spec.py <migration-spec.json>`.
 
 **If a page must be built from scratch** (no rebuilt equivalent - rare), fall back to the full
 authoring chain: `powerbi-report-planning` -> `powerbi-report-design` -> **empty layout skeleton,
@@ -307,7 +308,8 @@ crashing" is necessary but not sufficient:
 10. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
    `limitations_encountered` has been explicitly addressed or explicitly flagged** — none silently
    dropped.
-11. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
+11. **Any `azureMap` with >1 `Column` projection in `Category` is blocking** — it validates but almost always collapses Tableau's map grain.
+12. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
    still needs the relevant subset of this list re-checked (at minimum #4–#6 for the visual touched)
    before you report it done.
 

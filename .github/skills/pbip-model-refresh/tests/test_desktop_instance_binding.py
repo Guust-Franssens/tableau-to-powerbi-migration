@@ -16,6 +16,7 @@ candidates), and prove the connected model really is the one that owns the cache
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -402,6 +403,43 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.exists(), "a default refresh must persist cache.abf"
+
+
+def test_compatibility_alignment_declares_generated_edit(tmp_path: Path) -> None:
+    """A normal persisted refresh may rewrite database.tmdl; tamper needs structured evidence."""
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    model_dir = cache.parent.parent
+    database_tmdl = model_dir / "definition" / "database.tmdl"
+    database_tmdl.write_text("compatibilityLevel: 1604\n", encoding="utf-8")
+    before_hash = refresh_pbip_model.sha256_file(database_tmdl)
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "generated_artifacts": {
+                    "version": 1,
+                    "run_id": "engine-run",
+                    "recorded_at": "2026-08-10T08:00:00+00:00",
+                    "report_sha256": "report-hash",
+                    "files": {"MyMigration.SemanticModel/definition/database.tmdl": before_hash},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeDatabase:
+        CompatibilityLevel = 1702
+
+    note = refresh_pbip_model._align_compatibility(FakeDatabase(), model_dir)
+
+    declarations = json.loads((tmp_path / "_build" / "generated-edit-declarations.json").read_text(encoding="utf-8"))
+    declaration = declarations["declarations"][0]
+    assert "1604 -> 1702" in note
+    assert declaration["run_id"] == "engine-run"
+    assert declaration["target"] == "MyMigration.SemanticModel/definition/database.tmdl"
+    assert declaration["baseline_sha256"] == before_hash
+    assert declaration["expected_sha256"] == refresh_pbip_model.sha256_file(database_tmdl)
+    assert declaration["script_identity"] == "pbip-model-refresh/refresh_pbip_model.py"
 
 
 def test_a_timeout_does_not_assert_a_credential_modal(monkeypatch, tmp_path: Path, capsys) -> None:

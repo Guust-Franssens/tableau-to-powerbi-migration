@@ -49,6 +49,18 @@ _SHELF_FIELD_RE = re.compile(r"\[([^\[\]]+)\]\.\[([^\[\]]+)\]")
 _TABLEAU_LB_SENTINEL_RE = re.compile(r"^\s*[\u00c6\u00a0]+\s*$")
 
 
+class MigrationSpecValidationError(ValueError):
+    """Raised when a migration spec violates docs/migration-spec.schema.json."""
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("migration-spec.json schema validation failed:\n" + "\n".join(f"- {err}" for err in errors))
+
+
+class MigrationSpecValidationUnavailable(RuntimeError):
+    """Raised when a strict caller cannot load the schema validator."""
+
+
 def slugify(text: str) -> str:
     """Lowercase, alnum + underscore slug used to build stable synthetic ids."""
     text = re.sub(r"[^a-zA-Z0-9]+", "_", text.strip().lower())
@@ -1471,16 +1483,175 @@ def parse_workbook(path: Path) -> dict[str, Any]:
     return spec
 
 
-def validate_spec(spec: dict[str, Any], schema_path: Path) -> None:
-    """Validate the spec against migration-spec.schema.json; skips gracefully if jsonschema isn't
-    installed, since schema validation is a safety net, not a hard runtime dependency."""
+def _json_path(path_parts: list[Any]) -> str:
+    """Return an agent-friendly JSON path such as limitations_encountered[3].severity."""
+    if not path_parts:
+        return "<root>"
+    path = ""
+    for part in path_parts:
+        if isinstance(part, int):
+            path += f"[{part}]"
+        elif path:
+            path += f".{part}"
+        else:
+            path = str(part)
+    return path
+
+
+def _limitation_context(spec: dict[str, Any], path_parts: list[Any]) -> str:
+    """Name the affected limitations_encountered entry when a schema error points inside one."""
+    if len(path_parts) < 2 or path_parts[0] != "limitations_encountered" or not isinstance(path_parts[1], int):
+        return ""
+    entries = spec.get("limitations_encountered")
+    if not isinstance(entries, list) or path_parts[1] >= len(entries):
+        return ""
+    entry = entries[path_parts[1]]
+    if not isinstance(entry, dict):
+        return ""
+    details = [f"{key}={entry[key]!r}" for key in ("item", "stage", "severity") if key in entry]
+    return f" ({', '.join(details)})" if details else ""
+
+
+def _expectation(error: Any) -> str:
+    """Add concise expected-value guidance to jsonschema's raw message."""
+    if error.validator == "enum":
+        allowed = ", ".join(str(value) for value in error.validator_value)
+        return f" expected one of: {allowed}"
+    if error.validator == "required":
+        missing = [field for field in error.validator_value if field not in error.instance]
+        return f" missing required field(s): {', '.join(missing)}"
+    if error.validator == "additionalProperties":
+        allowed = ", ".join(error.schema.get("properties", {}))
+        return f" expected only these fields: {allowed}"
+    if error.validator == "type":
+        return f" expected type: {error.validator_value}"
+    return ""
+
+
+_SPEC_CONTRACT_GOOD_CANARY: dict[str, Any] = {
+    "migration_spec_version": "1.0",
+    "source": {"file_name": "canary.twb"},
+    "data_sources": [],
+    "worksheets": [],
+    "dashboards": [],
+    "limitations_encountered": [
+        {"item": "worksheet:profit", "issue": "valid downstream note", "severity": "high", "stage": "semantic_build"}
+    ],
+}
+
+_SPEC_CONTRACT_BAD_CANARIES: tuple[tuple[str, dict[str, Any]], ...] = (
+    (
+        "bad limitation severity",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [],
+            "worksheets": [],
+            "dashboards": [],
+            "limitations_encountered": [
+                {"item": "worksheet:profit", "issue": "bad severity", "severity": "critical", "stage": "semantic_build"}
+            ],
+        },
+    ),
+    (
+        "missing limitation stage",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [],
+            "worksheets": [],
+            "dashboards": [],
+            "limitations_encountered": [{"item": "worksheet:profit", "issue": "missing stage", "severity": "high"}],
+        },
+    ),
+    (
+        "non-object limitation entry",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [],
+            "worksheets": [],
+            "dashboards": [],
+            "limitations_encountered": ["not an object"],
+        },
+    ),
+    (
+        "typoed limitation key",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [],
+            "worksheets": [],
+            "dashboards": [],
+            "limitations_encountered": [
+                {
+                    "item": "worksheet:profit",
+                    "issue": "typoed key",
+                    "severity": "high",
+                    "stage": "semantic_build",
+                    "severtiy": "critical",
+                }
+            ],
+        },
+    ),
+)
+
+
+def _schema_contract_errors(validator: Any) -> list[str]:
+    """Return canary failures proving the compiled validator is too weak or too strict."""
+    errors = []
+    good_errors = sorted(validator.iter_errors(_SPEC_CONTRACT_GOOD_CANARY), key=lambda err: list(err.absolute_path))
+    if good_errors:
+        errors.append(f"known-good canary was rejected: {good_errors[0].message}")
+    for name, canary in _SPEC_CONTRACT_BAD_CANARIES:
+        if not list(validator.iter_errors(canary)):
+            errors.append(f"known-bad canary was accepted: {name}")
+    return errors
+
+
+def _unavailable_schema_result(message: str, require_jsonschema: bool, cause: Exception | None = None) -> list[str]:
+    """Raise for strict gates, warn-and-skip for parse-time compatibility."""
+    if require_jsonschema:
+        raise MigrationSpecValidationUnavailable(message) from cause
+    logger.warning("%s - skipping validation", message)
+    return []
+
+
+def collect_spec_validation_errors(
+    spec: dict[str, Any], schema_path: Path, *, require_jsonschema: bool = False
+) -> list[str]:
+    """Return human-readable schema errors; an empty list means the spec is valid."""
     try:
         import jsonschema  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        logger.warning("jsonschema not installed - skipping validation")
-        return
+    except ImportError as exc:
+        message = "jsonschema not installed - cannot validate migration-spec.json"
+        return _unavailable_schema_result(message, require_jsonschema, exc)
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    jsonschema.validate(spec, schema)
+    try:
+        jsonschema.Draft7Validator.check_schema(schema)
+    except jsonschema.SchemaError as exc:
+        message = f"{schema_path} is not a valid Draft 7 JSON schema: {exc.message}"
+        return _unavailable_schema_result(message, require_jsonschema, exc)
+    validator = jsonschema.Draft7Validator(schema)
+    contract_errors = _schema_contract_errors(validator)
+    if contract_errors:
+        message = f"{schema_path} cannot validate the migration spec contract: {'; '.join(contract_errors)}"
+        return _unavailable_schema_result(message, require_jsonschema)
+    errors = []
+    for error in sorted(validator.iter_errors(spec), key=lambda err: list(err.absolute_path)):
+        path_parts = list(error.absolute_path)
+        location = _json_path(path_parts)
+        context = _limitation_context(spec, path_parts)
+        expectation = _expectation(error)
+        errors.append(f"{location}{context}: {error.message};{expectation}")
+    return errors
+
+
+def validate_spec(spec: dict[str, Any], schema_path: Path) -> None:
+    """Validate the spec against migration-spec.schema.json with actionable error paths."""
+    errors = collect_spec_validation_errors(spec, schema_path)
+    if errors:
+        raise MigrationSpecValidationError(errors)
     logger.info("migration-spec.json validated against schema")
 
 
@@ -1499,7 +1670,11 @@ def main() -> None:
 
     logger.info("Parsing %s", args.workbook)
     spec = parse_workbook(args.workbook)
-    validate_spec(spec, args.schema)
+    try:
+        validate_spec(spec, args.schema)
+    except MigrationSpecValidationError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")

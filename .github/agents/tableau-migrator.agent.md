@@ -35,6 +35,7 @@ PBIR files yourself.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
+- **Declare generated edits.** TMDL/PBIR/`.pbip`: file/change/why + replay script + hash record.
 - **Surface complexity mismatches proactively.** If the parsed workbook implies more effort than the
   user assumes (many LOD/table-calc fields, extract-only data with no upstream, >20 floating-layout
   worksheets), say so before building rather than discovering it mid-migration.
@@ -215,8 +216,9 @@ in the active contract's limitations/worklist instead of silently dropping it.
      happen before any report work begins. Do not run report and model fixes concurrently against one
      bundle.
 9. **Delegate to `pbi-report-builder`** — only AFTER step 8's landing re-run has finished, because
-   that re-run recreates the `.Report` folder and would destroy its work. **Gate the handover:**
-   `python scripts/check_migration_progress.py --bundle <bundle> --handoff` must exit 0. Exit 1 means
+   that re-run recreates the `.Report` folder and would destroy its work. **Spec+handoff gates (both
+   exit 0):** `python scripts/validate_spec.py <spec>`;
+   `python scripts/check_migration_progress.py --bundle <bundle> --handoff`. Exit 1 means
    a model has no `cache.abf`, or one **older** than its TMDL — the report builder would open an
    EMPTY model and trigger its own refresh (minutes, plus a credential prompt on a live source).
    Measured: a cache written at 22:22 against a Desktop opened at 22:19 did exactly that, and a stale
@@ -224,7 +226,8 @@ in the active contract's limitations/worklist instead of silently dropping it.
    Give it: the handover
    slice, the validator's classification from step 7, the model location, and the reference bundle.
    Its edits must land as re-runnable `_build/fix_*.py` scripts, not bundle-only edits.
-10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. Name
+10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. First
+   rerun `python scripts/validate_spec.py <spec>`; block on failure. Name
    the mode explicitly; it is a different job from step 7's triage. It sees the artifacts, the
    reference bundle and the triage classifications, but **not the builders' rationale** — and it is
    told the classifications are **claims to verify, not settled facts**, including the ones an earlier
@@ -275,7 +278,7 @@ in the active contract's limitations/worklist instead of silently dropping it.
       | Tableau formula → DAX | `docs/tableau-dax-translation-guide.md` |
       | A visual encoding that renders | `.github/pbi.kb/visual-cookbook.md` + `visuals/` |
       | Parser/tooling behaviour | the script itself **plus a regression test** |
-      | Upstream engine behaviour | an issue on `Yarbrdab000/tableau-fabric-skills`, with a credential-free reproducer |
+      | Upstream engine behaviour | fresh empty-output run first; then upstream issue + credential-free reproducer |
 
       If you edit a bundle that is also published, re-run `scripts/build_plugin.py` or preflight flags
       the drift.
@@ -316,8 +319,8 @@ delegation timestamp before launch (PowerShell: `$baseline=(Get-Date).ToString('
 poll) → `PROGRESSING` leave it alone · `THINKING` file output is not decisive yet; re-check with the
 same baseline and liveness context · `STALLED` **ask it what it is blocked on** (a follow-up message),
 do **not** kill a slow-but-productive run · `SILENT` it finished, died, or is waiting on a human. The
-baseline is mandatory because setup artifacts written by the dispatcher are otherwise indistinguishable
-from agent progress.
+baseline is mandatory so setup files are not credited. Before sign-off:
+`python scripts/check_migration_progress.py --bundle <b> --tamper`; drift blocks
 
 **Invoke `pbi-migration-validator` with only ground-truth artifacts, never the build
 subagents' own reasoning or self-reported success** — its value depends on

@@ -20,6 +20,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check_migration_progress.py"
+DECLARE_SCRIPT = REPO / "scripts" / "declare_generated_edit.py"
 spec = importlib.util.spec_from_file_location("check_migration_progress", SCRIPT)
 cmp_mod = importlib.util.module_from_spec(spec)
 sys.modules["check_migration_progress"] = cmp_mod
@@ -33,6 +34,60 @@ def _touch(path: Path, minutes_ago: float = 0) -> Path:
         when = time.time() - minutes_ago * 60
         os.utime(path, (when, when))
     return path
+
+
+def _write_manifest(bundle: Path, files: dict[str, str]) -> None:
+    report = bundle / "report.json"
+    if not report.is_file():
+        report.write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+    (bundle / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "generated_artifacts": {
+                    "version": 1,
+                    "run_id": "run-1",
+                    "recorded_at": datetime.now().isoformat(timespec="seconds"),
+                    "report_generated_at": "2026-08-10T08:00:00Z",
+                    "report_sha256": cmp_mod.sha256_file(report),
+                    "files": files,
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_declaration(
+    bundle: Path,
+    target: str,
+    baseline_sha256: str | None,
+    expected_sha256: str | None,
+    kind: str = "changed",
+) -> None:
+    path = bundle / "_build" / "generated-edit-declarations.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "declarations": [
+                    {
+                        "version": 1,
+                        "run_id": "run-1",
+                        "kind": kind,
+                        "target": target,
+                        "baseline_sha256": baseline_sha256,
+                        "expected_sha256": expected_sha256,
+                        "script_identity": "_build/fix_orders_navigation.py",
+                        "script_sha256": "script-hash",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _scan_now(bundle: Path, window_minutes: int = 30):
@@ -238,6 +293,164 @@ def test_no_model_at_all_is_its_own_state(tmp_path):
     assert cmp_mod.handoff_ready(tmp_path)[0] == "NO_MODEL"
 
 
+# --- generated artifact drift ---------------------------------------------------------------------
+
+
+def test_tamper_detects_an_undeclared_generated_artifact_edit(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    _write_manifest(tmp_path, {"M.SemanticModel/definition/tables/Orders.tmdl": cmp_mod.sha256_file(generated)})
+    generated.write_text("changed in place", encoding="utf-8")
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "DRIFT"
+    assert "UNDECLARED" in notes[0]
+    assert "Orders.tmdl" in notes[0]
+
+
+def test_tamper_allows_a_generated_edit_declared_by_a_fix_script(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    baseline_hash = cmp_mod.sha256_file(generated)
+    target = "M.SemanticModel/definition/tables/Orders.tmdl"
+    _write_manifest(tmp_path, {target: baseline_hash})
+    generated.write_text("changed by replayable fix", encoding="utf-8")
+    _write_declaration(tmp_path, target, baseline_hash, cmp_mod.sha256_file(generated))
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "DECLARED_DRIFT"
+    assert any("fix_orders_navigation.py" in note for note in notes)
+
+
+def test_tamper_rejects_a_source_comment_without_structured_hash_evidence(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    target = "M.SemanticModel/definition/tables/Orders.tmdl"
+    _write_manifest(tmp_path, {target: cmp_mod.sha256_file(generated)})
+    generated.write_text("changed in place", encoding="utf-8")
+    fix = tmp_path / "_build" / "fix_orders_navigation.py"
+    fix.parent.mkdir(parents=True, exist_ok=True)
+    fix.write_text(f'"""Mentions {target}, but declares no output hash."""\n', encoding="utf-8")
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "DRIFT"
+    assert "UNDECLARED" in notes[0]
+
+
+def test_tamper_rejects_a_structured_declaration_with_the_wrong_output_hash(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    target = "M.SemanticModel/definition/tables/Orders.tmdl"
+    baseline_hash = cmp_mod.sha256_file(generated)
+    _write_manifest(tmp_path, {target: baseline_hash})
+    generated.write_text("changed in place", encoding="utf-8")
+    _write_declaration(tmp_path, target, baseline_hash, "not-the-current-hash")
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "DRIFT"
+    assert "UNDECLARED" in notes[0]
+
+
+def test_declare_wrapper_records_a_composed_path_fix_script(tmp_path):
+    target = Path("M.SemanticModel") / "definition" / "tables" / "Orders.tmdl"
+    generated = _touch(tmp_path / target, minutes_ago=1)
+    _write_manifest(tmp_path, {target.as_posix(): cmp_mod.sha256_file(generated)})
+    fix = tmp_path / "_build" / "fix_post_engine.py"
+    fix.parent.mkdir(parents=True, exist_ok=True)
+    fix.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "root = Path.cwd()",
+                "target = root / 'M.SemanticModel' / 'definition' / 'tables' / 'Orders.tmdl'",
+                "target.write_text('fixed by composed path', encoding='utf-8')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(DECLARE_SCRIPT),
+            "--bundle",
+            str(tmp_path),
+            "--target",
+            target.as_posix(),
+            "--script",
+            str(fix),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert state == "DECLARED_DRIFT"
+    assert any("fix_post_engine.py" in note for note in notes)
+
+
+def test_tamper_rejects_a_manifest_without_current_run_identity(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "generated_artifacts": {
+                    "version": 999,
+                    "recorded_at": "1999-01-01T00:00:00",
+                    "files": {"M.SemanticModel/definition/tables/Orders.tmdl": cmp_mod.sha256_file(generated)},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "NO_BASELINE"
+    assert "baseline" in notes[0]
+
+
+def test_tamper_rejects_a_manifest_bound_to_a_different_report(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    (tmp_path / "report.json").write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "generated_artifacts": {
+                    "version": 1,
+                    "run_id": "foreign-run",
+                    "recorded_at": "1999-01-01T00:00:00",
+                    "report_generated_at": "2026-08-10T08:00:00Z",
+                    "report_sha256": "definitely-not-the-current-report",
+                    "files": {"M.SemanticModel/definition/tables/Orders.tmdl": cmp_mod.sha256_file(generated)},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "NO_BASELINE"
+    assert "baseline" in notes[0]
+
+
+def test_tamper_ignores_refresh_cache_and_desktop_sidecars(tmp_path):
+    """The false-positive guard: a normal refresh/autosave must not train people to bypass the check."""
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    _write_manifest(tmp_path, {"M.SemanticModel/definition/tables/Orders.tmdl": cmp_mod.sha256_file(generated)})
+    _touch(tmp_path / "M.SemanticModel" / ".pbi" / "cache.abf")
+    _touch(tmp_path / "M.SemanticModel" / ".pbi" / "localSettings.json")
+    _touch(tmp_path / "R.Report" / ".pbi" / "localSettings.json")
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "CLEAN"
+    assert "pristine" in notes[0]
+
+
 # --- the CLI contract -----------------------------------------------------------------------------
 
 
@@ -270,6 +483,13 @@ def test_progress_mode_fails_closed_without_a_baseline(tmp_path):
     proc = _run("--bundle", str(tmp_path), "--json")
     assert proc.returncode == 2
     assert "--baseline" in proc.stderr + proc.stdout
+
+
+def test_modes_are_mutually_exclusive(tmp_path):
+    _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    proc = _run("--bundle", str(tmp_path), "--handoff", "--tamper")
+    assert proc.returncode == 2
+    assert "choose only one mode" in proc.stderr + proc.stdout
 
 
 def test_a_missing_bundle_is_reported_not_crashed():
