@@ -16,6 +16,7 @@ purpose: answer "has this Tableau PUBLISHED data source already been migrated?" 
 usage:   python scripts/published_datasource_registry.py --scan
          python scripts/published_datasource_registry.py --key finance/salesmaster
          python scripts/published_datasource_registry.py --spec migrations/workbooks/<slug>/migration-spec.json
+         python scripts/published_datasource_registry.py --bundle <engine-output-dir>
 
 Exit codes for --key / --spec: 0 = already migrated somewhere (reuse it), 1 = not yet migrated
 (build it once, in this migration), 2 = the spec has no published data source at all.
@@ -28,9 +29,12 @@ import json
 import logging
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
+
+from migration_bundle import MigrationBundle, load_bundle
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("published_datasource_registry")
@@ -58,10 +62,35 @@ DATASOURCES_DIR = REPO_ROOT / "migrations" / "datasources"
 MARKER_NAME = "published-datasource.json"
 
 
+@dataclass(frozen=True)
+class ScanResult:
+    """Readable contracts, known published keys, and keyless published signals."""
+
+    contracts_read: int
+    index: dict[str, list[dict[str, Any]]]
+    unknown_published: list[dict[str, str]]
+
+
 def _semantic_models(slug_dir: Path) -> list[Path]:
     """Return the semantic model folders built for a migration (empty if none exist yet)."""
     fabric = slug_dir / "fabric"
     return sorted(p for p in fabric.glob("*.SemanticModel") if p.is_dir()) if fabric.is_dir() else []
+
+
+def _engine_models(bundle_dir: Path) -> list[Path]:
+    """Return semantic model folders from the deterministic engine's native output layout."""
+    models: list[Path] = []
+    for root in (bundle_dir / "semantic_models", bundle_dir / "pbip"):
+        if root.is_dir():
+            models.extend(p for p in root.rglob("*.SemanticModel") if p.is_dir())
+    return sorted(models)
+
+
+def _semantic_models_any_layout(bundle: MigrationBundle) -> list[Path]:
+    """Return built semantic models for either the agent or engine layout."""
+    if bundle.kind == "engine-bundle":
+        return _engine_models(bundle.migration_dir)
+    return _semantic_models(bundle.migration_dir)
 
 
 def _rel(path: Path) -> str:
@@ -123,38 +152,47 @@ def find_shared_models(datasources_dir: Path = DATASOURCES_DIR) -> dict[str, dic
     return found
 
 
-def build_index(migrations_dir: Path = MIGRATIONS_DIR) -> dict[str, list[dict[str, Any]]]:
-    """Map every published-datasource dedup key -> the migrations that consume it.
+def scan_contracts(migrations_dir: Path = MIGRATIONS_DIR) -> ScanResult:
+    """Read migration contracts and index published-datasource signals.
 
-    Each entry records whether that migration actually produced a semantic model, which is what makes
-    it a reuse candidate rather than merely another consumer.
+    Known keys can be de-duplicated automatically. Keyless engine signals stay visible as UNKNOWN
+    rather than being derived from names or collapsed into "no published data sources".
     """
     index: dict[str, list[dict[str, Any]]] = {}
+    unknown: list[dict[str, str]] = []
+    read = 0
     if not migrations_dir.is_dir():
-        return index
-    for spec_path in sorted(migrations_dir.glob("*/migration-spec.json")):
+        return ScanResult(read, index, unknown)
+    candidates = [*sorted(migrations_dir.glob("*/migration-spec.json")), *sorted(migrations_dir.glob("*/report.json"))]
+    if (migrations_dir / "report.json").is_file():
+        candidates.append(migrations_dir / "report.json")
+    for contract_path in candidates:
         try:
-            spec = json.loads(spec_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warning("  !  skipping unreadable spec %s (%s)", spec_path, exc)
+            bundle = load_bundle(contract_path.parent if contract_path.name == "report.json" else contract_path)
+        except (OSError, json.JSONDecodeError, FileNotFoundError) as exc:
+            log.warning("  !  skipping unreadable migration contract %s (%s)", contract_path, exc)
             continue
-        slug_dir = spec_path.parent
+        read += 1
+        slug_dir = bundle.migration_dir
         if (slug_dir / MARKER_NAME).exists():
             continue  # a data-source migration OWNS the model; it is not a consumer of it
-        for ds in spec.get("data_sources", []):
-            published = ds.get("published_datasource") or {}
-            key = published.get("key")
-            if not key:
-                continue
+        for name in bundle.unknown_published_datasources:
+            unknown.append({"slug": slug_dir.name, "name": name})
+        for key in bundle.published_datasource_keys:
             index.setdefault(_normalize_key(key), []).append(
                 {
                     "slug": slug_dir.name,
-                    "name": published.get("id"),
-                    "site": published.get("site"),
-                    "semantic_models": [_rel(p) for p in _semantic_models(slug_dir)],
+                    "name": key.rsplit("/", 1)[-1],
+                    "site": key.split("/", 1)[0] if "/" in key else None,
+                    "semantic_models": [_rel(p) for p in _semantic_models_any_layout(bundle)],
                 }
             )
-    return index
+    return ScanResult(read, index, unknown)
+
+
+def build_index(migrations_dir: Path = MIGRATIONS_DIR) -> dict[str, list[dict[str, Any]]]:
+    """Compatibility wrapper for tests/callers that only need known-key entries."""
+    return scan_contracts(migrations_dir).index
 
 
 def _reuse_candidate(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -210,10 +248,20 @@ def _bind_instructions(model_rel: str) -> str:
 
 def cmd_scan(migrations_dir: Path, datasources_dir: Path) -> int:
     """Print every published data source found across all migrations and who consumes it."""
-    index = build_index(migrations_dir)
+    scan = scan_contracts(migrations_dir)
+    index = scan.index
     shared = find_shared_models(datasources_dir)
-    if not index and not shared:
-        log.info("No published (sqlproxy) data sources found in any migration-spec.json.")
+    if scan.contracts_read == 0 and not shared:
+        log.error(
+            "No readable migration-spec.json files or engine report.json bundles were found under %s. "
+            "Refusing to conclude that no shared-model de-duplication is needed from an empty scan.",
+            migrations_dir,
+        )
+        return 2
+    if not index and not shared and not scan.unknown_published:
+        log.info(
+            "No published (sqlproxy) data sources found in %d readable migration contract(s).", scan.contracts_read
+        )
         log.info("All parsed workbooks use embedded data sources - no shared-model de-duplication needed.")
         return 0
     log.info("Published data sources (consumed by %d workbook migration key(s)):", len(index))
@@ -236,6 +284,12 @@ def cmd_scan(migrations_dir: Path, datasources_dir: Path) -> int:
         log.info("\nData-source migrations with no consuming workbook parsed yet:")
         for key, meta in sorted(orphan_shared.items()):
             log.info("  %s -> %s", key, meta["model"])
+    if scan.unknown_published:
+        log.warning("\nPublished data-source signals with UNKNOWN key (manual/lineage lookup required):")
+        for entry in scan.unknown_published:
+            log.warning("  %s: %s", entry["slug"], entry["name"])
+        log.warning("  Do NOT derive a key from the name; fetch Tableau lineage/export metadata first.")
+        return 1
     return 0
 
 
@@ -352,20 +406,22 @@ def cmd_register(key: str, name: str, slug: str, datasources_dir: Path) -> int:
 
 
 def cmd_spec(spec_path: Path, migrations_dir: Path, datasources_dir: Path) -> int:
-    """Resolve every published data source declared by one migration-spec.json."""
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    keys = [
-        (ds.get("published_datasource") or {}).get("key")
-        for ds in spec.get("data_sources", [])
-        if (ds.get("published_datasource") or {}).get("key")
-    ]
+    """Resolve every published data source declared by one migration contract."""
+    bundle = load_bundle(spec_path)
+    keys = bundle.published_datasource_keys
     if not keys:
-        log.info("No published (sqlproxy) data source in %s - nothing to de-duplicate.", spec_path)
+        if bundle.unknown_published_datasources:
+            log.warning("Published data source signal(s) in %s have no stable key:", bundle.label)
+            for name in bundle.unknown_published_datasources:
+                log.warning("  UNKNOWN key for published datasource name: %s", name)
+            log.warning("Do NOT derive a key from the name; use Tableau lineage/export metadata first.")
+            return 1
+        log.info("No published (sqlproxy) data source in %s - nothing to de-duplicate.", bundle.label)
         return 2
     worst = 0
     for key in keys:
         log.info("")
-        worst = max(worst, _report_key(key, migrations_dir, datasources_dir, exclude_slug=spec_path.parent.name))
+        worst = max(worst, _report_key(key, migrations_dir, datasources_dir, exclude_slug=bundle.migration_dir.name))
     return worst
 
 
@@ -376,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--scan", action="store_true", help="List every published data source and its consumers")
     group.add_argument("--key", help="Look up one dedup key, e.g. finance/salesmaster")
     group.add_argument("--spec", type=Path, help="Resolve every published data source in a migration-spec.json")
+    group.add_argument("--bundle", type=Path, help="Resolve every published data source in an engine bundle")
     group.add_argument(
         "--register", metavar="KEY", help="Declare that a migrations/datasources/<slug>/ owns the model for KEY"
     )
@@ -396,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_register(args.register, name, args.slug, args.datasources_dir)
     if args.key:
         return _report_key(args.key, args.migrations_dir, args.datasources_dir)
-    return cmd_spec(args.spec.resolve(), args.migrations_dir, args.datasources_dir)
+    return cmd_spec((args.spec or args.bundle).resolve(), args.migrations_dir, args.datasources_dir)
 
 
 if __name__ == "__main__":

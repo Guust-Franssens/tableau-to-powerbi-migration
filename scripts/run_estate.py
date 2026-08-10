@@ -61,6 +61,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+from migration_bundle import sha256_file, write_engine_receipt
+
 log = logging.getLogger("run_estate")
 
 # `definition_of_done.status` values that mean the estate is NOT safe to hand downstream. "warn" is
@@ -257,6 +259,18 @@ def print_collisions(collisions: dict[str, list[dict]]) -> None:
     )
 
 
+def write_receipt_phase(out_dir: Path, phases: list[dict]) -> None:
+    """Persist the engine-output receipt and record the phase."""
+    started = time.monotonic()
+    receipt = write_engine_receipt(out_dir)
+    phases.append({"phase": "engine_receipt", "elapsed_sec": round(time.monotonic() - started, 1)})
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    _audit(out_dir, "engine-receipt", f"sha256={sha256_file(receipt)}")
+    log.info("ENGINE RECEIPT: %s", receipt)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -303,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_ENGINE_FAILED
 
     report = read_report(args.output)
+    if not args.slice_only:
+        write_receipt_phase(args.output, phases)
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------
     # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)

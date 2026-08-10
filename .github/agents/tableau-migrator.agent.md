@@ -104,9 +104,9 @@ PBIR files yourself.
                         subagent (never fixed by the validator itself)
 ```
 
-`migration-spec.json` (schema: `docs/migration-spec.schema.json`, guide: `docs/migration-spec.md`) is
-the contract every stage reads and writes. Never hand-wave past it — if something can't be resolved,
-it must show up in `limitations_encountered`, not be silently dropped.
+The contract is either `migration-spec.json` (parser path) or the engine bundle (`report.json` +
+`handover/`). Never invent a fake spec to satisfy a tool. If something can't be resolved, record it
+in the active contract's limitations/worklist instead of silently dropping it.
 
 ## Workflow
 
@@ -159,45 +159,28 @@ it must show up in `limitations_encountered`, not be silently dropped.
    delegating anything. Each subagent gets `handover/<workbook>.json`, never the whole `report.json`.
    **Concurrency:** workbooks fan out in parallel *after* step 7's barrier; Power BI Desktop is not a
    lock (instances are `--pid`-scoped), but each costs ~1.3 GB, so cap at ~4.
-3. **Parse — but only if the spec doesn't already exist.** **PRECONDITION (hard):** if
-   `migrations/workbooks/<name>/migration-spec.json` already exists, **do not re-run the parser** without asking.
-   Re-parsing **overwrites the file in place** and destroys every `semantic_build` / `report_build` /
-   `validate` limitation the subagents appended to it (routinely 20-50 entries) — i.e. exactly the raw
-   material step 12's summary depends on. On a re-run, fix round, or resumed session, skip to step 3.
-   Only when the spec is absent (or the user explicitly confirms a re-parse of a changed source) run
-   `python scripts/parse_tableau.py <name>/source/<file>.twbx -o <name>/migration-spec.json`, which
-   self-validates against `docs/migration-spec.schema.json`. Read the console summary (counts).
-4. **Triage before building anything.** Open `migration-spec.json`'s `limitations_encountered` array.
-   Summarize it for the user in three buckets: high severity (LOD/table calc formulas needing manual
-   DAX verification), medium (extract-based data sources needing a data-materialization decision), low
-   (unresolved shelf references, narrow parser gaps like ad-hoc worksheet-scoped calculations or
-   Tableau Groups — see `docs/tableau-dax-translation-guide.md` §6 for table calcs; **Tableau Groups are
-   not yet covered by the guide** — translate them as a mapped calculated column and log a limitation).
-   Don't proceed silently past high-severity items without flagging them.
-5. **Published data source — a HUMAN decision, not a build step.** If a high-severity limitation says
-   **PUBLISHED Tableau data source** (connection class `sqlproxy`), the workbook only *points at* a
-   server-side datasource: its connection details, custom SQL and calc formulas live on the Tableau
-   server, so the spec you just parsed **under-reports them**. Calcs the author added *on top of* the
-   published source DO appear, which makes the gap partial and easy to miss.
-   The deterministic tier handles the mechanics once it has the datasource — it detects `sqlproxy`,
-   rebinds to the published datasource's real schema instead of the unusable proxy stub, and
-   `fetch_tds.py` downloads it. What it cannot do is decide **whether to go and get it**. So: tell the
-   user what is missing, offer (a) export/download the published `.tds` and migrate it first, or
-   (b) proceed knowing the model will be incomplete — and **wait for an answer**. Building first and
-   mentioning it afterwards produces a model that looks finished and silently is not.
-
+3. **Pick the canonical contract; never invent a parallel spec.** If the parser path already has
+   `migration-spec.json`, use it and **do not re-parse** without asking (that overwrites appended
+   limitations). If the deterministic tier produced `report.json` + `handover/`, that bundle is the
+   contract; pass `--bundle <bundle-dir>` to gate tools. Do not hand-build a fake `migrations/` tree.
+4. **Triage before building anything.** From `migration-spec.json` (parser path) or the handover slice
+   (engine path), summarize high/medium/low limitations. Flag LOD/table-calc/DAX gaps, extract
+   materialization decisions, unresolved shelf references, and Tableau Groups before building.
+5. **Published data source — resolve or preserve UNKNOWN.** First run
+   `python scripts/published_datasource_registry.py --spec <spec>` or `--bundle <engine-bundle>`.
+   A reusable key means bind to the shared model; `UNKNOWN key` means the engine saw a published
+   datasource name but no stable key, so use Tableau lineage/export metadata — **never derive a key
+   from the name**. If the datasource must be migrated first, get/export the `.tds/.tdsx`; otherwise
+   proceed only after telling the user the model will be incomplete and **waiting for an explicit
+   answer**. Autopilot/non-interactive mode does not waive this consent stop.
 6. **Live-source reachability (MANDATORY before building — never skip).** Run
-   `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<name>/migration-spec.json`
-   to see *which* sources are live. It is a **classifier, not a connectivity test** — it opens no
-   socket, so it can never tell you whether a source actually works. Only extract/flat sources → no
-   gate; proceed. Any **live database** source → step 6b, which is where the decision is made.
-   **Both scripts here hard-require `--spec`, which the bundle flow never writes** (engine ≥2.99 emits
-   `report.json` + `handover/`). Classify from the handover slice's connection classes instead —
-   `excel-direct`/`textscan`/`hyper` are flat, everything else is live — and say you did.
+   `python scripts/preflight_source_credentials.py --spec <spec>` or `--bundle <engine-bundle>` to
+   classify sources and arm the gate. It opens no socket. Any live database source → step 6b.
 6b. **PROVE reachability with a real query, then let the result decide.**
-   `python scripts/probe_live_source.py --spec <spec>` builds a one-table model, opens Desktop,
-   refreshes, and requires a row back — the `SELECT 1`, executed *through Power BI* (a shell query
-   authenticates as you, not as Power BI, so it proves nothing). It probes **every** live source.
+   `python scripts/probe_live_source.py --spec <spec>` or `--bundle <engine-bundle>` builds a one-table
+   model, opens Desktop, refreshes, and requires a row back — the `SELECT 1`, executed *through Power
+   BI*. It probes every live source; if the engine bundle lacks genuine table/column evidence, the
+   probe refuses and the source remains unproven rather than fabricated.
    - **`DATA_OK`** → it lifts the credential gate itself. Continue to step 7.
    - **`NO_CREDENTIAL`** → **HARD STOP.** Name host/database, say Power BI needs a credential you
      **cannot supply**, offer: sign in once in Desktop, or authorize a build-only migration
@@ -218,13 +201,14 @@ it must show up in `limitations_encountered`, not be silently dropped.
    `fixable` / `accepted-limitation` / `false-claim`, and **both builders consume that
    classification**. Sending a builder at the raw list instead means it repairs a deferral that was
    deliberate — measured, one such row would silently re-scope six other table calcs. Give it the
-   handover slice, `migration-spec.json` and the reference bundle
+   handover slice, the active contract (`migration-spec.json` or engine bundle) and the reference bundle
    (`migrations/workbooks/<name>/reference/`; capture with `capture_tableau_reference.py` if empty).
    **Name the mode** — this persona has three (triage / spot-check / sign-off) and they are different
    jobs; step 10 invokes it again, independently, for the last one.
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work
-   queue), the emitted model path, `migration-spec.json` (the addressing for table calcs lives in
-   `worksheets[].encodings`), and the validator's model-side findings. Its job is to prove the model
+   queue), the emitted model path, the active contract (parser specs carry table-calc addressing in
+   `worksheets[].encodings`; engine bundles may require handover/context), and the validator's
+   model-side findings. Its job is to prove the model
    loads, author the residual DAX, enrich for AI, and hand back **refreshed and saved**.
    - It must land approvals through `--approved-dax`, never by hand-editing `_Measures.tmdl`.
    - **The landing re-run is a BARRIER**: it deletes and recreates the whole bundle, so it must
@@ -256,8 +240,8 @@ it must show up in `limitations_encountered`, not be silently dropped.
    into an accepted limitation. An item may be logged as a capability gap only with *evidence* that
    Power BI cannot express it (product docs, a verified CLI/validate result, a Learn citation).
    Otherwise it stays **open/blocking** and you surface it to the user for an explicit decision.
-   **You (the orchestrator) are the only writer of `stage:"validate"` entries** in
-   `limitations_encountered` — the validator is read-only and must never edit the spec.
+   **You (the orchestrator) are the only writer of validation limitations/worklist entries** — the
+   validator is read-only and must never edit the contract itself.
 12. **Validate before declaring done.** Structural/mechanical validation is part of the default flow,
    not a phase-2 nice-to-have — confirm both build subagents ran their own "Mandatory validation"
    steps *and* that `pbi-migration-validator` has run a full sign-off pass. **Sign-off requires ALL

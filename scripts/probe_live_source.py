@@ -2,6 +2,7 @@
 purpose: prove a live data source is actually reachable FROM POWER BI, by building a one-table
          probe model, refreshing it, and requiring a real row back.
 usage:   python scripts/probe_live_source.py --spec <migration-spec.json> [--source-index 0]
+         python scripts/probe_live_source.py --bundle <engine-output-dir> [--source-index 0]
                                              [--timeout-sec 180] [--keep]
 
 Why this exists
@@ -67,6 +68,7 @@ import time
 import uuid
 from pathlib import Path
 
+from migration_bundle import load_bundle
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("probe_live_source")
@@ -424,15 +426,13 @@ def _close(pid: int, pbip: Path) -> bool:
     return True
 
 
-def _resolve_probe_target(spec_path: Path, source_index: int) -> tuple[dict, list[str], str] | None:
+def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[str], str] | None:
     """Pick the source, its candidate tables and a column to probe. None when nothing to probe.
 
     Returns ALL tables, not just the first: a "table not found" is a spec error, and the workbook
     usually names several, so the probe can move on to the next rather than declaring the whole
     source unreachable over one bad name.
     """
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    sources = spec.get("data_sources", [])
     if source_index >= len(sources):
         log.error("PROBE: ERROR source index %d out of range (%d sources)", source_index, len(sources))
         raise SystemExit(1)
@@ -455,7 +455,7 @@ def _resolve_probe_target(spec_path: Path, source_index: int) -> tuple[dict, lis
     return conn, tables, fields[0]["internal_name"].strip("[]")
 
 
-def _write_probe_model(spec_path: Path, m_query: str, table: str, column: str) -> Path:
+def _write_probe_model(migration: Path, m_query: str, table: str, column: str) -> Path:
     """Materialise the one-table probe PBIP in the migration's `_probe/` sandbox.
 
     Deliberately a SIBLING of `fabric/`, never a child: the credential gate denies writes to
@@ -463,7 +463,7 @@ def _write_probe_model(spec_path: Path, m_query: str, table: str, column: str) -
     exists to satisfy. Keeping the sandbox outside the denied tree needs no grant, no ordering, and
     no heal path. See `credential_gate.probe_dir`.
     """
-    probe_root = spec_path.parent / "_probe" / f"run-{uuid.uuid4().hex}"
+    probe_root = migration / "_probe" / f"run-{uuid.uuid4().hex}"
     probe_root.mkdir(parents=True, exist_ok=True)
     for rel, content in _pbip_files("Probe", m_query, table, column).items():
         target = probe_root / rel
@@ -781,7 +781,7 @@ def _network_fault_observed(conn: dict) -> bool:
     return not _tcp_connects(server, _default_port(conn))
 
 
-def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep: bool) -> int:
+def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, keep: bool) -> int:
     """Probe every live source (or one, if `source_index` is given). Gate lifts only if ALL pass.
 
     Probing a single source was a real hole, not a convenience limit: the guarantee is "no model for
@@ -790,8 +790,15 @@ def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep:
     source nobody had ever contacted - precisely the failure this tool exists to prevent, just
     harder to see.
     """
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    sources = spec.get("data_sources", [])
+    bundle = load_bundle(bundle_path)
+    sources = bundle.data_sources
+    if bundle.kind == "engine-bundle" and not sources:
+        log.error(
+            "PROBE: ERROR engine bundle %s carries no explicit data_sources. Refusing to fabricate "
+            "a probe target; rerun the engine/coordinator with handover source details.",
+            bundle.label,
+        )
+        return 1
     live = [
         i
         for i, s in enumerate(sources)
@@ -805,13 +812,13 @@ def run_probe(spec_path: Path, source_index: int | None, timeout_sec: int, keep:
 
     log.info("probing %d live source(s): %s", len(live), live)
     for idx in live:
-        rc, verdict = _probe_one(spec_path, idx, timeout_sec, keep)
+        rc, verdict = _probe_one(bundle.migration_dir, sources, idx, timeout_sec, keep)
         if rc != 0:
             log.error("PROBE: source index %d failed - not lifting the gate", idx)
             _print_verdict_directive(verdict)
             return rc
 
-    _lift_gate(spec_path.parent, f"{len(live)} live source(s)")
+    _lift_gate(bundle.migration_dir, f"{len(live)} live source(s)")
     log.info("PROBE: DATA_OK all %d live source(s) reachable", len(live))
     return 0
 
@@ -912,7 +919,9 @@ def _print_verdict_directive(verdict: str) -> None:
     )
 
 
-def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool) -> tuple[int, str]:
+def _probe_one(
+    migration: Path, sources: list[dict], source_index: int, timeout_sec: int, keep: bool
+) -> tuple[int, str]:
     """Probe a single data source, trying its tables in order until one answers.
 
     Returns (exit code, verdict). The verdict is threaded back out because the caller has to print a
@@ -923,7 +932,7 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
     spec error worth retrying past, while a credential or reachability failure is the answer and
     retrying it would just cost another Desktop launch per table.
     """
-    target = _resolve_probe_target(spec_path, source_index)
+    target = _resolve_probe_target(sources, source_index)
     if target is None:
         return 0, "SKIPPED"
     conn, tables, column = target
@@ -936,11 +945,11 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
             "will fix an address that does not exist.",
             server,
         )
-        _record_attempt(spec_path.parent, "UNREACHABLE", f"{server} -> UNREACHABLE (DNS)")
+        _record_attempt(migration, "UNREACHABLE", f"{server} -> UNREACHABLE (DNS)")
         return 1, "UNREACHABLE"
 
     for i, table in enumerate(tables):
-        rc, verdict = _probe_one_table(spec_path, conn, (table, column), (timeout_sec, keep))
+        rc, verdict = _probe_one_table(migration, conn, (table, column), (timeout_sec, keep))
         if rc == 0:
             return 0, "DATA_OK"
         if verdict != "BAD_TABLE" or i == len(tables) - 1:
@@ -949,7 +958,7 @@ def _probe_one(spec_path: Path, source_index: int, timeout_sec: int, keep: bool)
     return 1, "BAD_TABLE"
 
 
-def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts: tuple[int, bool]) -> tuple[int, str]:
+def _probe_one_table(migration: Path, conn: dict, target: tuple[str, str], opts: tuple[int, bool]) -> tuple[int, str]:
     """Run the probe against one specific table. Returns (exit code, verdict)."""
     table, column = target
     timeout_sec, keep = opts
@@ -959,7 +968,7 @@ def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts:
         log.error("PROBE: ERROR %s", exc)
         return 1, "ERROR"
 
-    pbip = _write_probe_model(spec_path, m_query, table, column) / "Probe.pbip"
+    pbip = _write_probe_model(migration, m_query, table, column) / "Probe.pbip"
     log.info("probe model built: %s", pbip.parent)
     log.info("target: %s", note)
 
@@ -972,11 +981,11 @@ def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts:
             # Recorded HERE, not by the caller. Everything below this line - the `finally` that
             # shuts Desktop down - is slow, and a measurement that is not written down did not
             # happen as far as any later reader is concerned.
-            _record_attempt(spec_path.parent, verdict, f"{table} -> {verdict} (no catalog)")
+            _record_attempt(migration, verdict, f"{table} -> {verdict} (no catalog)")
             return 1, verdict
         log.info("model loaded - refreshing")
         rc, verdict = _refresh_and_classify(pid, table, timeout_sec, _network_fault_observed(conn))
-        _record_attempt(spec_path.parent, verdict, f"{table} -> {verdict}")
+        _record_attempt(migration, verdict, f"{table} -> {verdict}")
         return rc, verdict
     finally:
         if pid and not keep:
@@ -987,17 +996,20 @@ def _probe_one_table(spec_path: Path, conn: dict, target: tuple[str, str], opts:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--spec", type=Path, required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--spec", type=Path)
+    group.add_argument("--bundle", type=Path, help="engine-produced bundle directory")
     parser.add_argument(
         "--source-index", type=int, default=None, help="probe only this source (default: all live sources)"
     )
     parser.add_argument("--timeout-sec", type=int, default=180)
     parser.add_argument("--keep", action="store_true", help="leave Desktop open for inspection")
     args = parser.parse_args(argv)
-    if not args.spec.is_file():
-        log.error("PROBE: ERROR no such spec: %s", args.spec)
+    bundle_path = args.spec or args.bundle
+    if not bundle_path.exists():
+        log.error("PROBE: ERROR no such spec or bundle: %s", bundle_path)
         return 1
-    return run_probe(args.spec, args.source_index, args.timeout_sec, args.keep)
+    return run_probe(bundle_path, args.source_index, args.timeout_sec, args.keep)
 
 
 if __name__ == "__main__":

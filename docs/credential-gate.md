@@ -65,6 +65,29 @@ problem before the probe has returned one.
 | **Lifted by** | a successful one-row probe (`probe-cleared`), or an audit-backed human `authorize` |
 | **Audited by** | `credential_gate.py verify` — the authoritative pre-ship check |
 
+### Engine-produced bundles: detection, not prevention
+
+The deterministic engine runs before the agent tier and can emit `pbip/`, `semantic_models/`, and
+`data/` before this gate is armed. On that path the gate cannot honestly promise "no model exists";
+it promises that no **agent-tier** artifact is added while the source is unproven, and that pre-gate
+engine output is labelled as unvalidated until a probe clears the gate.
+
+`verify` therefore classifies provenance-backed engine artifacts separately when all of these are true:
+
+1. the audit log has an `engine-receipt` entry for this exact receipt **before** the latest `block`;
+2. the receipt's `report.json` and `input_manifest.json` hashes still match the current bundle;
+3. the artifact lives under a native engine output root (`pbip/`, `semantic_models/`, or `data/`);
+4. the artifact's relative path, size and sha256 exactly match a receipt entry.
+
+Anything else still fails closed: missing/malformed/stale provenance, an artifact outside those
+roots, or a size/hash mismatch is reported as a violation. A bare `clear` also remains unearned even
+if the only artifacts are pre-gate engine output — lifting the gate without a probe or human
+authorization would turn "unvalidated" into "ship it".
+
+This is a traceability control, not forgery-proof evidence. A same-user agent that deliberately edits
+both the receipt and audit log can still lie; the protection is against accidental drift, stale
+bundles, and path-of-least-resistance agent work that would otherwise be mistaken for engine output.
+
 If you are a **user** and want to proceed without live data:
 
 ```powershell
