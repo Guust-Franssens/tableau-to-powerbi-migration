@@ -307,7 +307,8 @@ crashing" is necessary but not sufficient:
 10. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
    `limitations_encountered` has been explicitly addressed or explicitly flagged** — none silently
    dropped.
-11. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
+11. **Any `azureMap` with >1 `Column` projection in `Category` is blocking** — it validates but almost always collapses Tableau's map grain.
+12. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
    still needs the relevant subset of this list re-checked (at minimum #4–#6 for the visual touched)
    before you report it done.
 
