@@ -1,4 +1,4 @@
-"""Tests for scripts/check_m_syntax.py.
+"""Tests for scripts/check_datamodel.py.
 
 These exist because Power BI Desktop reports a broken model as an unlocalised
 `M Engine error: 'Microsoft.Data.Mashup.Preview; Token ',' expected.'` - no file, no line, no
@@ -6,6 +6,8 @@ expression - which a real user hit repeatedly and could not act on. The checker'
 turning that into `file:line:col`, so it has to be both accurate AND quiet: a checker that cries
 wolf on good models gets ignored, which is worse than not having one.
 """
+
+# pylint: disable=import-error,wrong-import-position,missing-function-docstring,use-implicit-booleaness-not-comparison
 
 from __future__ import annotations
 
@@ -18,13 +20,28 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
-from check_m_syntax import _check_expression, _iter_m_blocks, check_model, check_model_counted
+from check_datamodel import (
+    _check_expression,
+    _iter_m_blocks,
+    check_datamodel,
+    check_model,
+    check_model_counted,
+    check_tmdl_model,
+    check_tmdl_text,
+    find_compact_filters,
+    main,
+)
 
 DUMMY = Path("model.tmdl")
+TMDL_DUMMY = Path("Table.tmdl")
 
 
 def _kinds(m_expression: str) -> set[str]:
     return {f.kind for f in _check_expression(DUMMY, m_expression)}
+
+
+def _tmdl_codes(text: str) -> set[str]:
+    return {f.code for f in check_tmdl_text(TMDL_DUMMY, text)}
 
 
 GOOD_M = [
@@ -215,3 +232,95 @@ def test_block_extraction_stops_at_tmdl_metadata() -> None:
     blocks = _iter_m_blocks(expressions)
     assert blocks
     assert all("lineageTag" not in body and "annotation" not in body for body, _, _ in blocks)
+
+
+GOOD_TMDL = [
+    "table S\n\tmeasure 'A' = SUM('S'[x])\n\t\tformatString: 0.00\n\n\tcolumn x\n\t\tdataType: int64\n",
+    "table S\n\tcolumn x\n\t\tdataType: int64\n\t\tannotation a = 1\n\t\tannotation b = 2\n",
+    "table S\n\tmeasure 'A' = 1\n\t\tformatString: 0.00\n\n\tmeasure 'B' = 2\n\t\tformatString: 0.00\n",
+    "table S\n\t/// formatString: not a property, this is prose\n\tmeasure 'A' = 1\n\t\tformatString: 0.00\n",
+]
+
+
+@pytest.mark.parametrize("text", GOOD_TMDL)
+def test_valid_tmdl_produces_no_findings(text: str) -> None:
+    """Explicit negative coverage: valid TMDL must stay silent."""
+    assert check_tmdl_text(TMDL_DUMMY, text) == []
+
+
+def test_duplicate_tmdl_property_is_caught() -> None:
+    """The known Desktop-blocking case: duplicate `formatString` on one measure."""
+    text = "table S\n\tmeasure 'A' = SUM('S'[x])\n\t\tformatString: 0.00%\n\t\tformatString: $#,##0.00\n"
+    assert "DUPLICATE_PROPERTY" in _tmdl_codes(text)
+
+
+def test_measure_named_like_a_column_is_caught() -> None:
+    """Tabular requires table-local measure and column names to be unique."""
+    text = "table S\n\tmeasure 'Profit' = SUM('S'[Profit])\n\n\tcolumn Profit\n\t\tdataType: double\n"
+    assert "NAME_COLLISION" in _tmdl_codes(text)
+
+
+def test_empty_measure_expression_is_caught() -> None:
+    """A measure header with no expression and only properties is invalid, not merely blank."""
+    text = "table S\n\tmeasure 'Broken' =\n\t\tformatString: 0.00\n"
+    assert "EMPTY_EXPRESSION" in _tmdl_codes(text)
+
+
+COMPACT_FILTER_CASES = [
+    (True, "CALCULATE(SUM('S'[Profit]), 'S'[Region] = [Region Param])"),
+    (True, "CALCULATETABLE(VALUES('S'[X]), 'S'[Year] = [Selected Year])"),
+    (False, "CALCULATE(SUM('S'[Profit]), FILTER(ALL('S'[Region]), 'S'[Region] = [Region Param]))"),
+    (False, "CALCULATE(SUM('S'[Profit]), 'S'[Region] = \"West\")"),
+    (False, "CALCULATE(SUM('S'[Profit]), ALL('Date'))"),
+    (False, "VAR _m = [Region Param] RETURN CALCULATE(SUM('S'[Profit]), 'S'[Region] = _m)"),
+]
+
+
+@pytest.mark.parametrize(("illegal", "expression"), COMPACT_FILTER_CASES)
+def test_compact_filter_detection_is_precise(illegal: bool, expression: str) -> None:
+    """Only direct compact filters with a measure on the right are flagged."""
+    assert find_compact_filters(expression) is illegal
+
+
+def test_compact_filter_in_measure_is_caught_by_gate() -> None:
+    """Mutation coverage for the TMDL walker, not just the predicate helper."""
+    text = "table S\n\tmeasure 'A' = CALCULATE(SUM('S'[Profit]), 'S'[Region] = [Region Param])\n"
+    assert "COMPACT_FILTER" in _tmdl_codes(text)
+
+
+def test_full_datamodel_gate_has_no_false_positive_on_valid_model(tmp_path: Path) -> None:
+    """The integrated gate must pass a valid model while scanning both M and TMDL."""
+    tables = tmp_path / "Good.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "S.tmdl").write_text(
+        "table S\n"
+        "\tmeasure 'A' = SUM('S'[x])\n"
+        "\t\tformatString: 0.00\n\n"
+        "\tcolumn x\n"
+        "\t\tdataType: int64\n\n"
+        "\tpartition S = m\n"
+        "\t\tmode: import\n"
+        '\t\tsource = let Source = #table({"x"}, {{1}}) in Source\n',
+        encoding="utf-8",
+    )
+    m_findings, m_scanned, tmdl_findings, tmdl_scanned = check_datamodel(tmp_path / "Good.SemanticModel")
+    assert (m_findings, tmdl_findings) == ([], [])
+    assert m_scanned == 1
+    assert tmdl_scanned == 1
+
+
+def test_tmdl_has_no_false_positives_across_the_committed_corpus() -> None:
+    """The real examples are the false-positive regression suite for the TMDL checks."""
+    offenders = {}
+    models = sorted((REPO_ROOT / "examples").glob("*/fabric/*.SemanticModel"))
+    assert len(models) == 16
+    for model in models:
+        findings, _ = check_tmdl_model(model)
+        if findings:
+            offenders[model.name] = [f"{finding.code} {finding.file.name}:{finding.line}" for finding in findings]
+    assert not offenders
+
+
+def test_gate_reports_not_a_pass_when_it_finds_no_model(tmp_path: Path) -> None:
+    """A mistyped gate path has not passed; it did not check a model."""
+    assert main([str(tmp_path)]) == 2

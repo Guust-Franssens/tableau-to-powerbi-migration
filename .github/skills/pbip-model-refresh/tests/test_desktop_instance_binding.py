@@ -220,7 +220,7 @@ def test_tmdl_tables_reads_through_a_byte_order_mark(tmp_path: Path) -> None:
 
     That fails OPEN - an empty fingerprint reports "identity unverified", which the gate lets
     through - so it would silently switch the check off on exactly the real-world files it guards.
-    `check_m_syntax.py` already strips `\\ufeff` for the same file set, so this shape is not theoretical.
+    `check_datamodel.py` already strips `\\ufeff` for the same file set, so this shape is not theoretical.
     """
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"], bom=True)
     assert tmdl_tables(cache.parent.parent) == {"Orders"}
