@@ -343,13 +343,18 @@ A "dimension-on-rows dot strip" → scatter with `Category` = the dimension (Det
   - **`sleep(n)` then `screenshot` does NOT fix it either**, and is the trap most likely to catch
     you: the sleep elapses while sitting on the *previous* page, then the screenshot verb navigates
     and captures almost immediately, so the page you actually want gets **no settle at all**.
-  - **What works: capture repeatedly until two consecutive frames are byte-identical.** This is a
-    *heuristic*, not a readiness signal (bridge CLI 0.1.2 exposes none): one equal pair certifies a
-    **plateau**, not completion, so a partial plateau longer than `--stable-seconds` can still pass
-    — raise the dwell for cold or high-risk maps. It still beats a fixed timeout, because it
-    self-tunes to a cold or warm Desktop and is faster than a conservative sleep (measured: 108 s vs
-    209 s for 10 pages). Use
-    `python scripts/capture_powerbi_pages.py <report.Report> <out-dir> --pid <pid>`.
+  - **What works: recapture until ONE digest stays unchanged for a dwell — not merely until two
+    frames match.** Two consecutive equal frames only prove the render paused; the rule the
+    implementation actually enforces is that the digest is unchanged across the whole
+    `--stable-seconds` window, and that **time spent inside a blocking screenshot call does not
+    count toward the dwell** (an early version counted it, so slow captures banked "stable" time
+    they had not earned). Even then it is a *heuristic*, not a readiness signal — bridge CLI 0.1.2
+    exposes none — so a partial plateau longer than the dwell still passes: raise it for cold or
+    high-risk maps. It beats a fixed timeout in both directions, because one long sleep is
+    simultaneously too slow for warm pages and too short for cold ones (measured: 108 s vs 209 s
+    for 10 pages). Repo-local implementation:
+    `python scripts/capture_powerbi_pages.py <report.Report> <out-dir> --pid <pid>` — that script
+    lives in the host repo, not in this bundle, so outside it implement the rule above directly.
   - Corollary: **after any `reload`, treat the first captures as suspect** — the earliest pages in a
     batch are the ones that race.
 - **The `powerbi-desktop` bridge has NO refresh verb.** Verbs as of bridge CLI 0.1.2: `status`,

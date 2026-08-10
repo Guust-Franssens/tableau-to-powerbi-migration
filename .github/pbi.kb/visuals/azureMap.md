@@ -37,11 +37,12 @@ Installed formatting objects include `bubbleLayer`, `filledMap`, `heatMapLayer`,
 | Density/heatmap | Use `azureMap` heat map layer with Latitude/Longitude or valid locations; tune radius, units, transparency, intensity, gradient, min/max zoom, and optionally `Size` as weight. | 🟨 yellow structural | Learn says heat maps are for density/hot spots and perform better than many overlapping symbols for large point datasets. Source: https://learn.microsoft.com/en-us/azure/azure-maps/power-bi-visual-add-heat-map-layer, ms.date 2025-01-17. Needs a render-verified PBIR exemplar. |
 | Custom-territory map (non-standard regions) | Use `azureMap` data-bound `referenceLayer` with simplified GeoJSON/KML/WKT/SHP/CSV boundaries and a stable territory key in Location; style polygons with conditional formatting. Avoid legacy `shapeMap` unless a human has captured an exact unsupported requirement. | ✅ green for reference-layer choropleth; 🟥 red for Shape Map parity | Learn supports data-bound reference layers and custom styling; installed catalog shows `shapeMap` exists but `map`/`filledMap` are deprecated to `azureMap`. Source: https://learn.microsoft.com/en-us/azure/azure-maps/power-bi-visual-add-reference-layer, ms.date 2025-01-17; installed catalog 2026-07-19. |
 
-## Basemap: read it from the `.twb`, don't infer it from a thumbnail
+## Basemap: read the SOURCE style from the `.twb`; the target mapping is a separate judgement
 
 Azure Maps `mapControls.defaultStyle` is the basemap. Getting it from a 192 px reference thumbnail
-is guesswork (and impossible when no thumbnail exists), but the source workbook states it outright —
-so this is one of the few migration questions with an exact, mechanical answer.
+is guesswork (and impossible when no thumbnail exists), but the source workbook states its own style
+outright — so **extracting the Tableau side is exact and mechanical.** Choosing the Azure Maps
+equivalent is a separate step, and is *not* verified by the extraction.
 
 Per worksheet, the `.twb` carries a `<style-rule element='map'>` and a `<mapsource>`:
 
@@ -53,14 +54,17 @@ for ws in ET.parse(twb).getroot().iter("worksheet"):
     sources = [e.get("name") for e in ws.iter("mapsource")]
 ```
 
-| Tableau | Azure Maps `defaultStyle` |
-| --- | --- |
-| `mapsource='Tableau'`, no `map-style` override | `grayscale_light`  ← Tableau's default light basemap |
-| `map-style='tableau-z-black'` | `night` |
-| `mapsource='Satellite'` | `satellite` |
+| Tableau source style | Azure Maps `defaultStyle` | confidence | evidence |
+| --- | --- | --- | --- |
+| `mapsource='Tableau'`, no `map-style` override | `grayscale_light` | ✅ verified | `book_6-1-Maps`, 2026-08-09, Desktop MSIX 2.157.627.0: 6 worksheets share this config, 3 have reference thumbnails, all light grey |
+| `map-style='tableau-z-black'` | `night` | ⚠️ inferred | source side read from the `.twb` (Dark Map); the Azure target is a name match, **no side-by-side render captured** |
+| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source side read from the `.twb` (Mapbox); Azure target not render-compared. Note this file's §"MS Learn best practice" still lists `satellite`/`night` behaviour as structurally verified only |
 
-**The method matters as much as the table** — it is how you convert an ⚠️ inferred into a ✅
-verified. Measured on `book_6-1-Maps`: **six** worksheets shared one identical config
+To promote a ⚠️ row to ✅, capture the Tableau reference render and the Power BI render of the same
+worksheet and compare them, then record date, Desktop/CLI version and worksheet here.
+
+**The method matters as much as the table** — it is how you convert an ⚠️ into a ✅ *on the source
+side*. Measured on `book_6-1-Maps`: **six** worksheets shared one identical config
 (`mapsource='Tableau'`, no override), and **three** of those six had reference thumbnails, all light
 grey. Same configuration + a rendered exemplar of that configuration = evidence for the other three,
 including two that had no thumbnail at all and had been flagged "confirm before changing".
@@ -116,9 +120,11 @@ silently — `validate` reports 0 errors, the `linearGradient3` stays in `visual
 still draws.
 
 **Symptom.** `referenceLayer[1].polygonFillColor` declares a `linearGradient3` over
-`Sum(Orders.Profit)`, yet the polygons render as one flat wash. Texas (`SUM(Profit)` = **−25,729**,
-the most negative value in the model) sampled **byte-identical RGB (156,177,200)** to mildly-positive
-states, and a single colour covered 33% of the landmass.
+`Sum(Orders.Profit)`, yet **the measure ramp is not applied** — polygons take categorical `Series`
+colours instead, so large same-category areas read as a flat wash. Texas (`SUM(Profit)` =
+**−25,729**, the most negative value in the model) sampled **byte-identical RGB (156,177,200)** to
+mildly-positive states, and a single colour covered 33% of the landmass. The map is not
+single-coloured overall — the point is that colour no longer encodes the measure.
 
 **Why it is easy to misdiagnose.** The visual also had a multi-field Location well (the defect
 below), so "the choropleth is broken" looks like it should resolve once the Location is fixed. It
@@ -214,11 +220,14 @@ source meant.
 
 ## 🔴 Render-verified DEFECT: a visual-level MEASURE filter silently drops azureMap marks
 
+**Verified 2026-08-09, Desktop MSIX 2.157.627.0, `book_6-1-Maps` (`Pie Chart Map`), entitled
+signed-in session** — same session and build as the two defects above.
+
 **Symptom.** An azureMap whose `filterConfig` carries an `Advanced` comparison against a **measure**
-plots far fewer marks than the identical DAX predicate returns. Measured on `Pie Chart Map`
-(2026-08-09): the filter `[Sales (w/o Category)] >= 24711.0D` should keep **10** cities; the map drew
-**5-6**. The missing ones were not the marginal ones — **New York City, the single largest value in
-the workbook (256,368)**, plus San Francisco, Philadelphia, San Diego and Jacksonville, were absent.
+plots far fewer marks than the identical DAX predicate returns. The filter
+`[Sales (w/o Category)] >= 24711.0D` should keep **10** cities; the map drew **5-6**. The missing
+ones were not the marginal ones — **New York City, the single largest value in the workbook
+(256,368)**, plus San Francisco, Philadelphia, San Diego and Jacksonville, were absent.
 
 **It is validation-invisible and render-plausible.** `validate` returns 0 errors, `preview-filters`
 shows one clean Visual-scoped filter, and the map draws a perfectly convincing set of pies. Nothing
@@ -235,6 +244,10 @@ announces that half the marks are gone. **Only counting marks against a DAX grou
 | **the filter itself** | **delete `filterConfig`, reload, recount** | **5 blobs -> 82 blobs.** Confirmed. |
 
 That last row is the whole experiment: one field removed, one reload, a 16x change in mark count.
+**Read it precisely, though** — on its own it proves the filter is what reduces the marks, not that
+it reduces them *wrongly*. The wrongness comes from the third row: DAX at the visual's own grain
+says the predicate keeps **10** cities, and the map drew **5-6**. Filter-is-the-cause (row 5) plus
+correct-count-is-10 (row 3) is what makes this a defect rather than a filter doing its job.
 
 **Mechanism (inferred).** Same family as the gotcha "*a measure used as a visual-level filter at a
 finer grain than it evaluates silently zeroes the visual*" — but the **partial** form, which is far
@@ -245,8 +258,10 @@ renders *most* of its marks gets signed off.
 
 1. **Filter on a COLUMN, not a measure** — ask the semantic-model owner for a boolean/flag calculated
    column evaluated at the filter's own grain (e.g. `Orders[City Is Top Sales]`). A column filter is
-   evaluated in the query's group-by, not re-evaluated per mark, and does not exhibit this. **This is
-   a model change — route it, don't make it from the report layer.**
+   evaluated in the query's group-by rather than re-evaluated per mark, so it should not exhibit
+   this — ⚠️ **inferred, not tested here:** no A/B control was run against a column filter on this
+   visual. Run that control before relying on it. **This is a model change — route it, don't make it
+   from the report layer.**
 2. **Top-N filter** (`filterConfig` `type: "TopN"`) when the source intent really was "top N by
    measure" rather than a threshold.
 3. **Leave the measure filter and document it** — only acceptable if you have counted the marks and
