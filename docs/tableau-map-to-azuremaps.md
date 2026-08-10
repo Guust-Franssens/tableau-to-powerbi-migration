@@ -51,7 +51,78 @@ and is safe to drop, but worth recording as a fidelity note rather than silently
 **A worksheet with no `<mapsource>` is not a map.** `Over Time` has none and is correctly a
 `columnChart`. Do not let a workbook named "Maps" force a map visual.
 
-## 3. The two cases that need a judgement call
+## 3. What actually happened to all nine worksheets
+
+Per-worksheet outcome from the single-workbook run (the one that emitted `azureMap` throughout).
+This is the table that matters, because **one engine choice broke eight of the nine**:
+
+| Tableau worksheet | mark class | emitted | `Category` (Location) well | outcome vs Tableau |
+|---|---|---|---|---|
+| Filled Map | `Automatic` | `azureMap` + `referenceLayer` | `[State]` | ✅ 49 polygons vs 49 |
+| Combined Map | `Multipolygon` + `Pie` | `azureMap` + `referenceLayer` + `bubbleLayer` | `[State, City]` | ❌ renders at **State** — 49 vs 531 |
+| Symbol Map | `Automatic` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
+| Dark Map | `Automatic` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
+| Density Map | `Heatmap` | `azureMap` + `heatMapLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
+| Mapbox | `Shape` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
+| Map with Viz in Tooltip | `Automatic` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
+| Pie Chart Map | `Pie` | `azureMap` + `bubbleLayer` + `Series` | `[Country, State, City]` | ❌ **1 mark** vs 10 |
+| Over Time | `Automatic`, **no `<mapsource>`** | `columnChart` | — | ✅ correctly not a map |
+
+**The single highest-value finding: a multi-field Location well collapses every mark to one.**
+
+Stacking geographic columns into `Category` builds a **drill hierarchy**, and `azureMap` renders at
+its **top** level until a user drills. `Country` has exactly one distinct value in this extract
+(`"United States"`), so any well starting with `Country` is *mathematically guaranteed* to draw one
+bubble at the US centroid — confirmed objectively by connected-components over the canvas: exactly
+one blob at px (1139, 744), which is `centerLatitude 39.2795` / `centerLongitude −97.4361`.
+
+`Combined Map` generalises the rule: it has **no** `Country` and still fails, rendering at `State`
+where Tableau plots at `City`. So it is not "`Country` poisons the well" — **any** multi-field
+Location well renders at its top level.
+
+It is validation-invisible: the map draws, the basemap is right, the legend is right, `validate` is
+clean. Only counting marks against the source grain finds it.
+
+## 4. The model change that fixes it — and why the obvious fix is also wrong
+
+This is a **semantic-model** change, not a report-layer one. Put only the *leaf* geography in
+`Category` — but the leaf is **not** `City`:
+
+- `DISTINCTCOUNT([City])` = **531**
+- distinct `(City, State)` pairs = **604**
+- **57 city names recur across states** (4 Springfields, 4 Columbias, 3 each of Columbus, Roseville,
+  Burlington, Florence, Concord, Lancaster) — **130 of 604 pairs, 21.5% of marks**
+
+So binding `City` alone silently merges or mis-geocodes a fifth of the map. The shipped fix is a
+calculated column carrying the qualified key:
+
+```dax
+column 'City, State' = IF(OR('Orders'[City] = "", 'Orders'[State] = ""), BLANK(),
+                          'Orders'[City] & ", " & 'Orders'[State])
+    dataCategory: Address
+```
+
+`dataCategory` matters — it tells Azure Maps how to geocode. Expect the mark count to **rise**
+(531 → 604): that equals Tableau's own grain when its Detail shelf carried City + State + Country,
+so it is a fidelity gain, but say so or it reads as a regression.
+
+**Verify by counting marks against the source grain, never by looking for an error** — the target is
+604, and both 1 and 531 render without complaint.
+
+**Detection rule worth automating:** any `azureMap` whose `Category` well holds more than one field
+is suspect by construction.
+
+## 5. Two further render-verified defects on these maps
+
+- **A visual-level MEASURE filter silently drops marks.** On `Pie Chart Map`, the filter
+  `[Sales (w/o Category)] >= 24711.0D` should keep 10 cities; the map drew 5–6, and the missing ones
+  included **New York City, the single largest value in the workbook**. Deleting `filterConfig` took
+  the count 5 → 82. `validate` clean throughout.
+- **A `Series`/Legend well vetoes a data-bound `referenceLayer.polygonFillColor`.** The measure ramp
+  is replaced by categorical legend colours: Texas (`SUM(Profit)` = −25,729) sampled byte-identical
+  RGB (156,177,200) to mildly-positive states.
+
+
 
 **Dual-layer (`Combined Map`).** Tableau puts *two* mark classes on one worksheet — `Multipolygon`
 (a choropleth) with `Pie` marks on top. `azureMap` supports this natively: a `referenceLayer` for
