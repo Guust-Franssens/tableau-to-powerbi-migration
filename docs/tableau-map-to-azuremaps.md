@@ -122,7 +122,7 @@ is suspect by construction.
   is replaced by categorical legend colours: Texas (`SUM(Profit)` = −25,729) sampled byte-identical
   RGB (156,177,200) to mildly-positive states.
 
-
+## 6. The two cases that need a judgement call
 
 **Dual-layer (`Combined Map`).** Tableau puts *two* mark classes on one worksheet — `Multipolygon`
 (a choropleth) with `Pie` marks on top. `azureMap` supports this natively: a `referenceLayer` for
@@ -139,7 +139,7 @@ choropleth colouring and a legend are mutually exclusive on the same `azureMap` 
 `Series` gives per-category colouring but not per-point pie slices. This is a genuine fidelity loss
 and should be reported as one rather than quietly downgraded.
 
-## 4. The finding that matters most: conversion depends on batch composition
+## 7. The finding that matters most: conversion depends on batch composition
 
 Two runs of the **same engine build**, 59 seconds apart, on the **byte-identical** workbook:
 
@@ -161,7 +161,7 @@ existing bundles. The confound I cannot fully exclude from the artifacts alone i
 used different engine working trees despite the timestamps. Worth reproducing upstream before
 treating the batch-composition hypothesis as established.
 
-## 5. Suggested detection
+## 8. Suggested detection
 
 Whatever the root cause, deprecated map types are cheap to assert against:
 
