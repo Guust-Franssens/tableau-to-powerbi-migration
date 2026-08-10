@@ -298,6 +298,32 @@ a real Desktop crash — all in one afternoon, all invisible in the eventual "do
 them, don't soften the finding to be polite about the subagent's framing — restate the verdict from
 the evidence and say so plainly.
 
+**Every fix in this batch passed CI and every one needed changes.** Measured 2026-08-09: five agents
+fixed eleven issues in isolated `git worktree`s, all five PRs went green, and an independent
+rubber-duck review — given **only the diff and the issue, never the author's rationale** — returned
+`request changes` on **all five**. The shared shape was that each fix *moved* its failure boundary
+rather than removing it: a data-loss fix that still collapsed extracts sharing a table name, a
+monitoring fix whose new liveness signal re-opened the door its own regression test was written to
+close, a parser fix that satisfied a synthetic fixture but not the real XML already committed to this
+repo. So:
+
+- **A green CI is the start of review, not the end of it.** CI proves the code does what its tests
+  say; it cannot tell you the tests have a blind spot. One covering test here *structurally could
+  not* observe the defect it was written for, because its fixture used distinct table names.
+- **Review the diff without the author's explanation.** A reviewer handed the reasoning tends to
+  ratify it. Every finding in that batch came from a *controlled experiment* — reversing input order,
+  unsetting an environment variable, injecting a hash mismatch — not from reading the code.
+- **Send the re-review to the reviewer who found the defect.** They already have the reproduction
+  built; a fresh reviewer has to rediscover it, and usually doesn't.
+- **Tell reviewers plainly that a clean bill of health is a legitimate outcome**, or they invent
+  findings to look thorough. Equally, tell authors to **push back with evidence** rather than comply:
+  one "already fixed, no change needed" verdict was correct, and survived deliberately sceptical
+  re-checking.
+- **Require `Fixes #N` in the commit message, not merely "reference the issue".** Four issues stayed
+  open after being fixed, reviewed, re-reviewed and merged, because the commits said `(#46)` — a
+  reference, not a GitHub closing keyword. The PR with the *best* per-issue write-up was the one that
+  did not close anything.
+
 ---
 
 ## Starting a migration — the DISPATCHER's job
