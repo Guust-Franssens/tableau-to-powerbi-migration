@@ -53,7 +53,6 @@ them by symbol, not by number, if they do not match.)
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import subprocess
@@ -63,6 +62,8 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+
+from migration_bundle import sha256_file, write_engine_receipt
 
 log = logging.getLogger("run_estate")
 
@@ -97,15 +98,6 @@ def run_engine(engine: Path, src: Path, out: Path, approved_dax: Path | None) ->
     log.info("ENGINE: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return proc.returncode, (proc.stdout + proc.stderr)
-
-
-def sha256_file(path: Path) -> str:
-    """Hash one generated artifact without loading large binary sidecars into memory."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _is_scratch_path(relative: Path) -> bool:
@@ -333,6 +325,33 @@ def print_collisions(collisions: dict[str, list[dict]]) -> None:
     )
 
 
+def write_receipt_phase(out_dir: Path, phases: list[dict]) -> None:
+    """Persist the engine-output receipt and record the phase."""
+    started = time.monotonic()
+    receipt = write_engine_receipt(out_dir)
+    phases.append({"phase": "engine_receipt", "elapsed_sec": round(time.monotonic() - started, 1)})
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    _audit(out_dir, "engine-receipt", f"sha256={sha256_file(receipt)}")
+    log.info("ENGINE RECEIPT: %s", receipt)
+
+
+def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict]) -> None:
+    """Baseline the engine's output: generated-artifact hashes, then the receipt over them.
+
+    The order is load-bearing and lives HERE rather than in ``main`` so it cannot be separated by an
+    unrelated edit: the manifest UPSERTS into ``input_manifest.json`` and the receipt HASHES that
+    same file, so receipt-first leaves ``input_manifest_sha256`` stale and the credential gate then
+    rejects the bundle the engine just produced - while the run still reports success.
+    """
+    log.info(
+        "GENERATED_ARTIFACTS: hashes -> %s",
+        write_generated_artifact_manifest(out_dir, report, phases[0]["started_wall"] - 1),
+    )
+    write_receipt_phase(out_dir, phases)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -381,10 +400,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = read_report(args.output)
     if not args.slice_only:
-        log.info(
-            "GENERATED_ARTIFACTS: hashes -> %s",
-            write_generated_artifact_manifest(args.output, report, phases[0]["started_wall"] - 1),
-        )
+        record_engine_output(args.output, report, phases)
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------
     # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)

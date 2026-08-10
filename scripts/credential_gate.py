@@ -41,6 +41,13 @@ same-user control defeats it. What the layers achieve is narrower and, I think, 
 
 Do not describe this as "agents cannot bypass the gate". Describe it as "agents cannot bypass it by
 accident, and cannot bypass it quietly".
+
+Engine-output receipts have the same threat model. They distinguish deterministic-tier output from
+later agent drift when the agent follows the normal path of least resistance: `run_estate.py` writes
+the receipt, records its hash in this audit log, and only an exact path/size/hash match is classified
+as pre-gate tier output. They are NOT an anti-forgery boundary against a deliberately malicious agent
+that can write both the bundle and the audit log as the same OS user. The value is traceability and
+fail-closed handling of accidental/stale/malformed receipts, not cryptographic non-repudiation.
 """
 
 from __future__ import annotations
@@ -55,6 +62,8 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from migration_bundle import ENGINE_OUTPUT_DIRS, ENGINE_RECEIPT, sha256_file
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("credential_gate")
@@ -239,6 +248,100 @@ def audited_paths(migration: Path) -> list[Path]:
     return found
 
 
+def _is_engine_output(path: Path, migration: Path) -> bool:
+    try:
+        relative = path.relative_to(migration)
+    except ValueError:
+        return False
+    return bool(relative.parts) and relative.parts[0] in ENGINE_OUTPUT_DIRS
+
+
+def _load_engine_receipt(migration: Path) -> dict[str, dict[str, str | int]] | None:
+    """Load exact engine artifact receipts; malformed or stale provenance earns no exemption."""
+    try:
+        receipt_path = migration / ENGINE_RECEIPT
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not _receipt_was_audited_before_block(migration, sha256_file(receipt_path)):
+        return None
+    if not _receipt_matches_bundle(migration, receipt):
+        return None
+    return _receipt_artifacts(receipt.get("artifacts"))
+
+
+def _receipt_was_audited_before_block(migration: Path, receipt_hash: str) -> bool:
+    """Was this exact receipt recorded before the latest gate arm?"""
+    seen = False
+    valid_for_latest_block = False
+    had_block = False
+    try:
+        for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            action = entry.get("action")
+            detail = str(entry.get("detail") or "")
+            if action == "engine-receipt" and f"sha256={receipt_hash}" in detail:
+                seen = True
+            elif action in BLOCK_ACTIONS:
+                had_block = True
+                valid_for_latest_block = seen
+                seen = False
+    except (OSError, ValueError):
+        return False
+    return valid_for_latest_block if had_block else seen
+
+
+def _receipt_matches_bundle(migration: Path, receipt: dict) -> bool:
+    """Does the receipt describe this bundle's current run markers?"""
+    if receipt.get("version") != 1:
+        return False
+    try:
+        report_hash = sha256_file(migration / "report.json")
+        manifest_hash = sha256_file(migration / "input_manifest.json")
+    except OSError:
+        return False
+    return receipt.get("report_sha256") == report_hash and receipt.get("input_manifest_sha256") == manifest_hash
+
+
+def _receipt_artifacts(records: object) -> dict[str, dict[str, str | int]] | None:
+    """Validate receipt artifact records and index them by relative path."""
+    if not isinstance(records, list):
+        return None
+    by_path: dict[str, dict[str, str | int]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            return None
+        rel = record.get("path")
+        size = record.get("size")
+        digest = record.get("sha256")
+        if not isinstance(rel, str) or not isinstance(size, int) or not isinstance(digest, str):
+            return None
+        by_path[rel] = {"size": size, "sha256": digest}
+    return by_path
+
+
+def _split_pre_gate_engine_artifacts(migration: Path, artifacts: list[Path]) -> tuple[list[Path], list[Path]]:
+    """Return (pre_gate_engine_output, still_violating_artifacts)."""
+    receipt = _load_engine_receipt(migration)
+    if receipt is None:
+        return [], artifacts
+    pre_gate: list[Path] = []
+    violations: list[Path] = []
+    for artifact in artifacts:
+        relative = artifact.relative_to(migration).as_posix()
+        record = receipt.get(relative)
+        if (
+            _is_engine_output(artifact, migration)
+            and record
+            and artifact.stat().st_size == record["size"]
+            and sha256_file(artifact) == record["sha256"]
+        ):
+            pre_gate.append(artifact)
+        else:
+            violations.append(artifact)
+    return pre_gate, violations
+
+
 def _last_block_sources(migration: Path) -> list[str] | None:
     """The source list recorded by the most recent `block`, or None if unreadable/absent.
 
@@ -344,7 +447,10 @@ def apply_block(migration: Path, sources: list[str]) -> int:
                 "reachability": "UNPROVEN",
                 "credential_status": "UNKNOWN - nothing has contacted this source yet",
                 "reason": "live data source(s) detected; reachability has NOT been measured",
-                "next_step": "python scripts/probe_live_source.py --spec <this-migration>/migration-spec.json",
+                "next_step": (
+                    "python scripts/probe_live_source.py --spec <this-migration>/migration-spec.json "
+                    "OR --bundle <engine-output-dir>"
+                ),
                 "read_this_before_reporting": (
                     "This file was written at PARSE time by a static check that opens NO connection. "
                     "It does NOT mean a credential is missing - only that nothing has proven the "
@@ -609,6 +715,7 @@ def verify(migration: Path) -> int:
     # no probe ever run. Enforcement cannot prevent that (clear has to exist for teardown), but it
     # must never pass silently, or the guarantee is gone via the front door.
     artifacts = audited_paths(migration)
+    pre_gate_engine_artifacts, gate_artifacts = _split_pre_gate_engine_artifacts(migration, artifacts)
     if artifacts and not deny and not _clear_was_earned(migration) and _gate_was_ever_applied(migration):
         log.error("GATE VERIFY: UNEARNED CLEAR - artifacts exist, but no successful probe and no")
         log.error("  human authorization is recorded in the audit log. The gate was lifted without")
@@ -617,12 +724,21 @@ def verify(migration: Path) -> int:
         violations += 1
 
     if (marker or deny) and not authentic:
-        if artifacts:
-            log.error("GATE VERIFY: VIOLATION - %d artifact(s) exist while the gate is applied:", len(artifacts))
-            for p in artifacts[:10]:
+        if pre_gate_engine_artifacts:
+            log.warning(
+                "GATE VERIFY: PRE-GATE TIER OUTPUT - %d engine artifact(s) predate the latest gate arm.",
+                len(pre_gate_engine_artifacts),
+            )
+            log.warning(
+                "  On the engine path the gate is a detection control: these files are unvalidated "
+                "until the probe clears the gate, but they were not built while blocked."
+            )
+        if gate_artifacts:
+            log.error("GATE VERIFY: VIOLATION - %d artifact(s) exist while the gate is applied:", len(gate_artifacts))
+            for p in gate_artifacts[:10]:
                 log.error("  %s", p)
             log.error("Built against a source whose reachability was never proven. Do not ship them.")
-            _audit(migration, "violation", f"{len(artifacts)} artifacts while blocked")
+            _audit(migration, "violation", f"{len(gate_artifacts)} artifacts while blocked")
             violations += 1
 
     if violations:

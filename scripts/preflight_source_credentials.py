@@ -16,6 +16,7 @@ purpose: preflight the DATA-SOURCE CREDENTIAL gate for a Tableau -> Power BI mig
          migration must verify connectivity and prompt the user if it is missing.
 
 usage:   python scripts/preflight_source_credentials.py --spec migrations/<slug>/migration-spec.json
+         python scripts/preflight_source_credentials.py --bundle <engine-output-dir>
          python scripts/preflight_source_credentials.py --model "<Workspace>" "<SemanticModel>"
 
 The service gate shells out to the Fabric CLI (`fab`), which must be authenticated (`fab auth status`).
@@ -34,6 +35,7 @@ import time
 from pathlib import Path
 
 from connection_target import FLAT_FILE, LIVE_SOURCE, powerbi_target
+from migration_bundle import load_bundle
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("preflight_source_credentials")
@@ -87,7 +89,7 @@ GATE_MARKER = ".credential-gate-BLOCKED.json"
 GATE_OVERRIDE = ".credential-gate-AUTHORIZED"
 
 
-def _write_gate_marker(spec_path: Path, sources: list[str]) -> Path | None:
+def _write_gate_marker(migration: Path, sources: list[str]) -> Path | None:
     """Apply the FILESYSTEM gate for this migration, and return the marker path.
 
     Delegates to scripts/credential_gate.py, which denies write access to the migration's output
@@ -100,7 +102,6 @@ def _write_gate_marker(spec_path: Path, sources: list[str]) -> Path | None:
     once a human has seen the gate, and removing it would make the toolkit unusable for a customer
     who genuinely wants a structural-only pass.
     """
-    migration = spec_path.parent
     if (migration / GATE_OVERRIDE).exists():
         log.warning("Gate OVERRIDDEN by %s - build-only run authorized by the user.", GATE_OVERRIDE)
         return None
@@ -119,9 +120,8 @@ def _write_gate_marker(spec_path: Path, sources: list[str]) -> Path | None:
     return marker if marker.exists() else None
 
 
-def _clear_gate_marker(spec_path: Path) -> None:
+def _clear_gate_marker(migration: Path) -> None:
     """Release the gate: no live source needs a credential."""
-    migration = spec_path.parent
     if (migration / GATE_MARKER).exists():
         subprocess.run(
             [
@@ -155,18 +155,26 @@ def _classify_legs(src: dict, index: int) -> list[tuple[str, str, str]]:
     return classified
 
 
-def cmd_classify(spec_path: Path) -> int:
-    """Classify every data source in a migration-spec.json for credential needs."""
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    sources = spec.get("data_sources", [])
+def cmd_classify(bundle_path: Path) -> int:
+    """Classify every data source in a parser spec or engine bundle for credential needs."""
+    bundle = load_bundle(bundle_path)
+    sources = bundle.data_sources
     if not sources:
-        log.info("No data_sources in %s", spec_path)
+        if bundle.kind == "engine-bundle":
+            log.error(
+                "No explicit data_sources in engine bundle %s. Refusing to infer a credential "
+                "verdict from report shape alone; pass a bundle with handover/source data or use "
+                "the parser spec path.",
+                bundle.label,
+            )
+            return 2
+        log.info("No data_sources in %s", bundle.label)
         return 0
 
     needs = 0
     review = 0
     blocked_names: list[str] = []
-    log.info("Data-source credential preflight for %s", spec_path)
+    log.info("Data-source credential preflight for %s (%s)", bundle.label, bundle.kind)
     for i, src in enumerate(sources):
         for name, verdict, reason in _classify_legs(src, i):
             marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
@@ -185,7 +193,7 @@ def cmd_classify(spec_path: Path) -> int:
         # invites exactly that reading ("the human fixes it later, I continue now"). Persona prose
         # already said "Unconditional" and lost, so the imperative lives here, in tool output, which
         # agents follow far more literally than their own instructions.
-        written = _write_gate_marker(spec_path, blocked_names)
+        written = _write_gate_marker(bundle.migration_dir, blocked_names)
         _print_stop_directive(needs)
         _print_remediation()
         if written:
@@ -200,7 +208,7 @@ def cmd_classify(spec_path: Path) -> int:
                 GATE_OVERRIDE,
             )
     else:
-        _clear_gate_marker(spec_path)
+        _clear_gate_marker(bundle.migration_dir)
         log.info("No live sources: all extract/flat (CSV + DataFolder). No credential gate for this workbook.")
     if review:
         log.warning("%d source(s) need manual review (unrecognised class).", review)
@@ -312,6 +320,7 @@ def _print_stop_directive(needs: int) -> None:
         "       NOT know whether a credential exists, so it is NOT telling you to stop.\n"
         "    3. Your NEXT action is the measurement. Run it now:\n"
         "         python scripts/probe_live_source.py --spec <this spec>\n"
+        "         OR: python scripts/probe_live_source.py --bundle <engine-output-dir>\n"
         "       It builds a one-table model, opens Power BI Desktop, and reads one real\n"
         "       row. It lifts the gate itself on DATA_OK.\n"
         "\n"
@@ -352,6 +361,7 @@ def _print_remediation() -> None:
         "  report a credential problem yet either - none has been observed. This\n"
         "  check never opened a connection. Run the probe; it decides:\n"
         "      python scripts/probe_live_source.py --spec <this spec>\n"
+        "      OR: python scripts/probe_live_source.py --bundle <engine-output-dir>\n"
         "============================================================"
     )
 
@@ -361,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--spec", type=Path, help="Path to a migration-spec.json (offline source classification)")
+    group.add_argument("--bundle", type=Path, help="Path to an engine-produced bundle directory")
     group.add_argument(
         "--model",
         nargs=2,
@@ -369,8 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.spec:
-        return cmd_classify(args.spec.resolve())
+    if args.spec or args.bundle:
+        return cmd_classify((args.spec or args.bundle).resolve())
     return cmd_gate(args.model[0], args.model[1])
 
 

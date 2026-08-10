@@ -8,10 +8,13 @@ file must authorize NOTHING, because agents demonstrably create it themselves.
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import platform
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,46 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 GATE = REPO / "scripts" / "credential_gate.py"
 HOOK = REPO / "scripts" / "hooks" / "credential_gate.py"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_engine_receipt(migration: Path, artifacts: list[Path]) -> None:
+    receipt = migration / "engine-output-receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "created_at": "2026-08-10T00:00:00+00:00",
+                "report_sha256": _sha256(migration / "report.json"),
+                "input_manifest_sha256": _sha256(migration / "input_manifest.json"),
+                "artifacts": [
+                    {
+                        "path": artifact.relative_to(migration).as_posix(),
+                        "size": artifact.stat().st_size,
+                        "sha256": _sha256(artifact),
+                    }
+                    for artifact in artifacts
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _append_audit(migration, "engine-receipt", f"sha256={_sha256(receipt)}")
+
+
+def _append_audit(migration: Path, action: str, detail: str) -> None:
+    audit = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "action": action,
+        "detail": detail,
+        "user": "test",
+    }
+    with (migration / ".credential-gate-audit.log").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(audit) + "\n")
 
 
 def run_gate(*args: str) -> subprocess.CompletedProcess:
@@ -125,6 +168,103 @@ def test_verify_scans_outside_fabric(migration: Path) -> None:
     (emitted / "Orders.tmdl").write_text("table Orders")
 
     assert run_gate("verify", str(migration)).returncode == 1
+
+
+def test_verify_allows_provenance_backed_engine_artifacts_that_predate_the_gate(migration: Path) -> None:
+    """Engine output exists before the gate can arm; verify must classify, not mislabel it.
+
+    This is the #56 engine-path shape: the deterministic tier has already written `pbip/` and
+    `semantic_models/`, then the agent tier arms a gate after reading the handover. The files are
+    still unvalidated, but they are not evidence that an agent built while blocked.
+    """
+    (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
+    (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    emitted = migration / "semantic_models" / "Orders.SemanticModel" / "definition" / "tables"
+    emitted.mkdir(parents=True)
+    artifact = emitted / "Orders.tmdl"
+    artifact.write_text("table Orders", encoding="utf-8")
+    _write_engine_receipt(migration, [artifact])
+
+    run_gate("block", str(migration), "--sources", "warehouse")
+    result = run_gate("verify", str(migration))
+
+    assert result.returncode == 0
+    assert "PRE-GATE TIER OUTPUT" in (result.stdout + result.stderr)
+
+
+def test_verify_still_flags_agent_artifacts_in_engine_roots_when_not_receipted(migration: Path) -> None:
+    """The provenance exception must not become a fail-open blanket for the engine path."""
+    (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
+    (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    emitted = migration / "semantic_models" / "Orders.SemanticModel" / "definition" / "tables"
+    emitted.mkdir(parents=True)
+    engine_artifact = emitted / "Orders.tmdl"
+    engine_artifact.write_text("table Orders", encoding="utf-8")
+    _write_engine_receipt(migration, [engine_artifact])
+
+    run_gate("block", str(migration), "--sources", "warehouse")
+
+    agent_output = migration / "semantic_models" / "Agent.SemanticModel" / "definition" / "tables" / "AgentModel.tmdl"
+    agent_output.parent.mkdir(parents=True)
+    agent_output.write_text("table AgentModel", encoding="utf-8")
+    os.utime(agent_output, (946684800, 946684800))
+
+    result = run_gate("verify", str(migration))
+    assert result.returncode == 1
+    assert "AgentModel.tmdl" in (result.stdout + result.stderr)
+
+
+def test_verify_rejects_a_mismatched_engine_receipt(migration: Path) -> None:
+    """A receipt whose artifact hashes no longer match must not launder current artifacts."""
+    (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
+    (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    emitted = migration / "semantic_models" / "Orders.SemanticModel" / "definition" / "tables"
+    emitted.mkdir(parents=True)
+    artifact = emitted / "Orders.tmdl"
+    artifact.write_text("table Orders", encoding="utf-8")
+    _write_engine_receipt(migration, [artifact])
+    artifact.write_text("table Orders\n// agent changed it", encoding="utf-8")
+
+    run_gate("block", str(migration), "--sources", "warehouse")
+
+    result = run_gate("verify", str(migration))
+    assert result.returncode == 1
+    assert "Orders.tmdl" in (result.stdout + result.stderr)
+
+
+def test_verify_rejects_a_foreign_run_receipt_with_matching_artifacts(migration: Path) -> None:
+    """Only _receipt_matches_bundle can reject this: artifacts match, run markers do not."""
+    (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
+    (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    emitted = migration / "semantic_models" / "Orders.SemanticModel" / "definition" / "tables"
+    emitted.mkdir(parents=True)
+    artifact = emitted / "Orders.tmdl"
+    artifact.write_text("table Orders", encoding="utf-8")
+    _write_engine_receipt(migration, [artifact])
+
+    (migration / "report.json").write_text('{"workbooks": ["other-run"]}', encoding="utf-8")
+
+    run_gate("block", str(migration), "--sources", "warehouse")
+    result = run_gate("verify", str(migration))
+
+    assert result.returncode == 1
+
+
+def test_verify_rejects_receipt_written_after_the_gate_arm(migration: Path) -> None:
+    """A helper-minted receipt after block is traceable drift, not engine output."""
+    (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
+    (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    run_gate("block", str(migration), "--sources", "warehouse")
+
+    emitted = migration / "semantic_models" / "Agent.SemanticModel" / "definition" / "tables"
+    emitted.mkdir(parents=True)
+    artifact = emitted / "Agent.tmdl"
+    artifact.write_text("table Agent", encoding="utf-8")
+    _write_engine_receipt(migration, [artifact])
+
+    result = run_gate("verify", str(migration))
+    assert result.returncode == 1
+    assert "Agent.tmdl" in (result.stdout + result.stderr)
 
 
 def test_verify_ignores_the_probe_sandbox_and_the_source_workbook(migration: Path) -> None:

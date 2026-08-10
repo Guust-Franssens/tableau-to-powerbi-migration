@@ -198,6 +198,42 @@ def test_generated_artifact_manifest_ignores_foreign_roots_from_before_this_run(
     assert "fabric/Stale.Report/definition/report.json" not in recorded
 
 
+def test_the_generated_manifest_is_written_before_the_engine_receipt(tmp_path: Path, monkeypatch) -> None:
+    """Ordering is load-bearing, not cosmetic - the two mechanisms share a file.
+
+    ``write_generated_artifact_manifest`` UPSERTS into ``input_manifest.json``; the engine receipt
+    HASHES that same file. Receipt-first therefore leaves ``input_manifest_sha256`` stale on every
+    legitimate run, and the credential gate rejects the bundle the engine just produced. Measured
+    when merging the two changes, which were developed independently and neither of whose suites
+    could observe the interaction.
+
+    This drives ``main()`` rather than the helpers, so re-ordering the real pipeline fails it. A
+    helper-level test would document the constraint without guarding it.
+    """
+    sys.path.insert(0, str(Path(run_estate.__file__).resolve().parent))
+    from credential_gate import _receipt_matches_bundle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    out = tmp_path / "bundle"
+
+    def _fake_engine(_engine: Path, _src: Path, dest: Path, _dax: Path | None) -> tuple[int, str]:
+        _write(dest / "report.json", json.dumps(_report()))
+        _write(dest / "input_manifest.json", '{"inputs": []}')
+        _write(dest / "fabric" / "Orders.SemanticModel" / "definition" / "t.tmdl", "table Orders")
+        return 0, ""
+
+    monkeypatch.setattr(run_estate, "run_engine", _fake_engine)
+    src = tmp_path / "src"
+    src.mkdir()
+    argv = ["--engine", str(tmp_path / "engine"), "--input", str(src), "--output", str(out)]
+    assert run_estate.main(argv) == run_estate.EXIT_OK
+
+    receipt = json.loads((out / "engine-output-receipt.json").read_text(encoding="utf-8"))
+    assert _receipt_matches_bundle(out, receipt), (
+        "the receipt does not describe the bundle main() just produced - "
+        "the generated-artifact manifest must be written BEFORE the receipt"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Slicing: the estate report must never enter a per-workbook agent's context
 # ---------------------------------------------------------------------------
