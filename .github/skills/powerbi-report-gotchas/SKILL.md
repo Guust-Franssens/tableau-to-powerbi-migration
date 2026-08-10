@@ -288,6 +288,20 @@ and shrinks the lower-48 to a dot), plus a fixed `zoom` + `centerLatitude/Longit
 viewport (512px vector tiles): continental US fills a **384px**-wide map at **`zoom ≈ 2.0`** (a
 700–940px map uses ≈2.9). `blank` style + `autoZoom` rendered empty/tiny — avoid.
 
+**For source-tool fidelity, prefer `defaultStyle 'blank_accessible'`** with `showStylePicker: false`,
+`showNavigationControls: false` and a light `polygonStrokeColor` — a clean white canvas with soft
+borders, matching a source tool that draws no basemap, zoom buttons or style picker. ⚠️ Reported by
+the deterministic engine's maintainer (`Yarbrdab000/tableau-fabric-skills#106`, 2026-08-10, Desktop
+2.157.627.0); **not independently reproduced here**. Note this is a *different value* from plain
+`'blank'`, which rendered empty/tiny above.
+
+**⚠️ `shapeMap` renders NOTHING — a blank rectangle** (same source, same session, a US-state
+choropleth shaded by `Sum(Profit)`; `powerbi-report-author validate` returns 0 errors for it). That
+makes the *modern* branch worse than the deprecated one: `filledMap` at least draws, and merely warns.
+**Not independently reproduced here** — but it explains why a pristine engine run emits `shapeMap` for
+several worksheets that nobody ever saw rendered, because our tier converts them to `azureMap` first.
+Treat `shapeMap` as unusable rather than merely superseded.
+
 **Route/line maps:** azureMap draws true 2-point routes via `PathID` + `PointOrder` + `pathLayer` (a
 fidelity win over the dual-axis workaround) — but it needs **one data row per endpoint**. If the fact
 stores origin+destination lat/long as columns on a single row, the arc cannot render, and that reshape

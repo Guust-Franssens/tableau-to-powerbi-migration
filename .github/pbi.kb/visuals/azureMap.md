@@ -94,11 +94,13 @@ Six Tableau map idioms, each with the `azureMap` layer config that **rendered co
 | Tableau idiom | layer | the setting that makes it work |
 |---|---|---|
 | `Automatic` + geo, no Size | `referenceLayer` (2-entry array) | entry[0] = `datasourceType 'url'` + hosted GeoJSON; entry[1] = `polygonFillColor` FillRule. `Category` = the **key column only**; the measure is in no well |
+| **filled map, no measure at all** | `referenceLayer` + **flat** `polygonFillColor` | a *flat* colour (no `FillRule`) plus **`bubbleLayer.show: false`** → uniform filled polygons. A location-only `azureMap` otherwise renders **bubbles, not filled areas**, which silently changes what a source filled map looks like. ⚠️ Reported by the engine maintainer (`Yarbrdab000/tableau-fabric-skills#106`); not reproduced here |
 | `Automatic` + Size measure | `bubbleLayer` (2-entry) | **`sizeByValue: true`** — without it `Size` does nothing. entry[1] = `fillColor` FillRule |
 | `Heatmap` | `heatMapLayer` | `heatMapRadius 22.0D` / `heatMapRadiusUnit 'pixels'` / `heatMapIntensity 0.55D`, 3-stop colour ramp, **`bubbleLayer.show: false`** |
 | `Shape` | `bubbleLayer`, fixed radius | `minBubbleRadius == maxRadius` and `sizeByValue: false` → a uniform dot rather than an unasked-for size encoding |
 | dark basemap | `mapControls` | `defaultStyle 'night'` — ✅ renders as a dark basemap |
 | satellite | `mapControls` | `defaultStyle 'satellite'` + **`showLabels: false`** (labels are unreadable over imagery) |
+| source-tool fidelity (no chrome) | `mapControls` | `defaultStyle 'blank_accessible'` + `showStylePicker: false` + `showNavigationControls: false` + light `polygonStrokeColor`. ⚠️ Same source as above; note plain `'blank'` rendered empty/tiny |
 
 **Verify by counting marks against the source grain, never by checking that it rendered.** Every
 defect below rendered a plausible map with `validate` clean.
