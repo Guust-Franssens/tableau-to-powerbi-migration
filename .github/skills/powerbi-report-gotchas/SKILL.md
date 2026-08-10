@@ -329,17 +329,36 @@ A "dimension-on-rows dot strip" → scatter with `Category` = the dimension (Det
 
 ## 7. Desktop verification mechanics
 
+- **A screenshot can be PARTIALLY drawn, and that is more dangerous than a blank one.** 🟢
+  Render-verified 2026-08-09, bridge CLI 0.1.2. Visuals that fetch remote resources — above all
+  `azureMap`, which chains model query → basemap tiles → remote reference-layer GeoJSON → marks —
+  draw **progressively**. Capture too early and you get a plausible, finished-looking map that is
+  silently missing marks. Measured on one page (604 city pies), same report, same warm Desktop:
+  **411** distinct canvas colours captured immediately after navigating (pies only in the
+  western/central US) vs **41,185** once settled (pies nationwide). Both look like real maps; only
+  the second is. This defeats mark-counting and any "does it render" check.
+  - **`screenshot-all --settle <ms>` does NOT fix it.** The flag exists but delays only before the
+    **first** capture. Measured: `--settle 5000` over 10 pages cost **38 s**, not the ~76 s a
+    per-page delay would cost. Use it to cover the post-`reload` cold start — nothing more.
+  - **`sleep(n)` then `screenshot` does NOT fix it either**, and is the trap most likely to catch
+    you: the sleep elapses while sitting on the *previous* page, then the screenshot verb navigates
+    and captures almost immediately, so the page you actually want gets **no settle at all**.
+  - **What works: capture repeatedly until two consecutive frames are byte-identical.** This is a
+    *heuristic*, not a readiness signal (bridge CLI 0.1.2 exposes none): one equal pair certifies a
+    **plateau**, not completion, so a partial plateau longer than `--stable-seconds` can still pass
+    — raise the dwell for cold or high-risk maps. It still beats a fixed timeout, because it
+    self-tunes to a cold or warm Desktop and is faster than a conservative sleep (measured: 108 s vs
+    209 s for 10 pages). Use
+    `python scripts/capture_powerbi_pages.py <report.Report> <out-dir> --pid <pid>`.
+  - Corollary: **after any `reload`, treat the first captures as suspect** — the earliest pages in a
+    batch are the ones that race.
 - **The `powerbi-desktop` bridge has NO refresh verb.** Verbs as of bridge CLI 0.1.2: `status`,
   `manifest`, `open`, `reload`, `screenshot`, `screenshot-all` (underlying methods
   `application.state.get` / `report.snapshot.capture` / `file.reload`). PBIP stores no data cache, so a
   freshly-opened import report renders **empty** ("tables have incomplete or no data"). **A clean
   screenshot with empty visuals is an unrefreshed-model artifact, not a binding defect.**
-- **A blank or sparse screenshot is not evidence of a blank or sparse page.** `azureMap` and other
-  remote/progressive visuals can look plausible while still missing marks; re-capture with
-  `python scripts/capture_powerbi_pages.py <report.Report> <out-dir> --pid <pid>` and require
-  a byte-identical stability dwell before trusting the image. This is a heuristic, not a readiness
-  signal: a partial plateau longer than `--stable-seconds` can still pass, so raise the dwell for cold
-  or high-risk maps.
+- **A blank or sparse screenshot is not evidence of a blank or sparse page** — see the
+  partial-render entry above; re-capture with a stability dwell before trusting any image.
 - **First check whether you even need to refresh.** A model handed over already refreshed AND saved
   persists to `<Name>.SemanticModel/.pbi/cache.abf` and survives reopening. Run
   `python scripts/refresh_pbip_model.py --pid <pid> --verify-only` — `DATA_OK` means you are done. On
