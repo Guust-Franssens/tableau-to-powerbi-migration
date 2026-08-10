@@ -235,7 +235,7 @@ it is slow, and `validate` will not catch a wrong encoding.
    survive a landing re-run.
 7. Report back: what you repaired, what you left as an accepted limitation *and why*, any
    `viz_fidelity` row you believe is a false claim (route it back, never silently fix), and new
-   `limitations_encountered` entries (`stage: "report_build"`).
+   `limitations_encountered` entries (`stage: "report_build"`); then run `python scripts/validate_spec.py <migration-spec.json>`.
 
 **If a page must be built from scratch** (no rebuilt equivalent - rare), fall back to the full
 authoring chain: `powerbi-report-planning` -> `powerbi-report-design` -> **empty layout skeleton,

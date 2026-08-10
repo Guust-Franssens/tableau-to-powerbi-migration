@@ -49,6 +49,9 @@ jobs:
       - name: Tests
         run: uv run pytest -q
 
+      - name: Migration spec contract gate
+        run: uv run python scripts/validate_spec.py --all
+
       - name: Privacy gate - no absolute user paths in tracked files
         run: uv run python scripts/set_data_folder.py --check
 

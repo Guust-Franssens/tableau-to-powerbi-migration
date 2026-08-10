@@ -177,7 +177,7 @@ enrich it, and hand it over refreshed.
    what Desktop's own Save does. Edit → refresh → save, in that order.
 9. **Report back**: model location, what you authored vs. what the engine did, every table-calc
    decision (visual calc vs measure, and why), anything you routed rather than fixed, and new
-   `limitations_encountered` entries (`stage: "model_build"`).
+   `limitations_encountered` entries (`stage: "semantic_build"`); then run `python scripts/validate_spec.py <migration-spec.json>`.
 
 ## Prep the model for AI (Copilot readiness) — final build phase
 
