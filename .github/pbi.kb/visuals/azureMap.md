@@ -61,7 +61,7 @@ separate judgement, and none of the three target mappings has been render-compar
 | --- | --- | --- | --- |
 | `mapsource='Tableau'`, no `map-style` override | `grayscale_light` | ⚠️ inferred | **Source side ✅:** `book_6-1-Maps`, 6 worksheets share this config, 3 have reference thumbnails, all light grey. **Target side ⚠️:** a Power BI render at `grayscale_light` exists (the 🟢 POSITIVE entry below, 2026-08-09, Desktop MSIX 2.157.627.0) but was never placed beside a Tableau thumbnail and judged a match |
 | `map-style='tableau-z-black'` | `night` | ⚠️ inferred | source side read from the `.twb` (Dark Map); the Azure target is a name match, **no side-by-side render captured** |
-| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source side read from the `.twb` (Mapbox); Azure target not render-compared. The `powerbi-report-gotchas` skill (§7, Desktop verification mechanics) likewise records `satellite`/`night` behaviour as structural only |
+| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source side read from the `.twb` (Mapbox); Azure target not render-compared. The `powerbi-report-gotchas` skill (§5, Maps) likewise records `satellite`/`night` behaviour as structural only |
 
 To promote a row to ✅, capture the Tableau reference render and the Power BI render of the **same
 worksheet**, compare them, and record the worksheet, date and Desktop/CLI version here. Note what
