@@ -38,4 +38,5 @@ def test_known_blocking_preflight_checks_are_critical() -> None:
     ):
         _assert_add_check_tier(source, check_name, "critical")
 
-    _assert_add_cli_tier(source, "powerbi-desktop", "critical")
+    for command in ("npx", "powerbi-desktop", "dotnet"):
+        _assert_add_cli_tier(source, command, "critical")

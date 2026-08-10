@@ -226,11 +226,12 @@ if ($migrationPlugin) {
         'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push. Do not trust a measurement taken against a stale bundle.'
 }
 
-# Recommended means "warn, do not halt." Audited 2026-08-10 under that exit semantics:
+# Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
+# depends on it, even when the dependency only fails later at handoff/validation time. Audited
+# 2026-08-10 under that exit semantics:
 #   * powerbi-migration-skills plugin: repo-local skills still load in this repo; the critical bundle
 #     checks above enforce correctness when the installed plugin is present and shadowing the repo.
-#   * powerbi-modeling-mcp / npx / dotnet: useful authoring and validation accelerators, but local
-#     PBIP/TMDL edits can still proceed without them.
+#   * powerbi-modeling-mcp: useful authoring accelerator; local PBIP/TMDL edits can still proceed.
 #   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
 #     is enforced by the critical PBI_DESKTOP_PATH pin below.
 # --- MCP servers ---
@@ -242,7 +243,7 @@ foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote',
         'Add via /mcp, or copy from .vscode/mcp.json into ~/.copilot/mcp-config.json (mcpServers).'
 }
 
-Add-Cli 'npx' 'recommended' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
+Add-Cli 'npx' 'critical' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
 Add-Cli 'powerbi-desktop' 'critical' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
 
 # --- Is anything NEWER available upstream? (-CheckUpstream, opt-in) -------------------------------
@@ -359,7 +360,7 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
 # check could never pass. TOM now comes from the NuGet package Microsoft.AnalysisServices.NetCore.retail.amd64,
 # restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
-Add-Cli 'dotnet' 'recommended' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
+Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'
