@@ -59,9 +59,9 @@ separate judgement, and none of the three target mappings has been render-compar
 
 | Tableau source style | Azure Maps `defaultStyle` | confidence | evidence |
 | --- | --- | --- | --- |
-| `mapsource='Tableau'`, no `map-style` override | `grayscale_light` | ⚠️ inferred | **Source side ✅:** `book_6-1-Maps`, 6 worksheets share this config, 3 have reference thumbnails, all light grey. **Target side ⚠️:** a Power BI render at `grayscale_light` exists (the 🟢 POSITIVE entry below, 2026-08-09, Desktop MSIX 2.157.627.0) but was never placed beside a Tableau thumbnail and judged a match |
-| `map-style='tableau-z-black'` | `night` | ⚠️ inferred | source side read from the `.twb` (Dark Map); the Azure target is a name match, **no side-by-side render captured** |
-| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source side read from the `.twb` (Mapbox); Azure target not render-compared. The `powerbi-report-gotchas` skill (§5, Maps) likewise records `satellite`/`night` behaviour as structural only |
+| `mapsource='Tableau'`, no `map-style` override | `grayscale_light` | ⚠️ inferred | **Source ✅:** `book_6-1-Maps`, 6 worksheets share this config, 3 have reference thumbnails, all light grey. **Target ⚠️:** renders light grey, but never placed beside a Tableau thumbnail and judged a match |
+| `map-style='tableau-z-black'` | `night` | ⚠️ inferred | **Target ✅** renders as a dark basemap (verified 2026-08-10, Dark Map page). **Equivalence ⚠️** — no side-by-side against Tableau's dark style |
+| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | **Target ✅** renders satellite imagery (verified 2026-08-10, Mapbox page). **Equivalence ⚠️** — not compared. The `powerbi-report-gotchas` skill (§5, Maps) likewise records this as structural only |
 
 To promote a row to ✅, capture the Tableau reference render and the Power BI render of the **same
 worksheet**, compare them, and record the worksheet, date and Desktop/CLI version here. Note what
@@ -76,6 +76,32 @@ including two that had no thumbnail at all and had been flagged "confirm before 
 
 Generalise it: when a reference render is missing, look for a **sibling that shares the identical
 source configuration and does have one**, rather than guessing or leaving the item unresolved.
+
+## 🟢 Per-idiom encodings, render-verified on `book_6-1-Maps` (2026-08-10)
+
+Six Tableau map idioms, each with the `azureMap` layer config that **rendered correctly** against
+9,994 Superstore rows (Desktop MSIX 2.157.627.0). Copy these rather than deriving them.
+
+**The common shell — two non-obvious parts:**
+
+- **Pin the viewport.** `mapControls.autoZoom: false` + explicit `zoom` / `centerLatitude` /
+  `centerLongitude`. With `autoZoom: true` the map fits Alaska + Hawaii + Puerto Rico and shrinks the
+  lower 48 to a corner. Continental US = `zoom 2.9D`, `centerLatitude 39.27954090366731D`,
+  `centerLongitude -97.43611791666353D` at a ~700–940px viewport (a 384px map needs ≈2.0).
+- **Explicitly switch OFF unused layers** — `heatMapLayer.show: false`, `referenceLayer.show: false`.
+  Unset is not the same as off.
+
+| Tableau idiom | layer | the setting that makes it work |
+|---|---|---|
+| `Automatic` + geo, no Size | `referenceLayer` (2-entry array) | entry[0] = `datasourceType 'url'` + hosted GeoJSON; entry[1] = `polygonFillColor` FillRule. `Category` = the **key column only**; the measure is in no well |
+| `Automatic` + Size measure | `bubbleLayer` (2-entry) | **`sizeByValue: true`** — without it `Size` does nothing. entry[1] = `fillColor` FillRule |
+| `Heatmap` | `heatMapLayer` | `heatMapRadius 22.0D` / `heatMapRadiusUnit 'pixels'` / `heatMapIntensity 0.55D`, 3-stop colour ramp, **`bubbleLayer.show: false`** |
+| `Shape` | `bubbleLayer`, fixed radius | `minBubbleRadius == maxRadius` and `sizeByValue: false` → a uniform dot rather than an unasked-for size encoding |
+| dark basemap | `mapControls` | `defaultStyle 'night'` — ✅ renders as a dark basemap |
+| satellite | `mapControls` | `defaultStyle 'satellite'` + **`showLabels: false`** (labels are unreadable over imagery) |
+
+**Verify by counting marks against the source grain, never by checking that it rendered.** Every
+defect below rendered a plausible map with `validate` clean.
 
 ## MS Learn best practice (as of 2026-07-19)
 
