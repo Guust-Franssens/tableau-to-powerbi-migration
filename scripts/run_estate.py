@@ -337,6 +337,21 @@ def write_receipt_phase(out_dir: Path, phases: list[dict]) -> None:
     log.info("ENGINE RECEIPT: %s", receipt)
 
 
+def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict]) -> None:
+    """Baseline the engine's output: generated-artifact hashes, then the receipt over them.
+
+    The order is load-bearing and lives HERE rather than in ``main`` so it cannot be separated by an
+    unrelated edit: the manifest UPSERTS into ``input_manifest.json`` and the receipt HASHES that
+    same file, so receipt-first leaves ``input_manifest_sha256`` stale and the credential gate then
+    rejects the bundle the engine just produced - while the run still reports success.
+    """
+    log.info(
+        "GENERATED_ARTIFACTS: hashes -> %s",
+        write_generated_artifact_manifest(out_dir, report, phases[0]["started_wall"] - 1),
+    )
+    write_receipt_phase(out_dir, phases)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -385,14 +400,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = read_report(args.output)
     if not args.slice_only:
-        # Order matters: the manifest UPSERTS into input_manifest.json, and the receipt HASHES that
-        # same file. Receipt-first would leave input_manifest_sha256 stale on every legitimate run,
-        # so _receipt_matches_bundle() would reject the bundle the engine just produced.
-        log.info(
-            "GENERATED_ARTIFACTS: hashes -> %s",
-            write_generated_artifact_manifest(args.output, report, phases[0]["started_wall"] - 1),
-        )
-        write_receipt_phase(args.output, phases)
+        record_engine_output(args.output, report, phases)
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------
     # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)
