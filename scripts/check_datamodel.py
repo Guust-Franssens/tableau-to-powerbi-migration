@@ -569,11 +569,30 @@ def _empty_measure_finding(path: Path, pending_measure: tuple[str, int]) -> Tmdl
     return TmdlFinding("EMPTY_EXPRESSION", f"measure '{name}' has no expression after '='.", path, line)
 
 
+def _append_name_collisions(
+    findings: list[TmdlFinding], path: Path, table_name: str, measures: dict[str, int], columns: dict[str, int]
+) -> None:
+    """Report measure/column collisions for one table scope."""
+    for name, line in measures.items():
+        if name in columns:
+            findings.append(
+                TmdlFinding(
+                    "NAME_COLLISION",
+                    f"measure '{name}' in table '{table_name}' has the same name as a column in "
+                    f"that table; Tabular names must be unique within a table. Column first seen "
+                    f"at line {columns[name]}.",
+                    path,
+                    line,
+                )
+            )
+
+
 def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Structurally check one TMDL document."""
     findings: list[TmdlFinding] = []
     seen: dict[int, dict[str, int]] = {}
     context_line: dict[int, int] = {}
+    current_table = ""
     measures: dict[str, int] = {}
     columns: dict[str, int] = {}
     pending_measure: tuple[str, int] | None = None
@@ -609,10 +628,15 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
             kind = obj.group("kind")
             rest = obj.group("rest")
             name = _object_name(rest)
-            if kind == "measure" and name:
+            if kind == "table" and name:
+                _append_name_collisions(findings, path, current_table, measures, columns)
+                current_table = name
+                measures = {}
+                columns = {}
+            elif kind == "measure" and name and current_table:
                 measures.setdefault(name, number)
                 pending_measure = None if _expression_on_measure_header(rest) else (name, number)
-            elif kind == "column" and name:
+            elif kind == "column" and name and current_table:
                 columns.setdefault(name, number)
             continue
 
@@ -647,17 +671,7 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
     if pending_measure:
         findings.append(_empty_measure_finding(path, pending_measure))
 
-    for name, line in measures.items():
-        if name in columns:
-            findings.append(
-                TmdlFinding(
-                    "NAME_COLLISION",
-                    f"measure '{name}' has the same name as a column in this table; Tabular names "
-                    f"must be unique within a table. Column first seen at line {columns[name]}.",
-                    path,
-                    line,
-                )
-            )
+    _append_name_collisions(findings, path, current_table, measures, columns)
     return findings
 
 

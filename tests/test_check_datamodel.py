@@ -254,10 +254,25 @@ def test_duplicate_tmdl_property_is_caught() -> None:
     assert "DUPLICATE_PROPERTY" in _tmdl_codes(text)
 
 
-def test_measure_named_like_a_column_is_caught() -> None:
-    """Tabular requires table-local measure and column names to be unique."""
+def test_measure_named_like_a_later_column_in_same_table_is_caught() -> None:
+    """Ordering must not hide a true table-local collision."""
     text = "table S\n\tmeasure 'Profit' = SUM('S'[Profit])\n\n\tcolumn Profit\n\t\tdataType: double\n"
     assert "NAME_COLLISION" in _tmdl_codes(text)
+
+
+def test_measure_named_like_an_earlier_column_in_same_table_is_caught() -> None:
+    """The same-table verdict must not depend on whether the column or measure appears first."""
+    text = "table S\n\tcolumn Profit\n\t\tdataType: double\n\n\tmeasure 'Profit' = SUM('S'[Profit])\n"
+    assert "NAME_COLLISION" in _tmdl_codes(text)
+
+
+def test_measure_and_column_same_name_in_different_tables_is_clean() -> None:
+    """TMDL permits multiple tables per document; collision state must reset per table."""
+    text = (
+        "table Orders\n\tcolumn Sales\n\t\tdataType: double\n\n"
+        "table _Measures\n\tmeasure Sales = SUM('Orders'[Sales])\n"
+    )
+    assert check_tmdl_text(TMDL_DUMMY, text) == []
 
 
 def test_empty_measure_expression_is_caught() -> None:
