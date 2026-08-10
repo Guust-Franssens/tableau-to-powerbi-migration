@@ -37,11 +37,11 @@ for ws in ET.parse(twb).getroot().iter("worksheet"):
 ```
 
 **Extracting the Tableau side is exact and mechanical. Choosing the Azure Maps equivalent is a
-separate judgement, and only the first row is render-verified:**
+separate judgement, and **none of the three target mappings has been render-compared yet:**
 
 | Tableau source style | Azure `defaultStyle` | confidence | evidence |
 |---|---|---|---|
-| `mapsource='Tableau'`, no `map-style` | `grayscale_light` | ✅ verified | 6 of 9 worksheets share this config; 3 have reference thumbnails, all light grey |
+| `mapsource='Tableau'`, no `map-style` | `grayscale_light` | ⚠️ inferred | **source ✅** 6 of 9 worksheets share this config, 3 have reference thumbnails, all light grey; **target ⚠️** a Power BI render at `grayscale_light` exists but was never compared against a Tableau thumbnail |
 | `map-style='tableau-z-black'` | `night` | ⚠️ inferred | source read from the `.twb` (Dark Map); target is a name match, no side-by-side render captured |
 | `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source read from the `.twb` (Mapbox); target not render-compared |
 
