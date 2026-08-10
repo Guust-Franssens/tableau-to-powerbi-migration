@@ -54,14 +54,19 @@ for ws in ET.parse(twb).getroot().iter("worksheet"):
     sources = [e.get("name") for e in ws.iter("mapsource")]
 ```
 
+**Extracting the Tableau side is exact and mechanical. Choosing the Azure Maps equivalent is a
+separate judgement, and none of the three target mappings has been render-compared yet:**
+
 | Tableau source style | Azure Maps `defaultStyle` | confidence | evidence |
 | --- | --- | --- | --- |
-| `mapsource='Tableau'`, no `map-style` override | `grayscale_light` | ✅ verified | `book_6-1-Maps`, 2026-08-09, Desktop MSIX 2.157.627.0: 6 worksheets share this config, 3 have reference thumbnails, all light grey |
+| `mapsource='Tableau'`, no `map-style` override | `grayscale_light` | ⚠️ inferred | **Source side ✅:** `book_6-1-Maps`, 6 worksheets share this config, 3 have reference thumbnails, all light grey. **Target side ⚠️:** a Power BI render at `grayscale_light` exists (the 🟢 POSITIVE entry below, 2026-08-09, Desktop MSIX 2.157.627.0) but was never placed beside a Tableau thumbnail and judged a match |
 | `map-style='tableau-z-black'` | `night` | ⚠️ inferred | source side read from the `.twb` (Dark Map); the Azure target is a name match, **no side-by-side render captured** |
-| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source side read from the `.twb` (Mapbox); Azure target not render-compared. Note this file's §"MS Learn best practice" still lists `satellite`/`night` behaviour as structurally verified only |
+| `mapsource='Satellite'` | `satellite` | ⚠️ inferred | source side read from the `.twb` (Mapbox); Azure target not render-compared. The `powerbi-report-gotchas` skill (§7, Desktop verification mechanics) likewise records `satellite`/`night` behaviour as structural only |
 
-To promote a ⚠️ row to ✅, capture the Tableau reference render and the Power BI render of the same
-worksheet and compare them, then record date, Desktop/CLI version and worksheet here.
+To promote a row to ✅, capture the Tableau reference render and the Power BI render of the **same
+worksheet**, compare them, and record the worksheet, date and Desktop/CLI version here. Note what
+that bar excludes, because it is the trap this table already fell into once: confirming the *source*
+is light grey says nothing about whether Azure Maps' `grayscale_light` resembles it.
 
 **The method matters as much as the table** — it is how you convert an ⚠️ into a ✅ *on the source
 side*. Measured on `book_6-1-Maps`: **six** worksheets shared one identical config
