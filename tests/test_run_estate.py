@@ -8,7 +8,9 @@ defensible for that job. They are simply not safe for a CONSUMER, which is what 
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,12 @@ def _workbook(name: str, model: str, requests: list[dict] | None = None) -> dict
         "model_translation_handoff": {"requests": requests or []},
         "viz_fidelity": [],
     }
+
+
+def _write(path: Path, text: str = "x") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +153,49 @@ def test_collision_carries_the_formulas_so_a_human_can_judge() -> None:
     )
     claims = run_estate.find_approval_collisions(report)["size"]
     assert len({c["formula"] for c in claims}) == 1
+
+
+# ---------------------------------------------------------------------------
+# Generated artifact fingerprints: downstream edits must be visible
+# ---------------------------------------------------------------------------
+
+
+def test_generated_artifact_manifest_records_only_stable_generated_files(tmp_path: Path) -> None:
+    """A normal refresh writes .pbi/cache.abf; that must not look like artifact tampering."""
+    _write(tmp_path / "fabric" / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl", "table Orders")
+    _write(tmp_path / "fabric" / "M.SemanticModel" / ".pbi" / "cache.abf", "refresh cache")
+    _write(tmp_path / "fabric" / "R.Report" / "definition" / "report.json", "{}")
+    _write(tmp_path / "fabric" / "R.Report" / ".pbi" / "localSettings.json", "{}")
+    _write(tmp_path / "fabric" / "Book.pbip", "{}")
+    _write(tmp_path / "_probe" / "Probe.pbip", "{}")
+
+    run_estate.write_generated_artifact_manifest(tmp_path)
+
+    manifest = json.loads((tmp_path / "input_manifest.json").read_text(encoding="utf-8"))
+    recorded = set(manifest["generated_artifacts"]["files"])
+    assert "fabric/M.SemanticModel/definition/tables/Orders.tmdl" in recorded
+    assert "fabric/R.Report/definition/report.json" in recorded
+    assert "fabric/Book.pbip" in recorded
+    assert "fabric/M.SemanticModel/.pbi/cache.abf" not in recorded
+    assert "fabric/R.Report/.pbi/localSettings.json" not in recorded
+    assert "_probe/Probe.pbip" not in recorded
+
+
+def test_generated_artifact_manifest_ignores_foreign_roots_from_before_this_run(tmp_path: Path) -> None:
+    """A landing run must not bless stale roots the engine did not recreate."""
+    stale = _write(tmp_path / "fabric" / "Stale.Report" / "definition" / "report.json", "{}")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    started = time.time() - 1
+    fresh = _write(tmp_path / "fabric" / "Fresh.Report" / "definition" / "report.json", "{}")
+    assert fresh.stat().st_mtime >= started
+
+    run_estate.write_generated_artifact_manifest(tmp_path, _report(), earliest_mtime=started)
+
+    manifest = json.loads((tmp_path / "input_manifest.json").read_text(encoding="utf-8"))
+    recorded = set(manifest["generated_artifacts"]["files"])
+    assert "fabric/Fresh.Report/definition/report.json" in recorded
+    assert "fabric/Stale.Report/definition/report.json" not in recorded
 
 
 # ---------------------------------------------------------------------------

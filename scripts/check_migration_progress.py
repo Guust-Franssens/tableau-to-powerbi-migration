@@ -3,6 +3,7 @@ purpose: tell an orchestrator whether a delegated migration is PROGRESSING or SP
          artifacts on disk rather than from the subagent's own narrative.
 usage:   python scripts/check_migration_progress.py --bundle <dir> [--since-minutes 20] [--json]
          python scripts/check_migration_progress.py --bundle <dir> --baseline 2026-08-09T20:00:00+02:00
+         python scripts/check_migration_progress.py --bundle <dir> --tamper
 
 Why this exists
 ---------------
@@ -23,6 +24,10 @@ This is deliberately NOT a kill switch. Its output is a prompt to ASK - the orch
 this reports STALLED is to make the subagent report what it is blocked on, which is the thing that
 did not happen for 105 minutes.
 
+The tamper mode is an audit record, not a security boundary. A declaration is written by the same
+script that changed the artifact, so it proves the edit was made visible and replayable; it does not
+authorize the edit or protect against someone hand-editing the declaration JSON.
+
 ⚠️ **A stall is not a failure, and a fast run is not a success.** A migration can legitimately go
 quiet while Power BI Desktop loads a model (~60-90s) or an XMLA refresh runs (measured 93s), and a
 correct early STOP - an unreachable source, a missing credential - produces almost no artifacts at
@@ -32,6 +37,7 @@ all and is the RIGHT outcome. Read the verdict together with what the run was as
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -47,6 +53,9 @@ LOG = logging.getLogger("check_migration_progress")
 DELIVERABLE_SUFFIXES = (".semanticmodel", ".report", ".pbip")
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
+GENERATED_ARTIFACTS_KEY = "generated_artifacts"
+GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
+VOLATILE_GENERATED_DIRS = {".pbi"}
 
 # A Desktop model load is 60-90s and a refresh + ImageSave was measured at 93s, so a window shorter
 # than this cannot distinguish "loading" from "stuck" and must not try.
@@ -85,6 +94,176 @@ def classify(path: Path) -> str:
     if any(part.endswith(DELIVERABLE_SUFFIXES) for part in parts):
         return "deliverable"
     return "other"
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a generated artifact from disk."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_generated_artifact(path: Path, bundle: Path) -> bool:
+    """Stable generated output whose drift should be declared.
+
+    Excludes ``.pbi`` sidecars because refreshes and Desktop autosaves legitimately rewrite them.
+    """
+    if not path.is_file():
+        return False
+    relative = path.relative_to(bundle)
+    lower_parts = [part.lower() for part in relative.parts]
+    if any(part in VOLATILE_GENERATED_DIRS for part in lower_parts) or classify(relative) == "scratch":
+        return False
+    if path.suffix.lower() == ".pbip":
+        return True
+    return any(part.endswith((".semanticmodel", ".report")) for part in lower_parts)
+
+
+def current_generated_artifacts(bundle: Path) -> set[str]:
+    """Current stable generated files, keyed by POSIX relative path."""
+    return {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if _is_generated_artifact(path, bundle)}
+
+
+def _baseline_binds_current_report(bundle: Path, generated: dict[str, Any]) -> bool:
+    """Whether the manifest's run evidence still matches this bundle's report.json."""
+    report_path = bundle / "report.json"
+    if not report_path.is_file() or sha256_file(report_path) != generated.get("report_sha256"):
+        return False
+    if generated.get("report_generated_at") is None:
+        return True
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    return report.get("generated_at") == generated.get("report_generated_at")
+
+
+def _valid_generated_baseline(bundle: Path, generated: Any) -> bool:
+    """Validate the generated-artifact baseline before trusting it."""
+    if not isinstance(generated, dict) or generated.get("version") != 1:
+        return False
+    if not generated.get("run_id") or not generated.get("report_sha256"):
+        return False
+    try:
+        datetime.fromisoformat(str(generated.get("recorded_at")).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return _baseline_binds_current_report(bundle, generated) and isinstance(generated.get("files"), dict)
+
+
+def load_generated_artifact_baseline(bundle: Path) -> dict[str, Any] | None:
+    """Generated-file baseline recorded by ``run_estate.py``."""
+    manifest_path = bundle / "input_manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    generated = manifest.get(GENERATED_ARTIFACTS_KEY) if isinstance(manifest, dict) else None
+    if not _valid_generated_baseline(bundle, generated):
+        return None
+    files = generated["files"]
+    generated["files"] = {str(path).replace("\\", "/"): str(digest) for path, digest in files.items()}
+    return generated
+
+
+def load_generated_edit_declarations(bundle: Path) -> list[dict[str, Any]]:
+    """Structured declarations written by refresh/fix tooling."""
+    path = bundle / GENERATED_EDIT_DECLARATIONS
+    if not path.is_file():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return []
+    declarations = payload.get("declarations")
+    return declarations if isinstance(declarations, list) else []
+
+
+def _artifact_drift(bundle: Path, baseline: dict[str, str]) -> list[tuple[str, str]]:
+    """Changed, missing, or newly-added generated artifacts."""
+    drift = []
+    for relative, expected in sorted(baseline.items()):
+        path = bundle / Path(relative)
+        if not path.is_file():
+            drift.append((relative, "missing"))
+        elif sha256_file(path) != expected:
+            drift.append((relative, "changed"))
+    for relative in sorted(current_generated_artifacts(bundle) - set(baseline)):
+        drift.append((relative, "added"))
+    return drift
+
+
+def _current_hash(bundle: Path, relative: str) -> str | None:
+    """Hash the current target, or ``None`` when the declared outcome is deletion."""
+    path = bundle / Path(relative)
+    return sha256_file(path) if path.is_file() else None
+
+
+def _declaration_matches(
+    declaration: dict[str, Any],
+    expected: dict[str, Any],
+) -> bool:
+    """Whether one declaration proves one current drift item."""
+    actual = {key: declaration.get(key) for key in expected}
+    return (
+        declaration.get("version", 1) == 1
+        and actual == expected
+        and bool(declaration.get("script_identity"))
+        and bool(declaration.get("script_sha256"))
+    )
+
+
+def _matching_declaration(
+    declarations: list[dict[str, Any]],
+    generated: dict[str, Any],
+    relative: str,
+    kind: str,
+    current_hash: str | None,
+) -> dict[str, Any] | None:
+    """A declaration is evidence only when it is tied to this run and this exact outcome."""
+    expected = {
+        "run_id": str(generated["run_id"]),
+        "kind": kind,
+        "target": relative,
+        "baseline_sha256": generated["files"].get(relative),
+        "expected_sha256": current_hash,
+    }
+    for declaration in declarations:
+        declaration = declaration | {"target": str(declaration.get("target", "")).replace("\\", "/")}
+        if _declaration_matches(declaration, expected):
+            return declaration
+    return None
+
+
+def tamper_check(bundle: Path) -> tuple[str, list[str]]:
+    """Detect generated artifacts that changed without structured declaration evidence."""
+    generated = load_generated_artifact_baseline(bundle)
+    if generated is None:
+        return "NO_BASELINE", ["no generated_artifacts baseline in input_manifest.json"]
+
+    baseline = generated["files"]
+    drift = _artifact_drift(bundle, baseline)
+    if not drift:
+        return "CLEAN", [f"{len(baseline)} generated artifact(s) are pristine against their engine-run hashes"]
+
+    declarations = load_generated_edit_declarations(bundle)
+    notes = []
+    undeclared = []
+    for relative, kind in drift:
+        current_hash = _current_hash(bundle, relative)
+        declaration = _matching_declaration(
+            declarations,
+            generated,
+            relative,
+            kind,
+            current_hash,
+        )
+        if declaration:
+            notes.append(f"DECLARED {kind}: {relative} via {declaration['script_identity']}")
+        else:
+            undeclared.append((relative, kind))
+            notes.append(
+                f"UNDECLARED {kind}: {relative} - record target, baseline hash and expected post-fix hash in "
+                f"{GENERATED_EDIT_DECLARATIONS.as_posix()}"
+            )
+    return ("DRIFT" if undeclared else "DECLARED_DRIFT"), notes
 
 
 def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dict[str, Any]:
@@ -330,6 +509,30 @@ def handoff_ready(bundle: Path) -> tuple[str, list[str]]:
     return "READY", [f"{len(models)} model(s) carry a cache that post-dates their TMDL"]
 
 
+def _emit_notes(label: str, bundle: Path, state: str, notes: list[str], as_json: bool) -> None:
+    """Render a note-list mode as JSON or log lines."""
+    if as_json:
+        sys.stdout.write(json.dumps({"bundle": str(bundle), "state": state, "notes": notes}, indent=2) + "\n")
+    else:
+        LOG.info("%s [%s] %s", label, state, bundle.name)
+        for note in notes:
+            LOG.info("  %s", note)
+
+
+def run_handoff_mode(bundle: Path, as_json: bool) -> int:
+    """Run the handoff gate and return its process exit code."""
+    state, notes = handoff_ready(bundle)
+    _emit_notes("HANDOFF", bundle, state, notes, as_json)
+    return {"READY": 0, "NOT_READY": 1, "NO_MODEL": 2}[state]
+
+
+def run_tamper_mode(bundle: Path, as_json: bool) -> int:
+    """Run the generated-artifact drift gate and return its process exit code."""
+    state, notes = tamper_check(bundle)
+    _emit_notes("TAMPER", bundle, state, notes, as_json)
+    return {"CLEAN": 0, "DECLARED_DRIFT": 0, "DRIFT": 1, "NO_BASELINE": 2}[state]
+
+
 def main(argv: list[str] | None = None) -> int:
     """Exit 0 PROGRESSING/THINKING/READY, 1 STALLED/NOT_READY, 2 SILENT/NO_MODEL."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -351,6 +554,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="instead of progress: is this bundle safe to hand to the report builder?",
     )
+    parser.add_argument(
+        "--tamper",
+        action="store_true",
+        help="instead of progress: did generated artifacts drift without matching hash declarations?",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
 
@@ -358,16 +566,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.bundle.is_dir():
         LOG.error("PROGRESS: ERROR no such bundle: %s", args.bundle)
         return 2
+    if sum(bool(mode) for mode in (args.handoff, args.tamper)) > 1:
+        LOG.error("PROGRESS: ERROR choose only one mode: progress, --handoff, or --tamper")
+        return 2
 
     if args.handoff:
-        state, notes = handoff_ready(args.bundle)
-        if args.json:
-            sys.stdout.write(json.dumps({"bundle": str(args.bundle), "state": state, "notes": notes}, indent=2) + "\n")
-        else:
-            LOG.info("HANDOFF [%s] %s", state, args.bundle.name)
-            for note in notes:
-                LOG.info("  %s", note)
-        return {"READY": 0, "NOT_READY": 1, "NO_MODEL": 2}[state]
+        return run_handoff_mode(args.bundle, args.json)
+
+    if args.tamper:
+        return run_tamper_mode(args.bundle, args.json)
 
     if args.baseline is None:
         LOG.error(
