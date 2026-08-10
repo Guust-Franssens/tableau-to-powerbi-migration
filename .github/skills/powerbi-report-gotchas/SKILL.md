@@ -337,7 +337,9 @@ A "dimension-on-rows dot strip" → scatter with `Category` = the dimension (Det
 - **A blank or sparse screenshot is not evidence of a blank or sparse page.** `azureMap` and other
   remote/progressive visuals can look plausible while still missing marks; re-capture with
   `python scripts/capture_powerbi_pages.py <report.Report> <out-dir> --pid <pid>` and require
-  a byte-identical stability dwell before trusting the image.
+  a byte-identical stability dwell before trusting the image. This is a heuristic, not a readiness
+  signal: a partial plateau longer than `--stable-seconds` can still pass, so raise the dwell for cold
+  or high-risk maps.
 - **First check whether you even need to refresh.** A model handed over already refreshed AND saved
   persists to `<Name>.SemanticModel/.pbi/cache.abf` and survives reopening. Run
   `python scripts/refresh_pbip_model.py --pid <pid> --verify-only` — `DATA_OK` means you are done. On

@@ -69,6 +69,42 @@ def test_capture_stable_ignores_a_partial_plateau_until_final_frame_dwells() -> 
         shutil.rmtree(out_dir.parent, ignore_errors=True)
 
 
+def test_capture_stable_does_not_count_screenshot_duration_as_dwell() -> None:
+    """A slow screenshot call must not turn one unchanged poll into convergence."""
+    out_dir = _workspace("capture-slow-screenshot")
+    dest = out_dir / "Map.png"
+    frames = [
+        b"partial-west",
+        b"partial-west",
+        b"complete-nationwide",
+        b"complete-nationwide",
+        b"complete-nationwide",
+    ]
+    clock = ManualClock()
+
+    def fake_screenshot(_page_id: str, _pid: str, frame: Path) -> bool:
+        if len(frames) == 5:
+            clock.sleep(5.0)
+        frame.write_bytes(frames.pop(0))
+        return True
+
+    try:
+        result = capture.capture_stable(
+            "ReportSection1",
+            "1234",
+            dest,
+            capture.CaptureOptions(poll=4.0, stable_seconds=8.0, max_wait=30.0),
+            capture.CaptureRuntime(screenshotter=fake_screenshot, sleep=clock.sleep, clock=clock),
+        )
+
+        assert result.captured
+        assert result.converged
+        assert result.frames == 5
+        assert dest.read_bytes() == b"complete-nationwide"
+    finally:
+        shutil.rmtree(out_dir.parent, ignore_errors=True)
+
+
 def test_capture_stable_flags_newest_frame_when_page_never_converges() -> None:
     """A page still changing at max-wait is kept for inspection but fails the gate."""
     out_dir = _workspace("capture-unstable")

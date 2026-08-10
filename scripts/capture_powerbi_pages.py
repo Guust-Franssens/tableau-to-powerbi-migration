@@ -2,7 +2,7 @@
 """
 purpose: Capture every Power BI report page, waiting until each page's render has actually stabilised.
 usage:   python scripts/capture_powerbi_pages.py <report.Report> <output-dir> [--pid PID]
-                                                [--poll 4] [--stable-seconds 8] [--max-wait 75]
+                                                [--poll 4] [--stable-seconds 20] [--max-wait 75]
 
 Why this exists - and why the obvious version is wrong
 ------------------------------------------------------
@@ -32,9 +32,10 @@ Three things that do not work
 
 What works
 ----------
-Capture repeatedly and compare frames across a minimum stable dwell. When the same page stays
-byte-identical for that dwell, the render has converged. That is a measurement of stability rather
-than an assumption about timing, so it self-tunes to a cold or warm Desktop.
+Capture repeatedly and compare frames across a minimum stable dwell. This is the best available
+heuristic (bridge CLI 0.1.2 exposes no render-readiness signal), not a proof: a partial plateau longer
+than ``--stable-seconds`` can still pass. The dwell clock excludes the blocking screenshot call itself,
+so a slow capture cannot collapse the check back to one unchanged polling interval.
 """
 
 from __future__ import annotations
@@ -136,12 +137,13 @@ def capture_stable(
 
     started = runtime.clock()
     stable_digest: str | None = None
-    stable_since = started
+    stable_idle_seconds = 0.0
     frames = 0
     newest_frame: Path | None = None
+    previous_frame_finished = started
     try:
         while runtime.clock() - started < options.max_wait:
-            captured_at = runtime.clock()
+            capture_started = runtime.clock()
             frame = scratch / f"{frames}.png"
             frames += 1
             if not runtime.screenshotter(page_id, pid, frame):
@@ -150,8 +152,11 @@ def capture_stable(
             digest = frame_digest(frame)
             if digest != stable_digest:
                 stable_digest = digest
-                stable_since = captured_at
-            elif captured_at - stable_since >= options.stable_seconds:
+                stable_idle_seconds = 0.0
+            else:
+                stable_idle_seconds += max(0.0, capture_started - previous_frame_finished)
+            previous_frame_finished = runtime.clock()
+            if stable_idle_seconds >= options.stable_seconds:
                 shutil.copyfile(frame, dest)
                 return CaptureResult(True, True, runtime.clock() - started, frames)
             runtime.sleep(options.poll)
@@ -217,7 +222,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--stable-seconds",
         type=float,
-        default=8.0,
+        default=20.0,
         help="Minimum byte-identical dwell before treating a page as converged",
     )
     parser.add_argument("--max-wait", type=float, default=75.0, help="Max seconds to wait for one page")
