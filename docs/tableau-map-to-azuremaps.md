@@ -58,22 +58,31 @@ and is safe to drop, but worth recording as a fidelity note rather than silently
 
 ## 3. What actually happened to all nine worksheets
 
-Per-worksheet outcome from the single-workbook run (the one that emitted `azureMap` throughout).
-This is the table that matters, because **one engine choice broke eight of the nine**:
+**Attribution matters here and I got it wrong once** — see the correction note at the end of this
+section. Two different things happened, in sequence:
 
-| Tableau worksheet | mark class | emitted | `Category` (Location) well | outcome vs Tableau |
-|---|---|---|---|---|
-| Filled Map | `Automatic` | `azureMap` + `referenceLayer` | `[State]` | ✅ 49 polygons vs 49 |
-| Combined Map | `Multipolygon` + `Pie` | `azureMap` + `referenceLayer` + `bubbleLayer` | `[State, City]` | ❌ renders at **State** — 49 vs 531 |
-| Symbol Map | `Automatic` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
-| Dark Map | `Automatic` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
-| Density Map | `Heatmap` | `azureMap` + `heatMapLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
-| Mapbox | `Shape` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
-| Map with Viz in Tooltip | `Automatic` | `azureMap` + `bubbleLayer` | `[Country, State, City]` | ❌ **1 mark** vs 531 |
-| Pie Chart Map | `Pie` | `azureMap` + `bubbleLayer` + `Series` | `[Country, State, City]` | ❌ **1 mark** vs 10 |
-| Over Time | `Automatic`, **no `<mapsource>`** | `columnChart` | — | ✅ correctly not a map |
+**(a) What the ENGINE emits** (pristine, no downstream tooling):
 
-**The single highest-value finding: a multi-field Location well collapses every mark to one.**
+| Tableau worksheet | mark class | engine emitted | location well |
+|---|---|---|---|
+| Combined Map | `Multipolygon` + `Pie` | `filledMap` ⚠️ Bing | `Orders.State` |
+| Dark Map | `Automatic` | `shapeMap` ⚠️ Bing | `Orders.City` |
+| Filled Map | `Automatic` | `shapeMap` ⚠️ Bing | `Orders.State` |
+| Mapbox | `Shape` | `filledMap` ⚠️ Bing | `Orders.City` |
+| Map with Viz in Tooltip | `Automatic` | `shapeMap` ⚠️ Bing | `Orders.City` |
+| Symbol Map | `Automatic` | `shapeMap` ⚠️ Bing | `Orders.City` |
+| **Pie Chart Map** | `Pie` | **`pieChart`** — geography dropped | `Orders.Category` |
+| **Density Map** | `Heatmap` | **no page emitted** | — |
+| Over Time | `Automatic`, no `<mapsource>` | `columnChart` ✅ | `Orders.Order_Date` |
+
+The engine binds **one** location column throughout — which is correct.
+
+**(b) What OUR tier then did**: converted every Bing visual to `azureMap`, added the missing Density
+Map page, and — the defect — bound `Category` to `[Country, State, City]`, which collapsed 6 of the
+maps to a single mark at the US centroid. That was later fixed by rebinding to a composite
+`'City, State'` key (§4). Both the defect and the fix are ours.
+
+**The durable lesson: a multi-field Location well collapses every mark to one.**
 
 Stacking geographic columns into `Category` builds a **drill hierarchy**, and `azureMap` renders at
 its **top** level until a user drills. `Country` has exactly one distinct value in this extract
@@ -144,27 +153,32 @@ choropleth colouring and a legend are mutually exclusive on the same `azureMap` 
 `Series` gives per-category colouring but not per-point pie slices. This is a genuine fidelity loss
 and should be reported as one rather than quietly downgraded.
 
-## 7. The finding that matters most: conversion depends on batch composition
+## 7. RETRACTED: "conversion depends on batch composition"
 
-Two runs of the **same engine build**, 59 seconds apart, on the **byte-identical** workbook:
+**This section previously claimed the engine's map conversion was non-deterministic** — Bing in a
+19-workbook batch, `azureMap` when the same workbook ran alone. **That was wrong.** It is kept here
+rather than deleted because the way it failed is the useful part.
 
-| run | batch size | `book_6-1-Maps` output |
-|---|---|---|
-| `_screen` | 19 workbooks | `filledMap` ×2, `shapeMap` ×4 — **deprecated Bing** |
-| `3-maps` | 1 workbook | all `azureMap` ✅ |
+**What was actually compared:** a pristine engine bundle (`_screen`) against one **our own agents had
+already rewritten in place** (`3-maps`). The `azureMap` output was ours, not the engine's. Batch size
+was never the variable.
 
-Same `tool: migrate_estate`, same `LocalFilesSource`, same input hash. The only recorded difference
-is how many workbooks were in the batch.
+**What refutes it in one command:** `4-dashboards` is a **single-workbook** run and its engine output
+is Bing `shapeMap`. One workbook, still Bing. That bundle sat on disk throughout.
 
-This matters more than the Bing→Azure conversion itself: a single-workbook pilot renders clean
-while the customer's estate run silently emits deprecated visuals, and the difference is invisible
-without diffing `visualType` across runs. `book_8-1-Dashboards` in the same estate run also still
-carries a Bing `map` (`Category` = `Orders.Map Location`, `Size` = `Sum(Orders.Sales)`).
+**The evidence that was already in hand:** the engine's own handover for `book_6-1-Maps` carries *two*
+visual-type lists — `filledMap`/`shapeMap`/`pieChart` (the engine's) and a later all-`azureMap`
+rewrite (ours). The validator sign-off even noted "a later pass rewrote the visuals and did not
+regenerate the handover". Both were read without connecting them.
 
-**Caveat, stated honestly:** I have not reproduced this on demand — it is an observation over two
-existing bundles. The confound I cannot fully exclude from the artifacts alone is that the two runs
-used different engine working trees despite the timestamps. Worth reproducing upstream before
-treating the batch-composition hypothesis as established.
+**Why it survived a self-check:** the stated caveat was *"I cannot exclude that the two runs used
+different engine working trees"* — a plausible-sounding doubt aimed at the wrong thing. Naming a
+sophisticated confound is not the same as ruling out the simple one, and it can substitute for
+checking. The cheap check (open the third bundle) was never run.
+
+**Generalisable rule: `out/reports/` is not pristine engine output once a fix pass has run.** Any
+claim about engine behaviour must come from a bundle no agent has touched — or from the handover's
+original list, which records what the engine actually said before anything rewrote it.
 
 ## 8. Suggested detection
 
