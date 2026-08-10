@@ -7,6 +7,11 @@ maps — which makes it a good single fixture for map conversion.
 
 Everything below is read from the `.twb` XML or from emitted PBIR, not inferred from a screenshot.
 
+Sent upstream to the deterministic engine as
+[`Yarbrdab000/tableau-fabric-skills#112`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/112),
+which owns Bing→Azure Maps conversion (tracked here by
+[`#60`](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/60)).
+
 ---
 
 ## 1. The mark type is stated in the source — no inference needed
