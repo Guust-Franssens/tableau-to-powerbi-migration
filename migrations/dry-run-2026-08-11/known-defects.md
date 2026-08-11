@@ -69,3 +69,24 @@ output:
    against a truncated result.
 
 **A short, clean, plausible answer is the failure mode here** — not an error.
+
+## Live risks carried over from real customer feedback (2026-07-31)
+
+From two customer documents produced by the **agentic-only** toolkit, audited against `master`
+`adc3b43`. Full analysis in the session record; these are the items that can still bite **this** run.
+
+**10 of 21 retrospective issues are still `not-addressed`.** The ones that matter here:
+
+| Risk | Why it is live | Watch for |
+|---|---|---|
+| **Corrupt inherited custom SQL** — doubled `<<`/`>>`, literal `\n`/`\t` | `parse_tableau.py:397-400` copies `custom_sql` **verbatim**. Not fixable by architecture: a deterministic parser faithfully carries corrupt SQL through. | A source whose SQL fails only at live execution. `\n` after a `--` comment silently swallows the next line. |
+| **`check_m_syntax.py` does not catch JSON-style `\"` in M** | Its scanner only knows M's doubled `""`; paired `\"` keeps the quote count balanced and evades `UNTERMINATED`. **PR #79 does not fix this either.** | This was the customer's *"single most expensive issue"* — blocked Desktop from opening, recurred 4×, misdiagnosed as a version mismatch. Now only reachable via `_build/fix_*.py` repair passes, but still reachable. |
+| **`TransformColumnTypes` arity/pair shape unchecked** | `check_m_syntax.py:318-349` checks separators inside lists, not function arity or `{column, type}` shape. | Syntactically valid M that fails at refresh. |
+| **No MySQL/Aurora probe connector** | `probe_live_source.py:253-306` implements Databricks, SQL Server, Snowflake only — then raises. | If any of the 38 uses MySQL/Aurora, the live probe cannot run at all. |
+| **Snowflake key-pair auth guidance is infra-only** | `setup_snowflake_keypair.py:17-21` says its key proves nothing about Power BI Desktop. | This site has `TABLEAU_SF_*` configured, so Snowflake is in scope. |
+| **Residual DAX `BLANK()` coercion** | Still agent-authored; the translation guide only says `ISNULL → ISBLANK`. | Threshold comparisons silently mis-evaluating on blanks. |
+| **Stale doc contradicts code** | `docs/data-source-credentials.md:162-165` still describes the old extract routing that `connection_target.py:42-72` deliberately overrides. | An agent following the doc rather than the code. |
+
+**Three issues are `obsolete-by-architecture` but only partially** — the deterministic tier now emits
+the base partitions, so an LLM cannot make those mistakes *there*; but our own `_build/fix_*.py`
+repair passes still hand-edit M and TMDL, so the class is narrowed, not eliminated.

@@ -95,9 +95,44 @@ by definition — log it with what the agent was stuck on and what unstuck it.
 
 | Phase | Started | Ended | Elapsed | Notes |
 |---|---|---|---|---|
-| 1 — assess 38 | | | | |
-| 2 — migrate 4–5 | | | | |
+| 1 — survey + assess 38 | | | | |
+| 1b — harvest 38 | | | | |
+| 2a — deterministic, all 38 | | | | |
+| 2b — agentic, 4–5 | | | | |
 | 3 — debrief | | | | |
+
+## Baseline to measure against — AVA Promocode, 2026-07-31
+
+The only pre-deterministic-tier measurement we have, from a **real customer migration** of **one
+workbook** (1 table, 2 pages, 21 visuals) on the agentic-only toolkit:
+
+| Sub-agent | Elapsed | Tool calls | Turns |
+|---|---:|---:|---:|
+| `pbi-semantic-builder` | **3h 39m 28s** | ~347 | 2 |
+| `pbi-report-builder` | **2h 36m 56s** | ~400 | 3 |
+| `pbi-migration-validator` | 38m 25s | ~106 | 1 |
+| **Total** | **6h 54m 49s** | **~853** | **6** |
+
+**90.7% of that time was the two builders** — and both of those jobs are now done by the
+deterministic tier. So the honest question for this run is **not** "is it faster" (it must be), but
+**where did the time move to?**
+
+Expected new bottlenecks: credential probes and Desktop waits · residual DAX / table-calc work ·
+AI enrichment · visual repair · cache persistence · validator rounds.
+
+**Regression signals** — record time separately for each, because a bigger total is not automatically
+bad (triage and validation are deliberately stricter now):
+
+- semantic time spent **recreating** objects the engine already emitted
+- report time spent **rebuilding** rather than repairing
+- external retries beyond the documented cap
+- validator loops beyond 2–3 rounds
+- hours on the **trivial control workbook** with an empty residual queue
+- inability to attribute agentic time at all
+
+Also record **human-wait time separately from active time**, and **time spent diagnosing
+`known-engine` defects separately from genuine agentic work** — otherwise a known bug inflates the
+UX measurement.
 
 ## Questions the agent asked
 
