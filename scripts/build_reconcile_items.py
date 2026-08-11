@@ -49,8 +49,18 @@ import csv
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+# Windows defaults stdout/stderr to the legacy cp1252 codec, which cannot encode the non-ASCII
+# characters (e.g. the warning glyph above) in this module's own docstring -- argparse's --help
+# crashes with UnicodeEncodeError before printing anything. Force UTF-8 so --help and any print()
+# of the same characters work the same on every platform.
+for _stream in (sys.stdout, sys.stderr):
+    # pylint: disable-next=no-member  # astroid mis-infers TextIOWrapper.encoding as a class here
+    if _stream is not None and _stream.encoding and _stream.encoding.lower() != "utf-8":
+        _stream.reconfigure(encoding="utf-8")
 
 LOG = logging.getLogger("reconcile-items")
 
