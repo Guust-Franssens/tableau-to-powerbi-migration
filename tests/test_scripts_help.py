@@ -21,6 +21,7 @@ into a docstring.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -106,6 +107,26 @@ def _documented_flags(text: str) -> list[str]:
     return sorted(set(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", match.group(1))))
 
 
+def _undocumented_flags(text: str, flags: list[str], shim_text: str = "") -> list[str]:
+    """Return usage flags that appear only in the module documentation."""
+    module_docstring = ast.get_docstring(ast.parse(text)) or ""
+    return [
+        flag
+        for flag in flags
+        if text.count(flag) - module_docstring.count(flag) + shim_text.count(flag) == 0
+    ]
+
+
+def test_documented_flag_requires_implementation_not_another_docstring_mention() -> None:
+    text = '''"""
+usage: example.py --missing
+
+--missing is described here too.
+"""
+'''
+    assert _undocumented_flags(text, _documented_flags(text)) == ["--missing"]
+
+
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
 def test_every_documented_flag_is_actually_implemented(script: Path) -> None:
     """Every `--flag` a script's own `usage:` line advertises must appear somewhere in its code.
@@ -123,14 +144,14 @@ def test_every_documented_flag_is_actually_implemented(script: Path) -> None:
     if not flags:
         return
 
-    combined = text
+    shim_text = ""
     shim_target = re.search(r"\.github/skills/\S+\.py", text)
     if shim_target:
         target_path = REPO_ROOT / shim_target.group(0)
         if target_path.is_file():
-            combined += target_path.read_text(encoding="utf-8")
+            shim_text = target_path.read_text(encoding="utf-8")
 
-    undocumented = [flag for flag in flags if combined.count(flag) <= 1]
+    undocumented = _undocumented_flags(text, flags, shim_text)
     assert not undocumented, (
         f"{script.name} documents {undocumented} in its usage: line, but the flag appears nowhere "
         "else in the script (or its forwarding target) - implement it or remove it from the docstring."
