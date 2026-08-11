@@ -26,6 +26,22 @@ PBIR files yourself.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
   PBIR/visuals, `pbi-migration-validator` is read-only and never edits. A subagent never "just fixes"
   a finding another agent owns — it reports; the orchestrator routes.
+- **Three locations, one direction: engine truth → working copy → deliverable. Never edit upstream of
+  where you are.**
+  | stage | location | rule |
+  |---|---|---|
+  | engine truth | `<bundle>/out/reports/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | working copy | `<bundle>/out/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
+
+  Keeping `reports/` pristine makes `diff out/reports/ out/pbip/` an exact answer to *"what did our
+  tier change versus what the engine produced?"* — unanswerable, that cost a retracted upstream bug on
+  2026-08-10 (our fix pass had rewritten `reports/` and the diff was read as engine behaviour).
+  `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
+  `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
+  shared datasource, and never ship `out/reports/` (it points back into `pbip/`). Mechanics:
+  `powerbi-report-gotchas` §3.
+
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
   surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
@@ -331,31 +347,25 @@ the same context you would have.
 
 ## Gotchas
 
-- **Never add a `tools:` line to this agent's frontmatter** (relevant because step 12 edits persona
-  files). Allow-lists ARE enforced and drop unrecognised entries **silently**, so a well-meant
-  allow-list can remove your delegation tool and leave you unable to delegate at all. Rationale and
-  measurements: `docs/agent-architecture.md` §2, §6.
-
-- **Sweep the Desktop batch — orphans included.** The shared convention has each subagent close its
-  own instance; some don't, and an orphan (+ its child `msmdsrv`) holds the bridge and blocks later
-  agents (`BRIDGE_ERROR "Host is not ready"`). So sweep between waves and before you summarize:
-  `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"`, map each PID to a migration by
-  `MainWindowTitle`, and close the **finished** ones only — never one still mid validator↔builder
-  handoff. Also confirm no scratch is staged in git.
-- **Keep this repo customer-agnostic.** Never hardcode a customer name into generated code, agent
-  files or script identifiers — customer context belongs in `migrations/workbooks/<name>/` only.
+- **Never add a `tools:` line to this agent's frontmatter** (step 12 edits persona files). Allow-lists
+  ARE enforced and drop unrecognised entries **silently**, so a well-meant one can remove your
+  delegation tool entirely. Rationale: `docs/agent-architecture.md` §2, §6.
+- **Sweep the Desktop batch — orphans included.** Each subagent should close its own instance; some
+  don't, and an orphan (+ child `msmdsrv`) holds the bridge and blocks later agents
+  (`BRIDGE_ERROR "Host is not ready"`). Sweep between waves and before you summarize:
+  `Get-CimInstance Win32_Process -Filter "Name='PBIDesktop.exe'"`, map each PID by `MainWindowTitle`,
+  close the **finished** ones only — never one mid validator↔builder handoff. Confirm no scratch is
+  staged in git.
+- **Keep this repo customer-agnostic.** Never hardcode a customer name in code, agent files or script
+  identifiers — customer context lives in `migrations/workbooks/<name>/` only.
 - **Never fabricate row data.** Extract-based (`.hyper`) sources have no live connection; don't invent
-  numbers to fill gaps. Materializing real data is the user's decision, never a silent approximation.
+  numbers. Materializing real data is the user's decision, never a silent approximation.
 - **`.twbx` source files are gitignored** (`**/source/*.twbx`) — they can contain customer data. The
   `migration-spec.json` they produce is the shareable artifact.
-- **Route fixes through the owning subagent, not ad hoc.** When a bug turns up in an already-built
-  model/report — whether you found it or `pbi-migration-validator` reported it — re-delegate to the
-  subagent that owns that layer (`pbi-semantic-builder` for DAX/TMDL, `pbi-report-builder` for
-  PBIR/visuals) rather than editing directly, even for a trivial one-liner. An earlier session's
-  biggest process gap was exactly this: a string of real bugs fixed by direct edits that bypassed both
-  subagents' skill chains and validation. The fixes were correct, but nothing that made them *safe*
-  ever ran against them.
-- **Check installed skill versions once per session.** `preflight.ps1` covers plugin/bundle drift, but
-  also run the Power BI skills' `check-updates`: more than one copy of a skill can be installed at
-  different capability levels, and this repo hit a real case where an older copy was used all session
-  while a newer one sat installed but unused.
+- **Route fixes through the owning subagent** — the shared "own your layer" rule, from your side. Even
+  a trivial one-liner goes back to `pbi-semantic-builder` (DAX/TMDL) or `pbi-report-builder`
+  (PBIR/visuals). An earlier session's biggest process gap was a string of correct direct fixes that
+  bypassed both subagents' skill chains — nothing that made them *safe* ever ran.
+- **Check installed skill versions once per session** — `preflight.ps1` covers plugin/bundle drift,
+  but also run the Power BI skills' `check-updates`: two copies can be installed at different
+  capability levels, and this repo used the older one all session while a newer sat unused.
