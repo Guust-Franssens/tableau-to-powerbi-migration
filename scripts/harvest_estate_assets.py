@@ -46,6 +46,15 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+# Windows defaults stdout/stderr to the legacy cp1252 codec, which cannot encode the non-ASCII
+# characters (e.g. the warning glyph above) in this module's own docstring -- argparse's --help
+# crashes with UnicodeEncodeError before printing anything. Force UTF-8 so --help and any print()
+# of the same characters work the same on every platform.
+for _stream in (sys.stdout, sys.stderr):
+    # pylint: disable-next=no-member  # astroid mis-infers TextIOWrapper.encoding as a class here
+    if _stream is not None and _stream.encoding and _stream.encoding.lower() != "utf-8":
+        _stream.reconfigure(encoding="utf-8")
+
 LOG = logging.getLogger("harvest_estate_assets")
 
 ENGINE_SCRIPTS = (
@@ -239,6 +248,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
     ap.add_argument("--db", type=Path, help="assess_estate.py estate.db to take LUIDs from")
     ap.add_argument("--limit", type=int, help="stop after N assets (for a quick pass)")
     ap.add_argument("--skip-download", action="store_true", help="reuse whatever is already in --out/assets")
+    ap.add_argument("--workbooks-only", action="store_true", help="skip published datasources; sweep workbooks only")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -254,8 +264,9 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
     db = args.db or (REPO_ROOT / "_assessment" / "estate.db")
     con = sqlite3.connect(db)
     todo: list[tuple[str, str, str]] = []
-    for luid, name in con.execute("SELECT luid, name FROM datasource ORDER BY name"):
-        todo.append(("datasource", luid, name))
+    if not args.workbooks_only:
+        for luid, name in con.execute("SELECT luid, name FROM datasource ORDER BY name"):
+            todo.append(("datasource", luid, name))
     for luid, name in con.execute("SELECT luid, name FROM workbook ORDER BY name"):
         todo.append(("workbook", luid, name))
     con.close()
