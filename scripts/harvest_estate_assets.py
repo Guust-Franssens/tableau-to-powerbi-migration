@@ -49,11 +49,14 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 # Windows defaults stdout/stderr to the legacy cp1252 codec, which cannot encode the non-ASCII
 # characters (e.g. the warning glyph above) in this module's own docstring -- argparse's --help
 # crashes with UnicodeEncodeError before printing anything. Force UTF-8 so --help and any print()
-# of the same characters work the same on every platform.
+# of the same characters work the same on every platform. This runs BEFORE the import below so a
+# failure there is reportable rather than itself crashing the encoder.
 for _stream in (sys.stdout, sys.stderr):
     # pylint: disable-next=no-member  # astroid mis-infers TextIOWrapper.encoding as a class here
     if _stream is not None and _stream.encoding and _stream.encoding.lower() != "utf-8":
         _stream.reconfigure(encoding="utf-8")
+
+from tableau_env import engine_child_env, load_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("harvest_estate_assets")
 
@@ -62,19 +65,6 @@ ENGINE_SCRIPTS = (
     / ".copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/scripts",
     REPO_ROOT.parent / "tableau-fabric-skills/skills/tableau-migration/scripts",
 )
-
-
-def load_env(path: Path) -> dict[str, str]:
-    """Read a git-ignored KEY=VALUE file. Absent file is not an error - env vars may already be set."""
-    out: dict[str, str] = {}
-    if not path.is_file():
-        return out
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            out[key.strip()] = value.strip()
-    return out
 
 
 def engine_scripts_dir() -> Path | None:
@@ -106,11 +96,9 @@ def download(kind: str, luid: str, out_file: Path, env: dict[str, str], scripts:
         "--out",
         str(out_file),
     ]
-    child = {**env, "TABLEAU_PAT_VALUE": env.get("TABLEAU_PAT_SECRET", "")}
+    child = engine_child_env(env)
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600, check=False, env={**dict(_os_environ()), **child}
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False, env=child)
     except subprocess.TimeoutExpired:
         return False, "timeout after 600s"
     if proc.returncode != 0:

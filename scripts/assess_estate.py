@@ -44,11 +44,15 @@ import json
 import logging
 import re
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tableau_env import load_env, pat_secret  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("assess")
 
@@ -67,16 +71,6 @@ TABLE_CALC_RE = re.compile(
 WEIGHTS = {"sheets": 1.0, "dashboards": 2.0, "calcs": 1.0, "lods": 5.0, "table_calcs": 5.0}
 
 
-def load_env(path: Path) -> dict[str, str]:
-    """Read a git-ignored KEY=VALUE file. Secrets are never logged or written to the store."""
-    env: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if "=" in line and not line.strip().startswith("#"):
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip()
-    return env
-
-
 class Site:
     """Read-only Tableau client. Re-authenticates on mid-run session loss and records that it did."""
 
@@ -84,7 +78,7 @@ class Site:
         self.base = env["TABLEAU_SERVER_URL"].rstrip("/")
         self.version = env.get("TABLEAU_REST_API_VERSION", "3.21")
         self.site = env["TABLEAU_SITE"]
-        self._pat = (env["TABLEAU_PAT_NAME"], env["TABLEAU_PAT_SECRET"])
+        self._pat = (env["TABLEAU_PAT_NAME"], pat_secret(env))
         self.token: str | None = None
         self.site_id: str | None = None
         self.reauths = 0
