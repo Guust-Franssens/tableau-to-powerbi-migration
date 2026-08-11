@@ -10,15 +10,13 @@ independent oracle matched. That refutes the deterministic tier's own framing of
 work "there is no script" for.
 
 Known debt, all deliberate and none yet fixed - do not treat this as a repo tool:
-  1. Reads `sys.argv` at module scope, so it cannot be imported or unit-tested. Needs argparse +
-     `main()`.
-  2. `--table` defaults to an airline-specific table name.
-  3. Imports `translation_router.check_candidate_dax` from the INSTALLED plugin by an expanded `~`
+  1. `--table` defaults to an airline-specific table name.
+  2. Imports `translation_router.check_candidate_dax` from the INSTALLED plugin by an expanded `~`
      path, and raises ImportError at import time when the plugin is absent. Deliberate - reusing
      his gate rather than reimplementing it is the point - but it needs to fail with a readable
      message instead of a traceback.
 
-The pylint suppressions below cover (1): module-level driver code shadows the helper functions'
+The pylint suppressions below cover the module-level driver code that shadows the helper functions'
 locals. They should be deleted by the refactor, not carried forward.
 """
 
@@ -28,6 +26,7 @@ locals. They should be deleted by the refactor, not carried forward.
 # pylint: disable=redefined-outer-name,too-many-return-statements,invalid-name
 # pylint: disable=wrong-import-position,import-error,missing-function-docstring
 
+import argparse
 import json
 import os
 import re
@@ -36,18 +35,21 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
+parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("REPORT")
+parser.add_argument("TWB")
+parser.add_argument("OUT")
+parser.add_argument("--table")
+args = parser.parse_args()
+
 SKILL = Path(os.path.expanduser("~")) / (
     r".copilot\installed-plugins\tableau-collection\tableau-fabric-skills\skills\tableau-migration"
 )
 sys.path.insert(0, str(SKILL / "scripts"))
 from translation_router import check_candidate_dax  # noqa: E402
 
-REPORT, TWB, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-TABLE = (
-    sys.argv[sys.argv.index("--table") + 1]
-    if "--table" in sys.argv
-    else ("airline_alliance_performance_2022_2025_1.csv")
-)
+REPORT, TWB, OUT = args.REPORT, args.TWB, args.OUT
+TABLE = args.table or "airline_alliance_performance_2022_2025_1.csv"
 T = f"'{TABLE}'"
 
 root = ET.fromstring(Path(TWB).read_text(encoding="utf-8"))
@@ -75,7 +77,7 @@ for ds in root.iter("datasource"):
 # real model columns (source of truth for binding)
 MODEL_COLS = set()
 tmdl = next((Path(REPORT).parent / "pbip").rglob("tables"))
-if "--table" not in sys.argv:
+if args.table is None:
     # bind to whichever fact table the DETERMINISTIC translations already used
     votes = Counter()
     for _f in tmdl.glob("*.tmdl"):
