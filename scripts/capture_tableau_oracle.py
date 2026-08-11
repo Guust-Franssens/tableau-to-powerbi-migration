@@ -60,12 +60,16 @@ import json
 import logging
 import random
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tableau_env import load_env, pat_secret  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-oracle")
 
@@ -85,16 +89,6 @@ TRANSIENT_STATUSES = frozenset({NETWORK_ERROR_STATUS, 429, 500, 502, 503, 504})
 _PERCENT = re.compile(r"^-?[\d,.]+%$")
 _CURRENCY = re.compile(r"^-?[$£€¥]\s?[\d,.]+$")
 _THOUSANDS = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
-
-
-def load_env(path: Path) -> dict[str, str]:
-    """Read a git-ignored KEY=VALUE file. Secrets are never logged."""
-    env: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if "=" in line and not line.strip().startswith("#"):
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip()
-    return env
 
 
 class ExportFailed(RuntimeError):
@@ -539,7 +533,7 @@ def main() -> int:
             base=env["TABLEAU_SERVER_URL"],
             site=env["TABLEAU_SITE"],
             pat_name=env["TABLEAU_PAT_NAME"],
-            pat_secret=env["TABLEAU_PAT_SECRET"],
+            pat_secret=pat_secret(env),
             version=env.get("TABLEAU_REST_API_VERSION", "3.21"),
         ),
         RetryPolicy(max_attempts=args.max_attempts, budget_sec=args.retry_budget),
