@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import json
 import logging
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -47,21 +48,12 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tableau_env import load_env, pat_secret  # noqa: E402
+
 LOG = logging.getLogger("provenance")
 
 WORKBOOK_SUFFIXES = (".twb", ".twbx")
-
-
-def load_env(path: Path) -> dict[str, str]:
-    """Read a git-ignored KEY=VALUE file. Secrets are never echoed into the output."""
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if "=" in line and not line.strip().startswith("#"):
-            key, value = line.split("=", 1)
-            env[key.strip()] = value.strip()
-    return env
 
 
 def fingerprint(path: Path) -> dict[str, Any]:
@@ -94,7 +86,7 @@ class TableauLookup:
         self.version = env.get("TABLEAU_REST_API_VERSION", "3.21")
         self.site = env["TABLEAU_SITE"]
         self.product_version = env.get("TABLEAU_PRODUCT_VERSION")
-        self._pat = (env["TABLEAU_PAT_NAME"], env["TABLEAU_PAT_SECRET"])
+        self._pat = (env["TABLEAU_PAT_NAME"], pat_secret(env))
         self.token: str | None = None
         self.site_id: str | None = None
 
