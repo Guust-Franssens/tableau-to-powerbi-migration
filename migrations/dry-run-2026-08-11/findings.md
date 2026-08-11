@@ -34,15 +34,58 @@ by definition — log it with what the agent was stuck on and what unstuck it.
 
 ---
 
-## F002 — No documented path from "a Tableau site" to "a folder of workbooks"
+## F002 — The site→folder step exists but is absent from the entry-point triage
 
 - **When:** 2026-08-11, before the run
 - **Tag:** `docs-gap`
 - **Phase:** 0 (planning)
-- **Observed:** `AGENTS.md`'s input-triage table maps *a site* → `assess_estate.py` + `tableau_lineage.py --plan`, and *a folder of `.twb`/`.twbx`* → `run_estate.py --input <folder>`. But `run_estate.py` only accepts a **local folder**, and nothing in the table says how to get from the first row to the second. The bridge (`harvest_estate_assets.py`, which wraps the engine's `fetch_tds.py`) exists but is never named in the triage.
-- **Root cause, upstream:** the engine's `LiveTableauSource` is an explicit stub — *"Documented SEAM for a live Tableau Server / Cloud connection — network calls NOT built yet."* Only `LocalFilesSource` and `InMemoryTableauSource` run end-to-end. So the one-button site→PBIP flow genuinely does not exist yet; the gap is real, not a doc oversight alone.
-- **Impact:** an operator following `AGENTS.md` for a site reaches an assessment and then has no documented next step. We only found this by reading `run_estate.py --help` during planning.
-- **Suggested fix:** add the download step to the triage table, and state plainly that live-site ingestion is not implemented upstream.
+- **⚠️ Correction:** an earlier version of this entry claimed no path existed. **That was wrong** —
+  `scripts/harvest_estate_assets.py` downloads every workbook and published datasource to
+  `<out>/assets/` as `.twbx`/`.tdsx`, which is exactly what `run_estate.py --input` consumes. The
+  defect is documentation, not capability.
+- **Observed:** `AGENTS.md`'s input-triage table maps *a site* → `assess_estate.py` +
+  `tableau_lineage.py --plan`, and *a folder of `.twb`/`.twbx`* → `run_estate.py --input <folder>`.
+  The step that gets you from the first row to the second is never named. An operator following the
+  table reaches an assessment and stops.
+- **Worth knowing:** `harvest_estate_assets.py` does more than download — it runs **both** parsers
+  (ours for fidelity, the engine's for conversion) and writes `parse-sweep.md` / `parse-sweep.json`,
+  a failure distribution across the estate. That is precisely the phase-2a evidence this run wants,
+  and it is buried in a script nobody is pointed at.
+- **Separately true:** the engine's `LiveTableauSource` is an explicit stub — *"Documented SEAM …
+  network calls NOT built yet"* — so there is no **one-button** live-site→PBIP flow. The two-step
+  harvest-then-run path is the supported route and should be documented as such.
+- **Suggested fix:** add the harvest step to the triage table; state plainly that live-site ingestion
+  is a two-step flow, and why.
+- **Status:** open
+
+---
+
+## F004 — `harvest_estate_assets.py` documents a `--workbooks-only` flag it does not implement
+
+- **When:** 2026-08-11, before the run
+- **Tag:** `new-UX`
+- **Phase:** 0 (setup)
+- **Observed:** the module docstring's usage line advertises it:
+
+  ```
+  usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--limit N]
+                                                   [--skip-download] [--workbooks-only]
+  ```
+
+  It appears **only** there — never in `argparse`. Running the documented line verbatim:
+
+  ```
+  $ python scripts/harvest_estate_assets.py --out C:\tfmig\_probe_out --workbooks-only
+  harvest_estate_assets.py: error: unrecognized arguments: --workbooks-only
+  EXIT=2
+  ```
+
+- **Impact:** copying the script's own documented invocation fails. Compounded by F003 — on Windows
+  `--help` crashes before printing, so the real flag list is not easily discoverable either.
+  Together they make this script hostile on first contact, and it is the script that bridges F002.
+- **Suggested fix:** implement the flag or delete it from the docstring. A test asserting that every
+  flag in a script's usage line actually parses would catch this class repo-wide, alongside the
+  `--help` smoke test proposed in F003.
 - **Status:** open
 
 ---
