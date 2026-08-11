@@ -346,10 +346,21 @@ copies then drift.
 
 | You were given | First move | Because |
 |---|---|---|
-| **A Tableau Server/Cloud site** (URL + PAT) | `python scripts/assess_estate.py --out _assessment` → then `python scripts/tableau_lineage.py --plan` | Assess emits *a decision, not an inventory*: what exists, what is **actually used**, how hard each workbook is, who can see it. Lineage then orders it **model-first** — the published data source feeding 12 workbooks is the highest-leverage unit in the estate. **You cannot create Tableau credentials**; a Tableau user must supply a PAT. |
+| **A Tableau Server/Cloud site** (URL + PAT) | `estate_survey.py --json` → `python scripts/assess_estate.py --out _assessment --survey <that json>` → `python scripts/tableau_lineage.py --plan` → **`python scripts/harvest_estate_assets.py --out <dir>`** → `python scripts/run_estate.py --input <dir>/assets --output <bundle>` | Assess emits *a decision, not an inventory*: what exists, what is **actually used**, how hard each workbook is, who can see it — but without `--survey` it reports migration **order as unknown**, and a workbook whose published datasource has not landed first rebuilds to an **empty report**. Harvest is the seam: it downloads every workbook and published datasource to `<out>/assets/` as `.twbx`/`.tdsx`, exactly what `run_estate.py --input` consumes. This is a deliberate **two-step** flow, not a gap — the engine's `LiveTableauSource` is an explicit stub ("network calls NOT built yet"), so there is no one-button live-site→PBIP path. |
 | **A folder of `.twb`/`.twbx`** | `python scripts/run_estate.py --input <folder> --output <bundle>` | Sweeps the whole folder through the deterministic tier and emits per-workbook handover slices. No server, so ordering is derived from the parsed specs rather than Tableau's metadata API. |
 | **One `.twb`/`.twbx`** | `python scripts/parse_tableau.py <file> -o <spec>` → dispatch `@tableau-migrator` | The simple path. Still write a brief. |
 | **A `.tds`/`.tdsx`** (data source, no workbook) | `parse_tableau.py` accepts it directly | This is **phase 1** of a model-first estate: a semantic model with **no report**. Also the fix for a `sqlproxy` published source, whose calcs live on the server and are therefore *under-reported* by any workbook that merely points at it. |
+
+`estate_survey.py` is the deterministic **engine's** script, not ours, so it is not on `PATH` — it
+installs under `~/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/scripts/estate_survey.py`
+(a sibling clone at `../tableau-fabric-skills/skills/tableau-migration/scripts/` also works; see
+`scripts/harvest_estate_assets.py`'s `engine_scripts_dir()` for the resolution order). Run its
+`--json` output straight into `assess_estate.py --survey`.
+
+`harvest_estate_assets.py` is worth more than the download: it also runs **both** parsers (ours for
+fidelity, the engine's for conversion) over every asset and writes `<out>/parse-sweep.md` /
+`parse-sweep.json` — an estate-wide failure distribution, and exactly the evidence an upstream
+feature request needs instead of an anecdote.
 
 **Where does the output go?** Be honest about this rather than promising: **local PBIP is the only
 supported target today.** There is no publish step in this repo — `pbi-deployer` is phase 2 and does
