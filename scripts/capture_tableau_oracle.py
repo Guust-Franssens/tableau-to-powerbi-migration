@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import load_env, pat_secret  # noqa: E402
+from tableau_env import load_env, pat_secret  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-oracle")
 

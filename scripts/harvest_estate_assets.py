@@ -46,7 +46,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-from tableau_env import engine_child_env, load_env  # noqa: E402
+from tableau_env import engine_child_env, load_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("harvest_estate_assets")
 
