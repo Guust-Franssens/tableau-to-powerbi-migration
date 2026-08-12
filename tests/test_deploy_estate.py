@@ -757,3 +757,41 @@ def test_a_failed_update_is_reported_not_swallowed(tmp_path, monkeypatch):
     item_id, failure = de._deploy_model(target, "WB", item)
     assert item_id is None
     assert "boom" in failure
+
+
+def test_an_item_on_the_second_page_is_found_not_duplicated(monkeypatch):
+    """Reading only page one makes a far-away item look absent, and absent means "create a copy"."""
+    pages = [
+        {"value": [{"displayName": "A", "type": de.MODEL_TYPE, "id": "id-a"}], "continuationToken": "tok-2"},
+        {"value": [{"displayName": "Z", "type": de.MODEL_TYPE, "id": "id-z"}]},
+    ]
+    calls: list[str] = []
+
+    def fake_call(_method, url, *_a, **_k):
+        calls.append(url)
+        return 200, {}, pages[len(calls) - 1]
+
+    monkeypatch.setattr(de, "call", fake_call)
+    assert de.find_existing("ws", "tok", "Z", de.MODEL_TYPE) == "id-z"
+    assert len(calls) == 2, "the second page was never requested"
+    assert "tok-2" in calls[1], "the continuation token must be carried into the next request"
+
+
+def test_a_repeating_continuation_token_cannot_loop_forever(monkeypatch):
+    calls: list[str] = []
+
+    def fake_call(_method, url, *_a, **_k):
+        calls.append(url)
+        return 200, {}, {"value": [], "continuationToken": "same-every-time"}
+
+    monkeypatch.setattr(de, "call", fake_call)
+    status, rows = de.list_all("ws", "tok", "items")
+    assert (status, rows) == (200, [])
+    assert len(calls) == 2, "a server repeating one token must not be followed indefinitely"
+
+
+def test_a_list_failure_is_reported_rather_than_read_as_empty(monkeypatch):
+    monkeypatch.setattr(de, "call", lambda *a, **k: (403, {}, {}))
+    status, rows = de.list_all("ws", "tok", "items")
+    assert status == 403 and rows == []
+    assert de.find_existing("ws", "tok", "A", de.MODEL_TYPE) is None

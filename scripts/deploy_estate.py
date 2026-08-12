@@ -68,6 +68,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -472,10 +473,10 @@ def preflight(workspace: str, tok: str, planned: int) -> tuple[bool, str, dict[s
         return False, f"could not read workspace {workspace}: HTTP {status} {json.dumps(body)[:200]}", {}
 
     name = body.get("displayName", "?")
-    status, _, items = call("GET", f"{API}/workspaces/{workspace}/items", tok)
+    status, rows = list_all(workspace, tok, "items")
     if status != 200:
         return False, f"could not list items in {name!r}: HTTP {status} - is this identity a Contributor?", body
-    existing = len(items.get("value", []))
+    existing = len(rows)
     budget = int(WORKSPACE_ITEM_LIMIT * (1 - HEADROOM)) - existing
     if planned > budget:
         return (
@@ -549,12 +550,39 @@ def create_item(workspace: str, tok: str, item: Item, journal: Journal) -> tuple
     return "Failed", None, detail
 
 
+def list_all(workspace: str, tok: str, collection: str) -> tuple[int, list[dict[str, Any]]]:
+    """Read every page of a Fabric list endpoint.
+
+    Fabric returns a `continuationToken` once a collection outgrows one page. Reading only the
+    first page makes an item that sits past the boundary look ABSENT, and "absent" is precisely
+    what makes this deployer create a second copy. A landing zone holds two items per workbook, so
+    a customer estate reaches that boundary long before a 33-workbook test bundle does - the
+    measured run above fitted in a single page and so could never have caught this.
+    """
+    url = f"{API}/workspaces/{workspace}/{collection}"
+    rows: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
+    while True:
+        status, _, body = call("GET", url, tok)
+        if status != 200:
+            return status, rows
+        rows.extend(body.get("value", []))
+        next_page = body.get("continuationToken")
+        # A server that keeps handing back the same token would otherwise loop forever.
+        if not next_page or next_page in seen_tokens:
+            return status, rows
+        seen_tokens.add(next_page)
+        url = body.get("continuationUri") or (
+            f"{API}/workspaces/{workspace}/{collection}?continuationToken={quote(next_page)}"
+        )
+
+
 def find_existing(workspace: str, tok: str, name: str, item_type: str) -> str | None:
     """Look up an item's id by name+type, for reconciling a journal that fell behind reality."""
-    status, _, body = call("GET", f"{API}/workspaces/{workspace}/items", tok)
+    status, rows = list_all(workspace, tok, "items")
     if status != 200:
         return None
-    for entry in body.get("value", []):
+    for entry in rows:
         if entry.get("displayName") == name and entry.get("type") == item_type:
             return entry.get("id")
     return None
@@ -762,11 +790,11 @@ def folder_plan(projects: dict[str, str], parents: dict[str, str] | None = None)
 
 def _existing_folder_paths(workspace: str, tok: str) -> dict[tuple[str, ...], str] | None:
     """Read the workspace's current folders as path-tuple -> id, or None if the API is unavailable."""
-    status, _, body = call("GET", f"{API}/workspaces/{workspace}/folders", tok)
+    status, rows = list_all(workspace, tok, "folders")
     if status != 200:
         LOG.warning("folders API unavailable (HTTP %s) - deploying flat", status)
         return None
-    by_id = {f["id"]: f for f in body.get("value", [])}
+    by_id = {f["id"]: f for f in rows}
     existing: dict[tuple[str, ...], str] = {}
     for folder in by_id.values():
         parts, node = [], folder
