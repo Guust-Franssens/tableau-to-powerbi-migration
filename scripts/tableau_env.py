@@ -38,6 +38,7 @@ script reject a ``.env`` written from our own ``.env.example``.
 from __future__ import annotations
 
 import os
+import re
 import warnings
 from pathlib import Path
 
@@ -65,6 +66,8 @@ CANONICAL_ENV_KEYS = (
 # Every accepted spelling, canonical or alias. A name outside this set in a Tableau-auth script is a
 # new divergence.
 ACCEPTED_ENV_KEYS = frozenset(CANONICAL_ENV_KEYS) | {"TABLEAU_SERVER", "TABLEAU_PAT_VALUE"}
+
+_TABLEAU_AUTH_HEADER_RE = re.compile(r"(?i)([\"']?x-tableau-auth[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;<>]+)")
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -223,7 +226,7 @@ def redact(text: str, *secrets: str) -> str:
         # A short or empty value would redact unrelated text; a real PAT secret is far longer.
         if secret and len(secret) >= 8:
             text = text.replace(secret, "[REDACTED]")
-    return text
+    return _TABLEAU_AUTH_HEADER_RE.sub(r"\1[REDACTED]", text)
 
 
 def engine_child_env(env: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:

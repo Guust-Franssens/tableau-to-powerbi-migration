@@ -180,6 +180,18 @@ def test_require_is_silent_when_everything_is_present():
     te.require({"TABLEAU_SERVER_URL": "https://x", "TABLEAU_PAT_NAME": "n", "TABLEAU_PAT_SECRET": "s"})
 
 
+# --------------------------------------------------------------------------- redaction
+
+
+def test_redact_scrubs_reflected_tableau_session_header_without_losing_status():
+    """Engine child stderr can echo an authenticated request into parse-sweep.json."""
+    text = "HTTP 400 from proxy: X-Tableau-Auth: SENTINEL_SESSION_TOKEN_FULL_PERMISSION path=/api/3.29"
+    redacted = te.redact(text, "PAT_SECRET_1234567890")
+    assert "SENTINEL_SESSION_TOKEN_FULL_PERMISSION" not in redacted
+    assert "HTTP 400" in redacted
+    assert "X-Tableau-Auth: [REDACTED]" in redacted
+
+
 # --------------------------------------------------------------------------- the guard against a fourth divergence
 
 

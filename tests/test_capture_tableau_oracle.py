@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -211,6 +213,71 @@ def test_network_failure_becomes_status_zero_rather_than_an_exception(monkeypatc
     status, body, _ = session._request("GET", "/x")  # pylint: disable=protected-access
     assert status == oracle.NETWORK_ERROR_STATUS
     assert b"ConnectionResetError" in body
+
+
+def test_reflected_session_token_is_redacted_from_exceptions_and_manifest(tmp_path):
+    """A WAF/proxy/debug endpoint can echo ``X-Tableau-Auth`` after sign-in.
+
+    That token is not the PAT secret, but it authorizes the same Tableau session. The status and
+    response shape must survive for diagnosis; only the credential value is removed.
+    """
+
+    token = "SENTINEL_SESSION_TOKEN_FULL_PERMISSION"
+
+    class EchoHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = f"status=400 X-Tableau-Auth: {self.headers.get('X-Tableau-Auth')} path={self.path}".encode()
+            self.send_response(400)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EchoHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        session = oracle.TableauSession(
+            oracle.SiteCredentials(
+                base=f"http://127.0.0.1:{server.server_port}",
+                site="site",
+                pat_name="pat-name",
+                pat_secret="PAT_SECRET_1234567890",
+                version="3.29",
+            ),
+            oracle.RetryPolicy(max_attempts=1, budget_sec=1),
+        )
+        session.token, session.site_id = token, "site-id"
+
+        with pytest.raises(RuntimeError) as excinfo:
+            session.get_json("/sites/site-id/views")
+        assert token not in str(excinfo.value)
+        assert "HTTP 400" in str(excinfo.value)
+        assert "X-Tableau-Auth: [REDACTED]" in str(excinfo.value)
+
+        record = oracle.capture_view(
+            session,
+            {"id": "view-id-12345678", "name": "Echo", "workbook": {"id": "wb", "name": "Workbook"}},
+            tmp_path,
+            False,
+        )
+        oracle.write_manifest(
+            [record],
+            session,
+            {"TABLEAU_SERVER_URL": "http://example", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"},
+            tmp_path,
+            0.0,
+        )
+        manifest = (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+        assert token not in manifest
+        assert "HTTP 400" in manifest
+        assert "X-Tableau-Auth: [REDACTED]" in manifest
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 # --------------------------------------------------------------------------- payload handling
