@@ -16,12 +16,14 @@ purpose: discover the Tableau dependency graph BEFORE migrating anything, so a T
          workbook (`data_sources[].published_datasource.key`), so server-side lineage and locally
          parsed workbooks line up.
 
-usage:   # credentials come from the environment, never argv (which leaks to the process list):
-         #   TABLEAU_SERVER=https://10ax.online.tableau.com
+usage:   # credentials come from a git-ignored .env (see .env.example) or the environment, never
+         # argv (which leaks to the process list):
+         #   TABLEAU_SERVER_URL=https://10ax.online.tableau.com
          #   TABLEAU_SITE=mysitecontenturl        (empty string for Tableau Server's Default site)
          #   TABLEAU_PAT_NAME=<personal access token name>
          #   TABLEAU_PAT_SECRET=<personal access token secret>
          python scripts/tableau_lineage.py --plan
+         python scripts/tableau_lineage.py --plan --env .env
          python scripts/tableau_lineage.py --plan --download migrations/datasources/_downloads
 
          # offline: re-plan from a previously saved API response, no server needed
@@ -37,12 +39,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, NamedTuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tableau_env import require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("tableau_lineage")
@@ -208,27 +212,21 @@ def print_plan(plan: list[dict[str, Any]]) -> None:
         log.info("      Confirm with the customer before migrating - these may be abandoned.")
 
 
-def _env_config() -> tuple[str, str, str, str]:
-    """Read server/site/PAT from the environment; fail with an actionable message if incomplete."""
-    server = os.environ.get("TABLEAU_SERVER", "")
-    site = os.environ.get("TABLEAU_SITE", "")
-    pat_name = os.environ.get("TABLEAU_PAT_NAME", "")
-    pat_secret = os.environ.get("TABLEAU_PAT_SECRET", "")
-    missing = [
-        n
-        for n, v in (("TABLEAU_SERVER", server), ("TABLEAU_PAT_NAME", pat_name), ("TABLEAU_PAT_SECRET", pat_secret))
-        if not v
-    ]
-    if missing:
-        raise SystemExit(
-            "Missing environment variable(s): "
-            + ", ".join(missing)
-            + "\n  TABLEAU_SERVER    e.g. https://10ax.online.tableau.com"
-            + "\n  TABLEAU_SITE      site contentUrl ('' for Tableau Server's Default site)"
-            + "\n  TABLEAU_PAT_NAME / TABLEAU_PAT_SECRET  a Personal Access Token"
-            + "\n(The agent cannot create these - a Tableau user with access must supply them.)"
-        )
-    return server, site, pat_name, pat_secret
+def _env_config(env_path: Path | None = None) -> tuple[str, str, str, str]:
+    """Read server/site/PAT from a `.env` file layered over the environment.
+
+    Previously read ``os.environ`` directly under the name ``TABLEAU_SERVER``, so a `.env` written
+    from our own ``.env.example`` (which documents ``TABLEAU_SERVER_URL``) failed here while working
+    everywhere else -- on step 2 of the documented site path.
+    """
+    env = resolve_env(env_path)
+    require(env)
+    return (
+        env["TABLEAU_SERVER_URL"].rstrip("/"),
+        env.get("TABLEAU_SITE", ""),
+        env["TABLEAU_PAT_NAME"],
+        env["TABLEAU_PAT_SECRET"],
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -237,6 +235,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan", action="store_true", help="Print the model-first migration plan")
     parser.add_argument("--download", type=Path, help="Download every published data source (.tdsx) to this folder")
     parser.add_argument("--from-json", type=Path, help="Re-plan offline from a saved lineage response")
+    parser.add_argument(
+        "--env", type=Path, default=Path(".env"), help="git-ignored KEY=VALUE credentials (default .env)"
+    )
     parser.add_argument("--save-json", type=Path, help="Save the raw lineage response for offline re-planning")
     parser.add_argument(
         "--api-version", default=DEFAULT_API_VERSION, help=f"REST API version (default {DEFAULT_API_VERSION})"
@@ -248,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         print_plan(build_plan(payload.get("datasources", []), payload.get("site", "")))
         return 0
 
-    server, site, pat_name, pat_secret = _env_config()
+    server, site, pat_name, pat_secret = _env_config(args.env)
     try:
         session = sign_in(server, site, pat_name, pat_secret, args.api_version)
         log.info("signed in to %s (site '%s')", server, site or "<default>")

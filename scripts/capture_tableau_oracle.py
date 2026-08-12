@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import load_env, pat_secret  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-oracle")
 
@@ -182,6 +182,10 @@ class TableauSession:
         """REST API version in use, for logging and the manifest."""
         return self._creds.version
 
+    def _redact_response(self, text: str) -> str:
+        """Scrub every Tableau credential known at this point before text leaves the HTTP layer."""
+        return redact(text, self._creds.pat_secret, self._creds.pat_name, self.token or "")
+
     def _request(
         self,
         method: str,
@@ -239,7 +243,11 @@ class TableauSession:
                 creds = json.loads(payload)["credentials"]
                 self.token, self.site_id = creds["token"], creds["site"]["id"]
                 return
-            last = payload.decode("utf-8", "replace")[:200]
+            # Redact the response body before it becomes an exception message: this is a sign-in
+            # POST whose request body CONTAINS the PAT, so any reflecting proxy, WAF or debug
+            # endpoint echoes it straight back. Measured with a local echo server during review of
+            # #97. Redact first, truncate second -- slicing first can leave a secret suffix.
+            last = self._redact_response(payload.decode("utf-8", "replace"))[:200]
             if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
                 break
             self.retry_count += 1
@@ -261,7 +269,9 @@ class TableauSession:
             if status == 200:
                 return json.loads(payload)
             if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
-                raise RuntimeError(f"GET {path} -> HTTP {status}: {payload.decode('utf-8', 'replace')[:200]}")
+                raise RuntimeError(
+                    f"GET {path} -> HTTP {status}: {self._redact_response(payload.decode('utf-8', 'replace'))[:200]}"
+                )
             self.retry_count += 1
             time.sleep(backoff_delay(attempt))
         raise RuntimeError(f"GET {path} exhausted {self.retry.max_attempts} attempts")
@@ -286,7 +296,7 @@ class TableauSession:
             elapsed = time.perf_counter() - started
             if status == 200:
                 return payload, elapsed, {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
-            text = payload.decode("utf-8", "replace")
+            text = self._redact_response(payload.decode("utf-8", "replace"))
             kind, detail = classify_export_error(status, text)
 
             if kind == "session_lost" and reauths < MAX_REAUTH_PER_VIEW:
@@ -527,7 +537,8 @@ def main() -> int:
     args = build_parser().parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    env = load_env(args.env)
+    env = resolve_env(args.env)
+    require(env)
     session = TableauSession(
         SiteCredentials(
             base=env["TABLEAU_SERVER_URL"],

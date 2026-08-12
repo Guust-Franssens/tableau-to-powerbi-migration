@@ -7,6 +7,15 @@ __pycache__/
 dist/
 build/
 
+# Engagement notes name a customer, their people, their scope and their timelines. THIS REPO IS
+# PUBLIC, and such notes are not toolkit content - they belong in the session workspace, never here.
+# (Learned the hard way: a workshop plan and a prerequisites email were committed and pushed before
+# anyone noticed the repo was public.)
+/migrations/workshop-*/
+/migrations/engagement-*/
+/migrations/customer-*/
+/migrations/*/migration-brief.md
+
 # The three migration trees share one shape (<tree>/<slug>/...), so these rules use `**/` to apply to
 # all of them: examples/ (our worked examples), migrations/workbooks/ (your workbook migrations) and
 # migrations/datasources/ (your published-data-source migrations).
