@@ -240,6 +240,55 @@ def test_the_json_is_checked_as_well_as_the_markdown(tmp_path):
     assert "JSONONLY_MARKER" not in json.dumps(cm.build(_spec(sources, tmp_path)))
 
 
+def test_structured_allowed_values_are_sanitized_without_python_repr_leaks(tmp_path):
+    """A dict/list in an allowed field must be walked, not stringified into a leaking repr."""
+    sources = [
+        {
+            "name": "S",
+            "connection": {
+                "class": "snowflake",
+                "warehouse": {"password": "DICT_MARKER", "name": "WH"},
+                "service": [{"api_key": "LIST_DICT_MARKER", "name": "svc"}],
+                "powerbi_target_reason": {"token": "DICT_REASON_MARKER"},
+            },
+        }
+    ]
+    manifest = cm.build(_spec(sources, tmp_path))
+    blob = json.dumps(manifest) + cm.render(manifest)
+    for marker in ("DICT_MARKER", "LIST_DICT_MARKER", "DICT_REASON_MARKER"):
+        assert marker not in blob
+    assert "WH" in blob and "svc" in blob
+
+
+@pytest.mark.parametrize(
+    ("value", "marker"),
+    [
+        ('PassWord = "QUOTED SPACE MARKER"', "QUOTED SPACE MARKER"),
+        ("token='SINGLE_QUOTED_MARKER'", "SINGLE_QUOTED_MARKER"),
+        ("user:SCHEMELESS_MARKER@host", "SCHEMELESS_MARKER"),
+    ],
+)
+def test_quoted_and_schemeless_credentials_are_redacted(value, marker, tmp_path):
+    """Review #104 found quoted assignments and bare userinfo still reached JSON/Markdown."""
+    sources = [{"name": "S", "connection": {"class": "snowflake", "server": value}}]
+    manifest = cm.build(_spec(sources, tmp_path))
+    blob = json.dumps(manifest) + cm.render(manifest)
+    assert marker not in blob
+
+
+def test_sanitizer_does_not_redact_credential_words_inside_legitimate_values(tmp_path):
+    """Over-redaction is also wrong: these are target names, not credentials."""
+    sources = [
+        {
+            "name": "S",
+            "connection": {"class": "postgres", "server": "passwordless.example.com", "database": "monkey_key"},
+        }
+    ]
+    rendered = cm.render(cm.build(_spec(sources, tmp_path)))
+    assert "passwordless.example.com" in rendered
+    assert "monkey_key" in rendered
+
+
 # --------------------------------------------------------------------------- review round: real bundle shape
 
 
@@ -317,3 +366,86 @@ def test_dedupe_uses_the_full_connection_not_the_projected_one(tmp_path):
         {"name": "Same", "connection": {"class": "postgres", "server": "s", "password": "b"}},
     ]
     assert cm.build(_spec(sources, tmp_path))["total"] == 2
+
+
+def test_same_named_sources_use_handover_identity_for_consumers(tmp_path):
+    """Two distinct sources with one display name must not inherit each other's reports."""
+    bundle = tmp_path / "b"
+    (bundle / "handover").mkdir(parents=True)
+    (bundle / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "name": "World Indicators",
+                        "connection": {
+                            "class": "federated",
+                            "connections": [{"class": "dataengine", "database": "Data/World.tde", "schema": "Extract"}],
+                        },
+                    },
+                    {
+                        "name": "World Indicators",
+                        "connection": {
+                            "class": "federated",
+                            "connections": [{"class": "hyper", "database": "Data/World.hyper", "schema": "Extract"}],
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    handovers = {
+        "RESTAPISample": {"connection_class": "dataengine", "database": "Data/World.tde", "schema": "Extract"},
+        "World_Indicators": {"connection_class": "hyper", "database": "Data/World.hyper", "schema": "Extract"},
+    }
+    for workbook, connection in handovers.items():
+        (bundle / "handover" / f"{workbook}.json").write_text(
+            json.dumps(
+                {
+                    "workbook": {
+                        "name": workbook,
+                        "bound_datasource": "World Indicators",
+                        "embedded_datasources": [
+                            {
+                                "caption": "World Indicators",
+                                "connection_class": connection["connection_class"],
+                                "connections": [connection],
+                            }
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+    entries = cm.build(bundle)["connections"]
+    assert {entry["legs"][0]["class"]: entry["used_by"] for entry in entries} == {
+        "dataengine": ["RESTAPISample"],
+        "hyper": ["World_Indicators"],
+    }
+    assert sorted(entry["used_by_count"] for entry in entries) == [1, 1]
+
+
+def test_same_named_sources_without_identity_are_ambiguous_not_union_counted(tmp_path):
+    """If handover only says a name shared by several connections, '?' is honest and '2' is not."""
+    bundle = tmp_path / "b"
+    (bundle / "handover").mkdir(parents=True)
+    (bundle / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {"name": "Sales", "connection": {"class": "postgres", "server": "prod.example"}},
+                    {"name": "Sales", "connection": {"class": "postgres", "server": "dev.example"}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    for workbook in ("prod_report", "dev_report"):
+        (bundle / "handover" / f"{workbook}.json").write_text(
+            json.dumps({"workbook": {"name": workbook, "bound_datasource": "Sales"}}), encoding="utf-8"
+        )
+    manifest = cm.build(bundle)
+    assert [entry["used_by_count"] for entry in manifest["connections"]] == [None, None]
+    assert all(not entry["blast_radius_known"] for entry in manifest["connections"])
+    assert "| ? |" in cm.render(manifest)

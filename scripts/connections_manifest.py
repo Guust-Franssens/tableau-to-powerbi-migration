@@ -81,14 +81,36 @@ SECRET_KEY_PATTERN = re.compile(r"password|secret|token|pwd|credential|apikey|ap
 # VALUE: URL userinfo (`//user:pass@host`), a credential query parameter (`?token=...`), or an
 # ODBC/JDBC property string (`Driver=X;PWD=...`) pasted into a server or database field. Filtering
 # keys alone let all three through into a document meant to be emailed (found in review of #100).
-_URL_USERINFO = re.compile(r"(?<=//)[^/@\s]+:[^/@\s]+@")
+_URL_USERINFO = re.compile(r"(?:(?<=//)|(?<![\w@./-]))[^/@\s:]+:[^/@\s]+@")
 _CREDENTIAL_ASSIGNMENT = re.compile(
     # The keyword may be the WHOLE key (`token=`, `PWD=`), not just a suffix of it. An earlier
     # version required at least one leading character, so `?token=...` and `;PWD=...` -- the two
     # commonest real forms -- slipped through while `user_password=` was caught.
-    r"([\w.\s-]*(?:password|secret|token|pwd|credential|apikey|api[_-]?key|sas|key))\s*=\s*[^;&\s]+",
+    r"([\w.\s-]*(?:password|secret|token|pwd|credential|apikey|api[_-]?key|sas|key))\s*=\s*"
+    r"(\"[^\"]*\"|'[^']*'|[^;&\s]+)",
     re.IGNORECASE,
 )
+
+
+def _sanitize_scalar(value: Any) -> str:
+    """Sanitize one non-container value."""
+    cleaned = _URL_USERINFO.sub("[REDACTED]@", str(value))
+    return _CREDENTIAL_ASSIGNMENT.sub(lambda m: f"{m.group(1)}=[REDACTED]", cleaned)
+
+
+def _sanitize_structured(value: Any) -> Any:
+    """Recursively sanitize containers without exposing Python reprs."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            safe_key = _sanitize_scalar(key)
+            out[safe_key] = "[REDACTED]" if SECRET_KEY_PATTERN.search(str(key)) else _sanitize_structured(item)
+        return out
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_structured(item) for item in value]
+    if value is None:
+        return ""
+    return _sanitize_scalar(value)
 
 
 def sanitize(value: Any) -> str:
@@ -101,8 +123,9 @@ def sanitize(value: Any) -> str:
     """
     if value is None:
         return ""
-    cleaned = _URL_USERINFO.sub("[REDACTED]@", str(value))
-    return _CREDENTIAL_ASSIGNMENT.sub(lambda m: f"{m.group(1)}=[REDACTED]", cleaned)
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(_sanitize_structured(value), sort_keys=True, default=str)
+    return _sanitize_scalar(value)
 
 
 SNAPSHOT = "snapshot (extract - no upstream connection)"
@@ -139,7 +162,7 @@ def safe_connection(connection: dict[str, Any]) -> dict[str, str]:
             continue
         if SECRET_KEY_PATTERN.search(field):
             continue
-        out["database" if field == "dbname" else field] = sanitize(str(value))
+        out["database" if field == "dbname" else field] = sanitize(value)
     return out
 
 
@@ -162,17 +185,62 @@ def legs(connection: dict[str, Any]) -> list[dict[str, str]]:
     return out
 
 
-def blast_radius(bundle_dir: Path) -> dict[str, list[str]]:
-    """Map data-source name -> the workbooks that bind to it, from the engine's handover slices.
+def _leg_identity(connection: dict[str, Any]) -> dict[str, str]:
+    """Stable, non-secret fields that identify a connection leg across contracts."""
+    return {
+        target: sanitize(value)
+        for source, target in (
+            ("class", "class"),
+            ("connection_class", "class"),
+            ("server", "server"),
+            ("database", "database"),
+            ("dbname", "database"),
+            ("warehouse", "warehouse"),
+            ("schema", "schema"),
+            ("service", "service"),
+            ("port", "port"),
+            ("auth_method", "auth_method"),
+        )
+        if (value := connection.get(source)) not in (None, "")
+    }
+
+
+def _connection_identity(connection: dict[str, Any]) -> str:
+    """Identity used only to match handover bindings back to full manifest rows."""
+    raw_legs = connection.get("connections")
+    if isinstance(raw_legs, list) and raw_legs:
+        normalized = [_leg_identity(leg) for leg in raw_legs if isinstance(leg, dict)]
+    else:
+        normalized = [_leg_identity(connection)]
+    return json.dumps(normalized, sort_keys=True)
+
+
+def _handover_connection(source: dict[str, Any]) -> dict[str, Any]:
+    """Translate a handover datasource summary into the same shape used by bundle sources."""
+    if isinstance(source.get("connection"), dict):
+        return source["connection"]
+    if isinstance(source.get("connections"), list):
+        return {"connections": source["connections"]}
+    return source
+
+
+def _handover_source_name(source: dict[str, Any]) -> str:
+    """Name fields differ between parser and engine handover contracts."""
+    return str(source.get("name") or source.get("caption") or source.get("label") or "")
+
+
+def blast_radius(bundle_dir: Path) -> dict[str, Any]:
+    """Index workbooks by datasource name and, when available, by datasource identity.
 
     Returns an empty map for a bundle that has no handover (a single-workbook parser spec), which is
     reported as unknown rather than as zero - a source with no known consumers is not the same as a
     source with none, and conflating them would silently deprioritise it.
     """
-    consumers: dict[str, set[str]] = defaultdict(set)
+    by_name: dict[str, set[str]] = defaultdict(set)
+    by_identity: dict[tuple[str, str], set[str]] = defaultdict(set)
     handover = bundle_dir / "handover"
     if not handover.is_dir():
-        return {}
+        return {"has_handover": False, "by_name": {}, "by_identity": {}}
     for slice_path in sorted(handover.glob("*.json")):
         try:
             workbook = json.loads(slice_path.read_text(encoding="utf-8")).get("workbook", {})
@@ -181,13 +249,21 @@ def blast_radius(bundle_dir: Path) -> dict[str, list[str]]:
             continue
         name = workbook.get("name") or slice_path.stem
         for source in workbook.get("consolidated_datasources") or workbook.get("embedded_datasources") or []:
-            key = source.get("name") if isinstance(source, dict) else str(source)
+            key = _handover_source_name(source) if isinstance(source, dict) else str(source)
             if key:
-                consumers[key].add(name)
+                by_name[key].add(name)
+            if isinstance(source, dict) and key:
+                identity = _connection_identity(_handover_connection(source))
+                if identity != "[{}]":
+                    by_identity[(key, identity)].add(name)
         bound = workbook.get("bound_datasource")
         if bound:
-            consumers[bound].add(name)
-    return {k: sorted(v) for k, v in consumers.items()}
+            by_name[bound].add(name)
+    return {
+        "has_handover": True,
+        "by_name": {k: sorted(v) for k, v in by_name.items()},
+        "by_identity": {k: sorted(v) for k, v in by_identity.items()},
+    }
 
 
 def classify(connection: dict[str, Any]) -> tuple[str, str]:
@@ -221,51 +297,87 @@ def classify(connection: dict[str, Any]) -> tuple[str, str]:
     return verdict, reason
 
 
+def _source_consumers(
+    raw_name: str,
+    identity: str,
+    radius: dict[str, Any],
+    source_identities_by_name: dict[str, set[str]],
+) -> tuple[list[str], bool]:
+    """Return consumers plus whether that assignment is specific enough to trust."""
+    identity_consumers = radius["by_identity"].get((raw_name, identity))
+    if identity_consumers is not None:
+        return [sanitize(c) for c in identity_consumers], True
+    if radius["has_handover"] and len(source_identities_by_name[raw_name]) == 1:
+        return [sanitize(c) for c in radius["by_name"].get(raw_name, [])], True
+    return [], False
+
+
+def _manifest_entry(
+    source: dict[str, Any],
+    radius: dict[str, Any],
+    source_identities_by_name: dict[str, set[str]],
+) -> tuple[tuple[str, str], dict[str, Any]]:
+    """Build one manifest entry before duplicate full-connections are merged."""
+    connection = source.get("connection") or {}
+    verdict, reason = classify(connection)
+    raw_name = source.get("name") or ""
+    name = sanitize(raw_name or "(unnamed)")
+    identity = _connection_identity(connection)
+    consumers, entry_blast_radius_known = _source_consumers(raw_name, identity, radius, source_identities_by_name)
+    key = (name, json.dumps(connection, sort_keys=True, default=str))
+    return key, {
+        "name": name,
+        "status": {"needs-credential": NEEDS_CREDENTIAL, "no-creds": SNAPSHOT}.get(verdict, REVIEW),
+        "connection": safe_connection(connection),
+        "legs": legs(connection),
+        "published_datasource": (connection.get("class") or "").lower() in PUBLISHED_PROXY_CLASSES,
+        "why": sanitize(reason),
+        "used_by": consumers,
+        "used_by_count": len(consumers) if entry_blast_radius_known else None,
+        "blast_radius_known": entry_blast_radius_known,
+    }
+
+
+def _merge_duplicate_entry(target: dict[str, Any], duplicate: dict[str, Any]) -> None:
+    """Merge duplicate rows produced by the same full connection."""
+    merged = sorted(set(target["used_by"]) | set(duplicate["used_by"]))
+    merged_known = target["blast_radius_known"] and duplicate["blast_radius_known"]
+    target["used_by"] = merged
+    target["blast_radius_known"] = merged_known
+    target["used_by_count"] = len(merged) if merged_known else None
+
+
 def build(bundle_path: Path) -> dict[str, Any]:
     """Assemble the manifest. Pure data in, pure data out - no I/O beyond reading the bundle."""
     bundle = load_bundle(bundle_path)
     radius = blast_radius(bundle.path if bundle.path.is_dir() else bundle.path.parent)
+    source_identities_by_name: dict[str, set[str]] = defaultdict(set)
+    for source in bundle.data_sources:
+        source_identities_by_name[source.get("name") or ""].add(_connection_identity(source.get("connection") or {}))
 
     entries: list[dict[str, Any]] = []
     seen: dict[tuple[str, str], dict[str, Any]] = {}
     for source in bundle.data_sources:
-        connection = source.get("connection") or {}
-        verdict, reason = classify(connection)
-        name = sanitize(source.get("name") or "(unnamed)")
         # Dedupe on the FULL connection, not the projected one: a field dropped for safety is also
         # invisible to a key built from the projection, which would merge two genuinely different
         # systems into one job and hide the second.
-        key = (name, json.dumps(connection, sort_keys=True, default=str))
-        consumers = [sanitize(c) for c in radius.get(source.get("name") or "", [])]
+        key, entry = _manifest_entry(source, radius, source_identities_by_name)
         if key in seen:
-            merged = sorted(set(seen[key]["used_by"]) | set(consumers))
-            seen[key]["used_by"] = merged
-            seen[key]["used_by_count"] = len(merged)
+            _merge_duplicate_entry(seen[key], entry)
             continue
-        entry = {
-            "name": name,
-            "status": {"needs-credential": NEEDS_CREDENTIAL, "no-creds": SNAPSHOT}.get(verdict, REVIEW),
-            "connection": safe_connection(connection),
-            "legs": legs(connection),
-            "published_datasource": (connection.get("class") or "").lower() in PUBLISHED_PROXY_CLASSES,
-            "why": sanitize(reason),
-            "used_by": consumers,
-            "used_by_count": len(consumers),
-            "blast_radius_known": bool(radius),
-        }
         seen[key] = entry
         entries.append(entry)
 
     # Highest blast radius first, then by name so the order is stable between runs.
-    entries.sort(key=lambda e: (-e["used_by_count"], e["name"]))
+    entries.sort(key=lambda e: (-(e["used_by_count"] or 0), e["name"]))
     return {
-        "bundle": str(bundle.path),
+        "bundle": sanitize(str(bundle.path)),
         "kind": bundle.kind,
         "total": len(entries),
         "needs_credential": sum(1 for e in entries if e["status"] == NEEDS_CREDENTIAL),
         "snapshots": sum(1 for e in entries if e["status"] == SNAPSHOT),
         "needs_review": sum(1 for e in entries if e["status"] == REVIEW),
-        "blast_radius_known": bool(radius),
+        "blast_radius_known": radius["has_handover"] and all(e["blast_radius_known"] for e in entries),
         "connections": entries,
     }
 
@@ -327,7 +439,7 @@ def render(manifest: dict[str, Any]) -> str:
         ]
         for e in needs:
             who = ", ".join(e["used_by"][:4]) + ("…" if len(e["used_by"]) > 4 else "")
-            count = e["used_by_count"] if manifest["blast_radius_known"] else "?"
+            count = e["used_by_count"] if e["blast_radius_known"] else "?"
             lines.append(f"| **{e['name']}** | {_connection_summary(e)} | {count} | {who or '—'} |")
         lines.append("")
 
