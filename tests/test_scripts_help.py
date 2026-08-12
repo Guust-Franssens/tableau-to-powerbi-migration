@@ -31,14 +31,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# `transpile_tableau_calc.py` is documented (in its own module docstring) as a "RESEARCH ARTIFACT,
-# pending refactor": it reads `sys.argv` at module scope instead of using argparse, and its very
-# first import unconditionally reaches for an EXTERNAL plugin (`translation_router`, from the
-# `tableau-migration` skill) that is not a pip package and is not installed in this repo's own test
-# environment. `--help` was never a supported entry point for it, so it is out of scope for a smoke
-# test asserting `--help` behaves like every other script's.
-KNOWN_NOT_A_CLI = {"transpile_tableau_calc.py"}
-
 
 def _tracked_scripts() -> list[Path]:
     tracked = subprocess.run(
@@ -51,7 +43,7 @@ def _tracked_scripts() -> list[Path]:
     return sorted(REPO_ROOT / rel for rel in tracked)
 
 
-SCRIPTS = [s for s in _tracked_scripts() if s.name not in KNOWN_NOT_A_CLI]
+SCRIPTS = _tracked_scripts()
 assert SCRIPTS, "no tracked scripts found under scripts/*.py - this guard now proves nothing"
 
 
@@ -76,6 +68,34 @@ def test_help_exits_zero_on_a_cp1252_stdout(script: Path) -> None:
     assert result.returncode == 0, (
         f"{script.name} --help exited {result.returncode} under a cp1252 stdout:\n{result.stderr[-2000:]}"
     )
+
+
+def test_transpiler_missing_arguments_prints_usage() -> None:
+    """The research transpiler must reject wrong arity without a traceback."""
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts/transpile_tableau_calc.py")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "usage:" in result.stderr
+    assert "IndexError" not in result.stderr
+
+
+def test_transpiler_is_importable() -> None:
+    """CLI parsing and the optional plugin import must not run during import."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.path.insert(0, 'scripts'); import transpile_tableau_calc",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _documented_flags(text: str) -> list[str]:
