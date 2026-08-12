@@ -60,6 +60,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -82,6 +83,11 @@ FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
 MODEL_TYPE = "SemanticModel"
 REPORT_TYPE = "Report"
 
+# Folders nest up to 10 levels in Fabric; beyond that the API answers `FolderDepthOutOfRange`.
+# Tableau does not enforce that limit, so a deep estate is a matter of time rather than a
+# hypothetical - the overflow is flattened into a compound name and reported, never dropped.
+MAX_FOLDER_DEPTH = 10
+
 # Fabric enforces 1,000 items per workspace (folders do not count). A workbook lands as ~2 items
 # plus one per datasource, so this bites at roughly 450-500 workbooks - but a customer-supplied
 # landing zone is not necessarily empty, so the budget is 1000 MINUS what is already there.
@@ -103,6 +109,7 @@ class Item:
     item_type: str
     folder: Path
     parts: list[dict[str, str]] = field(default_factory=list)
+    folder_id: str | None = None
 
     @property
     def digest(self) -> str:
@@ -406,6 +413,10 @@ def _post_item(workspace: str, tok: str, item: Item) -> tuple[int, dict, dict]:
     grind against.
     """
     body = {"displayName": item.name, "type": item.item_type, "definition": {"parts": item.parts}}
+    if item.folder_id:
+        # Placed AT CREATION - `folderId` is a field on Create Item, so there is no create-then-move
+        # dance and no window where the item sits in the wrong place.
+        body["folderId"] = item.folder_id
     status, headers, resp = call("POST", f"{API}/workspaces/{workspace}/items", tok, body)
     if status == 429:
         wait = float(headers.get("retry-after", "20"))
@@ -466,6 +477,213 @@ def find_existing(workspace: str, tok: str, name: str, item_type: str) -> str | 
     return None
 
 
+# Fabric folder names are far more restrictive than Tableau project names, and the API answers
+# `InvalidFolderDisplayName` rather than silently coercing. Measured against a live workspace:
+#
+#   rejected: &  /  \  :  ?  *  "  |  <  #  %  .     and a leading or trailing space
+#   accepted: -  _  +  (  )  spaces in the middle, and non-ASCII (`Ventes françaises` was fine)
+#
+# The dot is the one that will actually bite: it is rejected ANYWHERE, not merely at the end, and
+# Tableau project names carry dots routinely (`v1.2`, `Q1.2026`).
+#
+# This is an ALLOW-list rather than a deny-list of the characters measured above, deliberately: an
+# untested character silently replaced is a cosmetic surprise, whereas an untested character
+# rejected by the API is a failed deploy in front of the customer. Fail safe, not fail clever.
+_FOLDER_SAFE_EXTRA = frozenset(" -_+()")
+
+
+def folder_display_name(name: str) -> str:
+    """Coerce a Tableau project name into something Fabric will accept as a folder name."""
+    cleaned = "".join(char if (char.isalnum() or char in _FOLDER_SAFE_EXTRA) else "-" for char in name)
+    # Collapse runs introduced by substitution, then strip the leading/trailing spaces Fabric rejects.
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned.strip(" -") or "folder"
+
+
+def unique_siblings(names: list[str]) -> dict[str, str]:
+    """Map original -> final folder name, guaranteeing uniqueness AMONG SIBLINGS.
+
+    `R&D`, `R/D` and `R.D` all sanitise to `R-D`. Letting them collide would silently pool three
+    Tableau projects' content into one folder, and the customer would have no way to tell. A numeric
+    suffix is ugly and honest; a silent merge is neither.
+    """
+    used: dict[str, str] = {}
+    taken: set[str] = set()
+    for name in names:
+        base = folder_display_name(name)
+        candidate, counter = base, 2
+        while candidate.casefold() in taken:
+            candidate = f"{base} ({counter})"
+            counter += 1
+        taken.add(candidate.casefold())
+        used[name] = candidate
+    return used
+
+
+def project_parents(estate_db: Path | None) -> dict[str, str]:
+    """Map project name -> parent project name, so Tableau's nesting survives the migration.
+
+    Without this every project becomes a root folder: correct, but flatter than the customer's own
+    structure, which is the whole reason for mirroring it. `estate.db` records `parent_luid`, and it
+    was being collected and discarded.
+    """
+    if not (estate_db and estate_db.is_file()):
+        return {}
+    try:
+        with sqlite3.connect(f"file:{estate_db}?mode=ro", uri=True) as conn:
+            rows = list(conn.execute("select luid, name, parent_luid from project"))
+    except sqlite3.Error as exc:
+        LOG.warning("could not read the project tree from %s (%s) - folders will be flat", estate_db, exc)
+        return {}
+    names = {luid: name for luid, name, _parent in rows}
+    return {name: names[parent] for _luid, name, parent in rows if parent and parent in names}
+
+
+def _slug(name: str) -> str:
+    """Normalise a workbook name for matching across the two naming conventions.
+
+    Tableau keeps the original (`Meridian Multi-Source (3 systems)`); the engine sanitises it into a
+    folder name (`Meridian_Multi-Source__3_systems_`). An exact-match join therefore silently placed
+    only 8 of 33 workbooks and sent the rest to the root - which looks like "we had no project data"
+    rather than like a bug, so it is worth naming here.
+    """
+    return "".join(char.lower() if char.isalnum() else "_" for char in name).strip("_")
+
+
+def project_map(bundle: Path, estate_db: Path | None) -> dict[str, str]:
+    """Map workbook SLUG -> its Tableau project, from whichever source can answer.
+
+    Two sources, deliberately in this order:
+
+    * ``estate.db`` from `assess_estate.py` - authoritative and complete, because it read the site.
+    * ``source-provenance.json`` in the bundle - present without an assessment, but only covers
+      workbooks that were matched back to the site. Measured on a real bundle: 10 of 58 rows carried
+      an origin, the rest being local-only inputs.
+
+    A workbook we cannot place goes to the workspace ROOT and is reported as such. Inventing a folder
+    for it would be worse: the customer would look for content under a heading Tableau never had.
+    """
+    mapping: dict[str, str] = {}
+
+    provenance = bundle / "source-provenance.json"
+    if provenance.is_file():
+        try:
+            rows = json.loads(provenance.read_text(encoding="utf-8")).get("inputs", [])
+        except (json.JSONDecodeError, OSError):
+            rows = []
+        for row in rows:
+            origin = row.get("origin") or {}
+            name = origin.get("workbook_name")
+            if name and origin.get("project"):
+                mapping[_slug(name)] = origin["project"]
+
+    if estate_db and estate_db.is_file():
+        try:
+            with sqlite3.connect(f"file:{estate_db}?mode=ro", uri=True) as conn:
+                for name, project in conn.execute("select name, project from workbook where project is not null"):
+                    mapping[_slug(name)] = project  # the site is authoritative; overwrite provenance
+        except sqlite3.Error as exc:
+            LOG.warning("could not read %s (%s) - falling back to provenance only", estate_db, exc)
+
+    return mapping
+
+
+def folder_plan(projects: dict[str, str], parents: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """Turn per-workbook projects into a folder PATH per workbook, deepest ancestry first.
+
+    ``parents`` maps project -> parent project, so nesting is preserved: `91 - Calc Gauntlet` lands
+    under `90 - Migration Torture Chamber` rather than beside it. Without it every project is a root
+    folder, which is still correct - just flatter than Tableau was.
+    """
+    parents = parents or {}
+    plan: dict[str, list[str]] = {}
+    for workbook, project in projects.items():
+        path: list[str] = []
+        seen: set[str] = set()
+        node: str | None = project
+        while node and node not in seen:
+            seen.add(node)
+            path.append(node)
+            node = parents.get(node)
+        path.reverse()
+        if len(path) > MAX_FOLDER_DEPTH:
+            # Flatten the overflow into the last permitted folder rather than dropping it.
+            kept = path[: MAX_FOLDER_DEPTH - 1]
+            kept.append(" - ".join(path[MAX_FOLDER_DEPTH - 1 :]))
+            LOG.warning("%s is %d project(s) deep; flattening below level %d", workbook, len(path), MAX_FOLDER_DEPTH)
+            path = kept
+        plan[workbook] = path
+    return plan
+
+
+def _existing_folder_paths(workspace: str, tok: str) -> dict[tuple[str, ...], str] | None:
+    """Read the workspace's current folders as path-tuple -> id, or None if the API is unavailable."""
+    status, _, body = call("GET", f"{API}/workspaces/{workspace}/folders", tok)
+    if status != 200:
+        LOG.warning("folders API unavailable (HTTP %s) - deploying flat", status)
+        return None
+    by_id = {f["id"]: f for f in body.get("value", [])}
+    existing: dict[tuple[str, ...], str] = {}
+    for folder in by_id.values():
+        parts, node = [], folder
+        while node:
+            parts.append(node.get("displayName", ""))
+            node = by_id.get(node.get("parentFolderId") or "")
+        existing[tuple(reversed(parts))] = folder["id"]
+    return existing
+
+
+def _display_names(wanted: list[tuple[str, ...]]) -> dict[tuple[str, ...], str]:
+    """Sanitized folder name per path, unique within each parent. Logs every rename."""
+    by_parent: dict[tuple[str, ...], list[str]] = {}
+    for path in wanted:
+        by_parent.setdefault(path[:-1], []).append(path[-1])
+    display: dict[tuple[str, ...], str] = {}
+    for parent, children in by_parent.items():
+        for original, final in unique_siblings(children).items():
+            display[parent + (original,)] = final
+            if final != original:
+                LOG.info("folder name %r is not valid in Fabric - using %r", original, final)
+    return display
+
+
+def ensure_folders(workspace: str, tok: str, paths: list[list[str]]) -> dict[tuple[str, ...], str]:
+    """Create every folder in the plan, parents before children. Returns path-tuple -> folder id.
+
+    Names are sanitized per SIBLING GROUP, so two Tableau projects that coerce to the same Fabric
+    name get distinct folders instead of silently pooling their content. Every rename is logged: a
+    customer looking for `R&D` needs to be able to find where `R-D` came from.
+
+    Existing folders are reused rather than duplicated, so a re-run into a partly-populated landing
+    zone is safe.
+    """
+    existing = _existing_folder_paths(workspace, tok)
+    if existing is None:
+        return {}
+
+    wanted = sorted({tuple(path[: i + 1]) for path in paths for i in range(len(path))}, key=len)
+    display = _display_names(wanted)
+    resolved: dict[tuple[str, ...], str] = {}
+
+    for path in wanted:
+        final_path = tuple(display.get(path[: i + 1], part) for i, part in enumerate(path))
+        if final_path in existing:
+            resolved[path] = existing[final_path]
+            continue
+        payload: dict[str, Any] = {"displayName": display.get(path, path[-1])}
+        parent_id = resolved.get(path[:-1]) if len(path) > 1 else None
+        if parent_id:
+            payload["parentFolderId"] = parent_id
+        status, _, created = call("POST", f"{API}/workspaces/{workspace}/folders", tok, payload)
+        if status in (200, 201) and created.get("id"):
+            resolved[path] = existing[final_path] = created["id"]
+            LOG.info("folder created: %s", "/".join(final_path))
+        else:
+            LOG.warning("could not create folder %s (HTTP %s) - its items go to the root", "/".join(path), status)
+    return existing
+
+
 @dataclass
 class Target:
     """Where a deploy is going, and the state it carries. Keeps the per-item helpers small."""
@@ -521,11 +739,25 @@ def _deploy_report(target: Target, name: str, model: Item, report: Item, model_i
     return None
 
 
-def _print_plan(pairs: list[tuple[str, Item, Item | None]], workspace_name: str, planned: int) -> int:
-    """Report what would be created, and the item count that carries the customer's cost."""
+def _print_plan(
+    pairs: list[tuple[str, Item, Item | None]],
+    workspace_name: str,
+    planned: int,
+    placement: dict[str, list[str]],
+) -> int:
+    """Report what would be created, where it would land, and the item count that carries the cost."""
     LOG.info("--dry-run: nothing will be created. Plan:")
     for name, _model, report in pairs:
-        LOG.info("  %-44s %s%s", name, MODEL_TYPE, f" + {REPORT_TYPE}" if report else " (model only)")
+        where = "/".join(placement.get(_slug(name), [])) or "(workspace root)"
+        LOG.info("  %-40s %-28s %s", name, where, "model + report" if report else "model only")
+    if placement:
+        LOG.info(
+            "%d folder(s) would be created to mirror the Tableau project tree.",
+            len({tuple(p) for p in placement.values()}),
+        )
+    unplaced = [name for name, _m, _r in pairs if _slug(name) not in placement]
+    if unplaced:
+        LOG.info("%d workbook(s) have no known Tableau project and would land at the root.", len(unplaced))
     LOG.info(
         "%d item(s) would be created in %r. Each item carries a cost in the customer's capacity and "
         "licensing terms, so this is the number to agree BEFORE deploying.",
@@ -535,15 +767,17 @@ def _print_plan(pairs: list[tuple[str, Item, Item | None]], workspace_name: str,
     return EXIT_OK
 
 
-def _run_all(target: Target, pairs: list[tuple[str, Item, Item | None]]) -> list[str]:
+def _run_all(target: Target, pairs: list[tuple[str, Item, Item | None]], folders: dict[str, str]) -> list[str]:
     """Deploy every pair model-first, collecting failures rather than aborting on the first."""
     failures: list[str] = []
     for name, model, report in pairs:
+        model.folder_id = folders.get(_slug(name))
         model_id, failure = _deploy_model(target, name, model)
         if failure:
             failures.append(failure)
             continue
         if report:
+            report.folder_id = folders.get(_slug(name))
             report_failure = _deploy_report(target, name, model, report, model_id)
             if report_failure:
                 failures.append(report_failure)
@@ -573,6 +807,33 @@ def _acquire(bundle: Path, options: argparse.Namespace) -> tuple[RunLock, Journa
     return lock, Journal(journal_path)
 
 
+def _resolve_folders(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) -> dict[str, str]:
+    """Build the folder tree and return workbook name -> folder id (absent = workspace root)."""
+    if options.no_folders:
+        LOG.info("--no-folders: everything lands at the workspace root")
+        return {}
+    projects = project_map(bundle, options.estate_db)
+    if not projects:
+        LOG.info("no Tableau project information found - deploying flat (pass --estate-db to mirror the tree)")
+        return {}
+    plan = folder_plan(projects, project_parents(options.estate_db))
+    created = ensure_folders(workspace, tok, list(plan.values()))
+    placed = {wb: created[tuple(path)] for wb, path in plan.items() if tuple(path) in created}
+    LOG.info(
+        "folders: %d project(s) mirrored, %d workbook(s) placed (the rest go to the root)",
+        len({tuple(p) for p in plan.values()}),
+        len(placed),
+    )
+    return placed
+
+
+def _planned_placement(bundle: Path, options: argparse.Namespace) -> dict[str, list[str]]:
+    """The folder path each workbook would get, without contacting the service."""
+    if options.no_folders:
+        return {}
+    return folder_plan(project_map(bundle, options.estate_db), project_parents(options.estate_db))
+
+
 def deploy(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) -> int:
     """Deploy every workbook in the bundle, models first. Returns a process exit code."""
     pairs = discover(bundle)
@@ -586,14 +847,15 @@ def deploy(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) 
     workspace_name = info.get("displayName", workspace)
 
     if options.dry_run:
-        return _print_plan(pairs, workspace_name, planned)
+        return _print_plan(pairs, workspace_name, planned, _planned_placement(bundle, options))
 
     held = _acquire(bundle, options)
     if held is None:
         return EXIT_PREFLIGHT
     lock, journal = held
     try:
-        failures = _run_all(Target(workspace, workspace_name, tok, journal), pairs)
+        folders = _resolve_folders(bundle, workspace, tok, options)
+        failures = _run_all(Target(workspace, workspace_name, tok, journal), pairs, folders)
     finally:
         lock.release()
     return _report_failures(failures, planned, workspace_name)
@@ -610,6 +872,12 @@ def main(argv: list[str] | None = None) -> int:
         "--force-unlock", action="store_true", help="take the run lock even if another deploy appears to hold it"
     )
     parser.add_argument("--journal", type=Path, help="run journal path (default <bundle>/deploy-journal.jsonl)")
+    parser.add_argument(
+        "--estate-db",
+        type=Path,
+        help="assess_estate.py estate.db, so the Tableau project tree is mirrored as workspace folders",
+    )
+    parser.add_argument("--no-folders", action="store_true", help="deploy everything to the workspace root")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

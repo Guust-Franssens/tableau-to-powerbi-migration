@@ -37,7 +37,7 @@ def _bundle(tmp_path: Path, workbooks: dict[str, bool]) -> Path:
 
 
 def _options(**kwargs) -> argparse.Namespace:
-    defaults = {"dry_run": False, "force_unlock": False, "journal": None}
+    defaults = {"dry_run": False, "force_unlock": False, "journal": None, "estate_db": None, "no_folders": False}
     return argparse.Namespace(**{**defaults, **kwargs})
 
 
@@ -270,3 +270,143 @@ def test_a_report_is_never_deployed_without_a_model_id(tmp_path, monkeypatch):
     monkeypatch.setattr(de, "create_item", _create)
     assert de.deploy(bundle, "ws", "tok", _options(journal=tmp_path / "j.jsonl")) == de.EXIT_FAILED
     assert de.REPORT_TYPE not in deployed
+
+
+# --------------------------------------------------------------------------- folder mirroring
+#
+# Fabric's folder-name rules, measured against a live workspace (the API answers
+# `InvalidFolderDisplayName`, it does not coerce):
+#   rejected: &  /  \  :  ?  *  "  |  <  #  %  .   and a leading or trailing space
+#   accepted: -  _  +  (  )  interior spaces, non-ASCII
+# The dot is the trap: rejected ANYWHERE, and Tableau project names carry dots routinely.
+
+
+@pytest.mark.parametrize("bad", ["R&D", "R/D", "R\\D", "A:B", "A?B", "A*B", 'A"B', "A|B", "A<B", "A#B", "A%B", "v1.2"])
+def test_every_character_fabric_rejects_is_removed(bad):
+    cleaned = de.folder_display_name(bad)
+    assert not set(cleaned) & set('&/\\:?*"|<#%.')
+
+
+@pytest.mark.parametrize("good", ["Ventes françaises", "Q1 (2026)", "R+D", "A-B", "A_B", "Sales Reports"])
+def test_names_fabric_accepts_are_left_alone(good):
+    """Over-sanitising is a real failure too: it degrades a name the customer recognises."""
+    assert de.folder_display_name(good) == good
+
+
+def test_a_leading_or_trailing_space_is_stripped():
+    assert de.folder_display_name(" Lead") == "Lead"
+    assert de.folder_display_name("Trail ") == "Trail"
+
+
+def test_a_name_that_sanitises_to_nothing_still_gets_a_name():
+    assert de.folder_display_name("...") == "folder"
+    assert de.folder_display_name("///") == "folder"
+
+
+def test_projects_that_collide_after_sanitising_get_DISTINCT_folders():
+    """The failure this guards is SILENT: three Tableau projects pooling into one folder.
+
+    `R&D`, `R/D` and `R.D` all coerce toward `R-D`. A customer would have no way to tell that the
+    content of three projects had been merged.
+    """
+    final = de.unique_siblings(["R&D", "R/D", "R.D"])
+    assert len(set(final.values())) == 3, f"collided: {final}"
+
+
+def test_collision_suffixes_are_case_insensitive():
+    """Fabric treats folder names case-insensitively for uniqueness; so must we."""
+    final = de.unique_siblings(["r&d", "R/D"])
+    assert len(set(v.casefold() for v in final.values())) == 2
+
+
+def test_a_deep_tree_is_flattened_to_fabric_s_limit_not_dropped():
+    parents = {f"L{i}": f"L{i - 1}" for i in range(2, 13)}
+    plan = de.folder_plan({"wb": "L12"}, parents)
+    assert len(plan["wb"]) == de.MAX_FOLDER_DEPTH
+    assert "L12" in plan["wb"][-1], "the overflow must be preserved in the compound name, not dropped"
+
+
+def test_two_deep_chains_differing_below_the_limit_do_not_collapse():
+    """The subtlest collision: identical for 9 levels, differing only in the compounded tail."""
+    parents = {f"L{i}": f"L{i - 1}" for i in range(2, 13)}
+    parents["X12"] = "L11"
+    plan = de.folder_plan({"a": "L12", "b": "X12"}, parents)
+    assert plan["a"] != plan["b"], "two distinct projects flattened to the same folder path"
+
+
+def test_a_cycle_in_the_project_tree_terminates():
+    """A self-parent or an A->B->A loop must not hang the deploy."""
+    assert de.folder_plan({"wb": "A"}, {"A": "B", "B": "A"})["wb"]
+    assert de.folder_plan({"wb": "S"}, {"S": "S"})["wb"] == ["S"]
+
+
+def test_a_workbook_with_no_known_project_is_absent_rather_than_guessed(tmp_path):
+    """Inventing a folder would send the customer looking under a heading Tableau never had."""
+    assert de.folder_plan({}, {}) == {}
+    assert de.project_map(tmp_path, None) == {}
+
+
+def test_the_slug_join_survives_the_engine_s_name_sanitising(tmp_path):
+    """Tableau keeps `Meridian Multi-Source (3 systems)`; the engine writes `Meridian_Multi-Source__3_systems_`.
+
+    An exact-match join placed only 8 of 33 workbooks and sent the rest to the root - which reads as
+    "no project data" rather than as a bug.
+    """
+    assert de._slug("Meridian Multi-Source (3 systems)") == de._slug("Meridian_Multi-Source__3_systems_")
+
+
+def test_an_unreadable_estate_db_degrades_to_flat_rather_than_crashing(tmp_path):
+    broken = tmp_path / "not.db"
+    broken.write_text("this is not sqlite", encoding="utf-8")
+    assert de.project_parents(broken) == {}
+
+
+def test_folders_are_created_parents_before_children(monkeypatch):
+    """A child created before its parent lands at the root, silently flattening the tree."""
+    created: list[str] = []
+
+    def _call(method, url, tok, body=None):  # noqa: ARG001
+        if method == "GET":
+            return 200, {}, {"value": []}
+        created.append(body["displayName"])
+        return 201, {}, {"id": f"id-{len(created)}"}
+
+    monkeypatch.setattr(de, "call", _call)
+    de.ensure_folders("ws", "tok", [["Parent", "Child"]])
+    assert created == ["Parent", "Child"]
+
+
+def test_an_existing_folder_is_reused_not_duplicated(monkeypatch):
+    """A re-run into a partly-populated landing zone must not double the tree."""
+    created: list[str] = []
+
+    def _call(method, url, tok, body=None):  # noqa: ARG001
+        if method == "GET":
+            return 200, {}, {"value": [{"id": "f1", "displayName": "Parent", "parentFolderId": None}]}
+        created.append(body["displayName"])
+        return 201, {}, {"id": "new"}
+
+    monkeypatch.setattr(de, "call", _call)
+    resolved = de.ensure_folders("ws", "tok", [["Parent"]])
+    assert created == []
+    assert resolved[("Parent",)] == "f1"
+
+
+def test_an_unavailable_folders_api_degrades_to_a_flat_deploy(monkeypatch):
+    """Folders are public preview; losing them must cost placement, not the whole deployment."""
+    monkeypatch.setattr(de, "call", lambda *a, **k: (404, {}, {}))
+    assert de.ensure_folders("ws", "tok", [["A"]]) == {}
+
+
+def test_an_item_carries_its_folder_id_at_creation(monkeypatch):
+    """`folderId` is a field on Create Item - placement happens at creation, with no move step."""
+    sent: dict = {}
+
+    def _call(method, url, tok, body=None):  # noqa: ARG001
+        sent.update(body or {})
+        return 201, {}, {"id": "x"}
+
+    monkeypatch.setattr(de, "call", _call)
+    item = de.Item("N", de.MODEL_TYPE, Path("."), parts=[], folder_id="folder-1")
+    de.create_item("ws", "tok", item, de.Journal(Path("nul") if sys.platform == "win32" else Path("/dev/null")))
+    assert sent.get("folderId") == "folder-1"
