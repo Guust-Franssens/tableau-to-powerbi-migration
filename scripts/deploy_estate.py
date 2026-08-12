@@ -222,6 +222,9 @@ def rebind(parts: list[dict[str, str]], workspace_name: str, model_name: str, mo
         },
     }
     payload = base64.b64encode(json.dumps(pbir, indent=2).encode("utf-8")).decode("ascii")
+    if not any(part["path"] == "definition.pbir" for part in parts):
+        # Silently adding one would invent a binding for a report whose shape we do not understand.
+        raise ValueError("report has no definition.pbir - refusing to guess its semantic-model binding")
     return [{**part, "payload": payload} if part["path"] == "definition.pbir" else part for part in parts]
 
 
@@ -263,10 +266,11 @@ class Journal:
     types, which makes both the journal and the lock below load-bearing rather than conveniences.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, workspace: str = "") -> None:
         self.path = path
-        self.done: dict[tuple[str, str], dict[str, Any]] = {}
-        self.pending: dict[tuple[str, str], dict[str, Any]] = {}
+        self.workspace = workspace
+        self.done: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self.pending: dict[tuple[str, str, str], dict[str, Any]] = {}
         if path.is_file():
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -275,12 +279,19 @@ class Journal:
                     row = json.loads(line)
                 except json.JSONDecodeError:
                     continue  # a torn final line is expected after a hard kill
-                key = (row.get("item", ""), row.get("type", ""))
+                # Keyed by WORKSPACE too. Without it, deploying the same bundle to a second
+                # workspace - which is exactly what promotion from a landing zone to a secured
+                # workspace is - would find every item "already deployed" and create nothing, while
+                # reporting success.
+                key = (row.get("workspace", ""), row.get("item", ""), row.get("type", ""))
                 if row.get("phase") == "outcome" and row.get("status") == "Succeeded":
                     self.done[key] = row
                     self.pending.pop(key, None)
                 elif row.get("phase") == "intent":
                     self.pending[key] = row
+
+    def _key(self, item: Item) -> tuple[str, str, str]:
+        return (self.workspace, item.name, item.item_type)
 
     def _write(self, row: dict[str, Any]) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
@@ -292,10 +303,12 @@ class Journal:
         self._write(
             {
                 "phase": "intent",
+                "workspace": self.workspace,
                 "item": item.name,
                 "type": item.item_type,
                 "action": action,
                 "definition_sha256": item.digest,
+                "folderId": item.folder_id,
                 "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
         )
@@ -305,12 +318,14 @@ class Journal:
         self._write(
             {
                 "phase": "outcome",
+                "workspace": self.workspace,
                 "item": item.name,
                 "type": item.item_type,
                 "status": status,
                 "itemId": item_id,
                 "operationId": operation,
                 "definition_sha256": item.digest,
+                "folderId": item.folder_id,
                 "detail": detail[:400],
                 "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
@@ -320,16 +335,18 @@ class Journal:
         """Return the recorded success ONLY if the definition is byte-identical to what we now hold.
 
         The hash is the point. 'An item with this name exists' is the check that silently ships a
-        half-uploaded item; 'the content I intend is there' is the one that does not.
+        half-uploaded item; 'the content I intend is there' is the one that does not. The folder is
+        compared too, so moving a project in Tableau re-places its items rather than leaving them
+        where last year's tree put them.
         """
-        row = self.done.get((item.name, item.item_type))
-        if row and row.get("definition_sha256") == item.digest:
+        row = self.done.get(self._key(item))
+        if row and row.get("definition_sha256") == item.digest and row.get("folderId") == item.folder_id:
             return row
         return None
 
     def unfinished(self, item: Item) -> dict[str, Any] | None:
         """An intent with no matching success - the crash-in-flight case worth polling, not retrying."""
-        return self.pending.get((item.name, item.item_type))
+        return self.pending.get(self._key(item))
 
 
 class RunLock:
@@ -349,23 +366,30 @@ class RunLock:
         self.path = path
 
     def acquire(self, *, force: bool = False) -> tuple[bool, str]:
-        """Take the lock. Returns (ok, message)."""
-        if self.path.exists() and not force:
+        """Take the lock atomically. Returns (ok, message).
+
+        `O_CREAT | O_EXCL` rather than exists()-then-write: the check-then-act version has a window
+        two simultaneous starts can both pass, which is exactly the failure this lock exists to
+        prevent.
+        """
+        if force:
+            self.path.unlink(missing_ok=True)
+        try:
+            handle = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
             try:
                 held = json.loads(self.path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 held = {}
-            age = time.time() - self.path.stat().st_mtime
+            age = (time.time() - self.path.stat().st_mtime) / 60 if self.path.exists() else 0
             return False, (
                 f"another deploy holds {self.path.name} (pid {held.get('pid', '?')}, "
-                f"started {held.get('at', '?')}, {age / 60:.0f} min ago). Wait for it, or re-run with "
+                f"started {held.get('at', '?')}, {age:.0f} min ago). Wait for it, or re-run with "
                 "--force-unlock if you are certain it is dead. Two concurrent runs create DUPLICATE "
                 "items: Fabric does not reject a repeated report/model name."
             )
-        self.path.write_text(
-            json.dumps({"pid": os.getpid(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}),
-            encoding="utf-8",
-        )
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, stream)
         return True, "lock acquired"
 
     def release(self) -> None:
@@ -527,6 +551,14 @@ def project_parents(estate_db: Path | None) -> dict[str, str]:
     Without this every project becomes a root folder: correct, but flatter than the customer's own
     structure, which is the whole reason for mirroring it. `estate.db` records `parent_luid`, and it
     was being collected and discarded.
+
+    **Known limitation, deliberately reported rather than silently resolved.** The map is keyed by
+    NAME because that is all `workbook.project` gives us to join on. Tableau estates reuse project
+    names under different parents (`Reports`, `Archive`, `Test`), and two such projects are
+    indistinguishable here - so their content would pool under whichever parent won. Where that is
+    detected, BOTH are dropped from the tree and their content lands at the workspace root, which is
+    wrong-but-visible rather than wrong-and-hidden. Fixing it properly needs luid identity carried
+    through `workbook.project`, which is an assessment-layer change.
     """
     if not (estate_db and estate_db.is_file()):
         return {}
@@ -536,8 +568,21 @@ def project_parents(estate_db: Path | None) -> dict[str, str]:
     except sqlite3.Error as exc:
         LOG.warning("could not read the project tree from %s (%s) - folders will be flat", estate_db, exc)
         return {}
+
     names = {luid: name for luid, name, _parent in rows}
-    return {name: names[parent] for _luid, name, parent in rows if parent and parent in names}
+    duplicated = {name for name in names.values() if list(names.values()).count(name) > 1}
+    if duplicated:
+        LOG.warning(
+            "project name(s) %s appear more than once in the tree; they cannot be told apart from a "
+            "workbook's project name, so their content lands at the workspace root rather than "
+            "risking a merge under one parent",
+            ", ".join(sorted(duplicated)),
+        )
+    return {
+        name: names[parent]
+        for _luid, name, parent in rows
+        if parent and parent in names and name not in duplicated and names[parent] not in duplicated
+    }
 
 
 def _slug(name: str) -> str:
@@ -581,10 +626,33 @@ def project_map(bundle: Path, estate_db: Path | None) -> dict[str, str]:
     if estate_db and estate_db.is_file():
         try:
             with sqlite3.connect(f"file:{estate_db}?mode=ro", uri=True) as conn:
-                for name, project in conn.execute("select name, project from workbook where project is not null"):
-                    mapping[_slug(name)] = project  # the site is authoritative; overwrite provenance
+                rows = list(conn.execute("select name, project from workbook where project is not null"))
         except sqlite3.Error as exc:
             LOG.warning("could not read %s (%s) - falling back to provenance only", estate_db, exc)
+            rows = []
+        # Two workbooks whose names differ only by a separator or case slug to the same key
+        # (`Q1 Report` vs `Q1.Report`). Silently letting the last one win files the other under the
+        # wrong project, which is invisible afterwards. Refuse to place either, and say so.
+        seen: dict[str, tuple[str, str]] = {}
+        ambiguous: set[str] = set()
+        for name, project in rows:
+            key = _slug(name)
+            previous = seen.get(key)
+            if previous and previous[1] != project:
+                ambiguous.add(key)
+                LOG.warning(
+                    "workbook names %r and %r normalise to the same key but sit in different "
+                    "projects (%r vs %r) - both land at the workspace root rather than risk filing "
+                    "one under the other's project",
+                    previous[0],
+                    name,
+                    previous[1],
+                    project,
+                )
+            seen[key] = (name, project)
+            mapping[key] = project  # the site is authoritative; overwrite provenance
+        for key in ambiguous:
+            mapping.pop(key, None)
 
     return mapping
 
@@ -681,7 +749,12 @@ def ensure_folders(workspace: str, tok: str, paths: list[list[str]]) -> dict[tup
             LOG.info("folder created: %s", "/".join(final_path))
         else:
             LOG.warning("could not create folder %s (HTTP %s) - its items go to the root", "/".join(path), status)
-    return existing
+    # `resolved`, NOT `existing`: resolved is keyed by the ORIGINAL project path, which is what the
+    # caller holds. `existing` is keyed by the SANITIZED display path, so returning it silently
+    # missed every project whose name had to be changed - creating the folder, leaving it empty, and
+    # dumping its content at the workspace root while --dry-run promised otherwise. That failed
+    # precisely for the names this sanitizer exists to handle (`v1.2`, `R&D`).
+    return resolved
 
 
 @dataclass
@@ -715,8 +788,29 @@ def _deploy_model(target: Target, name: str, model: Item) -> tuple[str | None, s
     return model_id, None
 
 
+def report_is_empty(folder: Path) -> bool:
+    """True when a report has no pages, so there is genuinely nothing to deploy.
+
+    Fabric rejects an empty report with `Content provider provided invalid package content stream`,
+    which tells an operator nothing. Measured on a real estate: 2 of 33 reports had
+    `pageOrder: []` because the source workbook had no convertible worksheets, and both failed with
+    that message. Detecting it here turns an opaque service error into a statement of fact.
+    """
+    pages = folder / "definition" / "pages" / "pages.json"
+    if not pages.is_file():
+        return True
+    try:
+        return not json.loads(pages.read_text(encoding="utf-8")).get("pageOrder")
+    except (json.JSONDecodeError, OSError):
+        return False  # unreadable is not the same as empty; let the service judge it
+
+
 def _deploy_report(target: Target, name: str, model: Item, report: Item, model_id: str | None) -> str | None:
     """Deploy one report, rebound to its model. Returns a failure description or None."""
+    if report_is_empty(report.folder):
+        LOG.warning("%-44s report has NO PAGES - skipping (the model is still deployed)", name)
+        return None
+
     if not model_id:
         LOG.error("%-44s model id unknown - refusing to deploy an unbindable report", name)
         return f"{name}: model id unknown, cannot bind the report"
@@ -796,7 +890,7 @@ def _report_failures(failures: list[str], planned: int, workspace_name: str) -> 
     return EXIT_OK
 
 
-def _acquire(bundle: Path, options: argparse.Namespace) -> tuple[RunLock, Journal] | None:
+def _acquire(bundle: Path, workspace: str, options: argparse.Namespace) -> tuple[RunLock, Journal] | None:
     """Take the run lock and open the journal, or report why we must not start."""
     journal_path = options.journal or (bundle / "deploy-journal.jsonl")
     lock = RunLock(journal_path.with_suffix(".lock"))
@@ -804,7 +898,7 @@ def _acquire(bundle: Path, options: argparse.Namespace) -> tuple[RunLock, Journa
     if not acquired:
         LOG.error("%s", message)
         return None
-    return lock, Journal(journal_path)
+    return lock, Journal(journal_path, workspace)
 
 
 def _resolve_folders(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) -> dict[str, str]:
@@ -849,7 +943,7 @@ def deploy(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) 
     if options.dry_run:
         return _print_plan(pairs, workspace_name, planned, _planned_placement(bundle, options))
 
-    held = _acquire(bundle, options)
+    held = _acquire(bundle, workspace, options)
     if held is None:
         return EXIT_PREFLIGHT
     lock, journal = held

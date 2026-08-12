@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -29,9 +30,14 @@ def _bundle(tmp_path: Path, workbooks: dict[str, bool]) -> Path:
         (model / "definition.pbism").write_text('{"version":"4.0"}', encoding="utf-8")
         if has_report:
             report = bundle / "pbip" / name / f"{name}.Report"
-            report.mkdir(parents=True)
+            (report / "definition" / "pages").mkdir(parents=True)
             (report / "definition.pbir").write_text(
                 json.dumps({"datasetReference": {"byPath": {"path": f"../{name}.SemanticModel"}}}), encoding="utf-8"
+            )
+            # A page, so the report is not treated as empty: Fabric rejects a page-less report and
+            # the deployer skips one before it reaches any other check.
+            (report / "definition" / "pages" / "pages.json").write_text(
+                json.dumps({"pageOrder": ["p1"], "activePageName": "p1"}), encoding="utf-8"
             )
     return bundle
 
@@ -76,7 +82,6 @@ def test_rebinding_leaves_every_other_part_untouched(tmp_path):
     """Only the binding changes; rewriting anything else would silently alter the report."""
     bundle = _bundle(tmp_path, {"WB": True})
     report = bundle / "pbip" / "WB" / "WB.Report"
-    (report / "definition").mkdir()
     (report / "definition" / "report.json").write_text('{"x":1}', encoding="utf-8")
     before = de.parts_for(report)
     after = de.rebind(before, "WS", "WB", "G")
@@ -410,3 +415,141 @@ def test_an_item_carries_its_folder_id_at_creation(monkeypatch):
     item = de.Item("N", de.MODEL_TYPE, Path("."), parts=[], folder_id="folder-1")
     de.create_item("ws", "tok", item, de.Journal(Path("nul") if sys.platform == "win32" else Path("/dev/null")))
     assert sent.get("folderId") == "folder-1"
+
+
+# --------------------------------------------------------------------------- adversarial findings
+
+
+def test_ensure_folders_returns_ids_keyed_by_the_ORIGINAL_project_path(monkeypatch):
+    """The critical one: it returned ids keyed by the SANITIZED path, which no caller holds.
+
+    Every project whose name had to be changed (`v1.2`, `R&D`) therefore got its folder created,
+    left EMPTY, and its content dumped at the workspace root - while --dry-run promised otherwise.
+    """
+
+    def _call(method, url, tok, body=None):  # noqa: ARG001
+        if method == "GET":
+            return 200, {}, {"value": []}
+        return 201, {}, {"id": f"id-{body['displayName']}"}
+
+    monkeypatch.setattr(de, "call", _call)
+    resolved = de.ensure_folders("ws", "tok", [["R&D"], ["Finance", "Q1.2026"]])
+    assert ("R&D",) in resolved, "lookup must work with the name the caller actually has"
+    assert ("Finance", "Q1.2026") in resolved
+
+
+def test_a_project_needing_sanitising_still_receives_its_items(monkeypatch, tmp_path):
+    """End to end: the folder is created AND the workbook is placed in it, not at the root."""
+    monkeypatch.setattr(de, "project_map", lambda *a, **k: {"wb": "R&D"})
+    monkeypatch.setattr(de, "project_parents", lambda *a, **k: {})
+
+    def _call(method, url, tok, body=None):  # noqa: ARG001
+        if method == "GET":
+            return 200, {}, {"value": []}
+        return 201, {}, {"id": "folder-1"}
+
+    monkeypatch.setattr(de, "call", _call)
+    placed = de._resolve_folders(tmp_path, "ws", "tok", _options())
+    assert placed.get("wb") == "folder-1", "the workbook must land in the folder created for it"
+
+
+def test_two_workbooks_that_normalise_alike_are_both_left_unplaced(tmp_path):
+    """`Q1 Report` and `Q1.Report` slug identically; filing one under the other's project is silent.
+
+    Root placement is wrong-but-visible; a wrong folder is wrong-and-hidden.
+    """
+    db = tmp_path / "estate.db"
+    conn = sqlite3.connect(db)
+    conn.execute("create table workbook (name text, project text)")
+    conn.executemany("insert into workbook values (?, ?)", [("Q1 Report", "Alpha"), ("Q1.Report", "Beta")])
+    conn.commit()
+    conn.close()
+    assert de.project_map(tmp_path, db) == {}
+
+
+def test_same_named_projects_under_different_parents_do_not_pool(tmp_path):
+    """`Finance/Reports` and `HR/Reports` are indistinguishable by name; merging them is silent."""
+    db = tmp_path / "estate.db"
+    conn = sqlite3.connect(db)
+    conn.execute("create table project (luid text, name text, parent_luid text)")
+    conn.executemany(
+        "insert into project values (?, ?, ?)",
+        [("f", "Finance", None), ("h", "HR", None), ("r1", "Reports", "f"), ("r2", "Reports", "h")],
+    )
+    conn.commit()
+    conn.close()
+    assert "Reports" not in de.project_parents(db), "an ambiguous project must not be nested under a guess"
+
+
+def test_a_report_with_no_pages_is_skipped_with_a_clear_reason(tmp_path, monkeypatch):
+    """Fabric rejects an empty report as `invalid package content stream`, which explains nothing.
+
+    Measured: 2 of 33 reports on a real estate had `pageOrder: []` because the source workbook had
+    no convertible worksheets.
+    """
+    report = tmp_path / "X.Report"
+    (report / "definition" / "pages").mkdir(parents=True)
+    (report / "definition" / "pages" / "pages.json").write_text('{"pageOrder": []}', encoding="utf-8")
+    assert de.report_is_empty(report) is True
+
+    created: list[str] = []
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("x") or ("Succeeded", "id", ""))
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl"))
+    assert (
+        de._deploy_report(target, "X", de.Item("X", de.MODEL_TYPE, tmp_path), de.Item("X", de.REPORT_TYPE, report), "m")
+        is None
+    )
+    assert created == [], "an empty report must not be sent to the service"
+
+
+def test_a_report_WITH_pages_is_not_mistaken_for_empty(tmp_path):
+    report = tmp_path / "Y.Report"
+    (report / "definition" / "pages").mkdir(parents=True)
+    (report / "definition" / "pages" / "pages.json").write_text('{"pageOrder": ["p1"]}', encoding="utf-8")
+    assert de.report_is_empty(report) is False
+
+
+def test_the_journal_is_scoped_to_a_WORKSPACE(tmp_path):
+    """Promotion deploys the SAME bundle to a second workspace; it must not be skipped as done.
+
+    A journal keyed only by (item, type) would report success while creating nothing in the target.
+    """
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+
+    first = de.Journal(tmp_path / "j.jsonl", "workspace-A")
+    first.intent(item, "create")
+    first.outcome(item, "Succeeded", "id-1", "op-1")
+
+    assert de.Journal(tmp_path / "j.jsonl", "workspace-A").already_deployed(item) is not None
+    assert de.Journal(tmp_path / "j.jsonl", "workspace-B").already_deployed(item) is None
+
+
+def test_moving_a_project_in_tableau_re_places_its_items(tmp_path):
+    """The folder is part of the recorded state; otherwise items stay where last year's tree put them."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    folder = bundle / "pbip" / "WB" / "WB.SemanticModel"
+    item = de.Item("WB", de.MODEL_TYPE, folder, folder_id="old-folder")
+    item.parts = de.parts_for(folder)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Succeeded", "id-1", "op-1")
+
+    moved = de.Item("WB", de.MODEL_TYPE, folder, folder_id="new-folder")
+    moved.parts = de.parts_for(folder)
+    assert de.Journal(tmp_path / "j.jsonl", "ws").already_deployed(moved) is None
+
+
+def test_the_lock_is_taken_atomically(tmp_path):
+    """exists()-then-write has a window two simultaneous starts can both pass."""
+    lock = de.RunLock(tmp_path / "run.lock")
+    assert lock.acquire()[0] is True
+    # A second acquire must fail even though the first process is this same one.
+    assert de.RunLock(tmp_path / "run.lock").acquire()[0] is False
+
+
+def test_a_report_without_a_pbir_is_refused_rather_than_guessed(tmp_path):
+    """Inventing a binding for a report whose shape we do not understand is worse than stopping."""
+    with pytest.raises(ValueError, match="definition.pbir"):
+        de.rebind([{"path": "definition/report.json", "payload": "e30=", "payloadType": "InlineBase64"}], "W", "M", "G")
