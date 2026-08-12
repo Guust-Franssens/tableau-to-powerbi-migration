@@ -51,6 +51,10 @@ duplicate `displayName` + type is rejected (`ItemDisplayNameNotAvailableYet`), w
 rather than a solution - and its wording is the language of eventual consistency, so absence from a
 listing is not proof of absence.
 """
+# The deploy loop is one coherent procedure - preflight, folders, models, rebind, reports - and the
+# long prose above each step is the measured knowledge that keeps it correct. Splitting it to satisfy
+# a line count would scatter that, exactly as `parse_tableau.py` concluded.
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -65,6 +69,8 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -83,6 +89,17 @@ FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
 # asking a customer to provision one.
 MODEL_TYPE = "SemanticModel"
 REPORT_TYPE = "Report"
+
+# Stamped into every item this tool creates, so a later run can ask the SERVICE what it owns rather
+# than trusting a local journal that may be gone. Ownership matters because item identity in Fabric
+# is only (displayName, type): without it, an unrelated customer report called `Sales` is
+# indistinguishable from ours, and was silently overwritten.
+PROVENANCE = "Deployed by tableau-to-powerbi-migration"
+# The stamp also records WHICH estate an item came from. Without that, the marker only says "some
+# run of this tool made this", and a second estate deployed into the same landing zone silently
+# overwrote a same-named item from the first - one item where there should be two, the first
+# project's folder left empty, and both runs exiting 0.
+SOURCE_PREFIX = "| source:"
 
 # Folders nest up to 10 levels in Fabric; beyond that the API answers `FolderDepthOutOfRange`.
 # Tableau does not enforce that limit, so a deep estate is a matter of time rather than a
@@ -117,6 +134,9 @@ class Item:
     folder: Path
     parts: list[dict[str, str]] = field(default_factory=list)
     folder_id: str | None = None
+    # Which estate this came from, recorded in the item's stamp so a second estate cannot silently
+    # overwrite a same-named item belonging to the first.
+    source: str = ""
 
     @property
     def digest(self) -> str:
@@ -274,6 +294,29 @@ def rebind(parts: list[dict[str, str]], workspace_name: str, model_name: str, mo
     return [{**part, "payload": payload} if part["path"] == "definition.pbir" else part for part in parts]
 
 
+def _preferred_model(folder: Path, models: list[Path], reports: list[Path]) -> Path:
+    """Pick the model that belongs to this workbook when several sit side by side.
+
+    The report names its own model in `definition.pbir`'s `byPath`; that is ground truth and beats
+    any ordering heuristic. Falling back to the folder-named model beats alphabetical, which shipped
+    an unrelated model under the workbook's name.
+    """
+    if reports:
+        pbir = reports[0] / "definition.pbir"
+        try:
+            ref = json.loads(pbir.read_text(encoding="utf-8"))["datasetReference"]["byPath"]["path"]
+            wanted = (reports[0].parent / ref).resolve()
+            for candidate in models:
+                if candidate.resolve() == wanted:
+                    return candidate
+        except (json.JSONDecodeError, OSError, KeyError, TypeError):
+            pass  # no usable byPath; fall through to the name match
+    for candidate in models:
+        if candidate.stem == folder.name:
+            return candidate
+    return models[0]
+
+
 def discover(bundle: Path) -> list[tuple[str, Item, Item | None]]:
     """Find each workbook's (model, report) pair under `<bundle>/pbip/`.
 
@@ -286,12 +329,24 @@ def discover(bundle: Path) -> list[tuple[str, Item, Item | None]]:
         raise SystemExit(f"no pbip/ folder in {bundle} - was this bundle produced by run_estate.py?")
     found: list[tuple[str, Item, Item | None]] = []
     for folder in sorted(p for p in pbip.iterdir() if p.is_dir()):
-        models = list(folder.glob("*.SemanticModel"))
-        reports = list(folder.glob("*.Report"))
+        models = sorted(folder.glob("*.SemanticModel"))
+        reports = sorted(folder.glob("*.Report"))
         if not models:
             LOG.warning("%s has no .SemanticModel folder - skipping", folder.name)
             continue
-        model = Item(folder.name, MODEL_TYPE, models[0])
+        # Which model? `models[0]` of an unsorted glob chose arbitrarily; sorting alone made that
+        # choice deterministic AND deterministically wrong, shipping the alphabetically-first folder
+        # under the workbook's name. Prefer the one the report's `definition.pbir` actually points
+        # at, then the one named after the workbook, and only then fall back to the first.
+        model_path = _preferred_model(folder, models, reports)
+        for extra in [m for m in models if m != model_path] + reports[1:]:
+            LOG.warning(
+                "%s holds more than one item folder - using %s, ignoring %s",
+                folder.name,
+                model_path.name,
+                extra.name,
+            )
+        model = Item(folder.name, MODEL_TYPE, model_path)
         report = Item(folder.name, REPORT_TYPE, reports[0]) if reports else None
         found.append((folder.name, model, report))
     return found
@@ -318,6 +373,7 @@ class Journal:
         self.done: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.pending: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.attempts: set[tuple[str, str, str]] = set()
+        self.item_ids: set[str] = set()
         if path.is_file():
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -331,6 +387,10 @@ class Journal:
                 # workspace is - would find every item "already deployed" and create nothing, while
                 # reporting success.
                 key = (row.get("workspace", ""), row.get("item", ""), row.get("type", ""))
+                if row.get("workspace") == self.workspace and row.get("itemId"):
+                    # Every id this journal has ever seen in THIS workspace is an id we may claim.
+                    # Ownership is what stops us overwriting an item the customer put here.
+                    self.item_ids.add(row["itemId"])
                 if row.get("phase") == "outcome" and row.get("status") == "Succeeded":
                     self.done[key] = row
                     self.pending.pop(key, None)
@@ -457,7 +517,9 @@ class RunLock:
         self.path.unlink(missing_ok=True)
 
 
-def preflight(workspace: str, tok: str, planned: int) -> tuple[bool, str, dict[str, Any]]:
+def preflight(
+    workspace: str, tok: str, planned: int, planned_keys: list[tuple[str, str]] | None = None
+) -> tuple[bool, str, dict[str, Any]]:
     """Check everything cheap BEFORE the first write. Returns (ok, message, workspace-info).
 
     Each failure here is one a run would otherwise hit partway through, leaving a half-deployed
@@ -477,16 +539,47 @@ def preflight(workspace: str, tok: str, planned: int) -> tuple[bool, str, dict[s
     if status != 200:
         return False, f"could not list items in {name!r}: HTTP {status} - is this identity a Contributor?", body
     existing = len(rows)
+    # Only items that would be CREATED consume budget. Counting the run's own items as both
+    # "existing" and "planned" made every resume double-count them, so any estate above half the
+    # budget could be deployed once and then never re-run - and resuming is this script's purpose.
+    already = {(r.get("displayName"), r.get("type")) for r in rows}
+    creating = len([key for key in planned_keys or [] if key not in already]) if planned_keys else planned
     budget = int(WORKSPACE_ITEM_LIMIT * (1 - HEADROOM)) - existing
-    if planned > budget:
+    if creating > budget:
         return (
             False,
-            f"{planned} item(s) planned but only {budget} fit in {name!r} "
+            f"{creating} new item(s) planned but only {budget} fit in {name!r} "
             f"({existing} already there, {WORKSPACE_ITEM_LIMIT}-item limit, {int(HEADROOM * 100)}% headroom kept). "
             "Supply a second workspace or narrow the scope.",
             body,
         )
-    return True, f"{name!r}: {existing} existing item(s), {planned} planned, {budget - planned} spare", body
+    return (
+        True,
+        f"{name!r}: {existing} existing item(s), {planned} planned ({creating} new), {budget - creating} spare",
+        body,
+    )
+
+
+def _retry_after(headers: dict, default: float = 20.0) -> float:
+    """Seconds to wait from a `Retry-After` header.
+
+    RFC 9110 allows an HTTP-date as well as a delay in seconds; `float()` on the date form raised
+    `ValueError` and killed the deploy mid-estate.
+    """
+    raw = str(headers.get("retry-after", "")).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return default
+    if when is None:
+        return default
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, min((when - datetime.now(timezone.utc)).total_seconds(), 300.0))
 
 
 def _post_item(workspace: str, tok: str, item: Item) -> tuple[int, dict, dict]:
@@ -497,13 +590,17 @@ def _post_item(workspace: str, tok: str, item: Item) -> tuple[int, dict, dict]:
     grind against.
     """
     body = {"displayName": item.name, "type": item.item_type, "definition": {"parts": item.parts}}
+    # A marker the SERVICE can answer for. Ownership that lives only in a local journal is lost with
+    # the journal - and then the deployer refuses to touch its own previous output, which is safe but
+    # useless. Stamped here, a later run recognises what it deployed from any machine.
+    body["description"] = stamp_for(item)
     if item.folder_id:
         # Placed AT CREATION - `folderId` is a field on Create Item, so there is no create-then-move
         # dance and no window where the item sits in the wrong place.
         body["folderId"] = item.folder_id
     status, headers, resp = call("POST", f"{API}/workspaces/{workspace}/items", tok, body)
     if status == 429:
-        wait = float(headers.get("retry-after", "20"))
+        wait = _retry_after(headers)
         LOG.warning("rate limited creating %s; waiting %.0fs as instructed", item.name, wait)
         time.sleep(wait)
         status, headers, resp = call("POST", f"{API}/workspaces/{workspace}/items", tok, body)
@@ -577,15 +674,129 @@ def list_all(workspace: str, tok: str, collection: str) -> tuple[int, list[dict[
         )
 
 
-def find_existing(workspace: str, tok: str, name: str, item_type: str) -> str | None:
-    """Look up an item's id by name+type, for reconciling a journal that fell behind reality."""
-    status, rows = list_all(workspace, tok, "items")
-    if status != 200:
-        return None
-    for entry in rows:
-        if entry.get("displayName") == name and entry.get("type") == item_type:
-            return entry.get("id")
-    return None
+class Landing:
+    """What the landing zone already holds, read ONCE at the start of a run.
+
+    Three separate defects shared one root cause: asking the service per item, and treating *"I
+    could not ask"* as *"it is not there"*. `find_existing` returned `None` for a failed listing
+    exactly as it did for a genuine absence, and absent is what makes this deployer create a second
+    copy - so a single transient 500 or an unhandled 429 on the read produced a duplicate while the
+    run still exited 0. A clean run issued one full paged listing PER ITEM, so a large estate offered
+    hundreds of independent chances to hit it.
+
+    Reading once, up front, converts that into a single failure the run can refuse to start on.
+
+    It also carries the thing a name lookup cannot: **ownership**. A customer-supplied landing zone
+    is not necessarily empty, and item identity here is only (displayName, type) - so an unrelated
+    report called `Sales` was indistinguishable from ours and was overwritten in place, reported as
+    "already existed - definition updated". We therefore keep the ids that were present BEFORE this
+    run touched anything, and claim only those the journal can account for.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]], adopt: bool = False) -> None:
+        self.rows: dict[str, dict[str, Any]] = {r["id"]: r for r in rows if r.get("id")}
+        self.preexisting: set[str] = set(self.rows)
+        self.adopt = adopt
+
+    @classmethod
+    def read(cls, workspace: str, tok: str, adopt: bool = False) -> tuple[Landing | None, str]:
+        """Read the workspace, or return the reason we must not proceed without it."""
+        status, rows = list_all(workspace, tok, "items")
+        if status != 200:
+            return None, (
+                f"could not read the contents of workspace {workspace} (HTTP {status}). "
+                "Refusing to deploy: an unreadable workspace is indistinguishable from an empty one, "
+                "and deploying into it would create a second copy of everything already there."
+            )
+        return cls(rows, adopt), ""
+
+    def matching(self, name: str, item_type: str) -> list[dict[str, Any]]:
+        """Every item in the workspace with this exact name and type."""
+        return [r for r in self.rows.values() if r.get("displayName") == name and r.get("type") == item_type]
+
+    def _is_stamped(self, row: dict[str, Any]) -> bool:
+        """True if the SERVICE says a run of this tool created this item.
+
+        Deliberately NOT `journal.attempted(item)`. That asked "did we ever start an item with this
+        name?" without looking at the row at all, so a single failed create authorised overwriting
+        ANY item of that name for the life of the journal - and since a create that failed is
+        exactly what this deployer exists to resume from, that is a routine precondition, not an
+        exotic one. It also destroyed a customer's content and then stamped it as ours, making the
+        damage permanent.
+
+        The stamp is strictly better evidence, and it covers the case `attempted()` was there for:
+        `_post_item` sends the marker in the CREATE body, so an item that was created just before a
+        crash is already stamped when we come back for it.
+        """
+        return str(row.get("description") or "").startswith(PROVENANCE)
+
+    def source_of(self, row: dict[str, Any]) -> str:
+        """Which estate this item came from, as recorded in its stamp ("" if unknown)."""
+        text = str(row.get("description") or "")
+        marker = f"{PROVENANCE} {SOURCE_PREFIX}"
+        return text.split(marker, 1)[1].strip() if marker in text else ""
+
+    def claim(self, item: Item, journal: Journal) -> tuple[str | None, str | None]:
+        """Decide which existing item (if any) is OURS to update. Returns (item_id, refusal)."""
+        candidates = self.matching(item.name, item.item_type)
+        if not candidates:
+            return None, None
+        ours = [
+            row
+            for row in candidates
+            if self.adopt  # the operator has explicitly taken responsibility for this workspace
+            or row["id"] not in self.preexisting  # created during this very run
+            or row["id"] in journal.item_ids  # recorded by this journal, in this workspace
+            or self._is_stamped(row)  # marked by a previous run of this tool, in the SERVICE
+        ]
+        if not ours:
+            return None, (
+                f"{item.name} ({item.item_type}): an item of this name already exists in the workspace, "
+                "it carries no marker from a previous deploy, and this run's journal has no record of "
+                "creating it. Refusing to overwrite content that may not be ours. If this landing zone "
+                "IS ours and the journal was lost, re-run with --adopt-existing; otherwise rename the "
+                "workbook or use an empty workspace."
+            )
+        if len(ours) > 1:
+            return None, (
+                f"{item.name} ({item.item_type}): {len(ours)} items share this name, so which one to "
+                "update is ambiguous. Remove the extras in the workspace, then re-run."
+            )
+        mine = ours[0]
+        theirs = self.source_of(mine)
+        if theirs and item.source and theirs != item.source and not self.adopt:
+            # Two DIFFERENT workbooks that happen to share a name. Fabric identity is only
+            # (displayName, type), so without this the second estate silently overwrote the first,
+            # left its folder empty, and both runs exited 0.
+            return None, (
+                f"{item.name} ({item.item_type}): an item of this name in this workspace came from a "
+                f"different source ({theirs!r}, not {item.source!r}). Overwriting it would merge two "
+                "distinct workbooks into one item. Use a separate landing zone per estate, or rename."
+            )
+        return mine["id"], None
+
+    def folder_of(self, item_id: str) -> str | None:
+        """Which folder the workspace currently has this item in."""
+        return self.rows.get(item_id, {}).get("folderId")
+
+    def record(self, item_id: str, name: str, item_type: str, folder_id: str | None) -> None:
+        """Remember something we just created, so later items see it without another listing."""
+        self.rows[item_id] = {
+            "id": item_id,
+            "displayName": name,
+            "type": item_type,
+            "folderId": folder_id,
+            "description": PROVENANCE,
+        }
+
+    def describe(self, item_id: str) -> str:
+        """The item's description, which is where our ownership marker lives."""
+        return str(self.rows.get(item_id, {}).get("description") or "")
+
+    def mark(self, item_id: str, stamp: str = PROVENANCE) -> None:
+        """Note that the service has accepted our ownership marker for this item."""
+        if item_id in self.rows:
+            self.rows[item_id]["description"] = stamp
 
 
 # Fabric folder names are far more restrictive than Tableau project names, and the API answers
@@ -833,17 +1044,25 @@ def ensure_folders(workspace: str, tok: str, paths: list[list[str]]) -> dict[tup
     if existing is None:
         return {}
 
-    wanted = sorted({tuple(path[: i + 1]) for path in paths for i in range(len(path))}, key=len)
+    wanted = sorted({tuple(path[: i + 1]) for path in paths for i in range(len(path))}, key=lambda p: (len(p), p))
     display = _display_names(wanted)
     resolved: dict[tuple[str, ...], str] = {}
+    failed: set[tuple[str, ...]] = set()
 
     for path in wanted:
+        parent = path[:-1]
+        if parent and parent in failed:
+            # Creating the child anyway put it at the WORKSPACE ROOT under its own bare name, so
+            # `Finance/Q1` became a root-level `Q1` indistinguishable from `HR/Q1` - while the log
+            # said its items go to the root. Skip the subtree and say so once, accurately.
+            failed.add(path)
+            continue
         final_path = tuple(display.get(path[: i + 1], part) for i, part in enumerate(path))
         if final_path in existing:
             resolved[path] = existing[final_path]
             continue
         payload: dict[str, Any] = {"displayName": display.get(path, path[-1])}
-        parent_id = resolved.get(path[:-1]) if len(path) > 1 else None
+        parent_id = resolved.get(parent) if len(path) > 1 else None
         if parent_id:
             payload["parentFolderId"] = parent_id
         status, _, created = call("POST", f"{API}/workspaces/{workspace}/folders", tok, payload)
@@ -851,7 +1070,12 @@ def ensure_folders(workspace: str, tok: str, paths: list[list[str]]) -> dict[tup
             resolved[path] = existing[final_path] = created["id"]
             LOG.info("folder created: %s", "/".join(final_path))
         else:
-            LOG.warning("could not create folder %s (HTTP %s) - its items go to the root", "/".join(path), status)
+            failed.add(path)
+            LOG.warning(
+                "could not create folder %s (HTTP %s) - it and anything below it go to the root",
+                "/".join(path),
+                status,
+            )
     # `resolved`, NOT `existing`: resolved is keyed by the ORIGINAL project path, which is what the
     # caller holds. `existing` is keyed by the SANITIZED display path, so returning it silently
     # missed every project whose name had to be changed - creating the folder, leaving it empty, and
@@ -868,6 +1092,8 @@ class Target:
     workspace_name: str
     token: str
     journal: Journal
+    landing: Landing = field(default_factory=lambda: Landing([]))
+    source: str = ""
 
 
 def update_item(workspace: str, tok: Any, item: Item, item_id: str, journal: Journal) -> tuple[str, str]:
@@ -899,42 +1125,117 @@ def update_item(workspace: str, tok: Any, item: Item, item_id: str, journal: Jou
     return "Failed", detail
 
 
+def move_item(workspace: str, tok: str, item_id: str, folder_id: str | None) -> tuple[bool, str]:
+    """Re-place an existing item. Returns (moved, detail).
+
+    `updateDefinition` overwrites content and ignores placement, so without this an item that
+    changed folder stayed where it was while the journal recorded the folder we INTENDED. That
+    false record then matched on every later run and skipped the item forever - two empty folders
+    created, "2 workbook(s) placed" logged, and nothing actually moved.
+    """
+    body = {"targetFolderId": folder_id} if folder_id else {}
+    status, _, resp = call("POST", f"{API}/workspaces/{workspace}/items/{item_id}/move", tok, body)
+    if status in (200, 201, 202):
+        return True, ""
+    return False, f"HTTP {status} {json.dumps(resp)[:200]}"
+
+
+def stamp_for(item: Item) -> str:
+    """The description we write on an item we own, including which estate it came from."""
+    return f"{PROVENANCE} {SOURCE_PREFIX} {item.source}".rstrip() if item.source else PROVENANCE
+
+
+def stamp_item(workspace: str, tok: str, item_id: str, item: Item) -> bool:
+    """Mark an item as ours. Returns True if the service accepted the mark.
+
+    `updateDefinition` carries only the definition, so adopting an item left it unstamped and the
+    NEXT run refused it again - the escape hatch would have been needed forever, which defeats the
+    point of having a marker at all.
+    """
+    status, _, _ = call("PATCH", f"{API}/workspaces/{workspace}/items/{item_id}", tok, {"description": stamp_for(item)})
+    return status in (200, 201)
+
+
+def _update_existing(target: Target, item: Item, existing: str, kind: str, name: str) -> tuple[str | None, str | None]:
+    """Refresh an item we already own, and re-place it if its folder changed."""
+    state, detail = update_item(target.workspace, target.token, item, existing, target.journal)
+    if state != "Succeeded":
+        LOG.error("%-44s %s UPDATE %s: %s", name, kind.upper(), state, detail)
+        return None, f"{name} ({item.item_type}): {detail}"
+    if target.landing.describe(existing) != stamp_for(item):
+        if stamp_item(target.workspace, target.token, existing, item):
+            target.landing.mark(existing, stamp_for(item))
+    if target.landing.folder_of(existing) != item.folder_id:
+        moved, why = move_item(target.workspace, target.token, existing, item.folder_id)
+        if moved:
+            target.landing.record(existing, item.name, item.item_type, item.folder_id)
+        else:
+            # Record where it ACTUALLY is, so a later run retries the move instead of skipping - and
+            # report it, because a run that exits 0 forever while the estate does not match the plan
+            # is indistinguishable from one that worked.
+            LOG.error("%-44s %s could not be moved to its folder: %s", name, kind.upper(), why)
+            item.folder_id = target.landing.folder_of(existing)
+            target.journal.outcome(item, "Succeeded", existing, None, "definition updated; move failed")
+            return existing, f"{name} ({item.item_type}): updated, but could not be placed in its folder. {why}"
+    LOG.info("%-44s %s already existed - definition updated in place", name, kind)
+    return existing, None
+
+
 def _deploy_one(target: Target, item: Item, kind: str, name: str) -> tuple[str | None, str | None]:
     """Create, update or adopt one item. Returns (item_id, failure).
 
-    ALWAYS asks the service what exists before creating. That single rule closes every duplicate
-    path at once, and each of them was measured against a real workspace rather than imagined:
+    Never creates without first consulting what the workspace actually holds, and never treats an
+    unreadable answer as an empty one. Each duplicate path below was measured against a real
+    workspace rather than imagined:
 
       * a `Timeout` that our poll gave up on while the operation completed;
       * a crash between the POST and the outcome record;
       * a re-run after the item's PLACEMENT changed, where the content is identical but the folder
-        is not - this one duplicated ten items, because the deployer treated a moved item as new.
+        is not - this one duplicated ten items, because the deployer treated a moved item as new;
+      * a transient failure of the *existence check itself*, which read as "absent" and so created a
+        second copy while the run still exited 0.
 
     Fabric does not reject a repeated `Report`/`SemanticModel` name, so nothing downstream would
     have caught any of them.
     """
-    recorded = target.journal.already_deployed(item)
-    if recorded:
-        LOG.info("%-44s %s already deployed, unchanged - skipping", name, kind)
-        return recorded.get("itemId") or find_existing(target.workspace, target.token, item.name, item.item_type), None
+    existing, refusal = target.landing.claim(item, target.journal)
+    if refusal:
+        LOG.error("%-44s %s REFUSED: %s", name, kind.upper(), refusal)
+        return None, refusal
 
-    existing = find_existing(target.workspace, target.token, item.name, item.item_type)
-    if existing:
-        state, detail = update_item(target.workspace, target.token, item, existing, target.journal)
-        if state != "Succeeded":
-            LOG.error("%-44s %s UPDATE %s: %s", name, kind.upper(), state, detail)
-            return None, f"{name} ({item.item_type}): {detail}"
-        LOG.info("%-44s %s already existed - definition updated in place", name, kind)
+    if existing and target.journal.already_deployed(item) and target.landing.folder_of(existing) == item.folder_id:
+        # The journal alone is not evidence the item is still there: deleting a broken item in the
+        # portal and re-running is the obvious way to force a clean redeploy, and this fast path
+        # used to report success over a workspace the item had been removed from, leaving its report
+        # bound to a GUID that no longer resolved. The folder is compared against the WORKSPACE, not
+        # the journal, so an item moved by hand in the portal is put back rather than declared fine.
+        LOG.info("%-44s %s already deployed, unchanged - skipping", name, kind)
         return existing, None
 
+    if existing:
+        return _update_existing(target, item, existing, kind, name)
+    return _create_new(target, item, kind, name)
+
+
+def _create_new(target: Target, item: Item, kind: str, name: str) -> tuple[str | None, str | None]:
+    """Create an item that the workspace genuinely does not have."""
     state, item_id, detail = create_item(target.workspace, target.token, item, target.journal)
     if state == "AlreadyExists":
-        adopted = find_existing(target.workspace, target.token, item.name, item.item_type)
+        # The service says the name is taken but our own index does not know it. Re-read once: if it
+        # still cannot be located, this is NOT a success - reporting it as one declared a complete
+        # deploy over an empty workspace.
+        fresh, why = Landing.read(target.workspace, target.token)
+        adopted = None if fresh is None else (fresh.claim(item, target.journal)[0])
+        if not adopted:
+            LOG.error("%-44s %s name is taken but the item cannot be located: %s", name, kind.upper(), detail)
+            return None, f"{name} ({item.item_type}): name already in use but no matching item is readable. {why}"
+        target.landing.record(adopted, item.name, item.item_type, item.folder_id)
         LOG.info("%-44s %s already present in the workspace", name, kind)
         return adopted, None
     if state != "Succeeded":
         LOG.error("%-44s %s %s: %s", name, kind.upper(), state, detail)
         return None, f"{name} ({item.item_type}): {detail}"
+    target.landing.record(item_id, item.name, item.item_type, item.folder_id)
     LOG.info("%-44s %s deployed", name, kind)
     return item_id, None
 
@@ -1007,6 +1308,25 @@ def _print_plan(
     return EXIT_OK
 
 
+def _refusals(target: Target, pairs: list[tuple[str, Item, Item | None]]) -> list[str]:
+    """Every planned item we would refuse to touch, checked BEFORE anything is created.
+
+    `preflight` classifies a name clash as "an update, not a new item", but `claim` may refuse that
+    same name - so a run could create the model, then discover the report was foreign, and stop with
+    an orphan in the customer's workspace that the refusal message never mentions. Checking the whole
+    plan first makes that refusal free.
+    """
+    found: list[str] = []
+    for _name, model, report in pairs:
+        for item in (model, report):
+            if item is None:
+                continue
+            _, refusal = target.landing.claim(item, target.journal)
+            if refusal:
+                found.append(refusal)
+    return found
+
+
 def _run_all(
     target: Target, pairs: list[tuple[str, Item, Item | None]], folders: dict[str, str]
 ) -> tuple[list[str], int]:
@@ -1014,6 +1334,18 @@ def _run_all(
     failures: list[str] = []
     skipped = 0
     offline = 0
+    for name, model, report in pairs:
+        for item in (model, report):
+            if item is not None:
+                item.folder_id = folders.get(_slug(name))
+                item.source = target.source
+    blocked = _refusals(target, pairs)
+    if blocked:
+        LOG.error("%d planned item(s) cannot be deployed into this workspace:", len(blocked))
+        for line in blocked:
+            LOG.error("  %s", line)
+        LOG.error("Nothing was created - refusing up front rather than leaving a half-deployed estate.")
+        return blocked, 0
     for name, model, report in pairs:
         model.folder_id = folders.get(_slug(name))
         model_id, failure = _deploy_model(target, name, model)
@@ -1122,8 +1454,15 @@ def _execute(
         return None
     lock, journal = held
     try:
+        landing, why = Landing.read(workspace, tok, adopt=getattr(options, "adopt_existing", False))
+        if landing is None:
+            LOG.error("%s", why)
+            return None
+        if landing.adopt:
+            LOG.warning("--adopt-existing: same-named items already in this workspace WILL be overwritten")
         folders = _resolve_folders(bundle, workspace, tok, options)
-        return _run_all(Target(workspace, workspace_name, tok, journal), pairs=discover(bundle), folders=folders)
+        target = Target(workspace, workspace_name, tok, journal, landing, bundle.name)
+        return _run_all(target, pairs=discover(bundle), folders=folders)
     finally:
         lock.release()
 
@@ -1132,9 +1471,11 @@ def deploy(bundle: Path, workspace: str, tok: Any, options: argparse.Namespace) 
     """Deploy every workbook in the bundle, models first. Returns a process exit code."""
     pairs = discover(bundle)
     planned = sum(1 + (1 if report else 0) for _, _, report in pairs)
+    planned_keys = [(name, MODEL_TYPE) for name, _, _ in pairs]
+    planned_keys += [(name, REPORT_TYPE) for name, _, report in pairs if report]
     LOG.info("%d workbook(s) in %s -> %d item(s)", len(pairs), bundle, planned)
 
-    ok, message, info = preflight(workspace, tok, planned)
+    ok, message, info = preflight(workspace, tok, planned, planned_keys)
     LOG.info("preflight: %s", message)
     if not ok:
         return EXIT_PREFLIGHT
@@ -1167,6 +1508,14 @@ def main(argv: list[str] | None = None) -> int:
         help="assess_estate.py estate.db, so the Tableau project tree is mirrored as workspace folders",
     )
     parser.add_argument("--no-folders", action="store_true", help="deploy everything to the workspace root")
+    parser.add_argument(
+        "--adopt-existing",
+        action="store_true",
+        help=(
+            "take ownership of same-named items already in the workspace. Only for a landing zone "
+            "that IS ours whose journal was lost - it overwrites those items in place."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

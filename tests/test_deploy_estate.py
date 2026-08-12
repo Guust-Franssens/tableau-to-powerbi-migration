@@ -265,7 +265,11 @@ def test_a_report_is_never_deployed_without_a_model_id(tmp_path, monkeypatch):
         "call",
         lambda method, url, *a, **k: (200, {}, {"value": []} if url.endswith("/items") else {"displayName": "LZ"}),
     )
-    monkeypatch.setattr(de, "find_existing", lambda *a, **k: None)
+    monkeypatch.setattr(
+        de,
+        "call",
+        lambda method, url, *a, **k: (200, {}, {"value": []} if url.endswith("/items") else {"displayName": "LZ"}),
+    )
     deployed: list[str] = []
 
     def _create(ws, tok, item, journal):  # noqa: ARG001
@@ -541,12 +545,22 @@ def test_moving_a_project_in_tableau_re_places_its_items(tmp_path):
     assert de.Journal(tmp_path / "j.jsonl", "ws").already_deployed(moved) is None
 
 
-def test_the_lock_is_taken_atomically(tmp_path):
-    """exists()-then-write has a window two simultaneous starts can both pass."""
+def test_the_lock_is_taken_atomically(tmp_path, monkeypatch):
+    """exists()-then-write has a window two simultaneous starts can both pass.
+
+    Asserting only that a second acquire fails cannot tell the two implementations apart - an
+    exists()-then-write version passes that too (mutation-verified). So we simulate the race the
+    O_EXCL is there for: the file is on disk while `exists()` insists it is not, which is exactly
+    what a check-then-act loses to. Only an atomic create still refuses.
+    """
     lock = de.RunLock(tmp_path / "run.lock")
     assert lock.acquire()[0] is True
-    # A second acquire must fail even though the first process is this same one.
     assert de.RunLock(tmp_path / "run.lock").acquire()[0] is False
+
+    monkeypatch.setattr(de.Path, "exists", lambda _self: False)
+    assert de.RunLock(tmp_path / "run.lock").acquire()[0] is False, (
+        "the lock must be taken by an atomic create, not by looking first"
+    )
 
 
 def test_a_report_without_a_pbir_is_refused_rather_than_guessed(tmp_path):
@@ -618,8 +632,18 @@ def test_a_timed_out_item_is_adopted_not_recreated(tmp_path, monkeypatch):
     updated: list[str] = []
     monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("x") or ("Succeeded", "new", ""))
     monkeypatch.setattr(de, "update_item", lambda *a, **k: updated.append("u") or ("Succeeded", ""))
-    monkeypatch.setattr(de, "find_existing", lambda *a, **k: "existing-id")
-    target = de.Target("ws", "LZ", "tok", reloaded)
+    landing = de.Landing(
+        [
+            {
+                "id": "existing-id",
+                "displayName": "WB",
+                "type": de.MODEL_TYPE,
+                "folderId": None,
+                "description": de.PROVENANCE,
+            }
+        ]
+    )
+    target = de.Target("ws", "LZ", "tok", reloaded, landing)
     model_id, failure = de._deploy_model(target, "WB", item)
 
     assert failure is None
@@ -686,8 +710,15 @@ def test_a_dropped_network_stops_the_run_instead_of_failing_every_item(tmp_path,
 
 
 def test_a_transient_failure_does_not_trip_the_network_guard(tmp_path, monkeypatch):
-    """One bad item between good ones is not an outage; the counter must reset."""
-    bundle = _bundle(tmp_path, {"A": False, "B": False, "C": False})
+    """One bad item between good ones is not an outage; the counter must reset.
+
+    The pattern matters. Two failures then a success then two more only distinguishes a resetting
+    counter from a cumulative one if the cumulative count would CROSS the threshold - with a single
+    failure the guard never trips either way, so the old version of this test passed happily even
+    with `offline = 0` deleted (mutation-verified).
+    """
+    order = ["A", "B", "C", "D", "E", "F"]
+    bundle = _bundle(tmp_path, dict.fromkeys(order, False))
     monkeypatch.setattr(
         de,
         "call",
@@ -698,14 +729,38 @@ def test_a_transient_failure_does_not_trip_the_network_guard(tmp_path, monkeypat
         ),
     )
     seen: list[str] = []
+    offline = {"A", "B", "D", "E"}  # 2 failures, a success, then 2 more: 4 cumulative, never 3 in a row
 
     def _create(ws, tok, item, journal):  # noqa: ARG001
         seen.append(item.name)
-        return ("Failed", None, "HTTP 0 x") if item.name == "B" else ("Succeeded", "id", "")
+        return ("Failed", None, "HTTP 0 x") if item.name in offline else ("Succeeded", "id", "")
 
     monkeypatch.setattr(de, "create_item", _create)
     de.deploy(bundle, "ws", "tok", _options(journal=tmp_path / "j.jsonl"))
-    assert "C" in seen, "a single connectivity blip must not abandon the rest of the estate"
+    assert "F" in seen, "a success between blips must reset the counter, not accumulate toward the cap"
+    assert seen == order
+
+
+def test_a_report_with_no_pages_is_counted_as_skipped_in_the_summary(tmp_path, monkeypatch):
+    """The summary's "N skipped as empty" was only ever unit-tested with the count passed by hand."""
+    bundle = _bundle(tmp_path, {"WB": True})
+    pages = bundle / "pbip" / "WB" / "WB.Report" / "definition" / "pages" / "pages.json"
+    pages.write_text(json.dumps({"pageOrder": [], "activePageName": ""}), encoding="utf-8")
+    monkeypatch.setattr(
+        de,
+        "call",
+        lambda method, url, tok, body=None: (
+            200,
+            {},
+            {"value": []} if url.endswith("/items") else {"displayName": "LZ"},
+        ),
+    )
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: ("Succeeded", "id-1", ""))
+    messages: list[str] = []
+    monkeypatch.setattr(de.LOG, "info", lambda msg, *args: messages.append(str(msg) % args if args else str(msg)))
+
+    assert de.deploy(bundle, "ws", "tok", _options(journal=tmp_path / "j.jsonl")) == 0
+    assert any("1 skipped as empty" in m for m in messages), messages[-3:]
 
 
 def test_an_item_that_already_exists_is_UPDATED_never_duplicated(tmp_path, monkeypatch):
@@ -721,11 +776,26 @@ def test_an_item_that_already_exists_is_UPDATED_never_duplicated(tmp_path, monke
 
     created: list[str] = []
     updated: list[str] = []
-    monkeypatch.setattr(de, "find_existing", lambda *a, **k: "already-there")
     monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("c") or ("Succeeded", "new", ""))
     monkeypatch.setattr(de, "update_item", lambda *a, **k: updated.append("u") or ("Succeeded", ""))
 
-    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"))
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Timeout", None, "op-1")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    landing = de.Landing(
+        [
+            {
+                "id": "already-there",
+                "displayName": "WB",
+                "type": de.MODEL_TYPE,
+                "folderId": "old-folder",
+                "description": de.PROVENANCE,
+            }
+        ]
+    )
+    target = de.Target("ws", "LZ", "tok", journal, landing)
+    monkeypatch.setattr(de, "move_item", lambda *a, **k: (True, ""))
     item_id, failure = de._deploy_model(target, "WB", item)
 
     assert failure is None
@@ -740,9 +810,8 @@ def test_a_genuinely_new_item_is_created(tmp_path, monkeypatch):
     item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
     item.parts = de.parts_for(item.folder)
     created: list[str] = []
-    monkeypatch.setattr(de, "find_existing", lambda *a, **k: None)
     monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("c") or ("Succeeded", "fresh", ""))
-    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"))
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"), de.Landing([]))
     assert de._deploy_model(target, "WB", item) == ("fresh", None)
     assert created == ["c"]
 
@@ -751,9 +820,15 @@ def test_a_failed_update_is_reported_not_swallowed(tmp_path, monkeypatch):
     bundle = _bundle(tmp_path, {"WB": False})
     item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
     item.parts = de.parts_for(item.folder)
-    monkeypatch.setattr(de, "find_existing", lambda *a, **k: "there")
     monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Failed", "boom"))
-    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"))
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Timeout", None, "op-1")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    landing = de.Landing(
+        [{"id": "there", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None, "description": de.PROVENANCE}]
+    )
+    target = de.Target("ws", "LZ", "tok", journal, landing)
     item_id, failure = de._deploy_model(target, "WB", item)
     assert item_id is None
     assert "boom" in failure
@@ -772,7 +847,9 @@ def test_an_item_on_the_second_page_is_found_not_duplicated(monkeypatch):
         return 200, {}, pages[len(calls) - 1]
 
     monkeypatch.setattr(de, "call", fake_call)
-    assert de.find_existing("ws", "tok", "Z", de.MODEL_TYPE) == "id-z"
+    landing, why = de.Landing.read("ws", "tok")
+    assert landing is not None and why == ""
+    assert [r["id"] for r in landing.matching("Z", de.MODEL_TYPE)] == ["id-z"]
     assert len(calls) == 2, "the second page was never requested"
     assert "tok-2" in calls[1], "the continuation token must be carried into the next request"
 
@@ -791,7 +868,496 @@ def test_a_repeating_continuation_token_cannot_loop_forever(monkeypatch):
 
 
 def test_a_list_failure_is_reported_rather_than_read_as_empty(monkeypatch):
+    """The status must reach the caller. This test previously ALSO asserted that the lookup
+    returned None on a 403 - which is precisely "read as empty", the defect its name denies."""
     monkeypatch.setattr(de, "call", lambda *a, **k: (403, {}, {}))
     status, rows = de.list_all("ws", "tok", "items")
     assert status == 403 and rows == []
-    assert de.find_existing("ws", "tok", "A", de.MODEL_TYPE) is None
+    landing, why = de.Landing.read("ws", "tok")
+    assert landing is None and "403" in why, "a refused read must not become an empty workspace"
+
+
+# --- findings from the blind adversarial review of PR #105 -------------------------------------
+
+
+def test_a_failed_existence_read_refuses_to_deploy_rather_than_creating_duplicates(monkeypatch):
+    """ "I could not ask" must never be read as "it is not there".
+
+    Measured by the reviewer: one transient 500 on the read made a re-run create a second copy of a
+    model, exit 0, and rebind the report to the DUPLICATE - leaving the original as an orphan
+    holding the pre-fix definition.
+    """
+    monkeypatch.setattr(de, "list_all", lambda *a, **k: (500, []))
+    landing, why = de.Landing.read("ws", "tok")
+    assert landing is None, "an unreadable workspace must not be treated as an empty one"
+    assert "refusing to deploy" in why.lower()
+
+    monkeypatch.setattr(de, "list_all", lambda *a, **k: (200, []))
+    landing, why = de.Landing.read("ws", "tok")
+    assert landing is not None and why == "", "a readable empty workspace is still deployable"
+
+
+def test_an_item_we_did_not_create_is_never_overwritten(tmp_path):
+    """A customer-supplied landing zone is not necessarily empty.
+
+    Identity here is only (displayName, type), so an unrelated report called `Sales` was
+    indistinguishable from ours and was overwritten in place - reported as "already existed".
+    """
+    bundle = _bundle(tmp_path, {"Sales": False})
+    item = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    theirs = {"id": "customer-1", "displayName": "Sales", "type": de.MODEL_TYPE, "folderId": "their-folder"}
+
+    item_id, refusal = de.Landing([theirs]).claim(item, journal)
+
+    assert item_id is None, "we must not claim an item we have no record of creating"
+    assert refusal and "may not be ours" in refusal
+
+
+def test_an_item_this_run_created_is_ours_to_update(tmp_path):
+    """The refusal above must not break the ordinary resume."""
+    bundle = _bundle(tmp_path, {"Sales": False})
+    item = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Succeeded", "ours-1", "op-1")
+    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
+    row = {"id": "ours-1", "displayName": "Sales", "type": de.MODEL_TYPE, "folderId": None}
+
+    assert de.Landing([row]).claim(item, reloaded) == ("ours-1", None)
+
+
+def test_a_journalled_item_deleted_in_the_portal_is_recreated(tmp_path, monkeypatch):
+    """Deleting a broken item and re-running is the obvious way to force a clean redeploy.
+
+    The journal fast path used to return success without asking the service, so the run reported a
+    complete deploy over a workspace with no model, and the report kept a GUID that no longer
+    resolved.
+    """
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Succeeded", "gone-1", "op-1")
+    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
+    assert reloaded.already_deployed(item) is not None, "the journal still believes it is deployed"
+
+    created: list[str] = []
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("c") or ("Succeeded", "new-1", ""))
+    target = de.Target("ws", "LZ", "tok", reloaded, de.Landing([]))  # the workspace is empty now
+
+    item_id, failure = de._deploy_model(target, "WB", item)
+
+    assert failure is None
+    assert created == ["c"], "the item is gone from the workspace, so it must be created again"
+    assert item_id == "new-1"
+
+
+def test_a_re_placed_item_is_actually_moved(tmp_path, monkeypatch):
+    """updateDefinition ignores placement, so without a move the folder never changes."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel", folder_id="new-folder")
+    item.parts = de.parts_for(item.folder)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Timeout", None, "op-1")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    landing = de.Landing(
+        [
+            {
+                "id": "it-1",
+                "displayName": "WB",
+                "type": de.MODEL_TYPE,
+                "folderId": "old-folder",
+                "description": de.PROVENANCE,
+            }
+        ]
+    )
+
+    moves: list[tuple] = []
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
+    monkeypatch.setattr(de, "move_item", lambda w, t, i, f: moves.append((i, f)) or (True, ""))
+
+    de._deploy_model(de.Target("ws", "LZ", "tok", journal, landing), "WB", item)
+
+    assert moves == [("it-1", "new-folder")], "an item whose folder changed must be moved"
+
+
+def test_a_move_that_fails_records_where_the_item_actually_is(tmp_path, monkeypatch):
+    """Recording the INTENDED folder as achieved made every later run skip the item forever."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel", folder_id="new-folder")
+    item.parts = de.parts_for(item.folder)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Timeout", None, "op-1")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    landing = de.Landing(
+        [
+            {
+                "id": "it-1",
+                "displayName": "WB",
+                "type": de.MODEL_TYPE,
+                "folderId": "old-folder",
+                "description": de.PROVENANCE,
+            }
+        ]
+    )
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
+    monkeypatch.setattr(de, "move_item", lambda *a, **k: (False, "HTTP 400"))
+
+    de._deploy_model(de.Target("ws", "LZ", "tok", journal, landing), "WB", item)
+
+    rows = [json.loads(line) for line in (tmp_path / "j.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    final = [r for r in rows if r.get("phase") == "outcome" and r.get("status") == "Succeeded"][-1]
+    assert final["folderId"] == "old-folder", "we must record where it IS, not where we wanted it"
+
+
+def test_a_failed_parent_folder_does_not_scatter_its_children_at_the_root(monkeypatch):
+    """The child was created at the root under its own bare name, indistinguishable from a sibling."""
+    created: list[dict] = []
+
+    def flaky(method, url, _tok, body=None):
+        if method == "GET":
+            return 200, {}, {"value": []}
+        if body.get("displayName") == "Finance":
+            return 500, {}, {"error": "boom"}
+        created.append(body)
+        return 201, {}, {"id": f"id-{len(created)}"}
+
+    monkeypatch.setattr(de, "call", flaky)
+    resolved = de.ensure_folders("ws", "tok", [["Finance", "Q1"], ["HR", "Q1"]])
+
+    assert ("Finance", "Q1") not in resolved, "a child of a failed parent must not be resolved"
+    assert [c["displayName"] for c in created] == ["HR", "Q1"]
+    assert all(c.get("parentFolderId") or c["displayName"] == "HR" for c in created)
+
+
+def test_folder_naming_does_not_depend_on_set_iteration_order(monkeypatch):
+    """Which of two collision-prone projects owned which folder was decided by the hash seed."""
+    monkeypatch.setattr(de, "call", lambda *a, **k: (200, {}, {"value": []}))
+    first = de._display_names(sorted({("R&D",), ("R/D",)}, key=lambda p: (len(p), p)))
+    second = de._display_names(sorted({("R/D",), ("R&D",)}, key=lambda p: (len(p), p)))
+    assert first == second, "the same plan must produce the same folder names every run"
+
+
+def test_a_resume_does_not_count_its_own_items_against_the_budget(monkeypatch):
+    """existing + planned double-counted the run's own items, so a large estate could never re-run."""
+    rows = [{"id": f"i{n}", "displayName": f"WB{n}", "type": de.MODEL_TYPE} for n in range(460)]
+    monkeypatch.setattr(de, "call", lambda *a, **k: (200, {}, {"displayName": "LZ"}))
+    monkeypatch.setattr(de, "list_all", lambda *a, **k: (200, rows))
+
+    keys = [(f"WB{n}", de.MODEL_TYPE) for n in range(460)]
+    ok, message, _ = de.preflight("ws", "tok", 460, keys)
+
+    assert ok, f"a resume of an already-deployed estate must not be refused: {message}"
+    assert "0 new" in message
+
+
+def test_a_retry_after_date_does_not_crash_the_deploy():
+    """RFC 9110 allows an HTTP-date; float() on it raised ValueError mid-estate."""
+    assert de._retry_after({"retry-after": "30"}) == 30.0
+    assert de._retry_after({"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}) == 0.0
+    assert de._retry_after({}) == 20.0
+    assert de._retry_after({"retry-after": "nonsense"}) == 20.0
+
+
+def test_a_name_taken_but_unlocatable_item_is_a_failure_not_a_success(tmp_path, monkeypatch):
+    """Reporting it as deployed declared a complete run over an empty workspace."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: ("AlreadyExists", None, "taken"))
+    monkeypatch.setattr(de, "list_all", lambda *a, **k: (200, []))
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"), de.Landing([]))
+
+    item_id, failure = de._deploy_model(target, "WB", item)
+
+    assert item_id is None
+    assert failure and "no matching item" in failure
+
+
+def test_an_item_stamped_by_a_previous_run_is_recognised_without_the_journal(tmp_path):
+    """Ownership that lives only in a local file is lost with the file.
+
+    Refusing to touch our own previous output because a temp journal was cleaned is safe but
+    useless. The stamp is written to the SERVICE at creation, so any later run can read it.
+    """
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    empty_journal = de.Journal(tmp_path / "fresh.jsonl", "ws")
+    stamped = {
+        "id": "ours-1",
+        "displayName": "WB",
+        "type": de.MODEL_TYPE,
+        "folderId": None,
+        "description": de.PROVENANCE,
+    }
+
+    assert de.Landing([stamped]).claim(item, empty_journal) == ("ours-1", None)
+
+
+def test_adopt_existing_is_required_to_take_over_an_unstamped_item(tmp_path):
+    """The escape hatch must be explicit - and must actually work when asked for."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    journal = de.Journal(tmp_path / "fresh.jsonl", "ws")
+    theirs = {"id": "x-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None}
+
+    refused_id, refusal = de.Landing([theirs]).claim(item, journal)
+    assert refused_id is None and "--adopt-existing" in refusal
+
+    assert de.Landing([theirs], adopt=True).claim(item, journal) == ("x-1", None)
+
+
+def test_every_created_item_carries_the_provenance_stamp(tmp_path, monkeypatch):
+    """If creation stops stamping, the recognition above silently stops working."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    sent: list[dict] = []
+    monkeypatch.setattr(de, "call", lambda method, url, tok, body=None: (sent.append(body), (201, {}, {"id": "i"}))[1])
+
+    de._post_item("ws", "tok", item)
+
+    assert sent[0]["description"] == de.PROVENANCE
+
+
+def test_adopting_an_item_stamps_it_so_the_next_run_needs_no_flag(tmp_path, monkeypatch):
+    """Measured live: 64 items were adopted and 0 of 64 came back stamped.
+
+    updateDefinition carries only the definition, so without an explicit mark the escape hatch
+    would be needed on every future run - which is the same as having no marker at all.
+    """
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    unstamped = {"id": "x-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None, "description": ""}
+    landing = de.Landing([unstamped], adopt=True)
+
+    stamped: list[str] = []
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
+    monkeypatch.setattr(de, "stamp_item", lambda w, t, i, it: stamped.append(i) or True)
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"), landing)
+
+    de._deploy_model(target, "WB", item)
+
+    assert stamped == ["x-1"], "an adopted item must be marked as ours"
+    assert landing.describe("x-1") == de.PROVENANCE
+
+
+def test_an_already_stamped_item_is_not_stamped_again(tmp_path, monkeypatch):
+    """One needless PATCH per item per run, across a whole estate, is worth avoiding."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    row = {"id": "x-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None, "description": de.PROVENANCE}
+    stamped: list[str] = []
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
+    monkeypatch.setattr(de, "stamp_item", lambda w, t, i, it: stamped.append(i) or True)
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"), de.Landing([row]))
+
+    de._deploy_model(target, "WB", item)
+
+    assert stamped == []
+
+
+# --- round 2: findings from re-reviewing the fixes -----------------------------------------------
+
+
+def test_a_failed_create_does_not_authorise_overwriting_a_strangers_item(tmp_path):
+    """R1, critical: the first fix moved this boundary instead of removing it.
+
+    Ownership used to include `journal.attempted(item)`, which never looked at the row - so one
+    failed create authorised overwriting ANY item of that name for the life of the journal, and a
+    create that failed is exactly what this deployer exists to resume from. It destroyed the
+    customer's content and then stamped it as ours, making the damage permanent.
+    """
+    bundle = _bundle(tmp_path, {"Sales": False})
+    item = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Failed", None, "op-1", "HTTP 400")
+    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
+    assert reloaded.attempted(item) is True, "precondition: the journal remembers the failed attempt"
+
+    theirs = {"id": "cust-1", "displayName": "Sales", "type": de.MODEL_TYPE, "description": "Finance's own model"}
+    item_id, refusal = de.Landing([theirs]).claim(item, reloaded)
+
+    assert item_id is None, "a failed attempt must not authorise touching someone else's item"
+    assert refusal
+
+
+def test_a_crashed_create_is_still_recovered_because_the_item_is_stamped(tmp_path):
+    """Removing `attempted()` must not lose what it was there for.
+
+    `_post_item` sends the marker in the CREATE body, so an item created just before a crash is
+    already stamped when we come back for it - better evidence than the journal ever had.
+    """
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")  # crashed before the outcome was written
+    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
+    orphan = {"id": "made-1", "displayName": "WB", "type": de.MODEL_TYPE, "description": de.PROVENANCE}
+
+    assert de.Landing([orphan]).claim(item, reloaded) == ("made-1", None)
+
+
+def test_two_estates_sharing_a_workbook_name_do_not_collapse_into_one_item(tmp_path):
+    """R2: the stamp said "some run of this tool", not WHICH estate."""
+    bundle = _bundle(tmp_path, {"Sales": False})
+    mine = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel", source="HR-estate")
+    theirs = {
+        "id": "fin-1",
+        "displayName": "Sales",
+        "type": de.MODEL_TYPE,
+        "description": f"{de.PROVENANCE} {de.SOURCE_PREFIX} Finance-estate",
+    }
+
+    item_id, refusal = de.Landing([theirs]).claim(mine, de.Journal(tmp_path / "j.jsonl", "ws"))
+
+    assert item_id is None
+    assert refusal and "different source" in refusal
+
+
+def test_the_same_estate_redeployed_is_still_recognised(tmp_path):
+    """The source check must not break the ordinary re-run."""
+    bundle = _bundle(tmp_path, {"Sales": False})
+    mine = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel", source="HR-estate")
+    row = {
+        "id": "hr-1",
+        "displayName": "Sales",
+        "type": de.MODEL_TYPE,
+        "description": f"{de.PROVENANCE} {de.SOURCE_PREFIX} HR-estate",
+    }
+    assert de.Landing([row]).claim(mine, de.Journal(tmp_path / "j.jsonl", "ws")) == ("hr-1", None)
+
+
+def test_a_refusal_stops_the_run_before_anything_is_created(tmp_path, monkeypatch):
+    """R6: creating the model and THEN refusing the report left an orphan in the customer's zone."""
+    bundle = _bundle(tmp_path, {"Sales": True})
+    created: list[str] = []
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("c") or ("Succeeded", "id", ""))
+    monkeypatch.setattr(
+        de,
+        "call",
+        lambda method, url, tok, body=None: (
+            200,
+            {},
+            {"value": [{"id": "cust-1", "displayName": "Sales", "type": de.REPORT_TYPE, "description": "theirs"}]}
+            if url.endswith("/items")
+            else {"displayName": "LZ"},
+        ),
+    )
+
+    code = de.deploy(bundle, "ws", "tok", _options(journal=tmp_path / "j.jsonl"))
+
+    assert code == de.EXIT_FAILED
+    assert created == [], "nothing may be created when part of the plan is refused"
+
+
+def test_an_item_moved_by_hand_in_the_portal_is_put_back(tmp_path, monkeypatch):
+    """R4: the fast path compared folders against the journal, so service-side drift was invisible."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel", folder_id="planned")
+    item.parts = de.parts_for(item.folder)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Succeeded", "it-1", "op-1")
+    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
+    assert reloaded.already_deployed(item) is not None, "the journal believes it is where we put it"
+
+    landing = de.Landing(
+        [
+            {
+                "id": "it-1",
+                "displayName": "WB",
+                "type": de.MODEL_TYPE,
+                "folderId": "moved-by-hand",
+                "description": de.PROVENANCE,
+            }
+        ]
+    )
+    moves: list[tuple] = []
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
+    monkeypatch.setattr(de, "move_item", lambda w, t, i, f: moves.append((i, f)) or (True, ""))
+    monkeypatch.setattr(de, "stamp_item", lambda *a, **k: True)
+
+    de._deploy_model(de.Target("ws", "LZ", "tok", reloaded, landing), "WB", item)
+
+    assert moves == [("it-1", "planned")], "an item moved in the portal must be put back"
+
+
+def test_a_refused_move_is_reported_as_a_failure(tmp_path, monkeypatch):
+    """R5: exit 0 forever while the estate does not match the plan is indistinguishable from success."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel", folder_id="wanted")
+    item.parts = de.parts_for(item.folder)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    landing = de.Landing(
+        [{"id": "it-1", "displayName": "WB", "type": de.MODEL_TYPE, "folderId": None, "description": de.PROVENANCE}]
+    )
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Succeeded", ""))
+    monkeypatch.setattr(de, "move_item", lambda *a, **k: (False, "HTTP 400"))
+    monkeypatch.setattr(de, "stamp_item", lambda *a, **k: True)
+
+    _id, failure = de._deploy_model(de.Target("ws", "LZ", "tok", journal, landing), "WB", item)
+
+    assert failure and "could not be placed" in failure
+
+
+def test_ensure_folders_itself_is_order_independent(monkeypatch):
+    """M1: the previous test applied the sort in its OWN body, so it could not fail.
+
+    It exercised `_display_names(sorted(...))` rather than `ensure_folders`, which is where the
+    ordering bug lived.
+    """
+    seen = []
+    for plan in ([["R&D"], ["R/D"]], [["R/D"], ["R&D"]]):
+        created: list[str] = []
+        monkeypatch.setattr(
+            de,
+            "call",
+            lambda method, url, tok, body=None: (
+                (200, {}, {"value": []})
+                if method == "GET"
+                else (created.append(body["displayName"]), (201, {}, {"id": f"id-{len(created)}"}))[1]
+            ),
+        )
+        resolved = de.ensure_folders("ws", "tok", plan)
+        seen.append({"/".join(k): created[int(v.split("-")[1]) - 1] for k, v in resolved.items()})
+    assert seen[0] == seen[1], f"folder assignment depends on input order: {seen}"
+
+
+def test_the_model_named_by_the_report_is_the_one_deployed(tmp_path):
+    """M13/R3: sorting made the choice deterministic and deterministically WRONG."""
+    bundle = tmp_path / "b"
+    wb = bundle / "pbip" / "WB"
+    for name in ("Bravo", "WB"):
+        (wb / f"{name}.SemanticModel").mkdir(parents=True)
+        (wb / f"{name}.SemanticModel" / "definition.pbism").write_text(f'{{"iam":"{name}"}}', encoding="utf-8")
+    report = wb / "WB.Report"
+    (report / "definition" / "pages").mkdir(parents=True)
+    (report / "definition.pbir").write_text(
+        json.dumps({"datasetReference": {"byPath": {"path": "../WB.SemanticModel"}}}), encoding="utf-8"
+    )
+    (report / "definition" / "pages" / "pages.json").write_text(json.dumps({"pageOrder": ["p1"]}), encoding="utf-8")
+
+    (_name, model, _report) = de.discover(bundle)[0]
+
+    assert model.folder.name == "WB.SemanticModel", "the report's own byPath names the right model"
+
+
+def test_two_items_sharing_a_name_are_refused_rather_than_guessed(tmp_path):
+    """M18: the ambiguity branch had no test at all."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    rows = [
+        {"id": "a", "displayName": "WB", "type": de.MODEL_TYPE, "description": de.PROVENANCE},
+        {"id": "b", "displayName": "WB", "type": de.MODEL_TYPE, "description": de.PROVENANCE},
+    ]
+    item_id, refusal = de.Landing(rows).claim(item, de.Journal(tmp_path / "j.jsonl", "ws"))
+    assert item_id is None
+    assert refusal and "ambiguous" in refusal
