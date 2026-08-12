@@ -41,6 +41,10 @@ py-modules = []
 # folder a real gate rather than a claim. `ruff`/`pylint` need the same treatment in
 # `.github/workflows/checks.yml`; keep the two lists in step.
 testpaths = ["tests", ".github/skills"]
+# `slow` covers the offline end-to-end harness: it spawns a loopback HTTP server and a subprocess
+# engine, so it is seconds rather than milliseconds. Registered here so `-m "not slow"` works and so
+# the marker cannot rot into a silently-ignored typo (pytest warns, it does not fail, on unknown ones).
+markers = ["slow: offline end-to-end runs (loopback HTTP server + subprocess engine)"]
 
 [tool.ruff]
 exclude = [
