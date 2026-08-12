@@ -23,7 +23,6 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
 import struct
@@ -33,6 +32,9 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tableau_env import resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("capture-reference")
@@ -282,7 +284,10 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
     dashboards = _dashboard_names(slug_dir) or ["dashboard"]
 
     # Configured-but-unavailable Server must HALT, not silently fall through to a lower-fidelity source.
-    if os.environ.get("TABLEAU_SERVER_URL"):
+    # Read through the shared resolver so a `.env` counts as "configured" -- reading os.environ alone
+    # made a canonical `.env` invisible here, so this halt never fired for the users most likely to
+    # have one (found in review of #97).
+    if resolve_env(args.env).get("TABLEAU_SERVER_URL"):
         try:
             capture_server_rest(slug_dir)
         except NotImplementedError as exc:
@@ -323,6 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Acquire a provenance-stamped Tableau reference image.")
     parser.add_argument("slug_dir", help="path to <tree>/<slug> (e.g. migrations/workbooks/my-dash)")
     parser.add_argument("--public-url", help="Tableau Public workbookRepoUrl (demo provider)")
+    parser.add_argument(
+        "--env", type=Path, default=Path(".env"), help="git-ignored KEY=VALUE credentials (default .env)"
+    )
     parser.add_argument("--view", help="Tableau Public view name (with --public-url)")
     parser.add_argument(
         "--structural-only", action="store_true", help="proceed without a reference (cannot claim visual fidelity)"

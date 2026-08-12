@@ -249,7 +249,7 @@ def stamp_inputs(input_dir: Path, out_dir: Path) -> str | None:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
-        result = prov.build(input_dir, prov.load_env(Path(".env")))
+        result = prov.build(input_dir, prov.resolve_env(Path(".env")))
         if not result["input_count"]:
             return None
         path = out_dir / "source-provenance.json"

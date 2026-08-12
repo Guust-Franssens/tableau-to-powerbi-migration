@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import load_env, pat_secret  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-oracle")
 
@@ -239,7 +239,11 @@ class TableauSession:
                 creds = json.loads(payload)["credentials"]
                 self.token, self.site_id = creds["token"], creds["site"]["id"]
                 return
-            last = payload.decode("utf-8", "replace")[:200]
+            # Redact the response body before it becomes an exception message: this is a sign-in
+            # POST whose request body CONTAINS the PAT, so any reflecting proxy, WAF or debug
+            # endpoint echoes it straight back. Measured with a local echo server during review of
+            # #97. Redact first, truncate second -- slicing first can leave a secret suffix.
+            last = redact(payload.decode("utf-8", "replace"), self._creds.pat_secret, self._creds.pat_name)[:200]
             if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
                 break
             self.retry_count += 1
@@ -527,7 +531,8 @@ def main() -> int:
     args = build_parser().parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    env = load_env(args.env)
+    env = resolve_env(args.env)
+    require(env)
     session = TableauSession(
         SiteCredentials(
             base=env["TABLEAU_SERVER_URL"],

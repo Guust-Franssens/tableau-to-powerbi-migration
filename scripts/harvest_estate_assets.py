@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sqlite3
 import subprocess
 import sys
@@ -56,7 +55,7 @@ for _stream in (sys.stdout, sys.stderr):
     if _stream is not None and _stream.encoding and _stream.encoding.lower() != "utf-8":
         _stream.reconfigure(encoding="utf-8")
 
-from tableau_env import engine_child_env, load_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import engine_child_env, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("harvest_estate_assets")
 
@@ -102,12 +101,14 @@ def download(kind: str, luid: str, out_file: Path, env: dict[str, str], scripts:
     except subprocess.TimeoutExpired:
         return False, "timeout after 600s"
     if proc.returncode != 0:
-        return False, (proc.stderr or proc.stdout or "").strip()[-300:]
+        # Redact BEFORE truncating. Slicing first can cut through the secret and leave a suffix in
+        # the retained text, which is then both logged and persisted -- measured: the full secret was
+        # absent while its tail survived at the start of the slice. Order matters more than the
+        # scrub itself here, because the wrong order still passes a test whose sentinel happens to
+        # fall inside the window.
+        raw = redact((proc.stderr or proc.stdout or "").strip(), pat_secret(env), env.get("TABLEAU_PAT_NAME", ""))
+        return False, raw[-300:]
     return True, ""
-
-
-def _os_environ() -> dict[str, str]:
-    return dict(os.environ)
 
 
 def parse_ours(path: Path) -> dict[str, Any]:
@@ -245,7 +246,9 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
         LOG.error("deterministic tier not found; install the tableau-migration plugin or clone it beside this repo")
         return 1
 
-    env = {**_os_environ(), **load_env(args.env)}
+    env = resolve_env(args.env)
+    if not args.skip_download:
+        require(env)
     assets_dir = args.out / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
 

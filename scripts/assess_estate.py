@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import load_env, pat_secret  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import env_source, pat_secret, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("assess")
 
@@ -762,7 +762,9 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    env = load_env(args.env)
+    env = resolve_env(args.env)
+    require(env)
+    LOG.info("credentials: %s from the %s", "TABLEAU_PAT_SECRET", env_source("TABLEAU_PAT_SECRET", args.env))
     site = Site(env)
     site.sign_in()
     LOG.info("signed in to %r (api %s)", site.site, site.version)

@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import load_env, pat_secret  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import pat_secret, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("provenance")
 
@@ -234,7 +234,7 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    result = build(args.input, load_env(args.env))
+    result = build(args.input, resolve_env(args.env))
     if not result["input_count"]:
         LOG.error("no .twb/.twbx found under %s", args.input)
         return 1
