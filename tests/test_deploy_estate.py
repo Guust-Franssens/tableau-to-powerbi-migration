@@ -553,3 +553,207 @@ def test_a_report_without_a_pbir_is_refused_rather_than_guessed(tmp_path):
     """Inventing a binding for a report whose shape we do not understand is worse than stopping."""
     with pytest.raises(ValueError, match="definition.pbir"):
         de.rebind([{"path": "definition/report.json", "payload": "e30=", "payloadType": "InlineBase64"}], "W", "M", "G")
+
+
+def test_an_expired_token_is_renewed_and_the_call_retried(monkeypatch):
+    """Measured: a 66-item deploy outlived its token and every later call failed with 401.
+
+    The run was resumable, but an operator should not have to notice and re-run in front of a
+    customer.
+    """
+    calls: list[str] = []
+
+    def _request(method, url, bearer, body=None):  # noqa: ARG001
+        calls.append(bearer)
+        if bearer == "old":
+            return 401, {}, {"errorCode": "TokenExpired", "message": "Access token has expired"}
+        return 201, {}, {"id": "x"}
+
+    monkeypatch.setattr(de, "_request", _request)
+    tok = de.Token.__new__(de.Token)
+    tok.tenant = None
+    tok._value = "old"
+    monkeypatch.setattr(tok, "_mint", lambda: "fresh")
+    status, _, _ = de.call("POST", "http://x", tok)
+    assert status == 201
+    assert calls == ["old", "fresh"], "the call must be retried with a renewed token"
+
+
+def test_a_real_authorisation_failure_is_not_retried(monkeypatch):
+    """Only an EXPIRED token earns a retry; a genuine 401 is a real problem to report."""
+    calls: list[str] = []
+
+    def _request(method, url, bearer, body=None):  # noqa: ARG001
+        calls.append(bearer)
+        return 401, {}, {"errorCode": "Unauthorized", "message": "not a contributor"}
+
+    monkeypatch.setattr(de, "_request", _request)
+    tok = de.Token.__new__(de.Token)
+    tok.tenant = None
+    tok._value = "tok"
+    status, _, _ = de.call("GET", "http://x", tok)
+    assert status == 401
+    assert len(calls) == 1, "a non-expiry 401 must not be retried"
+
+
+def test_a_timed_out_item_is_adopted_not_recreated(tmp_path, monkeypatch):
+    """A `Timeout` is OUR poll giving up, not the service giving up.
+
+    Measured on a real estate: a model timed out at 300s, completed server-side anyway, and the
+    resume created a SECOND copy - Fabric does not reject a duplicate name, so nothing stopped it.
+    """
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Timeout", None, "op-1")
+
+    reloaded = de.Journal(tmp_path / "j.jsonl", "ws")
+    assert reloaded.already_deployed(item) is None, "a timeout is not a success"
+    assert reloaded.attempted(item) is True, "but it MUST trigger reconciliation before creating"
+
+    created: list[str] = []
+    updated: list[str] = []
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("x") or ("Succeeded", "new", ""))
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: updated.append("u") or ("Succeeded", ""))
+    monkeypatch.setattr(de, "find_existing", lambda *a, **k: "existing-id")
+    target = de.Target("ws", "LZ", "tok", reloaded)
+    model_id, failure = de._deploy_model(target, "WB", item)
+
+    assert failure is None
+    assert model_id == "existing-id", "the item that already exists must be adopted"
+    assert created == [], "creating a second copy is the defect this guards"
+    assert updated == ["u"], "its definition is refreshed in place instead"
+
+
+def test_a_failed_item_is_also_reconciled_before_recreating(tmp_path, monkeypatch):
+    """A `Failed` outcome may still have created the item; only a clean success is proof it did not."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    journal.intent(item, "create")
+    journal.outcome(item, "Failed", None, "op-1", "boom")
+    assert de.Journal(tmp_path / "j.jsonl", "ws").attempted(item) is True
+
+
+def test_a_clean_first_run_does_not_pay_for_reconciliation(tmp_path):
+    """An item never attempted must not trigger an extra lookup on every deploy."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    assert de.Journal(tmp_path / "absent.jsonl", "ws").attempted(item) is False
+
+
+def test_the_summary_reports_what_was_deployed_not_what_was_planned(caplog):
+    """Saying 'all 66 deployed' when two were skipped erodes trust in every other number."""
+    with caplog.at_level("INFO"):
+        de._report_failures([], 66, "LZ", skipped=2)
+    assert "64 item(s) deployed" in caplog.text
+    assert "2 skipped as empty" in caplog.text
+
+
+def test_a_dropped_network_stops_the_run_instead_of_failing_every_item(tmp_path, monkeypatch, caplog):
+    """Measured: a laptop moved between networks mid-deploy and burned through the whole estate.
+
+    Marking 30 items "Failed" is noise, and each one then needs reconciling on the resume. Stopping
+    after a few consecutive connectivity errors and saying so is the useful behaviour.
+    """
+    bundle = _bundle(tmp_path, {f"WB{i}": False for i in range(10)})
+    monkeypatch.setattr(
+        de,
+        "call",
+        lambda method, url, tok, body=None: (
+            200,
+            {},
+            {"value": []} if url.endswith("/items") else {"displayName": "LZ"},
+        ),
+    )
+    attempts: list[str] = []
+
+    def _create(ws, tok, item, journal):  # noqa: ARG001
+        attempts.append(item.name)
+        return ("Failed", None, 'HTTP 0  {"error": "getaddrinfo failed"}')
+
+    monkeypatch.setattr(de, "create_item", _create)
+    with caplog.at_level("ERROR"):
+        code = de.deploy(bundle, "ws", "tok", _options(journal=tmp_path / "j.jsonl"))
+    assert code == de.EXIT_FAILED
+    assert "network unreachable" in caplog.text
+    assert len(attempts) == de.MAX_CONSECUTIVE_NETWORK_FAILURES, "it must stop, not grind through all 10"
+
+
+def test_a_transient_failure_does_not_trip_the_network_guard(tmp_path, monkeypatch):
+    """One bad item between good ones is not an outage; the counter must reset."""
+    bundle = _bundle(tmp_path, {"A": False, "B": False, "C": False})
+    monkeypatch.setattr(
+        de,
+        "call",
+        lambda method, url, tok, body=None: (
+            200,
+            {},
+            {"value": []} if url.endswith("/items") else {"displayName": "LZ"},
+        ),
+    )
+    seen: list[str] = []
+
+    def _create(ws, tok, item, journal):  # noqa: ARG001
+        seen.append(item.name)
+        return ("Failed", None, "HTTP 0 x") if item.name == "B" else ("Succeeded", "id", "")
+
+    monkeypatch.setattr(de, "create_item", _create)
+    de.deploy(bundle, "ws", "tok", _options(journal=tmp_path / "j.jsonl"))
+    assert "C" in seen, "a single connectivity blip must not abandon the rest of the estate"
+
+
+def test_an_item_that_already_exists_is_UPDATED_never_duplicated(tmp_path, monkeypatch):
+    """The rule that closes every duplicate path: always ask the service before creating.
+
+    Measured against a real workspace: changing an item's PLACEMENT made the deployer treat it as
+    new and create a second copy - ten of them. Fabric does not reject a repeated name, so nothing
+    downstream caught it.
+    """
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel", folder_id="new-folder")
+    item.parts = de.parts_for(item.folder)
+
+    created: list[str] = []
+    updated: list[str] = []
+    monkeypatch.setattr(de, "find_existing", lambda *a, **k: "already-there")
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("c") or ("Succeeded", "new", ""))
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: updated.append("u") or ("Succeeded", ""))
+
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"))
+    item_id, failure = de._deploy_model(target, "WB", item)
+
+    assert failure is None
+    assert item_id == "already-there"
+    assert created == [], "an existing item must never be created a second time"
+    assert updated == ["u"], "it must be updated in place instead"
+
+
+def test_a_genuinely_new_item_is_created(tmp_path, monkeypatch):
+    """The update path must not swallow the normal case."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    created: list[str] = []
+    monkeypatch.setattr(de, "find_existing", lambda *a, **k: None)
+    monkeypatch.setattr(de, "create_item", lambda *a, **k: created.append("c") or ("Succeeded", "fresh", ""))
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"))
+    assert de._deploy_model(target, "WB", item) == ("fresh", None)
+    assert created == ["c"]
+
+
+def test_a_failed_update_is_reported_not_swallowed(tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel")
+    item.parts = de.parts_for(item.folder)
+    monkeypatch.setattr(de, "find_existing", lambda *a, **k: "there")
+    monkeypatch.setattr(de, "update_item", lambda *a, **k: ("Failed", "boom"))
+    target = de.Target("ws", "LZ", "tok", de.Journal(tmp_path / "j.jsonl", "ws"))
+    item_id, failure = de._deploy_model(target, "WB", item)
+    assert item_id is None
+    assert "boom" in failure

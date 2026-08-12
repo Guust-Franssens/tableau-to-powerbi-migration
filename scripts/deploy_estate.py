@@ -100,6 +100,12 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_PREFLIGHT = 2
 
+# A dropped network marks every remaining item "Failed" one by one, which is noise rather than
+# information - and each one then needs reconciling on the resume. Measured: a laptop moved between
+# networks mid-deploy and burned through the rest of the estate emitting `getaddrinfo failed`.
+# Stop after a few consecutive connectivity errors and say so plainly instead.
+MAX_CONSECUTIVE_NETWORK_FAILURES = 3
+
 
 @dataclass
 class Item:
@@ -121,31 +127,70 @@ class Item:
         return sha.hexdigest()
 
 
-def token(tenant: str | None) -> str:
+class Token:
+    """A Fabric bearer token that re-mints itself when the service says it has expired.
+
+    Minting once at startup is fine for a probe and wrong for an estate: a real deploy of 66 items
+    ran past the token's lifetime and every remaining call failed with
+    `401 TokenExpired`, leaving a half-deployed workspace. The run was resumable, but an operator
+    should not have to notice and re-run in front of a customer.
+    """
+
+    def __init__(self, tenant: str | None) -> None:
+        self.tenant = tenant
+        self._value = self._mint()
+
+    def _mint(self) -> str:
+        cmd = ["az", "account", "get-access-token", "--resource", FABRIC_RESOURCE]
+        if self.tenant:
+            cmd += ["--tenant", self.tenant]
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=True)
+        except subprocess.CalledProcessError as exc:
+            raise SystemExit(
+                "Could not get a Fabric token from the Azure CLI. Run `az login`"
+                + (f" --tenant {self.tenant}" if self.tenant else "")
+                + f".\n  {exc.stderr.strip()[:300]}"
+            ) from exc
+        return json.loads(out.stdout)["accessToken"]
+
+    def refresh(self) -> str:
+        """Mint a new token. Called when the service reports the current one expired."""
+        LOG.info("access token expired - renewing and continuing")
+        self._value = self._mint()
+        return self._value
+
+    def __str__(self) -> str:
+        return self._value
+
+
+def token(tenant: str | None) -> Token:
     """Mint a Fabric-scoped bearer token via the Azure CLI.
 
     `az` rather than `fab`: the same code path serves an interactive user (`az login`) and a service
     principal (`az login --service-principal`), so an unattended run needs no second mechanism.
     """
-    cmd = ["az", "account", "get-access-token", "--resource", FABRIC_RESOURCE]
-    if tenant:
-        cmd += ["--tenant", tenant]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, check=True, shell=True)
-    except subprocess.CalledProcessError as exc:
-        raise SystemExit(
-            "Could not get a Fabric token from the Azure CLI. Run `az login`"
-            + (f" --tenant {tenant}" if tenant else "")
-            + f".\n  {exc.stderr.strip()[:300]}"
-        ) from exc
-    return json.loads(out.stdout)["accessToken"]
+    return Token(tenant)
 
 
-def call(method: str, url: str, tok: str, body: dict | None = None) -> tuple[int, dict, dict]:
-    """One REST call. Returns (status, headers, parsed-body); never raises on an HTTP error."""
+def call(method: str, url: str, tok: Any, body: dict | None = None) -> tuple[int, dict, dict]:
+    """One REST call. Returns (status, headers, parsed-body); never raises on an HTTP error.
+
+    Retries ONCE on `401 TokenExpired` with a freshly minted token: a long deploy outlives its
+    token, and the alternative is a half-deployed workspace and a puzzled operator. Any other 401 is
+    a real authorization problem and is returned as-is rather than retried.
+    """
+    status, headers, parsed = _request(method, url, str(tok), body)
+    if status == 401 and isinstance(tok, Token) and "TokenExpired" in json.dumps(parsed):
+        status, headers, parsed = _request(method, url, tok.refresh(), body)
+    return status, headers, parsed
+
+
+def _request(method: str, url: str, bearer: str, body: dict | None = None) -> tuple[int, dict, dict]:
+    """The bare HTTP call, with no retry policy of its own."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {tok}")
+    req.add_header("Authorization", f"Bearer {bearer}")
     if data:
         req.add_header("Content-Type", "application/json")
     try:
@@ -271,6 +316,7 @@ class Journal:
         self.workspace = workspace
         self.done: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.pending: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self.attempts: set[tuple[str, str, str]] = set()
         if path.is_file():
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -286,6 +332,9 @@ class Journal:
                 key = (row.get("workspace", ""), row.get("item", ""), row.get("type", ""))
                 if row.get("phase") == "outcome" and row.get("status") == "Succeeded":
                     self.done[key] = row
+                    self.pending.pop(key, None)
+                elif row.get("phase") == "outcome":
+                    self.attempts.add(key)  # Timeout/Failed: may still exist server-side
                     self.pending.pop(key, None)
                 elif row.get("phase") == "intent":
                     self.pending[key] = row
@@ -347,6 +396,16 @@ class Journal:
     def unfinished(self, item: Item) -> dict[str, Any] | None:
         """An intent with no matching success - the crash-in-flight case worth polling, not retrying."""
         return self.pending.get(self._key(item))
+
+    def attempted(self, item: Item) -> bool:
+        """True if we ever started this item without recording a clean success.
+
+        Covers three states that look different in the log and identical to the service: an intent
+        with no outcome (crash between the call and the record), a `Timeout` (our poll gave up while
+        the operation continued), and a `Failed` that may still have created the item. All three
+        require asking the service what exists before creating anything.
+        """
+        return self._key(item) in self.pending or self._key(item) in self.attempts
 
 
 class RunLock:
@@ -545,6 +604,24 @@ def unique_siblings(names: list[str]) -> dict[str, str]:
     return used
 
 
+def ambiguous_projects(estate_db: Path | None) -> set[str]:
+    """Project names that occur more than once in the tree, and so cannot identify a folder.
+
+    `workbook.project` records a NAME, so two projects called `Reports` under different parents are
+    indistinguishable from a workbook's point of view. Placing either is a coin flip that silently
+    pools both, and placing them in a shared root-level `Reports` folder pools them just the same -
+    the first version of this fix only dropped the NESTING and left exactly that hole.
+    """
+    if not (estate_db and estate_db.is_file()):
+        return set()
+    try:
+        with sqlite3.connect(f"file:{estate_db}?mode=ro", uri=True) as conn:
+            names = [name for (name,) in conn.execute("select name from project")]
+    except sqlite3.Error:
+        return set()
+    return {name for name in names if names.count(name) > 1}
+
+
 def project_parents(estate_db: Path | None) -> dict[str, str]:
     """Map project name -> parent project name, so Tableau's nesting survives the migration.
 
@@ -570,14 +647,7 @@ def project_parents(estate_db: Path | None) -> dict[str, str]:
         return {}
 
     names = {luid: name for luid, name, _parent in rows}
-    duplicated = {name for name in names.values() if list(names.values()).count(name) > 1}
-    if duplicated:
-        LOG.warning(
-            "project name(s) %s appear more than once in the tree; they cannot be told apart from a "
-            "workbook's project name, so their content lands at the workspace root rather than "
-            "risking a merge under one parent",
-            ", ".join(sorted(duplicated)),
-        )
+    duplicated = ambiguous_projects(estate_db)
     return {
         name: names[parent]
         for _luid, name, parent in rows
@@ -626,7 +696,12 @@ def project_map(bundle: Path, estate_db: Path | None) -> dict[str, str]:
     if estate_db and estate_db.is_file():
         try:
             with sqlite3.connect(f"file:{estate_db}?mode=ro", uri=True) as conn:
+                # BOTH tables. A migrated estate contains published DATASOURCES as well as
+                # workbooks, and they carry their own project - reading only `workbook` left every
+                # datasource at the workspace root, which looks like a placement failure rather than
+                # like a table nobody queried.
                 rows = list(conn.execute("select name, project from workbook where project is not null"))
+                rows += list(conn.execute("select name, project from datasource where project is not null"))
         except sqlite3.Error as exc:
             LOG.warning("could not read %s (%s) - falling back to provenance only", estate_db, exc)
             rows = []
@@ -767,25 +842,79 @@ class Target:
     journal: Journal
 
 
+def update_item(workspace: str, tok: Any, item: Item, item_id: str, journal: Journal) -> tuple[str, str]:
+    """Overwrite an existing item's definition in place. Returns (status, detail).
+
+    The counterpart to `create_item`, and the reason a re-run cannot duplicate: an item that already
+    exists is UPDATED, never created again. `updateDefinition` overwrites the definition and leaves
+    the sensitivity label alone.
+    """
+    journal.intent(item, "update")
+    status, headers, resp = call(
+        "POST",
+        f"{API}/workspaces/{workspace}/items/{item_id}/updateDefinition",
+        tok,
+        {"definition": {"parts": item.parts}},
+    )
+    operation = headers.get("x-ms-operation-id")
+    if status in (200, 201):
+        journal.outcome(item, "Succeeded", item_id, operation)
+        return "Succeeded", ""
+    if status == 202:
+        location = headers.get("location") or (f"{API}/operations/{operation}" if operation else "")
+        state, body = await_operation(location, tok) if location else ("Failed", {})
+        detail = "" if state == "Succeeded" else json.dumps(body.get("error", body))[:400]
+        journal.outcome(item, state, item_id if state == "Succeeded" else None, operation, detail)
+        return state, detail
+    detail = f"HTTP {status} {json.dumps(resp)[:300]}"
+    journal.outcome(item, "Failed", None, operation, detail)
+    return "Failed", detail
+
+
+def _deploy_one(target: Target, item: Item, kind: str, name: str) -> tuple[str | None, str | None]:
+    """Create, update or adopt one item. Returns (item_id, failure).
+
+    ALWAYS asks the service what exists before creating. That single rule closes every duplicate
+    path at once, and each of them was measured against a real workspace rather than imagined:
+
+      * a `Timeout` that our poll gave up on while the operation completed;
+      * a crash between the POST and the outcome record;
+      * a re-run after the item's PLACEMENT changed, where the content is identical but the folder
+        is not - this one duplicated ten items, because the deployer treated a moved item as new.
+
+    Fabric does not reject a repeated `Report`/`SemanticModel` name, so nothing downstream would
+    have caught any of them.
+    """
+    recorded = target.journal.already_deployed(item)
+    if recorded:
+        LOG.info("%-44s %s already deployed, unchanged - skipping", name, kind)
+        return recorded.get("itemId") or find_existing(target.workspace, target.token, item.name, item.item_type), None
+
+    existing = find_existing(target.workspace, target.token, item.name, item.item_type)
+    if existing:
+        state, detail = update_item(target.workspace, target.token, item, existing, target.journal)
+        if state != "Succeeded":
+            LOG.error("%-44s %s UPDATE %s: %s", name, kind.upper(), state, detail)
+            return None, f"{name} ({item.item_type}): {detail}"
+        LOG.info("%-44s %s already existed - definition updated in place", name, kind)
+        return existing, None
+
+    state, item_id, detail = create_item(target.workspace, target.token, item, target.journal)
+    if state == "AlreadyExists":
+        adopted = find_existing(target.workspace, target.token, item.name, item.item_type)
+        LOG.info("%-44s %s already present in the workspace", name, kind)
+        return adopted, None
+    if state != "Succeeded":
+        LOG.error("%-44s %s %s: %s", name, kind.upper(), state, detail)
+        return None, f"{name} ({item.item_type}): {detail}"
+    LOG.info("%-44s %s deployed", name, kind)
+    return item_id, None
+
+
 def _deploy_model(target: Target, name: str, model: Item) -> tuple[str | None, str | None]:
     """Deploy (or recognise) one semantic model. Returns (model_id, failure)."""
     model.parts = parts_for(model.folder)
-    recorded = target.journal.already_deployed(model)
-    if recorded:
-        LOG.info("%-44s model already deployed, unchanged - skipping", name)
-        return recorded.get("itemId") or find_existing(target.workspace, target.token, model.name, MODEL_TYPE), None
-
-    if target.journal.unfinished(model):
-        LOG.info("%-44s model was in flight when the last run stopped; reconciling", name)
-    state, model_id, detail = create_item(target.workspace, target.token, model, target.journal)
-    if state == "AlreadyExists":
-        LOG.info("%-44s model already present in the workspace", name)
-        return find_existing(target.workspace, target.token, model.name, MODEL_TYPE), None
-    if state != "Succeeded":
-        LOG.error("%-44s MODEL %s: %s", name, state, detail)
-        return None, f"{name} ({MODEL_TYPE}): {detail}"
-    LOG.info("%-44s model deployed", name)
-    return model_id, None
+    return _deploy_one(target, model, "model", name)
 
 
 def report_is_empty(folder: Path) -> bool:
@@ -818,19 +947,8 @@ def _deploy_report(target: Target, name: str, model: Item, report: Item, model_i
     # Rebind BEFORE hashing: the digest must describe the bytes actually deployed, or a resume
     # compares against something that was never sent.
     report.parts = rebind(parts_for(report.folder), target.workspace_name, model.name, model_id)
-    if target.journal.already_deployed(report):
-        LOG.info("%-44s report already deployed, unchanged - skipping", name)
-        return None
-
-    state, _, detail = create_item(target.workspace, target.token, report, target.journal)
-    if state == "AlreadyExists":
-        LOG.info("%-44s report already present in the workspace", name)
-        return None
-    if state != "Succeeded":
-        LOG.error("%-44s REPORT %s: %s", name, state, detail)
-        return f"{name} ({REPORT_TYPE}): {detail}"
-    LOG.info("%-44s report deployed and bound", name)
-    return None
+    _item_id, failure = _deploy_one(target, report, "report", name)
+    return failure
 
 
 def _print_plan(
@@ -861,32 +979,57 @@ def _print_plan(
     return EXIT_OK
 
 
-def _run_all(target: Target, pairs: list[tuple[str, Item, Item | None]], folders: dict[str, str]) -> list[str]:
-    """Deploy every pair model-first, collecting failures rather than aborting on the first."""
+def _run_all(
+    target: Target, pairs: list[tuple[str, Item, Item | None]], folders: dict[str, str]
+) -> tuple[list[str], int]:
+    """Deploy every pair model-first. Returns (failures, items skipped as empty)."""
     failures: list[str] = []
+    skipped = 0
+    offline = 0
     for name, model, report in pairs:
         model.folder_id = folders.get(_slug(name))
         model_id, failure = _deploy_model(target, name, model)
         if failure:
             failures.append(failure)
+            # `HTTP 0` is our own client failing to resolve or reach the host, not a service verdict.
+            offline = offline + 1 if "HTTP 0" in failure else 0
+            if offline >= MAX_CONSECUTIVE_NETWORK_FAILURES:
+                LOG.error(
+                    "network unreachable for %d consecutive item(s) - stopping rather than marking "
+                    "the rest of the estate failed. Check connectivity, then re-run the same command "
+                    "to resume; everything already deployed is skipped by content hash.",
+                    offline,
+                )
+                break
             continue
+        offline = 0
         if report:
             report.folder_id = folders.get(_slug(name))
             report_failure = _deploy_report(target, name, model, report, model_id)
             if report_failure:
                 failures.append(report_failure)
-    return failures
+            elif report_is_empty(report.folder):
+                skipped += 1
+    return failures, skipped
 
 
-def _report_failures(failures: list[str], planned: int, workspace_name: str) -> int:
-    """Print the outcome and return the exit code. A partial deploy must not exit 0."""
+def _report_failures(failures: list[str], planned: int, workspace_name: str, skipped: int = 0) -> int:
+    """Print the outcome and return the exit code. A partial deploy must not exit 0.
+
+    Reports what actually happened rather than what was planned: saying "all 66 deployed" when two
+    empty reports were skipped is a small lie that erodes trust in every other number we print.
+    """
     if failures:
         LOG.error("%d item(s) failed:", len(failures))
         for line in failures:
             LOG.error("  %s", line)
         LOG.error("Re-run the same command to resume; deployed items are skipped by content hash.")
         return EXIT_FAILED
-    LOG.info("all %d item(s) deployed into %r", planned, workspace_name)
+    deployed = planned - skipped
+    if skipped:
+        LOG.info("%d item(s) deployed into %r; %d skipped as empty", deployed, workspace_name, skipped)
+    else:
+        LOG.info("all %d item(s) deployed into %r", deployed, workspace_name)
     return EXIT_OK
 
 
@@ -901,34 +1044,63 @@ def _acquire(bundle: Path, workspace: str, options: argparse.Namespace) -> tuple
     return lock, Journal(journal_path, workspace)
 
 
+def _placement_plan(bundle: Path, options: argparse.Namespace) -> dict[str, list[str]]:
+    """Folder path per workbook, with unplaceable ones omitted entirely.
+
+    A workbook whose project name is ambiguous is left OUT rather than filed under a same-named
+    folder: sharing a root-level `Reports` folder pools two different projects' content just as
+    surely as nesting it under the wrong parent.
+    """
+    if options.no_folders:
+        return {}
+    projects = project_map(bundle, options.estate_db)
+    ambiguous = ambiguous_projects(options.estate_db)
+    if ambiguous:
+        LOG.warning(
+            "project name(s) %s occur more than once in the Tableau tree and cannot be told apart "
+            "from a workbook's project name - their content lands at the workspace ROOT rather than "
+            "risking two projects pooling into one folder",
+            ", ".join(sorted(ambiguous)),
+        )
+        projects = {wb: project for wb, project in projects.items() if project not in ambiguous}
+    return folder_plan(projects, project_parents(options.estate_db))
+
+
 def _resolve_folders(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) -> dict[str, str]:
     """Build the folder tree and return workbook name -> folder id (absent = workspace root)."""
     if options.no_folders:
         LOG.info("--no-folders: everything lands at the workspace root")
         return {}
-    projects = project_map(bundle, options.estate_db)
-    if not projects:
+    plan = _placement_plan(bundle, options)
+    if not plan:
         LOG.info("no Tableau project information found - deploying flat (pass --estate-db to mirror the tree)")
         return {}
-    plan = folder_plan(projects, project_parents(options.estate_db))
     created = ensure_folders(workspace, tok, list(plan.values()))
     placed = {wb: created[tuple(path)] for wb, path in plan.items() if tuple(path) in created}
     LOG.info(
-        "folders: %d project(s) mirrored, %d workbook(s) placed (the rest go to the root)",
+        "folders: %d project path(s) mirrored, %d workbook(s) placed (the rest go to the root)",
         len({tuple(p) for p in plan.values()}),
         len(placed),
     )
     return placed
 
 
-def _planned_placement(bundle: Path, options: argparse.Namespace) -> dict[str, list[str]]:
-    """The folder path each workbook would get, without contacting the service."""
-    if options.no_folders:
-        return {}
-    return folder_plan(project_map(bundle, options.estate_db), project_parents(options.estate_db))
+def _execute(
+    bundle: Path, workspace: str, workspace_name: str, tok: Any, options: argparse.Namespace
+) -> tuple[list[str], int] | None:
+    """Take the lock, build the folders, deploy. None when the lock could not be taken."""
+    held = _acquire(bundle, workspace, options)
+    if held is None:
+        return None
+    lock, journal = held
+    try:
+        folders = _resolve_folders(bundle, workspace, tok, options)
+        return _run_all(Target(workspace, workspace_name, tok, journal), pairs=discover(bundle), folders=folders)
+    finally:
+        lock.release()
 
 
-def deploy(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) -> int:
+def deploy(bundle: Path, workspace: str, tok: Any, options: argparse.Namespace) -> int:
     """Deploy every workbook in the bundle, models first. Returns a process exit code."""
     pairs = discover(bundle)
     planned = sum(1 + (1 if report else 0) for _, _, report in pairs)
@@ -941,18 +1113,13 @@ def deploy(bundle: Path, workspace: str, tok: str, options: argparse.Namespace) 
     workspace_name = info.get("displayName", workspace)
 
     if options.dry_run:
-        return _print_plan(pairs, workspace_name, planned, _planned_placement(bundle, options))
+        return _print_plan(pairs, workspace_name, planned, _placement_plan(bundle, options))
 
-    held = _acquire(bundle, workspace, options)
-    if held is None:
+    outcome = _execute(bundle, workspace, workspace_name, tok, options)
+    if outcome is None:
         return EXIT_PREFLIGHT
-    lock, journal = held
-    try:
-        folders = _resolve_folders(bundle, workspace, tok, options)
-        failures = _run_all(Target(workspace, workspace_name, tok, journal), pairs, folders)
-    finally:
-        lock.release()
-    return _report_failures(failures, planned, workspace_name)
+    failures, skipped = outcome
+    return _report_failures(failures, planned, workspace_name, skipped)
 
 
 def main(argv: list[str] | None = None) -> int:
