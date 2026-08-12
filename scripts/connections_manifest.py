@@ -56,11 +56,54 @@ LOG = logging.getLogger("connections_manifest")
 # ALLOW-list: anything not named here is dropped rather than passed through, so a future connection
 # field carrying a token cannot reach the manifest by default. Fail-closed, like connection_target's
 # class handling.
-SAFE_CONNECTION_FIELDS = ("class", "server", "dbname", "warehouse", "schema", "service", "port")
+#
+# `database` is the CANONICAL name in both contracts (`parse_tableau.py:239` maps Tableau's `dbname`
+# attribute onto it, and `migration_bundle._engine_connection` does the same). An earlier version
+# allow-listed `dbname` and so emitted ONLY the class for every source on a real 27-source bundle --
+# a manifest that looked right and carried nothing. `dbname` stays accepted as an input alias.
+SAFE_CONNECTION_FIELDS = (
+    "class",
+    "server",
+    "database",
+    "dbname",
+    "warehouse",
+    "schema",
+    "service",
+    "port",
+    "auth_method",
+)
 
 # Anything whose KEY looks like a credential is dropped even if it appears in the list above. Belt
 # and braces: the allow-list is the control, this is the alarm.
 SECRET_KEY_PATTERN = re.compile(r"password|secret|token|pwd|credential|apikey|api_key|sas|key$", re.IGNORECASE)
+
+# A secret does not have to arrive under a credential-shaped KEY. It can ride inside an allowed
+# VALUE: URL userinfo (`//user:pass@host`), a credential query parameter (`?token=...`), or an
+# ODBC/JDBC property string (`Driver=X;PWD=...`) pasted into a server or database field. Filtering
+# keys alone let all three through into a document meant to be emailed (found in review of #100).
+_URL_USERINFO = re.compile(r"(?<=//)[^/@\s]+:[^/@\s]+@")
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    # The keyword may be the WHOLE key (`token=`, `PWD=`), not just a suffix of it. An earlier
+    # version required at least one leading character, so `?token=...` and `;PWD=...` -- the two
+    # commonest real forms -- slipped through while `user_password=` was caught.
+    r"([\w.\s-]*(?:password|secret|token|pwd|credential|apikey|api[_-]?key|sas|key))\s*=\s*[^;&\s]+",
+    re.IGNORECASE,
+)
+
+
+def sanitize(value: Any) -> str:
+    """Strip credential material out of a value that is about to be published.
+
+    Applied to EVERY emitted string -- connection values, data-source names, classification reasons
+    and workbook names -- not only to connection fields, because a secret pasted into a source name
+    reaches the same document by a different route. Accepts any type and coerces: a real bundle
+    supplies `None` reasons, and a sanitizer that raises is a sanitizer people route around.
+    """
+    if value is None:
+        return ""
+    cleaned = _URL_USERINFO.sub("[REDACTED]@", str(value))
+    return _CREDENTIAL_ASSIGNMENT.sub(lambda m: f"{m.group(1)}=[REDACTED]", cleaned)
+
 
 SNAPSHOT = "snapshot (extract - no upstream connection)"
 NEEDS_CREDENTIAL = "needs a credential"
@@ -73,9 +116,22 @@ REVIEW = "needs review"
 # sqlproxy-backed workbooks.
 PUBLISHED_PROXY_CLASSES = frozenset({"sqlproxy"})
 
+# Tableau's OWN extract engines. A leg with one of these is the extract itself, not an upstream: the
+# "server" is a path to a `.hyper`/`.tde` inside the package. `connection_target` treats them as live
+# (correctly - it allow-lists file classes and everything else is live, so an unknown class fails
+# safe), but for a CUSTOMER-facing document neither answer is honest. "Connect to
+# hyper @ Data/Extracts/xyz.hyper" is meaningless, and "no credential needed" is the fail-open this
+# codebase has been burned by. The truthful answer is that the original upstream is not recorded in
+# the workbook and a human must decide - which is what the review status is for.
+EXTRACT_ENGINE_CLASSES = frozenset({"hyper", "dataengine", "tde"})
+
 
 def safe_connection(connection: dict[str, Any]) -> dict[str, str]:
-    """Project a connection down to the fields a platform engineer needs, and nothing else."""
+    """Project a connection down to the fields a platform engineer needs, and nothing else.
+
+    Values are sanitized as well as keys: an allow-listed field is not a promise that its CONTENT is
+    safe. `dbname` is folded onto the canonical `database`.
+    """
     out: dict[str, str] = {}
     for field in SAFE_CONNECTION_FIELDS:
         value = connection.get(field)
@@ -83,7 +139,26 @@ def safe_connection(connection: dict[str, Any]) -> dict[str, str]:
             continue
         if SECRET_KEY_PATTERN.search(field):
             continue
-        out[field] = str(value)
+        out["database" if field == "dbname" else field] = sanitize(str(value))
+    return out
+
+
+def legs(connection: dict[str, Any]) -> list[dict[str, str]]:
+    """The per-system legs of a federated connection, each projected safely.
+
+    A Tableau federated source spans several systems, and the real targets live in
+    ``connection["connections"]``. Reading only the top level reported ``federated`` and nothing
+    else, which tells a platform team to connect to a word rather than to a database.
+    """
+    raw = connection.get("connections")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for leg in raw:
+        if isinstance(leg, dict):
+            projected = safe_connection(leg)
+            if projected:
+                out.append(projected)
     return out
 
 
@@ -115,6 +190,37 @@ def blast_radius(bundle_dir: Path) -> dict[str, list[str]]:
     return {k: sorted(v) for k, v in consumers.items()}
 
 
+def classify(connection: dict[str, Any]) -> tuple[str, str]:
+    """Verdict + reason for one source, resolving the two cases a top-level class alone gets wrong.
+
+    Delegates to ``classify_source`` for policy and only handles composition:
+
+    * **A federated source spans several systems.** If ANY leg is live, the source needs a
+      credential -- judging the whole thing by its top-level class can call it a snapshot while a
+      live leg sits underneath, the fail-OPEN direction this codebase has been burned by before.
+    * **Every leg is one of Tableau's own extract engines.** There is no upstream recorded anywhere
+      in the workbook, so we can neither name a system to connect nor promise none is needed.
+    """
+    verdict, reason = classify_source(connection)
+    reason = reason or ""
+    live_legs = [leg for leg in (connection.get("connections") or []) if isinstance(leg, dict)]
+
+    if verdict != "needs-credential" and live_legs:
+        leg_verdicts = [classify_source(leg)[0] for leg in live_legs]
+        if "needs-credential" in leg_verdicts:
+            return "needs-credential", "at least one leg of this federated source is a LIVE system; " + reason
+        if "review" in leg_verdicts:
+            verdict = "review"
+
+    leg_classes = {(leg.get("class") or "").lower() for leg in live_legs} or {(connection.get("class") or "").lower()}
+    if leg_classes and leg_classes <= EXTRACT_ENGINE_CLASSES:
+        return "review", (
+            "this is a Tableau extract (" + ", ".join(sorted(leg_classes)) + "); the workbook does not record "
+            "what it was extracted FROM. Decide whether to connect it to that upstream or keep it as a snapshot."
+        )
+    return verdict, reason
+
+
 def build(bundle_path: Path) -> dict[str, Any]:
     """Assemble the manifest. Pure data in, pure data out - no I/O beyond reading the bundle."""
     bundle = load_bundle(bundle_path)
@@ -124,13 +230,13 @@ def build(bundle_path: Path) -> dict[str, Any]:
     seen: dict[tuple[str, str], dict[str, Any]] = {}
     for source in bundle.data_sources:
         connection = source.get("connection") or {}
-        verdict, reason = classify_source(connection)
-        name = source.get("name") or "(unnamed)"
-        safe = safe_connection(connection)
-        # A datasource can appear once per consuming workbook. Collapse identical (name, connection)
-        # pairs and merge their consumers, or the customer reads one job as two.
-        key = (name, json.dumps(safe, sort_keys=True))
-        consumers = radius.get(name, [])
+        verdict, reason = classify(connection)
+        name = sanitize(source.get("name") or "(unnamed)")
+        # Dedupe on the FULL connection, not the projected one: a field dropped for safety is also
+        # invisible to a key built from the projection, which would merge two genuinely different
+        # systems into one job and hide the second.
+        key = (name, json.dumps(connection, sort_keys=True, default=str))
+        consumers = [sanitize(c) for c in radius.get(source.get("name") or "", [])]
         if key in seen:
             merged = sorted(set(seen[key]["used_by"]) | set(consumers))
             seen[key]["used_by"] = merged
@@ -139,9 +245,10 @@ def build(bundle_path: Path) -> dict[str, Any]:
         entry = {
             "name": name,
             "status": {"needs-credential": NEEDS_CREDENTIAL, "no-creds": SNAPSHOT}.get(verdict, REVIEW),
-            "connection": safe,
+            "connection": safe_connection(connection),
+            "legs": legs(connection),
             "published_datasource": (connection.get("class") or "").lower() in PUBLISHED_PROXY_CLASSES,
-            "why": reason,
+            "why": sanitize(reason),
             "used_by": consumers,
             "used_by_count": len(consumers),
             "blast_radius_known": bool(radius),
@@ -164,18 +271,24 @@ def build(bundle_path: Path) -> dict[str, Any]:
 
 
 def _connection_summary(entry: dict[str, Any]) -> str:
-    """One-line 'class @ server / database' for the table, without inventing missing parts.
+    """What to connect to, naming every leg of a federated source rather than the word 'federated'.
 
-    A published-datasource proxy gets named for what it is instead: `sqlproxy` is Tableau's own
-    front end, and its real upstream is defined server-side, so printing the class would tell a
-    platform engineer to connect to nothing.
+    A published-datasource proxy is named for what it is instead: `sqlproxy` is Tableau's own front
+    end, and its real upstream is defined server-side, so printing the class would tell a platform
+    engineer to connect to nothing.
     """
-    connection = entry["connection"]
-    klass = connection.get("class", "unknown")
     if entry.get("published_datasource"):
         return "**published data source** - upstream defined in Tableau, not in the workbook"
+    if entry.get("legs"):
+        return "<br>".join(_one_target(leg) for leg in entry["legs"])
+    return _one_target(entry["connection"])
+
+
+def _one_target(connection: dict[str, str]) -> str:
+    """`class @ server / database` for one system, without inventing missing parts."""
+    klass = connection.get("class", "unknown")
     where = connection.get("server") or ""
-    what = connection.get("dbname") or connection.get("warehouse") or ""
+    what = connection.get("database") or connection.get("warehouse") or ""
     tail = " / ".join(p for p in (where, what) if p)
     return f"`{klass}`" + (f" @ {tail}" if tail else "")
 
