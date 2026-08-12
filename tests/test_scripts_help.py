@@ -107,24 +107,39 @@ def _documented_flags(text: str) -> list[str]:
     return sorted(set(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", match.group(1))))
 
 
+def _implemented_flags(text: str) -> set[str]:
+    """Return literal long options defined by argparse calls."""
+    return {
+        argument.value
+        for call in ast.walk(ast.parse(text))
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "add_argument"
+        for argument in call.args
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str) and argument.value.startswith("--")
+    }
+
+
 def _undocumented_flags(text: str, flags: list[str], shim_text: str = "") -> list[str]:
-    """Return usage flags that appear only in the module documentation."""
-    module_docstring = ast.get_docstring(ast.parse(text)) or ""
-    return [
-        flag
-        for flag in flags
-        if text.count(flag) - module_docstring.count(flag) + shim_text.count(flag) == 0
-    ]
+    """Return usage flags without a matching literal argparse definition."""
+    return sorted(set(flags) - _implemented_flags(text) - _implemented_flags(shim_text))
 
 
-def test_documented_flag_requires_implementation_not_another_docstring_mention() -> None:
-    text = '''"""
-usage: example.py --missing
-
---missing is described here too.
-"""
-'''
-    assert _undocumented_flags(text, _documented_flags(text)) == ["--missing"]
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('"""\nusage: example.py --missing\n\n--missing is described here too.\n"""\n', ["--missing"]),
+        ('"""\nusage: example.py --out FILE\n\n"""\nparser.add_argument("--output")\n', ["--out"]),
+        ('"""\nusage: example.py --ghost\n\n"""\ndef helper():\n    """--ghost does nothing."""\n', ["--ghost"]),
+        ('"""\nusage: example.py --phantom\n\n"""\n# --phantom is planned\n', ["--phantom"]),
+        (
+            '"""\nusage: example.py --schema\n\n"""\nparser.add_argument("--real", help="not needed with --schema")\n',
+            ["--schema"],
+        ),
+        ('"""\nusage: example.py --output\n\n"""\nparser.add_argument("-o", "--output")\n', []),
+        ('"""\nusage: example.py --real\n\n"""\nparser.add_argument("--real")\n', []),
+    ],
+)
+def test_documented_flag_requires_matching_add_argument_literal(text: str, expected: list[str]) -> None:
+    assert _undocumented_flags(text, _documented_flags(text)) == expected
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
@@ -132,10 +147,10 @@ def test_every_documented_flag_is_actually_implemented(script: Path) -> None:
     """Every `--flag` a script's own `usage:` line advertises must appear somewhere in its code.
 
     `harvest_estate_assets.py` documented `--workbooks-only` in its usage line for a version that
-    never added the `argparse.add_argument` for it - the flag existed in exactly ONE place in the
-    file (the docstring itself). A flag that is genuinely implemented appears at least twice: once
-    in the usage example, once in the `add_argument` call (or subparser) that defines it. A handful
-    of scripts are FORWARDING SHIMS to a script bundled inside `.github/skills/` (see
+    never added its `argparse.add_argument` definition. This guard matches usage flags only against
+    literal options passed to `add_argument`, so documentation, comments, and related option names
+    cannot make an unimplemented flag appear valid. A handful of scripts are FORWARDING SHIMS to a
+    script bundled inside `.github/skills/` (see
     `tests/test_repo_layout.py`'s TREE_SCANNERS note on the same pattern) - their own file never
     mentions the flag at all, so the shim's declared target is read too before judging it missing.
     """
