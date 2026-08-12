@@ -16,15 +16,15 @@ Known debt, all deliberate and none yet fixed - do not treat this as a repo tool
      his gate rather than reimplementing it is the point - but it needs to fail with a readable
      message instead of a traceback.
 
-The pylint suppressions below cover the module-level driver code that shadows the helper functions'
-locals. They should be deleted by the refactor, not carried forward.
+The pylint suppressions cover its compact research-code style and plugin import. They should be
+deleted by the refactor, not carried forward.
 """
 
-# These suppressions all trace to the debt above: (1) module-level driver code shadows helper
-# locals and skips docstrings; (3) the runtime sys.path insert makes his plugin import
-# unresolvable to a static checker, and necessarily non-top-level.
-# pylint: disable=redefined-outer-name,too-many-return-statements,invalid-name
-# pylint: disable=wrong-import-position,import-error,missing-function-docstring
+# These suppressions all trace to the research artifact's compact helper functions, main driver, and
+# plugin import.
+# pylint: disable=redefined-outer-name,too-many-return-statements,invalid-name,too-many-locals
+# pylint: disable=too-many-branches,too-many-statements,global-variable-undefined
+# pylint: disable=wrong-import-position,import-error,import-outside-toplevel,missing-function-docstring
 
 import argparse
 import json
@@ -34,64 +34,6 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
-
-parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-parser.add_argument("REPORT")
-parser.add_argument("TWB")
-parser.add_argument("OUT")
-parser.add_argument("--table")
-args = parser.parse_args()
-
-SKILL = Path(os.path.expanduser("~")) / (
-    r".copilot\installed-plugins\tableau-collection\tableau-fabric-skills\skills\tableau-migration"
-)
-sys.path.insert(0, str(SKILL / "scripts"))
-from translation_router import check_candidate_dax  # noqa: E402
-
-REPORT, TWB, OUT = args.REPORT, args.TWB, args.OUT
-TABLE = args.table or "airline_alliance_performance_2022_2025_1.csv"
-T = f"'{TABLE}'"
-
-root = ET.fromstring(Path(TWB).read_text(encoding="utf-8"))
-
-# ---- 0a/0b: build the caption <-> internal-name and parameter maps -----------------
-params, calcs, basecols = {}, {}, set()
-for ds in root.iter("datasource"):
-    is_param = ds.get("name") == "Parameters"
-    for c in ds.iter("column"):
-        nm = (c.get("name") or "").strip("[]")
-        cap = c.get("caption") or nm
-        if is_param:
-            params[nm] = cap
-            continue
-        calc = c.find("calculation")
-        if calc is not None and calc.get("formula"):
-            calcs[nm] = {
-                "caption": cap,
-                "formula": calc.get("formula"),
-                "role": c.get("role"),
-            }
-        else:
-            basecols.add(nm)
-
-# real model columns (source of truth for binding)
-MODEL_COLS = set()
-tmdl = next((Path(REPORT).parent / "pbip").rglob("tables"))
-if args.table is None:
-    # bind to whichever fact table the DETERMINISTIC translations already used
-    votes = Counter()
-    for _f in tmdl.glob("*.tmdl"):
-        for m in re.finditer(r"'([^']+)'\[", _f.read_text(encoding="utf-8")):
-            votes[m.group(1)] += 1
-    if votes:
-        TABLE = votes.most_common(1)[0][0]
-        T = f"'{TABLE}'"
-        print(f"[auto] bound to most-referenced table: {TABLE} ({votes.most_common(3)})")
-tf = tmdl / f"{TABLE}.tmdl"
-if tf.exists():
-    MODEL_COLS = {
-        m.group(1).strip("'") for m in re.finditer(r"^\tcolumn ('[^']+'|\S+)", tf.read_text(encoding="utf-8"), re.M)
-    }
 
 # ---- reference rewriting ----------------------------------------------------------
 REF = re.compile(r"\[Parameters\]\.\[([^\]]+)\]|\[([^\]]+)\]")
@@ -284,22 +226,6 @@ def transpile(formula):
     return body, "scalar/measure arithmetic"
 
 
-# ---- drive over the handoff -------------------------------------------------------
-rep = json.loads(Path(REPORT).read_text(encoding="utf-8"))
-reqs = []
-for wb in rep.get("workbooks", []):
-    reqs += (wb.get("model_translation_handoff") or {}).get("requests", [])
-for ds in rep.get("datasources", []):
-    reqs += (ds.get("translation_handoff") or {}).get("requests", [])
-
-approved, skipped, gate_fail = {}, [], []
-KNOWN_MEASURES, KNOWN_COLS = set(), set()
-for _f in tmdl.glob("*.tmdl"):
-    _t = _f.read_text(encoding="utf-8")
-    KNOWN_MEASURES |= {m.group(1).strip("'") for m in re.finditer(r"^\tmeasure ('[^']+'|\S+)", _t, re.M)}
-    KNOWN_COLS |= {m.group(1).strip("'") for m in re.finditer(r"^\tcolumn ('[^']+'|\S+)", _t, re.M)}
-REQ_NAMES = {r["name"] for r in reqs}
-
 DAX_FUNCS = {
     "IF",
     "AND",
@@ -420,35 +346,107 @@ def structural_defects(dax):
     return bad
 
 
-for r in reqs:
-    dax, note = transpile(r.get("formula") or "")
-    if not dax:
-        skipped.append((r["name"], note))
-        continue
-    ur = unknown_refs(dax)
-    if ur:
-        skipped.append((r["name"], f"reference not in model: {ur}"))
-        continue
-    sd = structural_defects(dax)
-    if sd:
-        skipped.append((r["name"], f"structural defect: {sd}"))
-        continue
-    g = check_candidate_dax(dax, request=r)
-    if not g.get("ok"):
-        gate_fail.append((r["name"], g.get("issues"), dax[:160]))
-        continue
-    if r.get("role") != "measure":
-        # A Tier-1 transpiled CALCULATED COLUMN is uniquely dangerous: if its expression errors,
-        # EVERY query against the whole model fails ("does not hold any data"), not just that
-        # column -- the entire report goes blank. A failed MEASURE fails only where it is used.
-        # Parameter-driven ones are also semantically wrong (frozen at refresh, slicer-inert).
-        skipped.append((r["name"], "role=dimension -- calc columns are not landed by Tier 1"))
-        continue
-    approved[r["name"]] = dax
+def main():
+    """Transpile the handoff requests named by the command line."""
+    global REPORT, TWB, OUT, TABLE, T, params, calcs, basecols, MODEL_COLS, tmdl, check_candidate_dax
+    global KNOWN_MEASURES, KNOWN_COLS, REQ_NAMES
 
-Path(OUT).write_text(json.dumps(approved, indent=1, ensure_ascii=False), encoding="utf-8")
-print(f"requests={len(reqs)}  approved={len(approved)}  gate_fail={len(gate_fail)}  skipped={len(skipped)}")
-print("\nSKIP REASONS:", Counter(n for _, n in skipped).most_common(12))
-for nm, iss, d in gate_fail[:8]:
-    print("GATEFAIL", nm, iss, "|", d)
-Path("skipped.json").write_text(json.dumps(skipped, indent=1), encoding="utf-8")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("REPORT")
+    parser.add_argument("TWB")
+    parser.add_argument("OUT")
+    parser.add_argument("--table")
+    args = parser.parse_args()
+
+    skill = Path(os.path.expanduser("~")) / (
+        r".copilot\installed-plugins\tableau-collection\tableau-fabric-skills\skills\tableau-migration"
+    )
+    sys.path.insert(0, str(skill / "scripts"))
+    from translation_router import check_candidate_dax as candidate_gate
+
+    check_candidate_dax = candidate_gate
+    REPORT, TWB, OUT = args.REPORT, args.TWB, args.OUT
+    TABLE = args.table or "airline_alliance_performance_2022_2025_1.csv"
+    T = f"'{TABLE}'"
+
+    root = ET.fromstring(Path(TWB).read_text(encoding="utf-8"))
+    params, calcs, basecols = {}, {}, set()
+    for ds in root.iter("datasource"):
+        is_param = ds.get("name") == "Parameters"
+        for c in ds.iter("column"):
+            nm = (c.get("name") or "").strip("[]")
+            cap = c.get("caption") or nm
+            if is_param:
+                params[nm] = cap
+                continue
+            calc = c.find("calculation")
+            if calc is not None and calc.get("formula"):
+                calcs[nm] = {"caption": cap, "formula": calc.get("formula"), "role": c.get("role")}
+            else:
+                basecols.add(nm)
+
+    MODEL_COLS = set()
+    tmdl = next((Path(REPORT).parent / "pbip").rglob("tables"))
+    if args.table is None:
+        votes = Counter()
+        for file in tmdl.glob("*.tmdl"):
+            for match in re.finditer(r"'([^']+)'\[", file.read_text(encoding="utf-8")):
+                votes[match.group(1)] += 1
+        if votes:
+            TABLE = votes.most_common(1)[0][0]
+            T = f"'{TABLE}'"
+            print(f"[auto] bound to most-referenced table: {TABLE} ({votes.most_common(3)})")
+    table_file = tmdl / f"{TABLE}.tmdl"
+    if table_file.exists():
+        MODEL_COLS = {
+            match.group(1).strip("'")
+            for match in re.finditer(r"^\tcolumn ('[^']+'|\S+)", table_file.read_text(encoding="utf-8"), re.M)
+        }
+
+    rep = json.loads(Path(REPORT).read_text(encoding="utf-8"))
+    reqs = []
+    for wb in rep.get("workbooks", []):
+        reqs += (wb.get("model_translation_handoff") or {}).get("requests", [])
+    for ds in rep.get("datasources", []):
+        reqs += (ds.get("translation_handoff") or {}).get("requests", [])
+
+    approved, skipped, gate_fail = {}, [], []
+    KNOWN_MEASURES, KNOWN_COLS = set(), set()
+    for file in tmdl.glob("*.tmdl"):
+        text = file.read_text(encoding="utf-8")
+        KNOWN_MEASURES |= {match.group(1).strip("'") for match in re.finditer(r"^\tmeasure ('[^']+'|\S+)", text, re.M)}
+        KNOWN_COLS |= {match.group(1).strip("'") for match in re.finditer(r"^\tcolumn ('[^']+'|\S+)", text, re.M)}
+    REQ_NAMES = {request["name"] for request in reqs}
+
+    for request in reqs:
+        dax, note = transpile(request.get("formula") or "")
+        if not dax:
+            skipped.append((request["name"], note))
+            continue
+        unresolved = unknown_refs(dax)
+        if unresolved:
+            skipped.append((request["name"], f"reference not in model: {unresolved}"))
+            continue
+        defects = structural_defects(dax)
+        if defects:
+            skipped.append((request["name"], f"structural defect: {defects}"))
+            continue
+        gate = check_candidate_dax(dax, request=request)
+        if not gate.get("ok"):
+            gate_fail.append((request["name"], gate.get("issues"), dax[:160]))
+            continue
+        if request.get("role") != "measure":
+            skipped.append((request["name"], "role=dimension -- calc columns are not landed by Tier 1"))
+            continue
+        approved[request["name"]] = dax
+
+    Path(OUT).write_text(json.dumps(approved, indent=1, ensure_ascii=False), encoding="utf-8")
+    print(f"requests={len(reqs)}  approved={len(approved)}  gate_fail={len(gate_fail)}  skipped={len(skipped)}")
+    print("\nSKIP REASONS:", Counter(n for _, n in skipped).most_common(12))
+    for name, issues, dax in gate_fail[:8]:
+        print("GATEFAIL", name, issues, "|", dax)
+    Path("skipped.json").write_text(json.dumps(skipped, indent=1), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()

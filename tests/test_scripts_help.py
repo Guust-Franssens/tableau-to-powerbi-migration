@@ -31,6 +31,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
 def _tracked_scripts() -> list[Path]:
     tracked = subprocess.run(
         ["git", "ls-files", "scripts/*.py"],
@@ -80,6 +81,21 @@ def test_transpiler_missing_arguments_prints_usage() -> None:
     assert result.returncode == 2
     assert "usage:" in result.stderr
     assert "IndexError" not in result.stderr
+
+
+def test_transpiler_is_importable() -> None:
+    """CLI parsing and the optional plugin import must not run during import."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.path.insert(0, 'scripts'); import transpile_tableau_calc",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _documented_flags(text: str) -> list[str]:
