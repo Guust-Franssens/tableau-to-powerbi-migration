@@ -181,8 +181,8 @@ enrich it, and hand it over refreshed.
      sets the ORDER BY, not merely the display format), and `manual_sort`.
    - Land approvals through the engine: write `{name: dax}` and re-run via `--approved-dax`. **Never
      hand-edit `_Measures.tmdl`** — a landing re-run deletes and recreates it.
-5. **Check the M before Desktop sees it** — `python scripts/check_m_syntax.py <Name>.SemanticModel`.
-   Clean ≠ opens: it is a syntax screen, not an openability proof (`powerbi-semantic-model-gotchas`).
+5. **Check the data model before Desktop sees it** — `python scripts/check_datamodel.py <Name>.SemanticModel`.
+   Clean ≠ opens: it is a dependency-free M/TMDL structural screen, not an openability proof (`powerbi-semantic-model-gotchas`).
 6. **Validate a sample offline.** For at least the non-trivial translations, evaluate against real
    data and compare to the Tableau value. A measure that evaluates is not a measure that is right.
 7. **Enrich for AI — see the next section.** This is the part of the job nobody upstream does at all.

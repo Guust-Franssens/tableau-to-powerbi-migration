@@ -257,7 +257,7 @@ model refuses to commit ("There can't be more than one value in the 'sort by' co
 
 ⚠️ **This defect class is invisible to every offline check.** The calculated-column version passed
 `TmdlSerializer.DeserializeDatabaseFromFolder` (compat 1606, `SortByColumn` resolving to a real
-column object), `check_m_syntax`, and the measure/column-collision integrity assertions — and Desktop
+column object), `check_datamodel`, including M syntax and low-noise TMDL integrity assertions — and Desktop
 still refused the project. The symptom is the **`Untitled - Power BI Desktop`** window from §2, and
 the message lives in an **in-app dialog** that only a UI-Automation *descendants* scan surfaces (§5's
 recipe, filtering on `circular|depend|Issues`). Read the modal; do not infer from the title.

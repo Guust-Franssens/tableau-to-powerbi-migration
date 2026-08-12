@@ -230,7 +230,7 @@ nothing*. One prompt cannot hold both safely. `pbi-report-builder` stays unified
 `examples/airline-alliance-activity/fabric/` is the **same workbook** as `C:\pbip\airline-fresh`:
 **198 visuals / 108 measures (ours, from scratch)** vs ~126 visuals / 88 translated + 188 stubs (his).
 That is a ready-made Phase 0.5 hold-out set with no new tooling. They are also live test infrastructure
-(`tests/test_repo_layout.py`, `tests/test_skills.py:191-201`, `tests/test_check_m_syntax.py:149-155`)
+(`tests/test_repo_layout.py`, `tests/test_skills.py:191-201`, `tests/test_check_datamodel.py:149-155`)
 and source workbooks are gitignored (`README.md:235-249`), so they are **not** reproducible from a
 clean clone. Add `examples/*/deterministic/` alongside; never overwrite.
 ⚠️ The **198 → 126 visual gap** (mostly textbox 107→9, card 51→13) is an **unexplained finding**, not
