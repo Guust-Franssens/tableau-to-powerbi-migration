@@ -68,6 +68,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -305,16 +306,21 @@ def _preferred_model(folder: Path, models: list[Path], reports: list[Path]) -> P
         pbir = reports[0] / "definition.pbir"
         try:
             ref = json.loads(pbir.read_text(encoding="utf-8"))["datasetReference"]["byPath"]["path"]
-            wanted = (reports[0].parent / ref).resolve()
+            # Relative to the .Report FOLDER, not its parent. Resolving from the parent produced a
+            # path that could never exist, so this branch never matched and only the fallback ran -
+            # a fix that read correctly and did nothing.
+            wanted = (reports[0] / ref).resolve()
             for candidate in models:
                 if candidate.resolve() == wanted:
                     return candidate
         except (json.JSONDecodeError, OSError, KeyError, TypeError):
             pass  # no usable byPath; fall through to the name match
-    for candidate in models:
+    for candidate in sorted(models):
         if candidate.stem == folder.name:
             return candidate
-    return models[0]
+    # Nothing names a winner. `models[0]` of the caller's list made the choice depend on directory
+    # enumeration order, which NTFS happens to return alphabetically and other filesystems do not.
+    return min(models)
 
 
 def discover(bundle: Path) -> list[tuple[str, Item, Item | None]]:
@@ -719,33 +725,42 @@ class Landing:
 
         Deliberately NOT `journal.attempted(item)`. That asked "did we ever start an item with this
         name?" without looking at the row at all, so a single failed create authorised overwriting
-        ANY item of that name for the life of the journal - and since a create that failed is
-        exactly what this deployer exists to resume from, that is a routine precondition, not an
-        exotic one. It also destroyed a customer's content and then stamped it as ours, making the
-        damage permanent.
+        ANY item of that name for the life of the journal - and a create that failed is exactly what
+        this deployer exists to resume from. It also destroyed a customer's content and then stamped
+        it as ours, making the damage permanent.
 
         The stamp is strictly better evidence, and it covers the case `attempted()` was there for:
         `_post_item` sends the marker in the CREATE body, so an item that was created just before a
         crash is already stamped when we come back for it.
+
+        Matched anywhere in the text rather than only at the start: a governance tag prepended in
+        the portal is a routine edit, and `startswith` turned it into a refusal of the whole estate.
         """
-        return str(row.get("description") or "").startswith(PROVENANCE)
+        return PROVENANCE in str(row.get("description") or "")
 
     def source_of(self, row: dict[str, Any]) -> str:
         """Which estate this item came from, as recorded in its stamp ("" if unknown)."""
         text = str(row.get("description") or "")
         marker = f"{PROVENANCE} {SOURCE_PREFIX}"
-        return text.split(marker, 1)[1].strip() if marker in text else ""
+        if marker not in text:
+            return ""
+        # Tolerate text appended after the id (e.g. a governance tag) by stopping at whitespace.
+        tail = text.split(marker, 1)[1].strip()
+        return tail.split()[0] if tail else ""
 
     def claim(self, item: Item, journal: Journal) -> tuple[str | None, str | None]:
         """Decide which existing item (if any) is OURS to update. Returns (item_id, refusal)."""
         candidates = self.matching(item.name, item.item_type)
         if not candidates:
             return None, None
+        # NOTE: there is deliberately no "created during this run" leg. It would be unreachable:
+        # `Item.name` is the pbip DIRECTORY name, unique within a bundle, and a model and a report
+        # differ by type - so no two planned items can collide on (name, type). An item we created
+        # moments ago is claimed by its stamp like any other.
         ours = [
             row
             for row in candidates
             if self.adopt  # the operator has explicitly taken responsibility for this workspace
-            or row["id"] not in self.preexisting  # created during this very run
             or row["id"] in journal.item_ids  # recorded by this journal, in this workspace
             or self._is_stamped(row)  # marked by a previous run of this tool, in the SERVICE
         ]
@@ -764,14 +779,21 @@ class Landing:
             )
         mine = ours[0]
         theirs = self.source_of(mine)
-        if theirs and item.source and theirs != item.source and not self.adopt:
+        if theirs != item.source and not self.adopt and mine["id"] not in journal.item_ids:
             # Two DIFFERENT workbooks that happen to share a name. Fabric identity is only
             # (displayName, type), so without this the second estate silently overwrote the first,
             # left its folder empty, and both runs exited 0.
+            #
+            # An UNKNOWN source refuses too. Short-circuiting on "either side is empty" meant an
+            # item stamped by an older revision - or a bundle deployed as `--bundle .` - disabled
+            # the guard entirely and was then re-stamped with the overwriting estate's id, making
+            # the loss permanent and invisible.
+            came_from = theirs or "an earlier version of this tool, which did not record the estate"
             return None, (
-                f"{item.name} ({item.item_type}): an item of this name in this workspace came from a "
-                f"different source ({theirs!r}, not {item.source!r}). Overwriting it would merge two "
-                "distinct workbooks into one item. Use a separate landing zone per estate, or rename."
+                f"{item.name} ({item.item_type}): an item of this name in this workspace came from "
+                f"{came_from!r}, not {item.source!r}. Overwriting it would merge two distinct "
+                "workbooks into one item. If this landing zone is genuinely ours, re-run with "
+                "--adopt-existing; otherwise use a separate landing zone per estate."
             )
         return mine["id"], None
 
@@ -780,7 +802,13 @@ class Landing:
         return self.rows.get(item_id, {}).get("folderId")
 
     def record(self, item_id: str, name: str, item_type: str, folder_id: str | None) -> None:
-        """Remember something we just created, so later items see it without another listing."""
+        """Keep the in-memory view consistent with what the service now holds.
+
+        Invariant maintenance rather than load-bearing logic: within a single run nothing re-reads
+        an item after touching it, because item names are unique per bundle. Mutating this to a
+        no-op therefore breaks no test today - kept because an index that silently disagrees with
+        the service is exactly the class of bug this whole file exists to prevent.
+        """
         self.rows[item_id] = {
             "id": item_id,
             "displayName": name,
@@ -1017,12 +1045,21 @@ def _existing_folder_paths(workspace: str, tok: str) -> dict[tuple[str, ...], st
 
 
 def _display_names(wanted: list[tuple[str, ...]]) -> dict[tuple[str, ...], str]:
-    """Sanitized folder name per path, unique within each parent. Logs every rename."""
+    """Sanitized folder name per path, unique within each parent. Logs every rename.
+
+    Sorted here rather than trusting the caller: `unique_siblings` assigns the `(2)` suffix in
+    input order, so a set-derived order (hash-randomised per process) decided WHICH of two
+    collision-prone projects kept the clean name - and on the next run they could swap, filing new
+    content into the folder holding the other project. Order-independence belongs where the order
+    matters, not in whoever happens to call.
+    """
     by_parent: dict[tuple[str, ...], list[str]] = {}
-    for path in wanted:
+    for path in sorted(wanted):
         by_parent.setdefault(path[:-1], []).append(path[-1])
     display: dict[tuple[str, ...], str] = {}
-    for parent, children in by_parent.items():
+    for parent, children in sorted(by_parent.items()):
+        # `children` is already in sorted order because `wanted` was sorted above; sorting again
+        # here would be a second guard that merely masks the first under mutation testing.
         for original, final in unique_siblings(children).items():
             display[parent + (original,)] = final
             if final != original:
@@ -1140,6 +1177,42 @@ def move_item(workspace: str, tok: str, item_id: str, folder_id: str | None) -> 
     return False, f"HTTP {status} {json.dumps(resp)[:200]}"
 
 
+ESTATE_ID_FILE = "deploy-estate-id.txt"
+
+
+def estate_identity(bundle: Path, supplied: str | None = None) -> str:
+    """A stable identity for the estate in this bundle, which TRAVELS WITH THE BUNDLE.
+
+    The obvious choice - the bundle's directory name - was measured wrong in both directions:
+
+      * too strict: re-running the engine into a dated output folder, copying the bundle to another
+        machine, unzipping it as `bundle (1)`, or merely tab-completing a different CASE on Windows
+        made a legitimate re-run refuse the ENTIRE estate, advising the operator to "use a separate
+        landing zone", which is the opposite of the right action;
+      * too loose: two different customers whose bundle folders are both called `bundle` - the
+        literal placeholder in our own docs - silently overwrote each other, exit 0 both times.
+
+    So the identity is written INTO the bundle the first time it is deployed. A copy, a rename and a
+    re-zip all carry it; two independently produced bundles never share it.
+    """
+    if supplied:
+        return supplied.strip()
+    marker = bundle / ESTATE_ID_FILE
+    try:
+        existing = marker.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    minted = f"{bundle.name or 'estate'}-{uuid.uuid4().hex[:12]}"
+    try:
+        marker.write_text(minted + "\n", encoding="utf-8")
+        LOG.info("estate identity %s minted -> %s (keep this file with the bundle)", minted, marker)
+    except OSError as err:
+        LOG.warning("could not record the estate identity in the bundle (%s); using %s", err, minted)
+    return minted
+
+
 def stamp_for(item: Item) -> str:
     """The description we write on an item we own, including which estate it came from."""
     return f"{PROVENANCE} {SOURCE_PREFIX} {item.source}".rstrip() if item.source else PROVENANCE
@@ -1224,11 +1297,14 @@ def _create_new(target: Target, item: Item, kind: str, name: str) -> tuple[str |
         # The service says the name is taken but our own index does not know it. Re-read once: if it
         # still cannot be located, this is NOT a success - reporting it as one declared a complete
         # deploy over an empty workspace.
-        fresh, why = Landing.read(target.workspace, target.token)
-        adopted = None if fresh is None else (fresh.claim(item, target.journal)[0])
+        fresh, why = Landing.read(target.workspace, target.token, adopt=target.landing.adopt)
+        adopted, refused = (None, why) if fresh is None else fresh.claim(item, target.journal)
         if not adopted:
-            LOG.error("%-44s %s name is taken but the item cannot be located: %s", name, kind.upper(), detail)
-            return None, f"{name} ({item.item_type}): name already in use but no matching item is readable. {why}"
+            LOG.error("%-44s %s name is taken but the item cannot be claimed: %s", name, kind.upper(), detail)
+            return (
+                None,
+                f"{name} ({item.item_type}): {refused or 'name already in use but no matching item is readable.'}",
+            )
         target.landing.record(adopted, item.name, item.item_type, item.folder_id)
         LOG.info("%-44s %s already present in the workspace", name, kind)
         return adopted, None
@@ -1308,45 +1384,61 @@ def _print_plan(
     return EXIT_OK
 
 
-def _refusals(target: Target, pairs: list[tuple[str, Item, Item | None]]) -> list[str]:
-    """Every planned item we would refuse to touch, checked BEFORE anything is created.
+def _refusals(target: Target, pairs: list[tuple[str, Item, Item | None]]) -> dict[str, list[str]]:
+    """Which WORKBOOKS cannot be deployed, checked before anything is created.
 
-    `preflight` classifies a name clash as "an update, not a new item", but `claim` may refuse that
-    same name - so a run could create the model, then discover the report was foreign, and stop with
-    an orphan in the customer's workspace that the refusal message never mentions. Checking the whole
-    plan first makes that refusal free.
+    Per workbook, not per estate, and not per item. Per item let a run create the model and then
+    discover the report was foreign, leaving an orphan in the customer's workspace. Per estate was
+    worse in the other direction: one colliding name blocked six already-deployed workbooks from
+    ever being revisited, so a single foreign item became an estate-wide outage.
+
+    A report that would be skipped as empty is never deployed, so it cannot clash - checking it
+    aborted runs over an item that was never going to be touched.
     """
-    found: list[str] = []
-    for _name, model, report in pairs:
+    blocked: dict[str, list[str]] = {}
+    for name, model, report in pairs:
         for item in (model, report):
-            if item is None:
+            if item is None or (item is report and report_is_empty(item.folder)):
                 continue
             _, refusal = target.landing.claim(item, target.journal)
             if refusal:
-                found.append(refusal)
-    return found
+                blocked.setdefault(name, []).append(refusal)
+    return blocked
+
+
+def _plan_items(target: Target, pairs: list[tuple[str, Item, Item | None]], folders: dict[str, str]) -> None:
+    """Stamp placement and estate identity onto every planned item before anything is checked."""
+    for name, model, report in pairs:
+        for item in (model, report):
+            if item is not None:
+                item.folder_id = folders.get(_slug(name))
+                item.source = target.source
+
+
+def _announce_refusals(blocked: dict[str, list[str]]) -> list[str]:
+    """Report the workbooks we will not touch, and return their reasons as failures."""
+    if not blocked:
+        return []
+    LOG.error("%d workbook(s) cannot be deployed into this workspace and are SKIPPED:", len(blocked))
+    reasons = [line for lines in blocked.values() for line in lines]
+    for line in reasons:
+        LOG.error("  %s", line)
+    LOG.error("The remaining workbooks are deployed normally; nothing was created for the skipped ones.")
+    return reasons
 
 
 def _run_all(
     target: Target, pairs: list[tuple[str, Item, Item | None]], folders: dict[str, str]
 ) -> tuple[list[str], int]:
     """Deploy every pair model-first. Returns (failures, items skipped as empty)."""
-    failures: list[str] = []
     skipped = 0
     offline = 0
-    for name, model, report in pairs:
-        for item in (model, report):
-            if item is not None:
-                item.folder_id = folders.get(_slug(name))
-                item.source = target.source
+    _plan_items(target, pairs, folders)
     blocked = _refusals(target, pairs)
-    if blocked:
-        LOG.error("%d planned item(s) cannot be deployed into this workspace:", len(blocked))
-        for line in blocked:
-            LOG.error("  %s", line)
-        LOG.error("Nothing was created - refusing up front rather than leaving a half-deployed estate.")
-        return blocked, 0
+    failures: list[str] = _announce_refusals(blocked)
     for name, model, report in pairs:
+        if name in blocked:
+            continue
         model.folder_id = folders.get(_slug(name))
         model_id, failure = _deploy_model(target, name, model)
         if failure:
@@ -1461,7 +1553,14 @@ def _execute(
         if landing.adopt:
             LOG.warning("--adopt-existing: same-named items already in this workspace WILL be overwritten")
         folders = _resolve_folders(bundle, workspace, tok, options)
-        target = Target(workspace, workspace_name, tok, journal, landing, bundle.name)
+        target = Target(
+            workspace,
+            workspace_name,
+            tok,
+            journal,
+            landing,
+            estate_identity(bundle, getattr(options, "estate_id", None)),
+        )
         return _run_all(target, pairs=discover(bundle), folders=folders)
     finally:
         lock.release()
@@ -1508,6 +1607,13 @@ def main(argv: list[str] | None = None) -> int:
         help="assess_estate.py estate.db, so the Tableau project tree is mirrored as workspace folders",
     )
     parser.add_argument("--no-folders", action="store_true", help="deploy everything to the workspace root")
+    parser.add_argument(
+        "--estate-id",
+        help=(
+            "stable identity for this estate, stamped onto every item so a re-run recognises its "
+            "own work. Defaults to the id recorded in the bundle, minting one if absent."
+        ),
+    )
     parser.add_argument(
         "--adopt-existing",
         action="store_true",

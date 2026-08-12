@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import importlib
 import json
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -1219,7 +1221,7 @@ def test_two_estates_sharing_a_workbook_name_do_not_collapse_into_one_item(tmp_p
     item_id, refusal = de.Landing([theirs]).claim(mine, de.Journal(tmp_path / "j.jsonl", "ws"))
 
     assert item_id is None
-    assert refusal and "different source" in refusal
+    assert refusal and "came from 'Finance-estate'" in refusal
 
 
 def test_the_same_estate_redeployed_is_still_recognised(tmp_path):
@@ -1361,3 +1363,213 @@ def test_two_items_sharing_a_name_are_refused_rather_than_guessed(tmp_path):
     item_id, refusal = de.Landing(rows).claim(item, de.Journal(tmp_path / "j.jsonl", "ws"))
     assert item_id is None
     assert refusal and "ambiguous" in refusal
+
+
+# --- round 3: the identity chain, tested END TO END rather than at its midpoint ------------------
+
+
+def _deploy_into(bundle, service, journal, **opts):
+    """Run a full deploy against an in-memory Fabric stand-in. Returns the exit code."""
+    return de.deploy(bundle, "ws", "tok", _options(journal=journal, **opts))
+
+
+class _FakeFabric:
+    """Enough of Fabric to exercise identity: it does NOT reject a repeated displayName."""
+
+    def __init__(self):
+        self.items: list[dict] = []
+        self.n = 0
+
+    def call(self, method, url, _tok, body=None):
+        if method == "GET" and url.endswith("/items"):
+            return 200, {}, {"value": self.items}
+        if method == "GET":
+            return 200, {}, {"displayName": "LZ"}
+        if method == "POST" and url.endswith("/items"):
+            self.n += 1
+            row = {
+                "id": f"i{self.n}",
+                "displayName": body["displayName"],
+                "type": body["type"],
+                "description": body.get("description", ""),
+            }
+            self.items.append(row)
+            return 201, {}, row
+        if method == "PATCH":
+            for row in self.items:
+                if url.endswith(row["id"]):
+                    row["description"] = body["description"]
+            return 200, {}, {}
+        return 200, {}, {}
+
+
+def test_a_bundle_copied_or_renamed_still_recognises_its_own_estate(tmp_path):
+    """A dated output folder, a copy to another machine, or `bundle (1)` must not brick the estate.
+
+    Measured on the previous revision: renaming the bundle directory made a legitimate re-run refuse
+    EVERY workbook, advising the operator to use a different landing zone - the opposite of right.
+    """
+    first = _bundle(tmp_path / "estate-2026-08-13", {"Sales": False})
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        assert _deploy_into(first, service, tmp_path / "j.jsonl") == de.EXIT_OK
+        shutil.copytree(first, tmp_path / "estate-2026-08-14" / "bundle")
+        renamed = tmp_path / "estate-2026-08-14" / "bundle"
+
+        code = _deploy_into(renamed, service, tmp_path / "j2.jsonl")  # different journal too
+
+        assert code == de.EXIT_OK, "the same bundle under a new folder name must still be ours"
+        assert len(service.items) == 1, f"a rename must not create a second copy: {service.items}"
+    finally:
+        importlib.reload(de)
+
+
+def test_two_different_estates_in_folders_of_the_same_name_do_not_collide(tmp_path):
+    """`bundle` is the literal placeholder in our own docs, so two customers sharing it is the norm."""
+    a = _bundle(tmp_path / "customerA" / "bundle", {"Sales": False})
+    b = _bundle(tmp_path / "customerB" / "bundle", {"Sales": False})
+    (b / "pbip" / "Sales" / "Sales.SemanticModel" / "definition.pbism").write_text('{"iam":"B"}', encoding="utf-8")
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        assert _deploy_into(a, service, tmp_path / "ja.jsonl") == de.EXIT_OK
+        code = _deploy_into(b, service, tmp_path / "jb.jsonl")
+
+        assert code == de.EXIT_FAILED, "a different estate must not silently overwrite the first"
+        assert len(service.items) == 1
+        assert service.items[0]["description"].endswith(de.estate_identity(a))
+    finally:
+        importlib.reload(de)
+
+
+def test_the_estate_identity_travels_inside_the_bundle(tmp_path):
+    """It is written into the bundle precisely so a copy carries it."""
+    bundle = _bundle(tmp_path / "b", {"WB": False})
+    minted = de.estate_identity(bundle)
+    assert (bundle / de.ESTATE_ID_FILE).read_text(encoding="utf-8").strip() == minted
+    assert de.estate_identity(bundle) == minted, "a second call must not mint a new identity"
+    assert de.estate_identity(bundle, "explicit-id") == "explicit-id"
+
+
+def test_an_item_stamped_without_an_estate_is_refused_not_silently_taken(tmp_path):
+    """An empty source on EITHER side used to disable the guard, then re-stamp the victim as ours."""
+    bundle = _bundle(tmp_path, {"Sales": False})
+    mine = de.Item("Sales", de.MODEL_TYPE, bundle / "pbip" / "Sales" / "Sales.SemanticModel", source="mine")
+    legacy = {"id": "old-1", "displayName": "Sales", "type": de.MODEL_TYPE, "description": de.PROVENANCE}
+
+    item_id, refusal = de.Landing([legacy]).claim(mine, de.Journal(tmp_path / "j.jsonl", "ws"))
+
+    assert item_id is None
+    assert refusal and "earlier version" in refusal
+
+
+def test_a_governance_tag_added_in_the_portal_does_not_flip_ownership(tmp_path):
+    """Prepending or appending to the description is a routine edit; startswith turned it fatal."""
+    bundle = _bundle(tmp_path, {"WB": False})
+    item = de.Item("WB", de.MODEL_TYPE, bundle / "pbip" / "WB" / "WB.SemanticModel", source="e1")
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    for description in (
+        f"[certified] {de.PROVENANCE} {de.SOURCE_PREFIX} e1",
+        f"{de.PROVENANCE} {de.SOURCE_PREFIX} e1 [certified]",
+    ):
+        row = {"id": "x", "displayName": "WB", "type": de.MODEL_TYPE, "description": description}
+        assert de.Landing([row]).claim(item, journal) == ("x", None), description
+
+
+def test_one_foreign_name_does_not_block_the_rest_of_the_estate(tmp_path, monkeypatch):
+    """Per-estate refusal turned one collision into an outage over provably-ours workbooks."""
+    bundle = _bundle(tmp_path / "b", {"Clean": False, "Clash": False})
+    service = _FakeFabric()
+    service.items.append({"id": "cust", "displayName": "Clash", "type": de.MODEL_TYPE, "description": "theirs"})
+    de.call = service.call
+    try:
+        code = _deploy_into(bundle, service, tmp_path / "j.jsonl")
+        deployed = [i["displayName"] for i in service.items if i["id"] != "cust"]
+
+        assert code == de.EXIT_FAILED, "the collision must still be reported"
+        assert deployed == ["Clean"], f"the clean workbook must still deploy: {service.items}"
+    finally:
+        importlib.reload(de)
+
+
+def test_an_empty_report_sharing_a_name_does_not_block_its_workbook(tmp_path):
+    """It is skipped before deployment, so it cannot clash - refusing over it aborted clean runs."""
+    bundle = _bundle(tmp_path / "b", {"WB": True})
+    pages = bundle / "pbip" / "WB" / "WB.Report" / "definition" / "pages" / "pages.json"
+    pages.write_text(json.dumps({"pageOrder": []}), encoding="utf-8")
+    service = _FakeFabric()
+    service.items.append({"id": "cust", "displayName": "WB", "type": de.REPORT_TYPE, "description": "theirs"})
+    de.call = service.call
+    try:
+        code = _deploy_into(bundle, service, tmp_path / "j.jsonl")
+        assert code == de.EXIT_OK, "an empty report is never deployed, so its name cannot clash"
+        assert [i["displayName"] for i in service.items if i["id"] != "cust"] == ["WB"]
+    finally:
+        importlib.reload(de)
+
+
+def test_the_report_names_its_model_even_when_the_fallback_would_disagree(tmp_path):
+    """The previous fixture let the folder-name fallback give the same answer, so it proved nothing."""
+    bundle = tmp_path / "b"
+    wb = bundle / "pbip" / "WB"
+    for name in ("Alpha", "WB", "Zulu"):
+        (wb / f"{name}.SemanticModel").mkdir(parents=True)
+        (wb / f"{name}.SemanticModel" / "definition.pbism").write_text(f'{{"iam":"{name}"}}', encoding="utf-8")
+    report = wb / "WB.Report"
+    (report / "definition" / "pages").mkdir(parents=True)
+    (report / "definition.pbir").write_text(
+        json.dumps({"datasetReference": {"byPath": {"path": "../Zulu.SemanticModel"}}}), encoding="utf-8"
+    )
+    (report / "definition" / "pages" / "pages.json").write_text(json.dumps({"pageOrder": ["p1"]}), encoding="utf-8")
+
+    (_name, model, _report) = de.discover(bundle)[0]
+
+    assert model.folder.name == "Zulu.SemanticModel", "byPath is ground truth and must beat the fallback"
+
+
+def test_folder_names_do_not_depend_on_the_order_they_arrive_in(caplog):
+    """`unique_siblings` assigns "(2)" in input order, so the order must not vary.
+
+    Set-derived order is hash-randomised per process: the same two projects could swap folders
+    between runs, filing new content into the one holding the OTHER project. Sorting inside
+    `_display_names` makes that impossible regardless of what the caller passes.
+    """
+    forward = [("R&D",), ("R/D",), ("Ops", "Q1.2"), ("Ops", "Q1-2"), ("Ops",)]
+    assert de._display_names(forward) == de._display_names(list(reversed(forward)))
+
+
+def test_a_stamp_the_service_refused_is_not_recorded_as_applied(monkeypatch):
+    """Believing an unapplied stamp makes the NEXT run refuse the item it thinks it marked."""
+    monkeypatch.setattr(de, "call", lambda *a, **k: (403, {}, {}))
+    item = de.Item("WB", de.MODEL_TYPE, Path("."), source="e1")
+    assert de.stamp_item("ws", "tok", "id-1", item) is False
+
+    monkeypatch.setattr(de, "call", lambda *a, **k: (200, {}, {}))
+    assert de.stamp_item("ws", "tok", "id-1", item) is True
+
+
+def test_the_model_choice_is_deterministic_when_nothing_names_a_winner(tmp_path):
+    """No byPath and no folder-name match still must not vary between runs."""
+    bundle = tmp_path / "b"
+    wb = bundle / "pbip" / "WB"
+    for name in ("Zulu", "Alpha"):
+        (wb / f"{name}.SemanticModel").mkdir(parents=True)
+        (wb / f"{name}.SemanticModel" / "definition.pbism").write_text("{}", encoding="utf-8")
+
+    (_name, model, _report) = de.discover(bundle)[0]
+
+    assert model.folder.name == "Alpha.SemanticModel", "the tiebreak must be stable, not glob order"
+
+
+def test_the_model_tiebreak_does_not_depend_on_directory_listing_order(tmp_path):
+    """Filesystem-independent: NTFS enumerates alphabetically, which masks an unsorted glob here."""
+    wb = tmp_path / "WB"
+    paths = []
+    for name in ("Zulu", "Alpha"):
+        path = wb / f"{name}.SemanticModel"
+        path.mkdir(parents=True)
+        paths.append(path)
+
+    assert de._preferred_model(wb, list(paths), []) == wb / "Alpha.SemanticModel"
+    assert de._preferred_model(wb, list(reversed(paths)), []) == wb / "Alpha.SemanticModel"
