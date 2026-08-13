@@ -261,6 +261,14 @@ def test_is_complete_abf_rejects_a_truncation_on_a_block_boundary(tmp_path: Path
     assert "boundary" in (refresh_pbip_model._abf_rejection_reason(boundary) or "")
 
 
+@pytest.mark.parametrize("chunk", (512 * 1024, 1024 * 1024, _ABF_MAX_BLOCK_BYTES, 4 * 1024 * 1024))
+def test_boundary_truncated_abf_is_rejected_for_review_chunk_sizes(tmp_path: Path, chunk: int) -> None:
+    """Pin the four measured boundary truncations: 512 KiB, 1 MiB, 2 MiB, and 4 MiB chunks."""
+    boundary = tmp_path / "cache.abf"
+    boundary.write_bytes(_abf_bytes(((chunk, 64), (chunk, 64), (chunk, 64))))
+    assert refresh_pbip_model._is_complete_abf(boundary) is False
+
+
 def test_every_proper_prefix_of_a_valid_backup_is_rejected(tmp_path: Path) -> None:
     """Exhaustive: for a two-block image, EVERY prefix short of the whole file is a partial write.
 
@@ -899,6 +907,31 @@ def test_a_locked_out_persist_cannot_touch_compat_or_cache(tmp_path: Path) -> No
             refresh_pbip_model._persist_image(cache, model_dir, 1606, b_write, lock_timeout=0.3)
         assert database_tmdl.read_bytes() == before, "a locked-out run must not mutate database.tmdl"
         assert not cache.exists(), "a locked-out run must not write a cache"
+
+
+def test_refresh_refuses_ui_save_after_model_lock_timeout(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A live peer holding the persist lock must report NOT_PERSISTED, not fall back outside the lock."""
+    cache = _model(tmp_path, compat=1604)
+    args = refresh_pbip_model._build_arg_parser().parse_args([])
+    calls: list[str] = []
+
+    def locked_image_save(_port: int, _cache: Path, model_dir: Path | None = None):
+        calls.append(f"image:{model_dir}")
+        raise refresh_pbip_model.ModelLockTimeout("held by pid 123 on host buildbox")
+
+    def unlocked_ui_save(_pid: int) -> tuple[bool, str]:
+        calls.append("ui-save")
+        return True, "ui save should not run"
+
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_args: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "image_save", locked_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "save", unlocked_ui_save)
+
+    assert refresh_pbip_model._refresh_and_save(456, 789, cache, args) == 1
+    out = capsys.readouterr().out
+    assert "REFRESH: NOT_PERSISTED" in out
+    assert "pid 123" in out
+    assert calls == [f"image:{cache.parent.parent}"]
 
 
 def _frontmatter(text: str) -> str:

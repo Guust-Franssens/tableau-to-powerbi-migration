@@ -139,8 +139,8 @@ SAVE_TIMEOUT_SECONDS = 120
 # How long a persist waits for a CONCURRENT persist of the same model to finish before giving up
 # (issue #114). A persist writes ~114 KB and takes seconds, so a live peer clears well within this;
 # the wait only bites a genuinely stuck LIVE holder (a dead holder's lock is reclaimed at once, never
-# waited on). On timeout `_persist_image` raises `ModelLockTimeout`, and `_refresh_and_save` degrades
-# to the UI Save - which does its own compatibility alignment - rather than forcing the #114 race.
+# waited on). On timeout `_persist_image` raises `ModelLockTimeout` and `_refresh_and_save` REFUSES to
+# persist (`NOT_PERSISTED`), naming the concurrent run.
 PERSIST_LOCK_TIMEOUT_SECONDS = 120.0
 # The XMLA refresh ceiling. NOT agent-tunable on purpose - there is no CLI flag for it.
 #
@@ -1035,34 +1035,39 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     #
     # `--no-save` is for read-only work (the validator is read-only BY CONTRACT and must pass it) and
     # for validate-then-deploy, where the project must stay byte-identical.
-    if args.no_save:
-        return None
-
-    # Preferred: a real API call. Falls back to driving the UI only if it fails, so a change in the
-    # engine can never leave the pipeline with no way to persist.
-    saved, save_message = (False, "no cache path resolved")
-    if cache is not None and not args.ui_save:
-        try:
-            saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
-        except CompatRollbackError as exc:
-            # FATAL: the cache write failed AND the compatibility alignment could not be rolled back,
-            # so database.tmdl declares a level that was never written to a cache. Driving the UI Save
-            # on top of that inconsistent state would persist the mismatch, so do NOT fall back to it.
-            print(f"  save   : {exc}")
-            print(
-                "REFRESH: ERROR compatibility rollback failed - database.tmdl left inconsistent; "
-                "do NOT save. Restore database.tmdl from source control before retrying."
-            )
-            return 2
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
-    if not saved:
+    if not args.no_save:
+        # Preferred: a real API call. Falls back to driving the UI only if it fails, so a change in the
+        # engine can never leave the pipeline with no way to persist.
+        saved, save_message = (False, "no cache path resolved")
+        if cache is not None and not args.ui_save:
+            try:
+                saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
+            except CompatRollbackError as exc:
+                # FATAL: the cache write failed AND the compatibility alignment could not be rolled back,
+                # so database.tmdl declares a level that was never written to a cache. Driving the UI Save
+                # on top of that inconsistent state would persist the mismatch, so do NOT fall back to it.
+                print(f"  save   : {exc}")
+                print(
+                    "REFRESH: ERROR compatibility rollback failed - database.tmdl left inconsistent; "
+                    "do NOT save. Restore database.tmdl from source control before retrying."
+                )
+                return 2
+            except ModelLockTimeout as exc:
+                print(f"  save   : {exc}")
+                print(
+                    "REFRESH: NOT_PERSISTED (a concurrent persist of this model holds the lock; "
+                    "data is in memory only). Wait for the other run to finish and retry."
+                )
+                return 1
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
+        if not saved:
+            print(f"  save   : {save_message}")
+            saved, save_message = save(pid)
         print(f"  save   : {save_message}")
-        saved, save_message = save(pid)
-    print(f"  save   : {save_message}")
-    if not saved:
-        print("REFRESH: NOT_PERSISTED (data is in memory only - the next open will be empty)")
-        return 1
+        if not saved:
+            print("REFRESH: NOT_PERSISTED (data is in memory only - the next open will be empty)")
+            return 1
     return None
 
 

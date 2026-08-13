@@ -47,9 +47,8 @@ class ModelLockTimeout(RuntimeError):
     """The per-model persistence lock was held by a LIVE process past the acquisition timeout.
 
     Distinct from the dead-holder case (which is reclaimed, never raised): this means another run is
-    genuinely persisting the SAME model right now. The caller must NOT force past it - doing so is
-    exactly the #114 race - but back off, or fall back to a mechanism that does its own compatibility
-    alignment (Desktop's UI Save).
+    genuinely persisting the SAME model right now. The caller must NOT force past it or fall back to
+    an unlocked save - doing so is exactly the #114 race - but refuse to persist and ask for a retry.
     """
 
 

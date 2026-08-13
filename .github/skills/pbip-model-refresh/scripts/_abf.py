@@ -36,9 +36,9 @@ _ABF_PREAMBLE = "This backup was created using XPress9 compression.".encode("utf
 _ABF_FIRST_BLOCK_OFFSET = len(_ABF_PREAMBLE) + 2  # 100-byte preamble + the 2-byte pad
 _ABF_BLOCK_MAGIC = b"\x2a\xd7\x86\x4e"
 _ABF_BLOCK_HEADER_BYTES = 8 + len(_ABF_BLOCK_MAGIC)  # uint32 uncompressed + uint32 length + magic
-# Every one of the 60 NON-final blocks measured declares exactly 2 MiB uncompressed, and every one of
-# the 13 FINAL blocks declares less. So a file whose last block is a full 2 MiB is a write that
-# stopped on a block boundary with more to come - the one truncation a chain-walk alone cannot see.
+# Every non-final block measured declares exactly 2 MiB uncompressed, and every final block declares
+# less. That fixed interior size is load-bearing: without it, a write truncated exactly on a block
+# boundary can land cleanly on EOF and look complete.
 _ABF_MAX_BLOCK_BYTES = 2 * 1024 * 1024
 
 
@@ -100,6 +100,11 @@ def _walk_abf_blocks(handle, size: int) -> str | None:
         if end > size:
             return f"block {blocks} needs {end} byte(s) but the file is {size} - truncated write"
         if end < size:
+            if uncompressed != _ABF_MAX_BLOCK_BYTES:
+                return (
+                    f"block {blocks} is non-final but declares {uncompressed} uncompressed byte(s), "
+                    f"not the required {_ABF_MAX_BLOCK_BYTES}"
+                )
             offset = end
             continue
         if uncompressed == _ABF_MAX_BLOCK_BYTES:
