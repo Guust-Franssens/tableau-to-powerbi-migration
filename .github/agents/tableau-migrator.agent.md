@@ -168,12 +168,14 @@ in the active contract's limitations/worklist instead of silently dropping it.
    credentials** — a Tableau user must supply a PAT. Without server access, fall back to step 4.
 2. **Run the deterministic tier — it builds, you consume.** `python scripts/run_estate.py --input
    <folder> --output <bundle>` runs the engine over one workbook or a whole folder, then supplies the
-   three things its own output contract does not: a **real exit code** (the engine prints
+   four things its own output contract does not: a **real exit code** (the engine prints
    `[FAIL] Definition of done` and returns 0 anyway), an **`--approved-dax` collision check** (that
    map is estate-global and name-keyed, so one approval for a calc named `Calculation2` lands in
-   *every* model that reuses the name), and **per-workbook handover slices** so the raw estate report
-   never enters a subagent's context. Exit 3 = `DOD_FAILED`, exit 4 = collision — resolve both before
-   delegating anything. Each subagent gets `handover/<workbook>.json`, never the whole `report.json`.
+   *every* model that reuses the name), an **empty-model gate** (`check_empty_model.py`, offline —
+   an Import partition over a flat file that never landed opens, validates, binds and holds **zero
+   rows**), and **per-workbook handover slices** so the raw estate report never enters a subagent's
+   context. Exit 3 = `DOD_FAILED`, 4 = collision, 5 = non-canonical engine, 6 = `EMPTY_MODEL` —
+   resolve before delegating anything. Each subagent gets `handover/<workbook>.json`, never the whole `report.json`.
    **Concurrency:** workbooks fan out in parallel *after* step 7's barrier; Power BI Desktop is not a
    lock (instances are `--pid`-scoped), but each costs ~1.3 GB, so cap at ~4.
 3. **Pick the canonical contract; never invent a parallel spec.** If the parser path already has

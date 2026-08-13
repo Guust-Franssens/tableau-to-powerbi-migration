@@ -333,12 +333,13 @@ answer.
 
 | exit | constant | meaning | what to do |
 |---|---|---|---|
-| `0` | `EXIT_OK` | `ESTATE: READY` — DoD not failed, no approval collisions | proceed |
+| `0` | `EXIT_OK` | `ESTATE: READY` — DoD not failed, no approval collisions, no empty models | proceed |
 | `1` | `EXIT_ENGINE_FAILED` | the engine itself exited non-zero | read the last 2000 chars it printed (the wrapper prints them to stderr) |
 | `2` | *(argparse/usage)* | `--input` missing and `--slice-only` not given | fix the command |
 | `3` | `EXIT_DOD_FAILED` | engine's definition of done is `failed` | **§3 decision point** — do not deploy |
 | `4` | `EXIT_COLLISION` | two models claim the same calc name with different formulas | resolve before approving DAX |
 | `5` | `EXIT_ENGINE_SOURCE` | *(pending branch only)* non-canonical engine | see §1.2 |
+| `6` | `EXIT_EMPTY_MODEL` | *(pending branch only)* a model would open and load **zero rows** — an Import partition over a flat file that never landed | read `<bundle>/empty-model-check.json`; land the file and repoint the partition, or make the table live. Never deploy it: it looks finished and shows nothing |
 
 Note `warn` is **deliberately allowed through** — it is the normal state of a real migration
 (deferred visuals, stubbed calcs), and blocking on it would make the wrapper useless ✅ verified
