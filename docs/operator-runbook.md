@@ -573,25 +573,25 @@ offers — land the file and repoint the partition, or make the table live — a
 workshop clock the third option is usually the real one: **deploy the other N and leave that one
 behind.**
 
-❌ **There is no supported flag for it.** ✅ verified against `deploy_estate.py --help` 2026-08-13:
-the full option set is `--bundle --workspace --tenant --dry-run --force-unlock --journal --estate-db
---no-folders --estate-id --adopt-existing`. No `--skip`, no exclusion of any kind, and the module has
-no empty-model awareness (it knows only `report_is_empty()`, which is a report with **no pages** — a
-different thing). Issue #127 tracks adding one.
+✅ **Use the supported skip path — do not hand-move folders.** Verified against
+`deploy_estate.py --help` and the module docstring: `--skip <unit>` withholds one named unit, and
+`--skip-empty-models` withholds every unit that `<bundle>\empty-model-check.json` reports EMPTY.
+Issue #127 is closed by #140.
 
-⚠️ **Until it exists, move the folder** — discovery is purely folder-driven, so this works, and the
-dry run confirms it:
+Run a dry run first and confirm the item count drops by the withheld unit's model/report count:
 
 ```powershell
-mkdir <bundle>\_quarantine-empty-model
-Move-Item <bundle>\pbip\<unit-folder> <bundle>\_quarantine-empty-model\
-python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --dry-run   # item count must DROP by 2
+python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --skip-empty-models --dry-run
+# or, for one known unit:
+python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --skip <unit-folder> --dry-run
 ```
 
 The count dropping by exactly **2** (the model and its report) is the confirmation signal — a drop of
-1, or no drop, means you moved the wrong folder. ⚠️ reported from the cold run, whose dry run went
-**78 → 76** items. Record the quarantined unit in the brief: an accepted gap is a decision, an
-unmentioned one is a defect.
+1, or no drop, means you withheld a model-only unit or named the wrong folder. A `--skip` name that
+matches no directory under `<bundle>\pbip` refuses to start rather than silently deploying it.
+Record the withheld unit in the brief: an accepted gap is a decision, an unmentioned one is a
+defect. The real run exits **3 / `EXIT_INCOMPLETE`** when the attempted deploy succeeds but a unit
+was withheld (§2 step 6).
 
 ### Step 6 — deploy
 
@@ -607,7 +607,7 @@ BEFORE deploying, since each item carries a cost in the customer's capacity and 
 verified. On the **2026-08-12 reference bundle** a dry run plans **76 items** — 39 units × 2, minus
 2 reports skipped as empty ✅ re-verified 2026-08-13 by calling `discover()` + `report_is_empty()`
 offline against that bundle. (The cold run's newer bundle landed on 76 too, but only *after* the
-quarantine above took it from 78 — do not read one estate's number as the other's.)
+empty model was withheld — do not read one estate's number as the other's.)
 
 Then drop `--dry-run`.
 
@@ -638,7 +638,7 @@ document — and it is the number to give the customer once you have it.
 | `0` | `EXIT_OK` | everything planned was deployed (skipped-as-empty reports are reported honestly, not counted as deployed) | proceed |
 | `1` | `EXIT_FAILED` | at least one item failed, **or one or more workbooks were refused** — the run names them | fix the named failures/refusals, then re-run the same command to resume |
 | `2` | `EXIT_PREFLIGHT` | never started: workspace missing, no access, item budget does not fit, an unreadable empty-model report was requested, or a `--skip` name matched no unit | fix the preflight/refusal message; for a bad `--skip`, use a directory name under `<bundle>\pbip` (or `--dry-run` to list them) |
-| `3` | `EXIT_INCOMPLETE` | everything attempted succeeded, but one or more whole units were deliberately withheld by `--skip` / `--skip-empty-models`; nothing was created for those units, so the estate is knowingly incomplete | repair the withheld units, then re-run without the skip to finish the estate; a caller that intentionally quarantined them may accept exactly this code |
+| `3` | `EXIT_INCOMPLETE` | everything attempted succeeded, but one or more whole units were deliberately withheld by `--skip` / `--skip-empty-models`; nothing was created for those units, so the estate is knowingly incomplete | repair the withheld units, then re-run without the skip to finish the estate; a caller that intentionally withheld them may accept exactly this code |
 
 What it does, in order, and why the order is not negotiable:
 
@@ -661,24 +661,20 @@ hand-roll it ✅ verified from the module docstring:
   indistinguishable from success until `/operations/{id}` is polled. **This is not only a create
   problem** — it applies to every long-running item call, including the `getDefinition` a verifier
   reaches for. See §5.1 check 8, where the naive version fabricates a plausible false defect.
-- **Duplicate item names — the one place two "verified" claims collide.** State it once, here:
+- **Duplicate item names.** Cite the deployer's settled source-of-truth; do not restate an older
+  contradiction here:
 
   > **Measured against a real Fabric tenant, via this script's own path** (`POST
   > https://api.fabric.microsoft.com/v1/workspaces/{id}/items`, Create Item, item types `Report` and
   > `SemanticModel`): **Fabric did NOT reject a second item with the same `displayName` and type** —
   > two identical pairs sat side by side in the workspace afterwards.
 
-  ✅ verified 2026-08-13 by reading both claims in `deploy_estate.py`. They are not equally strong,
-  and the difference is the answer: the **module docstring** states the *documented* API behaviour
-  (*"a duplicate `displayName` + type is rejected (`ItemDisplayNameNotAvailableYet`)"*), while the
-  journal's own docstring records the *observed* behaviour above and concludes that rejection **"is
-  therefore not a safety net we can lean on for these types"**. The code sides with the measurement:
-  it handles `ItemDisplayNameNotAvailableYet`/`ItemDisplayNameAlreadyInUse` as *"already there, go
-  verify"* rather than as fatal, because on a resume that is the expected answer — and it treats the
-  journal and the run lock as load-bearing precisely because nothing upstream will stop a duplicate.
-  Issue #127 tracks removing the contradiction in the code; **the operational rule does not depend on
-  which wins**: assume a duplicate name will be *accepted*, and let the journal (§6.1) and the
-  ownership guard (§3.3) do the protecting. Nothing downstream catches it if you are wrong.
+  ✅ verified 2026-08-13 from `deploy_estate.py`'s module docstring. The code still handles
+  `ItemDisplayNameNotAvailableYet`/`ItemDisplayNameAlreadyInUse` defensively as *"already there, go
+  verify"*, but the same source states those errors have **never been observed** for this create path
+  and are **not** evidence that the service rejects duplicates. Operational rule: assume a duplicate
+  name will be *accepted*, and let the journal (§6.1), run lock and ownership guard (§3.3) do the
+  protecting. Nothing downstream catches it if you are wrong.
 
 ---
 
@@ -930,13 +926,13 @@ Run in order. Each line says what it proves — and §5.2 says what none of them
 | 2 | DoD not failed | `summary.md`'s first heading, and the `definition_of_done` line in the run summary | `status` ≠ `failed` |
 | 3 | inputs are accounted for | `_sweep/parse-sweep.md` (§2 step 4 — **not** `_harvest/`) | `ours failed 0, his failed 0` |
 | 4 | the item count was agreed | `deploy_estate.py --dry-run` | number matches what the customer signed off |
-| 5 | deploy completed | `echo $LASTEXITCODE` after step 6 | `0` (`1` = at least one failure or refusal — read the named list) |
+| 5 | deploy completed | `echo $LASTEXITCODE` after step 6 | `0`, or `3` when you deliberately withheld a unit (`1` = at least one failure or refusal — read the named list) |
 | 6 | nothing was silently skipped | the final line: `all N item(s) deployed` **or** `N deployed; M skipped as empty` | M is a number you can explain |
 | 7 | the journal has no unfinished intent | `Select-String -Path <bundle>\deploy-journal.jsonl -Pattern '"status":"failed"'` | no hits, or hits you have triaged |
 | 8 | every report resolves its model | `python scripts\verify_bindings.py --workspace <workspace-id> --tenant <tenant-id>` (the API, polled) | exit `0`: every report resolves to a `SemanticModel` in this workspace; exit `1` = findings; exit `2` = the check could not be performed |
 | 9 | the estate identity survived | `Get-Content <bundle>\deploy-estate-id.txt` | non-empty, and stored with the bundle |
 | 10 | the engine version is recorded | `.engine` in `<bundle>\engine-output-receipt.json` (§1.2) | present, with `canonical: true` |
-| 11 | no model would load zero rows | `<bundle>\empty-model-check.json` | `"status": "OK"`, or a quarantine you decided on (§2 step 5) |
+| 11 | no model would load zero rows | `<bundle>\empty-model-check.json` | `"status": "OK"`, or a unit you deliberately withheld with `--skip` / `--skip-empty-models` (§2 step 5) |
 | 12 | connections the customer must make | `python scripts\connections_manifest.py --bundle <bundle> --out <dir>` | `connections.md` delivered |
 
 ❌ **Correction: check 10 no longer looks for `ENGINE-VERSION.txt`.** That file was a manual
