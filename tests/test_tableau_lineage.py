@@ -85,26 +85,54 @@ def _survey_workbook(
     dependencies: list[tuple[str, str | None]],
     project: str = "Certified Sources",
     unknown: bool = False,
+    candidates: dict[str, list[tuple[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """One workbook entry as `estate_survey.py --json` writes it.
 
-    `luid=""` on a dependency is not a synthetic edge case: `resolve_dependency` emits exactly that
-    - together with a non-`resolved` status - for any dependency it could not tie to exactly one
-    data source (AMBIGUOUS / NOT_FOUND), so the two travel together here as well.
+    A dependency row is `dict(dep)` updated with `resolve_dependency`'s return, so the three shapes
+    it can take are reproduced exactly:
+
+    * RESOLVED  -> `luid`/`project` filled, `candidates` holding the ONE match;
+    * AMBIGUOUS -> `luid: ""` AND `project: ""` (it "NEVER picks one"), `candidates` naming every
+      data source that shares the name;
+    * NOT_FOUND -> `luid: ""`, `project: ""`, `candidates: []`.
+
+    Blanking `project` alongside `luid` is the detail a fixture is most tempted to skip, and it is
+    load-bearing: on real output the ambiguity is visible ONLY in `candidates`, so a fixture that
+    leaves `project` populated tests a shape the engine cannot emit.
     """
+    matches = candidates or {}
+    deps: list[dict[str, Any]] = []
+    for ds_name, luid in dependencies:
+        found = [
+            {"luid": c_luid, "name": ds_name, "project": c_project} for c_luid, c_project in matches.get(ds_name, [])
+        ]
+        if luid is None or luid:
+            resolved_luid = f"luid-{ds_name}" if luid is None else luid
+            deps.append(
+                {
+                    "datasource_name": ds_name,
+                    "status": "resolved",
+                    "luid": resolved_luid,
+                    "project": project,
+                    "candidates": found or [{"luid": resolved_luid, "name": ds_name, "project": project}],
+                }
+            )
+            continue
+        deps.append(
+            {
+                "datasource_name": ds_name,
+                "status": "ambiguous" if found else "not_found",
+                "luid": "",
+                "project": "",
+                "candidates": found,
+            }
+        )
     return {
         "name": name,
         "luid": f"wb-{name}",
         "project": "Reports",
-        "published_dependencies": [
-            {
-                "datasource_name": ds_name,
-                "status": "resolved" if luid is None or luid else "ambiguous",
-                "luid": f"luid-{ds_name}" if luid is None else luid,
-                "project": project,
-            }
-            for ds_name, luid in dependencies
-        ],
+        "published_dependencies": deps,
         # `build_survey` stamps both of these on every workbook row; the fixtures carry them so a
         # gap check that reads them is exercised against the shape the engine actually writes.
         "dependencies_unknown": unknown,
@@ -136,7 +164,7 @@ def _survey_file(tmp_path: Path, workbooks: list[dict[str, Any]], **extra: Any) 
                     "workbook": workbook["name"],
                     "datasource_name": dep["datasource_name"],
                     "status": dep["status"],
-                    "candidates": [],
+                    "candidates": dep["candidates"],
                 }
             )
     payload: dict[str, Any] = {
@@ -159,6 +187,32 @@ def _survey_file(tmp_path: Path, workbooks: list[dict[str, Any]], **extra: Any) 
         **extra,
     }
     path = tmp_path / "estate_survey.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+# `build_survey()` alone returns these four summary keys and nothing else - verified against engine
+# 2.126.0. `survey_site()` is what adds `degraded`, `listing_errors`, `connection_read_errors` and
+# `summary.dependencies_unknown` on top.
+_OFFLINE_SUMMARY_KEYS = frozenset(
+    {"workbooks_total", "workbooks_with_published_dependency", "required_datasources", "unresolved_dependencies"}
+)
+
+
+def _offline_survey(tmp_path: Path, workbooks: list[dict[str, Any]], **extra: Any) -> Path:
+    """A survey as `build_survey()` writes it WITHOUT `survey_site()` - i.e. no error bookkeeping.
+
+    This is not a hypothetical: `build_survey` is the no-network assembly entry point, and every
+    survey written before engine 2.117.0 (2026-08-10) has this shape too. It is also the only shape
+    in which the per-workbook `dependencies_unknown` flag is the SOLE evidence that a workbook went
+    unread - which is exactly why a fixture must be able to produce it. A fixture that stamps
+    `summary.dependencies_unknown` supplies the very signal the test claims to be testing.
+    """
+    payload = json.loads(_survey_file(tmp_path, workbooks, **extra).read_text("utf-8"))
+    for key in ("degraded", "listing_errors", "connection_read_errors"):
+        payload.pop(key, None)
+    payload["summary"] = {k: v for k, v in payload["summary"].items() if k in _OFFLINE_SUMMARY_KEYS}
+    path = tmp_path / "offline_survey.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
@@ -388,13 +442,26 @@ def test_an_incomplete_survey_withholds_the_stronger_claim(tmp_path: Path, caplo
 
 
 def test_an_unresolved_dependency_also_counts_as_a_gap(tmp_path: Path) -> None:
-    """A dependency the survey could not resolve leaves a hole in the graph; say so."""
-    workbook = _survey_workbook(REVENUE_WB, [(SALES_DS, None)])
-    workbook["published_dependencies"][0]["status"] = "ambiguous"
-    survey = load_survey(_survey_file(tmp_path, [workbook]))
+    """A dependency the survey could not resolve leaves a hole in the graph; say so.
+
+    This is the PARSED direction on its own: the declared list is emptied, so only the workbook row
+    carries the evidence. The declared direction has its own test below - the two must not be able
+    to cover for each other, because a listing failure is exactly when they disagree.
+    """
+    workbook = _survey_workbook(REVENUE_WB, [(SALES_DS, "")])
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [workbook],
+            unresolved_dependencies=[],
+            summary={"workbooks_total": 1, "unresolved_dependencies": 0, "degraded": False},
+        )
+    )
 
     assert not survey.complete
-    assert "did not resolve" in " ".join(survey.gaps)
+    assert [gap for gap in survey.gaps if "resolve" in gap] == [
+        "1 dependency(ies) did not resolve to a published data source"
+    ]
 
 
 # --- the survey's OWN completeness signals -------------------------------------------------------
@@ -467,14 +534,37 @@ def test_a_survey_listing_no_workbooks_at_all_is_evidence_of_nothing(
 def test_a_workbook_with_unknown_dependencies_is_a_gap_with_no_error_list_present(tmp_path: Path) -> None:
     """`build_survey` marks the row; only `survey_site` adds the error list. Read the row too.
 
-    A survey assembled by `build_survey()` alone carries `dependencies_unknown` per workbook and
-    none of `survey_site`'s bookkeeping, and "unknown" is the opposite of "none" - which is the
-    engine's own stated reason for the flag.
+    The fixture here is `build_survey()`'s output with NONE of `survey_site`'s bookkeeping - no
+    `connection_read_errors`, no `summary.dependencies_unknown` - so the per-workbook flag is the
+    only evidence in the file. That matters: with the summary counter present the scan is never the
+    sole signal, and deleting it leaves the suite green (measured). "Unknown" is the opposite of
+    "none", which is the engine's own stated reason for the flag.
+    """
+    survey = load_survey(
+        _offline_survey(
+            tmp_path,
+            [_survey_workbook(REVENUE_WB, [(SALES_DS, None)]), _survey_workbook("Unreadable", [], unknown=True)],
+        )
+    )
+
+    assert "dependencies_unknown" not in json.loads(survey.path.read_text("utf-8"))["summary"]
+    assert not survey.complete
+    assert "1 workbook connection(s) could not be read" in " ".join(survey.gaps)
+
+
+def test_the_summary_counter_is_read_even_when_no_workbook_row_carries_the_flag(tmp_path: Path) -> None:
+    """The mirror of the test above: the SUMMARY on its own, with clean rows.
+
+    `survey_site` computes `summary.dependencies_unknown` from the LUIDs whose connections it could
+    not read, while the per-row flag is stamped by `build_survey` - so the two can disagree exactly
+    when it matters, e.g. when the listing that would have carried the row failed as well. Each
+    source needs a test in which it is the only evidence, or one of them can quietly stop counting.
     """
     survey = load_survey(
         _survey_file(
             tmp_path,
-            [_survey_workbook(REVENUE_WB, [(SALES_DS, None)]), _survey_workbook("Unreadable", [], unknown=True)],
+            [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])],
+            summary={"workbooks_total": 1, "dependencies_unknown": 1, "degraded": False},
         )
     )
 
@@ -485,11 +575,15 @@ def test_a_workbook_with_unknown_dependencies_is_a_gap_with_no_error_list_presen
 def test_a_survey_carrying_no_degraded_flag_cannot_claim_it_saw_the_estate(tmp_path: Path) -> None:
     """Completeness needs positive evidence; the absence of the flag is not it.
 
-    Every survey the canonical engine writes carries `degraded` (`main()` dumps `survey_site`'s
-    dict whole). A JSON without it is either older than the flag or not the engine's - and neither
-    can license the strongest claim this tool makes. Measured on the 2026-08-13 operator run whose
-    artifact is still on disk: that survey has no `degraded` and no `listing_errors` key at all, so
-    the pre-fix code was reading two fields out of a file that could not have contained the others.
+    Every survey the canonical engine writes today carries `degraded` (`main()` dumps
+    `survey_site`'s dict whole). A JSON without it is either older than the flag or not the
+    engine's - and neither can license the strongest claim this tool makes.
+
+    Measured on the three survey artifacts on this machine: the 2026-08-13 operator run carries
+    `degraded: false`, empty error lists and 38/38 workbooks, and is classified COMPLETE - a
+    healthy survey is unaffected by this gate. The two older dry-run artifacts (2026-08-12 and
+    2026-08-11) carry no `degraded` and no `listing_errors` key at all, so the pre-fix code was
+    reading two fields out of files that could not have contained the others.
     """
     payload = json.loads(_survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])]).read_text("utf-8"))
     del payload["degraded"]
@@ -500,6 +594,37 @@ def test_a_survey_carrying_no_degraded_flag_cannot_claim_it_saw_the_estate(tmp_p
 
     assert not survey.complete
     assert "no 'degraded' flag" in " ".join(survey.gaps)
+
+
+def test_an_otherwise_clean_survey_with_no_flag_is_told_the_likely_cause(tmp_path: Path) -> None:
+    """Name the cheap explanation instead of sending an operator after a phantom failure.
+
+    `degraded` and `listing_errors` arrived in engine 2.117.0 (upstream commit 72f983a8,
+    2026-08-10), so every survey this repo took before that date now reads INCOMPLETE. The gate
+    stays exactly as strict - a pre-2.117.0 survey that lost a listing call is genuinely
+    indistinguishable from a healthy one, which is why the flag was added - but the remedy it
+    prints ("re-run estate_survey.py") needs live Tableau credentials, so an operator who cannot
+    get them deserves to know the likely reason before spending the afternoon on it.
+    """
+    survey = load_survey(_offline_survey(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])]))
+    gaps = " ".join(survey.gaps)
+
+    assert not survey.complete
+    assert "predates engine 2.117.0 (2026-08-10)" in gaps
+
+
+def test_the_version_hint_is_withheld_when_the_survey_shows_a_REAL_failure(tmp_path: Path) -> None:
+    """An old survey that ALSO lost a listing call is not merely old; do not explain it away."""
+    survey = load_survey(
+        _offline_survey(
+            tmp_path,
+            [_survey_workbook(REVENUE_WB, [(SALES_DS, None)]), _survey_workbook("Unreadable", [], unknown=True)],
+        )
+    )
+    gaps = " ".join(survey.gaps)
+
+    assert "no 'degraded' flag" in gaps
+    assert "predates engine" not in gaps
 
 
 def test_a_workbook_list_shorter_than_the_surveys_own_count_is_a_gap(tmp_path: Path) -> None:
@@ -530,6 +655,24 @@ def test_one_failure_recorded_three_ways_is_reported_once(tmp_path: Path) -> Non
 
     unread = [gap for gap in survey.gaps if "could not be read" in gap]
     assert unread == ["1 workbook connection(s) could not be read"]
+
+
+def test_an_incomplete_survey_says_so_even_when_there_is_nothing_to_warn_about(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The gaps have to REACH the operator, not merely exist on the object.
+
+    With no orphan data sources there is no UNCONFIRMED heading to soften, so the header's
+    'SURVEY IS INCOMPLETE' line is the only place the gaps are printed at all. Silencing it left
+    the whole suite green (measured), which means every other completeness test was asserting on
+    `survey.gaps` rather than on what an operator actually reads.
+    """
+    datasources = [_metadata(SALES_DS, downstream=[REVENUE_WB])]
+    survey = load_survey(_survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])], degraded=True))
+    output = _rendered(caplog, build_plan(datasources, "", survey), survey)
+
+    assert "UNCONFIRMED" not in output
+    assert "SURVEY IS INCOMPLETE: the survey reports itself DEGRADED" in output
 
 
 def test_an_incomplete_survey_still_contributes_every_edge_it_did_see(
@@ -638,7 +781,8 @@ def test_a_declared_unresolved_dependency_is_a_gap_even_when_every_row_resolved(
     `survey_site` records an unresolvable dependency in `unresolved_dependencies` as well as on the
     row, and the two can disagree - a row can be missing entirely when the listing that would have
     carried it failed. Reading only the rows would then miss a hole the survey is explicitly
-    declaring.
+    declaring. They are counted as ONE failure, not two: on a listing failure both carry the same
+    38 dependencies, and printing them under two different sentences reads as 76.
     """
     survey = load_survey(
         _survey_file(
@@ -651,22 +795,37 @@ def test_a_declared_unresolved_dependency_is_a_gap_even_when_every_row_resolved(
     )
 
     assert not survey.complete
-    assert "1 declared dependency(ies) resolved to no data source" in " ".join(survey.gaps)
+    assert [gap for gap in survey.gaps if "resolve" in gap] == [
+        "1 dependency(ies) did not resolve to a published data source"
+    ]
+
+
+def test_one_unresolved_dependency_declared_and_parsed_is_reported_once(tmp_path: Path) -> None:
+    """The same hole seen from both sides is one hole. `_count`'s contract says ONCE."""
+    survey = load_survey(_survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, "")])]))
+
+    assert [gap for gap in survey.gaps if "resolve" in gap] == [
+        "1 dependency(ies) did not resolve to a published data source"
+    ]
 
 
 def test_a_survey_listing_one_name_under_two_identities_is_flagged_too(tmp_path: Path) -> None:
     """The collision can arrive from the SURVEY side, not just the Metadata API's.
 
-    Two rows naming 'Quarterly Figures' with different LUIDs/projects collapse into one key here,
-    so both workbooks look like consumers of one data source. Same decision as the other direction:
-    keep the merged edges (the order stays safe) and say plainly that the attribution is not known.
+    This is the shape `resolve_dependency` ACTUALLY emits for a duplicated name: `status:
+    "ambiguous"`, `luid: ""`, `project: ""` and a `candidates` list naming both data sources. It
+    "NEVER picks one", so neither identity field carries the evidence - only `candidates` does, and
+    a fixture that hands over two populated LUIDs instead is testing a shape the engine cannot
+    produce. Here the Metadata API lists ONE row for the name, so `len(rows) >= 2` cannot fire
+    either: without reading `candidates` the merge happens with nothing printed.
     """
+    both = {SHARED_DS: [("luid-finance", "Finance"), ("luid-marketing", "Marketing")]}
     survey = load_survey(
         _survey_file(
             tmp_path,
             [
-                _survey_workbook(FINANCE_WB, [(SHARED_DS, "luid-finance")], project="Finance"),
-                _survey_workbook(MARKETING_WB, [(SHARED_DS, "luid-marketing")], project="Marketing"),
+                _survey_workbook(FINANCE_WB, [(SHARED_DS, "")], candidates=both),
+                _survey_workbook(MARKETING_WB, [(SHARED_DS, "")], candidates=both),
             ],
         )
     )
@@ -675,10 +834,42 @@ def test_a_survey_listing_one_name_under_two_identities_is_flagged_too(tmp_path:
     assert entry.ambiguous
     assert entry.projects == {"Finance", "Marketing"}
     assert entry.luids == {"luid-finance", "luid-marketing"}
+    # Evidence only: the survey could not choose, so neither does this. A row with no LUID is
+    # skipped by the download step instead of fetching whichever candidate was listed first.
+    assert (entry.luid, entry.project) == (None, None)
 
     plan = build_plan([_metadata(SHARED_DS, luid="luid-finance", project="Finance")], "", survey)
     assert plan[0]["downstream_workbooks"] == [FINANCE_WB, MARKETING_WB]
     assert plan[0]["name_collision"] == ["Finance", "Marketing"]
+
+
+def test_a_collision_the_metadata_api_cannot_see_at_all_is_still_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The silent-merge hole: no Metadata API row for the name, ambiguous survey dependencies.
+
+    A `sqlproxy` data source can be invisible to the Metadata API entirely - that IS issue #126 -
+    so the row is survey-only and `len(rows) >= 2` never fires. The merge is still the right call
+    (it over-migrates rather than orphans), but it is the one decision that must never be made
+    quietly, so the survey-only row is checked for the collision too.
+    """
+    both = {SHARED_DS: [("luid-finance", "Finance"), ("luid-marketing", "Marketing")]}
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [
+                _survey_workbook(FINANCE_WB, [(SHARED_DS, "")], candidates=both),
+                _survey_workbook(MARKETING_WB, [(SHARED_DS, "")], candidates=both),
+            ],
+        )
+    )
+    plan = build_plan([], "", survey)
+    output = _rendered(caplog, plan, survey)
+
+    assert [entry["matched_via"] for entry in plan] == ["survey-only"]
+    assert plan[0]["name_collision"] == ["Finance", "Marketing"]
+    assert "NAME COLLISION" in output
+    assert f"{SHARED_DS!r} exists in 2 project(s) (Finance, Marketing)" in output
 
 
 def test_a_unique_name_reports_no_collision(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

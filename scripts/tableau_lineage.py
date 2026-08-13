@@ -61,6 +61,7 @@ import logging
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -141,13 +142,27 @@ class SurveyDatasource:
     luids: set[str] = field(default_factory=set)
 
     def observe(self, luid: str | None, project: str | None) -> None:
-        """Record one sighting of this data source; the survey names it once per consumer."""
+        """Record a RESOLVED sighting: this is the identity the download step will use."""
         if luid:
             self.luids.add(luid)
             self.luid = self.luid or luid
         if project:
             self.projects.add(project)
             self.project = self.project or project
+
+    def note_candidate(self, luid: str | None, project: str | None) -> None:
+        """Record one candidate the survey could NOT choose between - evidence, never identity.
+
+        `resolve_dependency` returns `status='ambiguous', luid='', project=''` plus a `candidates`
+        list naming every data source that shares the name, and it "NEVER picks one" on purpose.
+        Neither does this: candidates feed the ambiguity evidence only, so `luid`/`project` stay
+        empty and the download step skips a data source nobody can identify - instead of quietly
+        fetching whichever candidate happened to be listed first.
+        """
+        if luid:
+            self.luids.add(luid)
+        if project:
+            self.projects.add(project)
 
     @property
     def ambiguous(self) -> bool:
@@ -220,7 +235,7 @@ def _count(*values: Any) -> int:
     return max((c for c in counts if isinstance(c, int) and not isinstance(c, bool)), default=0)
 
 
-def _flag_gaps(data: dict[str, Any]) -> list[str]:
+def _flag_gaps(data: dict[str, Any], other_gaps: Sequence[str] = ()) -> list[str]:
     """Read the survey's OWN verdict on itself: `degraded`.
 
     `survey_site()` sets `degraded = bool(errors or listing_errors)` and documents it as "this
@@ -231,12 +246,26 @@ def _flag_gaps(data: dict[str, Any]) -> list[str]:
 
     Its ABSENCE is a gap too. A survey with no flag cannot show it saw the whole estate, and the
     only claim gated on completeness here is the strongest one this tool makes ("may be abandoned").
+
+    That gate stays strict even for the common benign cause - an OLD survey. `degraded` and
+    `listing_errors` arrived in engine 2.117.0 (upstream commit 72f983a8, 2026-08-10), so every
+    survey taken before that date lacks them; a pre-2.117.0 survey that silently lost a listing call
+    is genuinely indistinguishable from a healthy one, which is why the flag was added. What this
+    DOES do is name that likely cause when nothing else in the survey looks wrong, so an operator
+    five days from a workshop is not sent hunting for a failure that never happened - or, worse,
+    told only to "re-run estate_survey.py", which needs live Tableau credentials.
     """
     declared = data.get("degraded", _summary(data).get("degraded"))
     if declared is None:
+        cause = (
+            " - no other error is reported, so this survey most likely predates engine 2.117.0 "
+            "(2026-08-10), which added the flag"
+            if not other_gaps
+            else ""
+        )
         return [
             "the survey carries no 'degraded' flag, so it cannot show it saw the whole estate "
-            "(re-run estate_survey.py to produce one)"
+            f"(re-run estate_survey.py to produce one){cause}"
         ]
     return ["the survey reports itself DEGRADED (estate_survey.py's own flag)"] if declared else []
 
@@ -269,14 +298,20 @@ def _visibility_gaps(data: dict[str, Any]) -> list[str]:
 
 
 def _resolution_gaps(data: dict[str, Any], unresolved_deps: int) -> list[str]:
-    """Every dependency the survey saw but could not tie to a published data source."""
-    gaps: list[str] = []
-    declared_unresolved = _count(data.get("unresolved_dependencies"), _summary(data).get("unresolved_dependencies"))
-    if declared_unresolved:
-        gaps.append(f"{declared_unresolved} declared dependency(ies) resolved to no data source")
-    if unresolved_deps:
-        gaps.append(f"{unresolved_deps} dependency(ies) did not resolve to a published data source")
-    return gaps
+    """Every dependency the survey saw but could not tie to a published data source.
+
+    The survey declares this count in `unresolved_dependencies` (and in its summary) AND it is
+    visible per-row in the parsed edges; `_count` reports the ONE failure once, so a listing failure
+    does not print the same 38 dependencies under two different sentences.
+    """
+    unresolved = _count(
+        data.get("unresolved_dependencies"),
+        _summary(data).get("unresolved_dependencies"),
+        unresolved_deps,
+    )
+    if not unresolved:
+        return []
+    return [f"{unresolved} dependency(ies) did not resolve to a published data source"]
 
 
 def _survey_gaps(data: dict[str, Any], unresolved_deps: int) -> tuple[str, ...]:
@@ -289,7 +324,8 @@ def _survey_gaps(data: dict[str, Any], unresolved_deps: int) -> tuple[str, ...]:
     original ("Both the Metadata API and the survey found no consumer"). The missing workbook is
     precisely the consumer that would have disproved it.
     """
-    return tuple(_flag_gaps(data) + _visibility_gaps(data) + _resolution_gaps(data, unresolved_deps))
+    observed = _visibility_gaps(data) + _resolution_gaps(data, unresolved_deps)
+    return tuple(_flag_gaps(data, observed) + observed)
 
 
 def _read_survey_edges(
@@ -317,6 +353,15 @@ def _read_survey_edges(
             entry = datasources.setdefault(_norm(name), SurveyDatasource(name=name))
             entry.consumers.add(_norm(wb_display))
             entry.observe(dep.get("luid"), dep.get("project"))
+            # An AMBIGUOUS dependency carries `luid: ""`, `project: ""` and a `candidates` list -
+            # `resolve_dependency` "NEVER picks one" when a name matches several data sources. Read
+            # that list: it is the only place the collision is visible when the Metadata API lists
+            # at most one row for the name, and without it the merge this tool performs on purpose
+            # (over-migrate, never orphan) would happen SILENTLY, which is the one thing it must
+            # not do.
+            for candidate in dep.get("candidates") or []:
+                if isinstance(candidate, dict):
+                    entry.note_candidate(candidate.get("luid"), candidate.get("project"))
             if dep.get("status") and dep.get("status") != "resolved":
                 unresolved += 1
     return unresolved
@@ -509,9 +554,28 @@ def _flag_name_collisions(by_key: dict[str, list[dict[str, Any]]], survey: Surve
         survey_projects = sorted(entry.projects) if entry and entry.ambiguous else []
         if len(rows) < 2 and not survey_projects:
             continue
-        projects = sorted({str(row["project"]) for row in rows} | set(survey_projects))
+        projects = sorted({str(row["project"]) for row in rows if row["project"]} | set(survey_projects))
         for row in rows:
-            row["name_collision"] = projects
+            row["name_collision"] = projects or ["?"]
+
+
+def _survey_only_rows(site: str, survey: Survey, by_key: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Plan rows for data sources the Metadata API never listed at all.
+
+    They are registered in `by_key` as well, not merely appended to the plan: a collision the
+    Metadata API cannot see (it lists at most one row for the name - and for a `sqlproxy` source,
+    often none) would otherwise reach the operator as a single quiet row, and the name merge this
+    script performs on purpose would happen with no warning printed anywhere.
+    """
+    rows: list[dict[str, Any]] = []
+    for key, seen in survey.datasources.items():
+        if key in by_key:
+            continue
+        source = {"name": seen.name, "luid": seen.luid, "project": seen.project, "has_extracts": None}
+        row = _entry(site, source, [], survey.consumers(key), "survey-only")
+        rows.append(row)
+        by_key.setdefault(key, []).append(row)
+    return rows
 
 
 def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | None = None) -> list[dict[str, Any]]:
@@ -545,11 +609,7 @@ def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | No
             by_key.setdefault(survey_key, []).append(entry)
 
     if survey:
-        for key, seen in survey.datasources.items():
-            if key in by_key:
-                continue
-            source = {"name": seen.name, "luid": seen.luid, "project": seen.project, "has_extracts": None}
-            plan.append(_entry(site, source, [], survey.consumers(key), "survey-only"))
+        plan.extend(_survey_only_rows(site, survey, by_key))
         _flag_name_collisions(by_key, survey)
 
     return sorted(plan, key=lambda p: (-p["downstream_count"], (p["name"] or "").lower()))
