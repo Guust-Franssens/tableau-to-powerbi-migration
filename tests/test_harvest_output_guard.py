@@ -62,15 +62,17 @@ def _is_ignored(path: Path, cwd: Path) -> bool:
 
 @pytest.fixture(name="repo")
 def repo_fixture(tmp_path: Path) -> Path:
-    """A throwaway git repo carrying this repo's real harvest ignore rules."""
+    """A throwaway git repo carrying this repo's REAL .gitignore, byte for byte.
+
+    Copied whole rather than filtered down to the harvest rules: a reduced fixture answered
+    `check-ignore` differently from the real file (see
+    `test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it`), so a subset would have proved
+    something about a file nobody has.
+    """
     _git(["init", "-q"], tmp_path)
-    rules = [
-        line
-        for line in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-        if line.startswith(("/_harvest", "/_sweep", "/_assessment", "/_bundle", "/_estate"))
-    ]
-    assert rules, "no harvest-family rules found in .gitignore - this fixture would prove nothing"
-    (tmp_path / ".gitignore").write_text("\n".join(rules) + "\n", encoding="utf-8")
+    ignore_text = (REPO_ROOT / ".gitignore").read_bytes()
+    assert b"/_sweep" in ignore_text and b"/_harvest" in ignore_text, "no harvest rules - fixture proves nothing"
+    (tmp_path / ".gitignore").write_bytes(ignore_text)
     return tmp_path
 
 
@@ -119,6 +121,20 @@ def test_guard_refuses_an_unignored_path_inside_a_work_tree(repo: Path) -> None:
 def test_guard_proceeds_for_an_ignored_path(repo: Path) -> None:
     assert h.unignored_output_paths(repo / "_sweep-2026-08-13") == []
     assert h.refuse_unignored_output(repo / "_sweep-2026-08-13", allow_unignored=False) is False
+
+
+def test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it(repo: Path) -> None:
+    """Appending a slash to make a directory rule match turns the guard into a rubber stamp.
+
+    Measured on git 2.55.0.windows.3 against a realistic `.gitignore`: `check-ignore -- 'x/'` exits
+    0 for ANY path, reporting an EMPTY matched pattern - so a guard that probes with a trailing
+    slash reports every target as safely ignored, including the one this test refuses. The
+    workaround for the directory-rule problem is a path COMPONENT under `--out`, never a slash.
+    """
+    stamp = _git(["check-ignore", "-q", "--", f"{repo / 'definitely-not-ignored'}/"], repo)
+    if stamp.returncode != 0:
+        pytest.skip("this git no longer reports every trailing-slash path as ignored")
+    assert h.refuse_unignored_output(repo / "_leaky", allow_unignored=False) is True
 
 
 def test_guard_proceeds_when_the_directory_already_exists(repo: Path) -> None:
