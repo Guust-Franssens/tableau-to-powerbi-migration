@@ -14,7 +14,7 @@
   Verifies: Python + the parser's Python deps, the deterministic conversion engine (the installed
   `tableau-fabric-skills` plugin, which is its SINGLE canonical source - a second copy anywhere is a
   hard failure, see issue #107), both skill plugins
-  (powerbi-authoring@fabric-collection and powerbi-migration-skills@powerbi-migration-collection),
+  (powerbi-authoring@fabric-collection and powerbi-playbook@powerbi-playbook-collection),
   the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, and the npm CLI version
   matrix. Prints a per-item status (OK / WARN / MISS) with an install hint for anything absent.
 
@@ -189,7 +189,7 @@ else {
 
 # --- Skill plugins ---
 # Both are REQUIRED for the agents to work as written: `powerbi-authoring` supplies the planning/
-# design/authoring/semantic-model skills the builder personas chain, and `powerbi-migration-skills`
+# design/authoring/semantic-model skills the builder personas chain, and `powerbi-playbook`
 # republishes this repo's own two bundles so a subagent can invoke them BY NAME. Measured 2026-07-31:
 # a custom subagent does get a `skill` tool and CAN invoke both plugin and repo-local skills - so a
 # missing plugin is a real capability loss, not a cosmetic one.
@@ -198,8 +198,8 @@ $migrationPlugin = $null
 foreach ($p in @(
         @{ name = 'powerbi-authoring'; market = 'fabric-collection'; tier = 'critical'
             hint = 'In Copilot: /plugin -> add marketplace microsoft/skills-for-fabric -> enable powerbi-authoring. See AGENTS.md.' },
-        @{ name = 'powerbi-migration-skills'; market = 'powerbi-migration-collection'; tier = 'recommended'
-            hint = 'In Copilot: /plugin -> add marketplace Guust-Franssens/powerbi-migration-skills -> enable powerbi-migration-skills. See AGENTS.md.' }
+        @{ name = 'powerbi-playbook'; market = 'powerbi-playbook-collection'; tier = 'recommended'
+            hint = 'In Copilot: /plugin -> add marketplace Guust-Franssens/powerbi-playbook -> enable powerbi-playbook. See AGENTS.md.' }
     )) {
     $plugin = $null
     if ($cfg -and $cfg.installedPlugins) {
@@ -208,7 +208,7 @@ foreach ($p in @(
     $pluginOk = $plugin -and (Test-Path $plugin.cache_path)
     Add-Check "plugin: $($p.name)@$($p.market)" $p.tier ([bool]$pluginOk) `
         $(if ($pluginOk) { "v$($plugin.version)" } else { 'not installed/enabled' }) $p.hint
-    if ($pluginOk -and $p.name -eq 'powerbi-migration-skills') { $migrationPlugin = $plugin }
+    if ($pluginOk -and $p.name -eq 'powerbi-playbook') { $migrationPlugin = $plugin }
 }
 
 # --- Skill-bundle drift (the plugin copy SHADOWS .github/skills/ for a subagent) ---
@@ -261,17 +261,17 @@ if ($migrationPlugin) {
     #                    warning visible and actionable, but do not encode a warning tier as exit 1.
     $detail = if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" } else { "$($shipped.Count) bundle(s) present" }
     Add-Check 'skill bundles installed' 'critical' ($missing.Count -eq 0) $detail `
-        'copilot plugin install powerbi-migration-skills@powerbi-migration-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
+        'copilot plugin install powerbi-playbook@powerbi-playbook-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
 
     Add-Check 'skill bundles match published plugin' 'critical' ($drift.Count -eq 0) `
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
-        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of powerbi-migration-skills>, commit+push. Do not trust a measurement taken against a stale bundle.'
+        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of powerbi-playbook>, commit+push. Do not trust a measurement taken against a stale bundle.'
 }
 
 # Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
 # depends on it, even when the dependency only fails later at handoff/validation time. Audited
 # 2026-08-10 under that exit semantics:
-#   * powerbi-migration-skills plugin: repo-local skills still load in this repo; the critical bundle
+#   * powerbi-playbook plugin: repo-local skills still load in this repo; the critical bundle
 #     checks above enforce correctness when the installed plugin is present and shadowing the repo.
 #   * powerbi-modeling-mcp: useful authoring accelerator; local PBIP/TMDL edits can still proceed.
 #   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target

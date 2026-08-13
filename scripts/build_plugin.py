@@ -27,10 +27,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = REPO_ROOT / ".github" / "skills"
 
-MARKETPLACE_NAME = "powerbi-migration-collection"
-PLUGIN_NAME = "powerbi-migration-skills"
-VERSION = "0.2.0"
-PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-migration-skills"
+MARKETPLACE_NAME = "powerbi-playbook-collection"
+PLUGIN_NAME = "powerbi-playbook"
+VERSION = "0.3.0"
+PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-playbook"
 
 # Only source-tool-agnostic bundles ship. `sentinel-probe` is a diagnostic, and anything
 # Tableau-specific belongs in the migration repo's personas, not in a reusable plugin.
@@ -156,6 +156,26 @@ def _force_remove(func, path, _exc) -> None:
     func(path)
 
 
+def _rmtree_force(path: Path) -> None:
+    """`shutil.rmtree` that clears read-only bits, on both Python 3.11 and 3.12+.
+
+    `onexc` is Python 3.12+; this repo targets 3.11 (`pyproject.toml` py-version), where passing it
+    raises `TypeError`. `onerror` is deprecated in 3.12 but still honoured, so the split below is the
+    one spelling that works on both.
+
+    This lives in a helper because it did NOT used to: the guard existed at one call site while
+    `main()` called `rmtree(..., onexc=...)` directly, so `--check` crashed with `TypeError` on the
+    repo's own declared Python and could never have caught an unpublished edit.
+    """
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_force_remove)
+    else:
+        # pylint's deprecated-argument check is static, so it flags this branch even though it only
+        # ever runs on 3.11, where `onerror` is the CORRECT (and only) spelling.
+        # pylint: disable-next=deprecated-argument
+        shutil.rmtree(path, onerror=lambda fn, p, _exc: _force_remove(fn, Path(p), None))
+
+
 def _clear_but_keep_git(out: Path) -> None:
     """Empty `out` of generated content while preserving `.git`.
 
@@ -167,16 +187,7 @@ def _clear_but_keep_git(out: Path) -> None:
         if entry.name == ".git":
             continue
         if entry.is_dir():
-            # `onexc` is Python 3.12+; this repo targets 3.11 (`pyproject.toml` py-version), where
-            # passing it raises TypeError and the build dies before writing anything. `onerror` is
-            # deprecated in 3.12 but still honoured, so it is the one spelling that works on both.
-            if sys.version_info >= (3, 12):
-                shutil.rmtree(entry, onexc=_force_remove)
-            else:
-                # pylint's deprecated-argument check is static, so it flags this branch even though
-                # it only ever runs on 3.11, where `onerror` is the CORRECT (and only) spelling.
-                # pylint: disable-next=deprecated-argument
-                shutil.rmtree(entry, onerror=lambda fn, path, _exc: _force_remove(fn, Path(path), None))
+            _rmtree_force(entry)
         else:
             entry.chmod(stat.S_IWRITE)
             entry.unlink()
@@ -265,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         scratch = out.parent / f"{out.name}.check"
         build(scratch)
         fresh = _generated_files(scratch)
-        shutil.rmtree(scratch, onexc=_force_remove)
+        _rmtree_force(scratch)
         if existing != fresh:
             drifted = sorted({*existing} ^ {*fresh}) or [k for k in existing if k in fresh and existing[k] != fresh[k]]
             print("BUILD: DRIFT - rebuild required. Differing paths:")

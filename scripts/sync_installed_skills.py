@@ -12,8 +12,8 @@ you exit" - and that is what the toolkit assumed for weeks.
 It is wrong. Measured 2026-08-01, the lock is narrower than the error implies:
 
     <base>                                  RENAME BLOCKED   (a running session holds it)
-    <base>/powerbi-migration-skills         RENAME BLOCKED
-    <base>/powerbi-migration-skills/skills  renameable
+    <base>/powerbi-playbook         RENAME BLOCKED
+    <base>/powerbi-playbook/skills  renameable
     any file inside                         freely writable, creatable and deletable
 
 `plugin update` fails because it replaces the plugin by swapping the top-level directory, which is
@@ -42,12 +42,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 INSTALLED = (
-    Path.home()
-    / ".copilot"
-    / "installed-plugins"
-    / "powerbi-migration-collection"
-    / "powerbi-migration-skills"
-    / "skills"
+    Path.home() / ".copilot" / "installed-plugins" / "powerbi-playbook-collection" / "powerbi-playbook" / "skills"
 )
 
 
@@ -64,7 +59,7 @@ def build_reference_copy(workdir: Path) -> Path:
         capture_output=True,
         text=True,
     )
-    built = workdir / "plugins" / "powerbi-migration-skills" / "skills"
+    built = workdir / "plugins" / "powerbi-playbook" / "skills"
     if not built.is_dir():
         raise SystemExit(f"build_plugin.py did not produce {built}")
     return built
@@ -102,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"SYNC: ERROR - plugin not installed at {INSTALLED}")
         print(
             "      Install it once between sessions: copilot plugin install "
-            "powerbi-migration-skills@powerbi-migration-collection"
+            "powerbi-playbook@powerbi-playbook-collection"
         )
         return 2
 
