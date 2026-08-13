@@ -34,7 +34,9 @@
 
 .OUTPUTS
   Final line `VERDICT: CREDENTIAL_MISSING` (exit 1) or `VERDICT: CREDENTIAL_PRESENT` (exit 0), or
-  `VERDICT: UNKNOWN` (exit 3) if the target window can't be found.
+  `VERDICT: UNKNOWN` (exit 3) if no window for the pid can be found OR a Refresh control was never
+  invoked (with nothing invoked, "no modal appeared" proves nothing - reporting PRESENT then would be
+  a fail-open arbiter, worse than none).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/probe_desktop_credential.ps1 -DesktopPid 42532
@@ -52,19 +54,26 @@ $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.A
 # Connector credential-dialog signature text (covers Databricks / SQL / Snowflake / generic OAuth).
 $sig = 'You aren.t signed in|Personal Access Token|Databricks Client Credentials|specify how to connect|Account Key|Enter your credentials|Please specify how to connect'
 
+function Get-PidWindows {
+  # EVERY top-level window of the target process, not just the first. A credential modal is its own
+  # top-level window (a sibling of the main Desktop window, not a child), so scanning only the first
+  # would miss it - and the whole point of this arbiter is to catch that modal.
+  return $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
+}
+
 function Test-CredentialModal {
-  $cur = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-  if (-not $cur) { return $null }
-  $desc = $cur.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-  foreach ($d in $desc) {
-    $n = $d.Current.Name
-    if ($n -and $n -match $sig) { return $n }
+  foreach ($w in Get-PidWindows) {
+    $desc = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($d in $desc) {
+      $n = $d.Current.Name
+      if ($n -and $n -match $sig) { return $n }
+    }
   }
   return $null
 }
 
-$win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-if (-not $win) { Write-Output "main window for pid $DesktopPid not found"; Write-Output "VERDICT: UNKNOWN"; exit 3 }
+$windows = Get-PidWindows
+if (-not $windows -or $windows.Count -eq 0) { Write-Output "no window for pid $DesktopPid found"; Write-Output "VERDICT: UNKNOWN"; exit 3 }
 
 # 1. If a credential modal is ALREADY open, the credential is missing - report immediately.
 $hit = Test-CredentialModal
@@ -75,14 +84,26 @@ if ($hit) {
 }
 
 # 2. Otherwise trigger a refresh and watch for the modal (generous timeout for warehouse cold-start).
-$all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+# Search every top-level window for an invokable 'Refresh', not just the first.
 $invoked = $false
-foreach ($e in $all) {
-  if ($e.Current.Name -eq 'Refresh' -and (($e.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }) -match 'Invoke')) {
-    try { $e.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); $invoked = $true; break } catch {}
+foreach ($w in $windows) {
+  $all = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+  foreach ($e in $all) {
+    if ($e.Current.Name -eq 'Refresh' -and (($e.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }) -match 'Invoke')) {
+      try { $e.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); $invoked = $true; break } catch {}
+    }
   }
+  if ($invoked) { break }
 }
 Write-Output "refresh invoked: $invoked"
+
+# If no Refresh was ever invoked, we did not actually test anything: "no modal appeared" is not
+# evidence a credential is cached. Report UNKNOWN rather than a fail-open CREDENTIAL_PRESENT.
+if (-not $invoked) {
+  Write-Output "no invokable Refresh control found for pid $DesktopPid - cannot probe the credential state"
+  Write-Output "VERDICT: UNKNOWN"
+  exit 3
+}
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while ((Get-Date) -lt $deadline) {

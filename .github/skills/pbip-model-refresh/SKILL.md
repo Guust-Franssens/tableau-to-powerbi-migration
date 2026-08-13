@@ -192,8 +192,11 @@ data can only have come from the cache.
 Two traps:
 
 - The AMO client raises **"The server sent an unrecognizable response"** *while writing the file
-  correctly*. Judge success by the FILE (exists, non-empty, mtime advanced), never by the absence of
-  an exception.
+  correctly*. Judge success by the FILE, never by the absence of an exception — but "the file" means a
+  **complete** ABF: only that specific benign response is tolerated, and the staged `cache.abf.tmp` is
+  swapped in only after it is validated as a real Analysis Services backup (CFBF/OLE2 magic + a full
+  header), so a truncated or disk-full write is rejected instead of replacing a good cache. Any other
+  exception propagates and the compatibility-level alignment is rolled back.
 - `database_operations ExportToTmdlFolder` persists model *definition* changes but carries no rows.
   It cannot substitute for this.
 
@@ -215,22 +218,29 @@ queries that same wrong port.
 So, before refreshing, querying or saving anything, two guards run. First, **if you pass `--port` it
 must EQUAL the port derived from `--pid`** — a mismatch aborts, so `--port` can never bypass PID-based
 discovery to point the read (and the `ImageSave` write) at another instance. Second, `same_model()`
-compares the connected model's tables against the TMDL that owns the destination cache and requires an
-**EXACT table-for-table match**; a mismatch — or an identity it cannot establish at all (no model
-folder resolved, or no TMDL tables to fingerprint) — aborts with `WRONG_MODEL`, **failing closed**
-rather than assuming it is fine. A superset schema (all your tables plus more) is a mismatch, not a
-"confirmed". File metadata fundamentally cannot tell you whose rows are in a blob, only the model's
-own contents can. When a project folder holds several `.SemanticModel` directories the destination is
-resolved from the `.pbip` → report → `definition.pbir` `byPath` **binding**, never an arbitrary first
-match. In a parallel batch **always pass `--pid`** (`powerbi-desktop status` maps pid to open file);
-with several instances open the scripts refuse to guess.
+compares the connected model against the TMDL that owns the destination cache and requires an **exact
+match of tables, columns AND measures** — table names alone are too coarse (a bound sibling with the
+same table names but different columns or measures would pass), so the fingerprint descends into each
+table's columns and the model's measures, filtering only the auto-generated noise that never appears in
+TMDL (RowNumber system columns, `LocalDateTable_*` / `DateTableTemplate_*` auto-date tables). A
+mismatch — or an identity it cannot establish at all (no model folder resolved, or no TMDL to
+fingerprint) — aborts with `WRONG_MODEL`, **failing closed** rather than assuming it is fine. A superset
+schema (all your tables plus more) is a mismatch, not a "confirmed". File metadata fundamentally cannot
+tell you whose rows are in a blob, only the model's own contents can. When a project folder holds
+several `.SemanticModel` directories the destination is resolved from the `.pbip` → report →
+`definition.pbir` `byPath` **binding first**; only if no binding resolves does a single same-named
+sibling act as a last-resort fallback — the binding is authoritative and the name heuristic can never
+short-circuit it. In a parallel batch **always pass `--pid`** (`powerbi-desktop status` maps pid to open
+file); with several instances open the scripts refuse to guess.
 
 **Sweep for orphans before you build, not just siblings while you build.** Measured 2026-08-01: a
 Desktop instance was already running on the *exact `.pbip` path* about to be generated, left over from
-an earlier, since-deleted attempt. `same_model()` would not have caught it — its TMDL tables matched —
-but `INFO.MEASURES()` showed measures the new build never defines, i.e. a **different model held in
-memory on your path**, one Save away from overwriting the files you are generating. So at the start of
-a build, list `Get-Process PBIDesktop`, read each one's command line
+an earlier, since-deleted attempt. The tables-only fingerprint then in force would not have caught it —
+its TMDL tables matched — though the columns+measures fingerprint now would, because `INFO.MEASURES()`
+showed measures the new build never defines. But do not lean on that: an orphan whose schema is
+byte-for-byte your model (the common re-open case) is **identical** to `same_model()`, one Save away
+from overwriting the files you are generating. So at the start of a build, list `Get-Process
+PBIDesktop`, read each one's command line
 (`Get-CimInstance Win32_Process -Filter "ProcessId=<pid>"`), and force-close any instance already bound
 to your own `.pbip` before writing to it. Identify by `MainWindowTitle` + command line, never by "the
 one instance that is running".

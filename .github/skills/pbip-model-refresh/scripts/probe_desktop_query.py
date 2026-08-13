@@ -188,6 +188,80 @@ def first_table(conn) -> str:
     return names[0]
 
 
+# TMSCHEMA_COLUMNS.Type == 3 is the auto-generated per-table RowNumber (index) column. It is NEVER
+# serialized into TMDL, so an identity fingerprint that compared it would report every real model as
+# a stranger - it must be filtered from the live side, not compared. (1=Data, 2=Calculated,
+# 3=RowNumber, 4=CalculatedTableColumn.)
+_COLUMN_TYPE_ROWNUMBER = 3
+
+
+def _table_id_to_name(conn) -> dict[str, str]:
+    """Map each table's engine ID to its name, so column/measure rows can name their table."""
+    cmd = conn.CreateCommand()
+    cmd.CommandText = "SELECT [ID], [Name] FROM $SYSTEM.TMSCHEMA_TABLES"
+    reader = cmd.ExecuteReader()
+    mapping: dict[str, str] = {}
+    try:
+        while reader.Read():
+            mapping[str(reader.GetValue(0))] = str(reader.GetValue(1))
+    finally:
+        reader.Close()
+    return mapping
+
+
+def column_names(conn) -> set[tuple[str, str]]:
+    """`(table, column)` pairs from TMSCHEMA_COLUMNS, part of a model's identity fingerprint.
+
+    Two classes of AUTO-GENERATED column are filtered so the fingerprint compares only what the TMDL
+    actually declares (otherwise a legitimate model would fail its own identity gate):
+    * the per-table RowNumber index (`Type == _COLUMN_TYPE_ROWNUMBER`), which is never in TMDL; and
+    * every column of the `LocalDateTable_*` / `DateTableTemplate_*` auto date/time scaffolding, which
+      is filtered at TABLE level on the disk side too.
+    `ExplicitName` is the model name; `InferredName` is the fallback for a column whose name the
+    engine inferred. Comparison is case-folded by the caller.
+    """
+    id_to_name = _table_id_to_name(conn)
+    cmd = conn.CreateCommand()
+    cmd.CommandText = "SELECT [TableID], [ExplicitName], [InferredName], [Type] FROM $SYSTEM.TMSCHEMA_COLUMNS"
+    reader = cmd.ExecuteReader()
+    pairs: set[tuple[str, str]] = set()
+    try:
+        while reader.Read():
+            if int(reader.GetValue(3)) == _COLUMN_TYPE_ROWNUMBER:
+                continue
+            table = id_to_name.get(str(reader.GetValue(0)))
+            if table is None or table.startswith(AUTO_DATE_TABLE_PREFIXES):
+                continue
+            explicit = reader.GetValue(1)
+            name = str(explicit) if explicit not in (None, "") else str(reader.GetValue(2))
+            pairs.add((table, name))
+    finally:
+        reader.Close()
+    return pairs
+
+
+def measure_names(conn) -> set[tuple[str, str]]:
+    """`(table, measure)` pairs from TMSCHEMA_MEASURES, part of a model's identity fingerprint.
+
+    Measures on the auto date/time scaffolding are filtered for the same reason as its columns.
+    Comparison is case-folded by the caller.
+    """
+    id_to_name = _table_id_to_name(conn)
+    cmd = conn.CreateCommand()
+    cmd.CommandText = "SELECT [TableID], [Name] FROM $SYSTEM.TMSCHEMA_MEASURES"
+    reader = cmd.ExecuteReader()
+    pairs: set[tuple[str, str]] = set()
+    try:
+        while reader.Read():
+            table = id_to_name.get(str(reader.GetValue(0)))
+            if table is None or table.startswith(AUTO_DATE_TABLE_PREFIXES):
+                continue
+            pairs.add((table, str(reader.GetValue(1))))
+    finally:
+        reader.Close()
+    return pairs
+
+
 def _probe_one(port: int, conn, table: str) -> int:
     """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
     dax = f"EVALUATE TOPN(1, '{table}')"

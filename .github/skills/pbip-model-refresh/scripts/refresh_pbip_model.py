@@ -92,7 +92,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 # pylint: disable=wrong-import-position
-from probe_desktop_query import AUTO_DATE_TABLE_PREFIXES, _load_adomd, discover_port, first_table, table_names
+from probe_desktop_query import (
+    AUTO_DATE_TABLE_PREFIXES,
+    _load_adomd,
+    column_names,
+    discover_port,
+    first_table,
+    measure_names,
+    table_names,
+)
 
 SAVE_SETTLE_SECONDS = 3
 SAVE_TIMEOUT_SECONDS = 120
@@ -120,8 +128,20 @@ REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
 # A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
 # only when it needs to be (spaces, punctuation), so both forms have to be accepted.
 TABLE_DECL_RE = re.compile(r"^table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
+# A column/measure declaration sits INDENTED under its table, and is quoted only when it must be.
+# The unquoted branch stops at whitespace OR `=`, so a calculated column/measure (`column 'X' = expr`
+# or `measure Total = SUM(...)`) yields just the name, never the expression that follows.
+COLUMN_DECL_RE = re.compile(r"^\s*column\s+(?:'([^']+)'|([^=\s]+))", re.MULTILINE)
+MEASURE_DECL_RE = re.compile(r"^\s*measure\s+(?:'([^']+)'|([^=\s]+))", re.MULTILINE)
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
+
+# A persisted `cache.abf` is an Analysis Services backup, which is a Microsoft Compound File Binary
+# (OLE2) container - it always begins with this 8-byte signature and is at least one 512-byte CFBF
+# header. Verifying that before swapping a staged file over a good cache is what stops a truncated or
+# interrupted write from being mistaken for a real one and destroying the existing cache (#113).
+_CFBF_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_CFBF_HEADER_BYTES = 512
 
 # The credential arbiter that settles a refresh TIMEOUT (slow source vs. sign-in modal). Resolved
 # relative to THIS file so the runtime recovery instruction always points at the copy that ships
@@ -429,62 +449,116 @@ def _compat_rollback_paths(model_dir: Path | None) -> list[Path]:
     return paths
 
 
+def _is_complete_abf(path: Path) -> bool:
+    """Is `path` a fully-written cache.abf, not a truncated or partial one?
+
+    A cache.abf is an Analysis Services backup, i.e. a Microsoft Compound File Binary (OLE2)
+    container, so a complete one begins with `_CFBF_MAGIC` and is at least one CFBF header
+    (`_CFBF_HEADER_BYTES`). This is a NECESSARY, cheap check, not a full parse: paired with only
+    suppressing the one benign AMO exception (`_is_benign_imagesave_response_error`), it keeps a
+    disk-full or interrupted write from replacing a good cache with rubble (#113). It stays
+    conservative - rejecting a VALID cache would be worse than the bug - so it checks only the
+    signature and a minimum size, never an exact length or sector alignment.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(len(_CFBF_MAGIC))
+        return head == _CFBF_MAGIC and path.stat().st_size >= _CFBF_HEADER_BYTES
+    except OSError:
+        return False
+
+
+def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
+    """AMO's ImageSave raises even after a fully correct write - only THAT error is benign.
+
+    Measured: the client throws "The server sent an unrecognizable response" while the backup is
+    written correctly, so a save cannot be judged by the absence of an exception. But every OTHER
+    failure (disk full, permission denied, the stream closing mid-write) MUST propagate, or a partial
+    write is mistaken for success and destroys the existing cache - the precise #113 defect. Matching
+    only the known message fails SAFE if the wording ever changes: a real write is treated as failed
+    (the pipeline falls back to the UI save), never a partial write treated as a success.
+    """
+    return "unrecognizable response" in str(exc).lower()
+
+
 def _staged_image_write(cache_path: Path, write_image) -> bool:
-    """Write the cache to a staging file and swap it in atomically. Returns True on a real write.
+    """Write the cache to a staging file and swap it in atomically. Returns True only on a COMPLETE write.
 
-    ``FileMode.Create`` on the live ``cache.abf`` truncates a good cache the instant the write
-    begins, so an ImageSave that then fails half way leaves the project WORSE than before -- no
-    fresh cache and no old one either. Staging to ``cache.abf.tmp`` and only ``os.replace``-ing it
-    over the original once it exists and is non-empty means a failed or partial write cannot destroy
-    an existing good cache.
-
-    Success is judged by the staged FILE, never by the absence of an exception: the AMO client
-    raises "The server sent an unrecognizable response" *while writing correctly*, so ``write_image``
-    is allowed to raise, and a raise with a non-empty staging file still counts as a write.
+    `FileMode.Create` on the live `cache.abf` truncates a good cache the instant the write begins, so
+    an ImageSave that then fails half way leaves the project WORSE than before -- no fresh cache and
+    no old one. Staging to `cache.abf.tmp` and only `os.replace`-ing it over the original once it is a
+    COMPLETE backup means a failed or partial write cannot destroy an existing good cache. Two rules
+    make "complete" mean what it says (#113): `write_image` is expected NOT to raise (`image_save`
+    absorbs the one benign AMO error and re-raises everything else), so any exception reaching here --
+    including from `os.replace` -- is a REAL failure that PROPAGATES after the staging file is removed,
+    letting the caller roll the compatibility bump back; and even on a clean return the staged file
+    must look like a backup (`_is_complete_abf`) before it is swapped in.
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     staging = cache_path.with_name(cache_path.name + ".tmp")
     if staging.exists():
         staging.unlink()
+    swapped = False
     try:
         write_image(staging)
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        # The write is judged by the file below, not by whether the call raised.
-        del exc
-    if staging.exists() and staging.stat().st_size > 0:
-        os.replace(staging, cache_path)
-        return True
-    if staging.exists():
-        staging.unlink()
-    return False
+        if _is_complete_abf(staging):
+            os.replace(staging, cache_path)
+            swapped = True
+    finally:
+        # Never leave a partial cache.abf.tmp behind. `finally` does not suppress the exception, so a
+        # real write/replace error still propagates to _persist_image, which rolls the compat back.
+        if not swapped and staging.exists():
+            staging.unlink()
+    return swapped
 
 
-def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, write_image) -> tuple[bool, str]:
-    """Align compat, stage the cache write, swap atomically, and roll compat back if the write fails.
-
-    Pure-Python (no .NET), so the atomic-write and rollback guarantees are unit-testable without a
-    live Analysis Services instance. ``write_image(staging_path)`` performs the actual engine write.
-    """
-    rollback_paths = _compat_rollback_paths(model_dir)
-    snapshot = {path: (path.read_bytes() if path.exists() else None) for path in rollback_paths}
-
-    aligned = _align_compatibility(model_dir, live_level)
-    if aligned:
-        print(f"  save   : {aligned}")
-
-    if _staged_image_write(cache_path, write_image):
-        size_kb = cache_path.stat().st_size / 1024
-        return True, f"persisted via AMO ImageSave ({size_kb:.1f} KB, compatibilityLevel {live_level})"
-
-    # The write did not land: undo the (provisional) compatibility alignment so a failed persist
-    # cannot leave database.tmdl declaring a level that was never actually written to a cache.
+def _restore_rollback_snapshot(snapshot: dict[Path, bytes | None]) -> None:
+    """Restore each snapshotted path to exactly its pre-alignment state (bytes, or absence)."""
     for path, original in snapshot.items():
         if original is None:
             if path.exists():
                 path.unlink()
-        elif path.read_bytes() != original:
+        elif not path.exists() or path.read_bytes() != original:
             path.write_bytes(original)
-    return False, "ImageSave did not produce a cache file (compatibility alignment rolled back)"
+
+
+def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, write_image) -> tuple[bool, str]:
+    """Align compat, stage the cache write, swap atomically, and roll compat back UNLESS it committed.
+
+    Pure-Python (no .NET), so the atomic-write and rollback guarantees are unit-testable without a
+    live Analysis Services instance. ``write_image(staging_path)`` performs the actual engine write.
+
+    The whole align -> write -> replace sequence is wrapped so the compatibility bump is provisional:
+    it is kept ONLY if the cache was definitively committed. The rollback therefore runs on the clean
+    "write did not land" return AND on any exception raised along the way -- a stale-temp unlink, a
+    ``stat()``, or a Windows ``os.replace`` that raises ``PermissionError`` because the cache is
+    locked. Before this was a ``finally`` the rollback ran only on the ``False`` return, so an
+    exception left ``database.tmdl`` bumped for a cache that was never written, and the caller carried
+    that state into the UI Save (#113, round-2 blocker 2).
+    """
+    rollback_paths = _compat_rollback_paths(model_dir)
+    snapshot = {path: (path.read_bytes() if path.exists() else None) for path in rollback_paths}
+    committed = False
+    try:
+        aligned = _align_compatibility(model_dir, live_level)
+        if aligned:
+            print(f"  save   : {aligned}")
+
+        committed = _staged_image_write(cache_path, write_image)
+        if committed:
+            # The cache is written and swapped in; a post-commit stat failure must NOT undo it, so the
+            # size note is best-effort and never flips `committed` back to False.
+            try:
+                size_note = f"{cache_path.stat().st_size / 1024:.1f} KB, "
+            except OSError:
+                size_note = ""
+            return True, f"persisted via AMO ImageSave ({size_note}compatibilityLevel {live_level})"
+        return False, "ImageSave did not produce a complete cache file (compatibility alignment rolled back)"
+    finally:
+        # Undo the (provisional) alignment unless the cache actually committed. A failed persist must
+        # never leave database.tmdl declaring a level that was never written to a cache.
+        if not committed:
+            _restore_rollback_snapshot(snapshot)
 
 
 def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
@@ -524,9 +598,13 @@ def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
             try:
                 server.ImageSave(database.ID, stream)
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                # Expected: the response parser trips even on a successful write. The staged-file
-                # check in _staged_image_write is the real evidence.
-                del exc
+                # AMO's response parser trips even on a fully correct write, so ONLY that specific
+                # error is swallowed; the staged-file check in _staged_image_write is the real
+                # evidence. Every other failure (disk full, permission, the stream dying mid-write)
+                # is re-raised so a partial write cannot be mistaken for a success and overwrite the
+                # existing good cache (#113).
+                if not _is_benign_imagesave_response_error(exc):
+                    raise
             finally:
                 stream.Close()
 
@@ -639,10 +717,13 @@ def cache_file(pid: int) -> Path | None:
     globbing for one returned None and silently sent the save down the UI-Automation fallback.
 
     When a folder holds several `.SemanticModel` directories the model is resolved from the PBIP
-    BINDING (the `.pbip` -> report -> `definition.pbir` `byPath` chain), then by an exact name match,
-    and otherwise this returns None so the identity gate fails closed. The old `models[0]` fallback
-    silently bound the run to an arbitrary sibling model - exactly the wrong-instance write this
-    skill exists to prevent.
+    BINDING (the `.pbip` -> report -> `definition.pbir` `byPath` chain) FIRST, because that is the
+    authoritative statement of which model the `.pbip` opens. Only if the binding cannot be read is
+    an exact stem match used as a weaker fallback, and otherwise this returns None so the identity
+    gate fails closed. The order matters: consulting the name first let a same-named sibling shadow
+    the model the binding actually points at (#114, round-2 blocker 3a), and the old `models[0]`
+    fallback silently bound the run to an arbitrary sibling - the wrong-instance write this exists to
+    prevent.
     """
     inst = _instance(pid)
     if inst is None or not inst.get("currentFilePath"):
@@ -653,13 +734,17 @@ def cache_file(pid: int) -> Path | None:
         return None
     if len(models) == 1:
         return models[0] / ".pbi" / "cache.abf"
+    # Authoritative: follow the .pbip -> report -> definition.pbir byPath binding.
+    bound = _model_from_pbip_binding(pbip, models)
+    if bound is not None:
+        return bound / ".pbi" / "cache.abf"
+    # Only when the binding is unreadable/absent: fall back to an exact stem match. This is a weaker
+    # heuristic and must NEVER run ahead of the binding, or a same-named sibling shadows the model
+    # the .pbip actually opens.
     stem = pbip.stem.lower()
     by_name = [model for model in models if model.stem.lower() == stem]
     if len(by_name) == 1:
         return by_name[0] / ".pbi" / "cache.abf"
-    bound = _model_from_pbip_binding(pbip, models)
-    if bound is not None:
-        return bound / ".pbi" / "cache.abf"
     # Ambiguous, and no binding resolved it: refuse to guess. Returning None makes the identity gate
     # fail closed rather than persist into whichever sibling happened to sort first.
     return None
@@ -694,6 +779,81 @@ def _live_tables(port: int) -> set[str]:
         conn.Close()
 
 
+def tmdl_columns_measures(model_dir: Path) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """`(table, column)` and `(table, measure)` pairs declared by the TMDL on disk.
+
+    The finer half of the identity fingerprint: two models can share table names but differ in their
+    columns or measures, and a table-only match would confirm the wrong one (#114, round-2 blocker
+    3). Each `tables/<Name>.tmdl` declares exactly one table, so its name scopes every column/measure
+    in the file; auto date-table files are skipped to mirror the live-side filter.
+    """
+    definition = model_dir / "definition"
+    columns: set[tuple[str, str]] = set()
+    measures: set[tuple[str, str]] = set()
+    for tmdl in sorted(definition.glob("tables/*.tmdl")):
+        text = tmdl.read_text(encoding="utf-8-sig", errors="replace")
+        decl = TABLE_DECL_RE.search(text)
+        if not decl:
+            continue
+        table = decl.group(1) or decl.group(2)
+        if table.startswith(AUTO_DATE_TABLE_PREFIXES):
+            continue
+        columns.update((table, quoted or bare) for quoted, bare in COLUMN_DECL_RE.findall(text))
+        measures.update((table, quoted or bare) for quoted, bare in MEASURE_DECL_RE.findall(text))
+    return columns, measures
+
+
+def _live_columns_measures(port: int) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """`(table, column)` and `(table, measure)` pairs in the model currently served on `port`.
+
+    Auto-generated columns (RowNumber, and the auto date/time scaffolding) are filtered inside
+    `column_names`/`measure_names` so the live side compares like-for-like with the TMDL on disk.
+    """
+    adomd_connection = _load_adomd()
+    conn = adomd_connection(f"Data Source=localhost:{port}")
+    conn.Open()
+    try:
+        return column_names(conn), measure_names(conn)
+    finally:
+        conn.Close()
+
+
+def _first_schema_difference(kind: str, on_disk: set[tuple[str, str]], live: set[tuple[str, str]]) -> str | None:
+    """Compare two `(table, name)` sets case-insensitively; return a message if they differ, else None.
+
+    Pure and .NET-free so the exact-match rule is unit-testable. Names are compared case-folded (the
+    engine and TMDL can disagree only on case), and the message names a few offenders from each side
+    so a refusal is diagnosable rather than a bare mismatch.
+    """
+    disk_fold = {(table.casefold(), name.casefold()) for table, name in on_disk}
+    live_fold = {(table.casefold(), name.casefold()) for table, name in live}
+    missing = sorted(
+        f"{table}[{name}]" for table, name in on_disk if (table.casefold(), name.casefold()) not in live_fold
+    )
+    extra = sorted(f"{table}[{name}]" for table, name in live if (table.casefold(), name.casefold()) not in disk_fold)
+    if not missing and not extra:
+        return None
+    return (
+        f"{len(missing)} TMDL {kind}(s) absent from the connected model (e.g. {missing[:3]}), "
+        f"{len(extra)} connected {kind}(s) not in the TMDL (e.g. {extra[:3]})"
+    )
+
+
+def _first_table_difference(on_disk: set[str], live: set[str]) -> str | None:
+    """Compare table-name sets case-insensitively; return the WRONG_MODEL reason, or None if equal."""
+    disk_fold = {name.casefold() for name in on_disk}
+    live_fold = {name.casefold() for name in live}
+    missing = sorted(name for name in on_disk if name.casefold() not in live_fold)
+    extra = sorted(name for name in live if name.casefold() not in disk_fold)
+    if not missing and not extra:
+        return None
+    return (
+        f"{len(missing)} TMDL table(s) absent from the connected model (e.g. {missing[:3]}), "
+        f"{len(extra)} connected table(s) not in the TMDL (e.g. {extra[:3]}) - "
+        "an exact table-for-table match is required"
+    )
+
+
 def same_model(port: int, cache_path: Path | None) -> tuple[bool, str]:
     """Is the model served on `port` the one that owns `cache_path`? Returns (ok, message).
 
@@ -708,13 +868,15 @@ def same_model(port: int, cache_path: Path | None) -> tuple[bool, str]:
     not the same answer, and this gate guards a write into another migration's project. It used to
     return True ("unverified") in both cases and let the write through.
 
-    **The fingerprint is EXACT, not a subset.** The connected model's tables must equal the TMDL's,
-    table-for-table. The previous check only required the TMDL tables to be PRESENT in the engine,
-    so a sibling with a SUPERSET schema (all your tables plus more) passed and was reported
-    "confirmed" - the precise hole this closes. Concurrent Desktop instances are supported, so that
-    sibling is reachable, not theoretical. Extra live tables now abort with WRONG_MODEL: a properly
-    exported model (finish TMDL edits, then refresh, then save) has no engine-only tables once the
-    auto date-table scaffolding is filtered from both sides.
+    **The fingerprint is EXACT, not a subset, and reaches columns and measures.** The connected
+    model's tables must equal the TMDL's table-for-table, AND its columns and measures must match too.
+    A table-only check confirmed a sibling that shared table names but differed in columns or measures
+    - and once `cache_file`'s binding is authoritative (round-2 blocker 3a) that sibling is reachable
+    on a widened/wrong port, so tables alone are not enough (round-2 blocker 3). Auto-generated
+    columns (the RowNumber index, the auto date/time scaffolding) are FILTERED, not compared, so a
+    legitimate model never fails its own gate over engine-only artifacts. The previous check also only
+    required the TMDL tables to be PRESENT in the engine, so a SUPERSET sibling passed; an exact match
+    now refuses it.
     """
     if cache_path is None:
         return False, "identity UNVERIFIED (no model folder resolved for this pid) - refusing (fail closed)"
@@ -724,19 +886,22 @@ def same_model(port: int, cache_path: Path | None) -> tuple[bool, str]:
         return False, (
             f"identity UNVERIFIED (no TMDL tables under {model_dir / 'definition'}) - refusing (fail closed)"
         )
-    live_names = _live_tables(port)
-    live = {name.casefold() for name in live_names}
-    on_disk_fold = {name.casefold() for name in on_disk}
-    missing = sorted(name for name in on_disk if name.casefold() not in live)
-    extra = sorted(name for name in live_names if name.casefold() not in on_disk_fold)
-    if missing or extra:
-        return False, (
-            f"port {port} does NOT serve {model_dir.name}: "
-            f"{len(missing)} TMDL table(s) absent from the connected model (e.g. {missing[:3]}), "
-            f"{len(extra)} connected table(s) not in the TMDL (e.g. {extra[:3]}) - "
-            "an exact table-for-table match is required"
-        )
-    return True, f"{model_dir.name} confirmed on port {port} ({len(on_disk)} table(s), exact match)"
+    table_diff = _first_table_difference(on_disk, _live_tables(port))
+    if table_diff is not None:
+        return False, f"port {port} does NOT serve {model_dir.name}: {table_diff}"
+    disk_columns, disk_measures = tmdl_columns_measures(model_dir)
+    live_columns, live_measures = _live_columns_measures(port)
+    for kind, on_disk_set, live_set in (
+        ("column", disk_columns, live_columns),
+        ("measure", disk_measures, live_measures),
+    ):
+        difference = _first_schema_difference(kind, on_disk_set, live_set)
+        if difference is not None:
+            return False, f"port {port} does NOT serve {model_dir.name}: {difference} - an exact match is required"
+    return True, (
+        f"{model_dir.name} confirmed on port {port} "
+        f"({len(on_disk)} table(s), {len(disk_columns)} column(s), {len(disk_measures)} measure(s), exact match)"
+    )
 
 
 def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int]], bool]:
@@ -807,7 +972,7 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
                 "    (b) BLOCKED: Desktop is showing a data-source sign-in modal no automation\n"
                 "        can fill. Retrying cannot dismiss it; a human must sign in once.\n"
                 "  SETTLE IT - run the arbiter that ships beside this script, do not guess:\n"
-                f"    powershell -File {CREDENTIAL_PROBE} -DesktopPid {pid}\n"
+                f'    powershell -File "{CREDENTIAL_PROBE}" -DesktopPid {pid}\n'
                 "  A one-row probe bundle narrows this, but does NOT settle it: a probe limited to a\n"
                 "  single row is fast once the source is WARM, yet measured 2026-08-05 a 1-row probe\n"
                 "  against a SUSPENDED Snowflake warehouse took 167 s (vs 21 s against an already\n"
