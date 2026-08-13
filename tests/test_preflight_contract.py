@@ -180,6 +180,22 @@ def _tenant_block(source: str) -> str:
     return source[source.index("# --- Fabric token TENANT") : source.index("$odbc = ")]
 
 
+def test_the_tenant_variable_is_documented_where_an_operator_would_look_for_it() -> None:
+    """`FABRIC_TENANT_ID` is the one input this check has, and the hint text points at `.env`.
+
+    It was previously named only inside `preflight.ps1` itself - so the hint said "put it in .env"
+    and `.env.example`, the file that lists what goes in `.env`, did not mention it.
+
+    The value must stay EMPTY. A placeholder like `<your-tenant-id>` would be copied into every
+    clone's `.env`, where it becomes a declared-but-uncomparable intent: a permanent warning line
+    on every run, for a tenant nobody chose.
+    """
+    lines = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    declarations = [ln for ln in lines if ln.startswith("FABRIC_TENANT_ID=")]
+    assert declarations == ["FABRIC_TENANT_ID="], f"expected one empty declaration, saw {declarations}"
+    assert any("deploy_estate.py" in ln for ln in lines), "say what the value is FOR, not just its name"
+
+
 def test_the_tenant_check_reports_exactly_once_whatever_happens() -> None:
     """One unconditional emission, and a hint for every outcome the verdict can return.
 
@@ -227,9 +243,10 @@ def test_critical_is_reserved_for_a_mismatch_declared_on_this_run() -> None:
     )
     others = [ln.strip() for ln in block.splitlines() if "'critical'" in ln and not re.search(r"\$tier\s*=", ln)]
     assert all("-eq 'critical'" in ln for ln in others), f"'critical' is assigned somewhere else too: {others}"
-    assert "$tenantIntentIsExplicit = [bool](Remove-SurroundingQuotes $Tenant)" in block, (
-        "explicit intent means the -Tenant parameter, not an ambient environment variable"
+    assert "IsExplicit = [bool]$candidates[0]" in block, (
+        "explicit intent means the -Tenant parameter - the FIRST channel - not an ambient environment variable"
     )
+    assert "-IntentIsExplicit $intent.IsExplicit" in block, "the verdict must be told which channel actually won"
 
 
 def test_the_tenant_check_costs_nothing_until_a_comparable_tenant_is_declared() -> None:
@@ -237,13 +254,32 @@ def test_the_tenant_check_costs_nothing_until_a_comparable_tenant_is_declared() 
 
     A mandatory token mint here would tax every run for a check that cannot say anything useful
     without an intended tenant to compare against - the same reasoning that keeps `-CheckUpstream`
-    opt-in. The guard also skips the mint for an intended id that is not a GUID, because that one
-    cannot be compared against a `tid` either.
+    opt-in. Resolving a declared DOMAIN now costs a second `az` call, so the contract is about the
+    top-level FLOW rather than the whole block: every `az` invocation the flow reaches must sit
+    inside a branch that has already established something was declared.
     """
     block = _tenant_block(_preflight_source())
-    guard = block.index("if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {")
-    assert guard < block.index("'get-access-token'"), "the token mint must sit behind the declaration guard"
-    assert "& az" not in block[:guard], "no `az` invocation may precede the declaration guard"
+    flow = block[block.index("$intent = Resolve-IntendedTenant") :]
+    first_guard = flow.index("if ($intendedTenant")
+    for line in flow.splitlines():
+        if "& az" in line and not line.strip().startswith("#"):
+            assert line.startswith((" ", "\t")), f"an unguarded `az` invocation at the top of the flow: {line}"
+    assert first_guard < flow.index("& az"), "no `az` invocation may precede the declaration guard"
+    guard = flow.index("if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {")
+    assert guard < flow.index("'get-access-token'"), "the token mint must sit behind the declaration guard"
+    # Resolution runs only for a declaration that is NOT already a GUID, so the ordinary path pays
+    # for one `az` call, not two.
+    assert "if ($intendedTenant -and -not (Test-TenantIdShape $intendedTenant) -and $azPresent) {" in flow, (
+        "domain resolution must be guarded on a declared, non-GUID intent"
+    )
+    # And its answer must be USED. The resolver itself is executed by
+    # `test_a_declared_domain_is_resolved_rather_than_given_up_on`; this one line of wiring can only
+    # be executed by running preflight, which probes npm, Desktop and the plugin cache and cannot run
+    # in CI - and it is exactly where a correct resolution can still be thrown away, silently
+    # restoring the "not compared" verdict this change removed.
+    assert "if ($resolved) { $intendedTenant = $resolved }" in flow, (
+        "a successful resolution must replace the declared spelling for comparison"
+    )
 
 
 def test_the_wrong_tenant_hint_prefers_the_non_mutating_fix() -> None:
@@ -303,7 +339,23 @@ def test_no_output_path_can_carry_the_token() -> None:
         assert any(pattern.match(stripped) for pattern in allowed), f"the token escapes into: {stripped}"
 
 
-# --- Executed, not merely read ---------------------------------------------------------------------
+def test_the_closing_line_names_the_tenant_when_something_is_wrong_with_it() -> None:
+    """A count is not a diagnosis, and the tenant line scrolls off before the verdict is read.
+
+    Measured: the WRONG TENANT warning sat at line 22 of 38 output lines, with 16 `[OK]` lines after
+    it; on an 80x24 terminal the only text still visible read "Ready to migrate. 3 recommended
+    warning(s) present." Both exit paths therefore carry the tenant summary - the failing one too,
+    because a run that is already blocking on something else must still say the tenant was wrong.
+    """
+    source = _preflight_source()
+    summary_lines = [ln for ln in source.splitlines() if 'Write-Host "PREFLIGHT:' in ln]
+    assert len(summary_lines) == 2, f"expected the two exit summaries, saw {summary_lines}"
+    assert all("$tenantNote" in ln for ln in summary_lines), (
+        f"every closing line must be able to name the tenant: {summary_lines}"
+    )
+    assert "$tenantNote = if ($verdict.Summary)" in source, "the note must come from the verdict, not be re-derived"
+
+
 # Two things here cannot be established by reading the source:
 #   * the base64url decode - a padding or charset bug fails CLOSED in the worst way, reporting "could
 #     not decode" for real tokens so the check never fires, while every source contract still passes;
@@ -369,17 +421,20 @@ def _verdict(
     *,
     explicit: bool = False,
     az_present: bool = True,
+    declared_as: str = "",
 ) -> dict:
     raw = _run_ps(
         "Get-TenantVerdict,Remove-SurroundingQuotes,Test-TenantIdShape",
         "$v = Get-TenantVerdict -IntendedTenant $env:T_INTENDED -ActualTenant $env:T_ACTUAL "
-        "-IntentIsExplicit ([bool]::Parse($env:T_EXPLICIT)) -AzPresent ([bool]::Parse($env:T_AZ)) -Scope ''\n"
+        "-IntentIsExplicit ([bool]::Parse($env:T_EXPLICIT)) -AzPresent ([bool]::Parse($env:T_AZ)) -Scope '' "
+        "-DeclaredAs $env:T_DECLARED\n"
         "Emit ($v | ConvertTo-Json -Compress)\n",
         {
             "T_INTENDED": intended,
             "T_ACTUAL": actual,
             "T_EXPLICIT": str(explicit),
             "T_AZ": str(az_present),
+            "T_DECLARED": declared_as,
         },
     )
     return json.loads(_emitted(raw))
@@ -455,7 +510,8 @@ def test_the_verdict_tiers_follow_where_the_intent_came_from() -> None:
 @pytest.mark.parametrize(
     "declared",
     [
-        "contoso.onmicrosoft.com",  # accepted by `az --tenant` and deploy_estate.py, so plausible here
+        "contoso.onmicrosoft.com",  # a real default domain, but for a tenant this machine cannot see
+        "contoso.com",  # a VANITY domain - never the default domain, so never resolvable
         "<your-tenant-id>",  # copied out of a .env.example and never filled in
         "72f988bf86f141af91ab2d7cd011db47",  # a GUID with the hyphens lost
         "not-a-guid",
@@ -465,9 +521,9 @@ def test_an_uncomparable_tenant_id_never_blocks(declared: str) -> None:
     """A `tid` is always a GUID, so anything else is "cannot compare", never "wrong tenant".
 
     Comparing a domain name or a placeholder against a GUID answers WRONG TENANT and exits 1 - the
-    same false blocker as the quoting bug, arriving by a different route. This one is not
-    hypothetical: `FABRIC_TENANT_ID` is currently documented nowhere, and the obvious fix for that
-    (a line in `.env.example`) ships a placeholder to every clone.
+    same false blocker as the quoting bug, arriving by a different route. Note the caller RESOLVES a
+    default domain before it gets here (`Resolve-TenantIdFromDomain`); what reaches this function is
+    the residue that resolution could not turn into a GUID, and for that "cannot compare" is honest.
     """
     verdict = _verdict(declared, _TID)
     assert (verdict["Kind"], verdict["Ok"], verdict["Tier"]) == ("malformed", False, "optional")
@@ -481,6 +537,7 @@ def test_an_uncomparable_tenant_id_never_blocks(declared: str) -> None:
         ("nothing declared", {"intended": "", "actual": _TID}, "no-intent"),
         ("az not installed", {"intended": _TID, "actual": "", "az_present": False}, "no-az"),
         ("declared, az present, no token", {"intended": _TID, "actual": ""}, "no-token"),
+        ("declared as an unresolvable name", {"intended": "contoso.com", "actual": _TID}, "malformed"),
     ],
 )
 def test_every_reason_the_check_could_not_run_is_advisory(label: str, kwargs: dict, expected_kind: str) -> None:
@@ -492,13 +549,174 @@ def test_every_reason_the_check_could_not_run_is_advisory(label: str, kwargs: di
     verdict = _verdict(**kwargs)
     assert verdict["Kind"] == expected_kind, label
     assert verdict["Ok"] is False, f"{label}: an unrun check is not a pass"
-    assert verdict["Tier"] == "optional", f"{label}: must not block"
+    assert verdict["Tier"] != "critical", f"{label}: must not block"
     assert verdict["Detail"], f"{label}: must still say something"
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("label", "kwargs"),
+    [
+        ("unresolvable spelling", {"intended": "contoso.com", "actual": _TID}),
+        ("az not installed", {"intended": _TID, "actual": "", "az_present": False}),
+        ("no token could be minted", {"intended": _TID, "actual": ""}),
+    ],
+)
+def test_a_declared_tenant_that_could_not_be_verified_is_not_filed_under_optional(label: str, kwargs: dict) -> None:
+    """A check the operator ASKED FOR that did not run is a blank space, not a pass.
+
+    Measured: `preflight.ps1 -Tenant contoso.onmicrosoft.com` printed its one line under
+    `== OPTIONAL ==`, beneath a green "Ready to migrate" - i.e. an explicit, blocking-channel
+    declaration of intent bought exactly zero verification and said so in the tier nobody reads.
+    Provenance decides how loud that is, exactly as it does for a mismatch: `-Tenant` is a statement
+    about THIS run, `.env` is a standing preference. The generalisation past the reviewed case
+    (`malformed`) is deliberate - "az is missing" and "no token" leave a declared intent just as
+    unverified as an unresolvable name does.
+    """
+    ambient = _verdict(**kwargs, explicit=False)
+    explicit = _verdict(**kwargs, explicit=True)
+    assert ambient["Tier"] == "optional", f"{label}: configured intent stays optional"
+    assert explicit["Tier"] == "recommended", f"{label}: declared intent must be visible"
+    assert explicit["Tier"] != "critical", f"{label}: could-not-verify is still not a blocker"
+    assert "NOT VERIFIED" in explicit["Summary"], f"{label}: the closing line must say it was not verified"
+    assert ambient["Summary"] == "", f"{label}: a standing preference must not shout on every run"
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("label", "kwargs", "expect_summary"),
+    [
+        ("a match says nothing", {"intended": _TID, "actual": _TID}, False),
+        ("nothing declared says nothing", {"intended": "", "actual": _TID}, False),
+        ("a mismatch always speaks", {"intended": _OTHER_TID, "actual": _TID}, True),
+        ("an explicit mismatch speaks", {"intended": _OTHER_TID, "actual": _TID, "explicit": True}, True),
+    ],
+)
+def test_the_summary_speaks_only_when_it_has_something_to_say(label: str, kwargs: dict, expect_summary: bool) -> None:
+    """The closing line is the last thing an operator reads; it must stay quiet on the happy path.
+
+    A mismatch names the tenant whatever its provenance - a WARN that scrolled off the top is the
+    exact failure mode this exists for - while a match, and a run with nothing declared, add nothing.
+    """
+    verdict = _verdict(**kwargs)
+    assert bool(verdict["Summary"]) is expect_summary, f"{label}: Summary={verdict['Summary']!r}"
+    if expect_summary:
+        assert _OTHER_TID in verdict["Summary"] and _TID in verdict["Summary"], (
+            "both ends must be named, or the summary cannot be acted on without scrolling back"
+        )
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_a_resolved_domain_is_compared_but_still_reported_the_way_it_was_written() -> None:
+    """The operator typed a domain; the verdict must be about the GUID yet legible to them.
+
+    Without `DeclaredAs`, a resolved domain produces a message naming two GUIDs the operator never
+    typed, and no way to connect either to what they wrote.
+    """
+    resolved = _verdict(_OTHER_TID, _TID, explicit=True, declared_as="contoso.onmicrosoft.com")
+    assert resolved["Kind"] == "mismatch" and resolved["Tier"] == "critical"
+    assert "declared as contoso.onmicrosoft.com" in resolved["Detail"]
+    assert "declared as contoso.onmicrosoft.com" in resolved["Summary"]
+    # When nothing was translated, the same string twice is noise.
+    plain = _verdict(_TID, _TID, declared_as=_TID)
+    assert "declared as" not in plain["Detail"], "only a RESOLVED spelling is worth repeating"
+
+
+def _resolve_intent(flag: str = "", env: str = "", dotenv: str = "") -> dict:
+    raw = _run_ps(
+        "Resolve-IntendedTenant,Remove-SurroundingQuotes",
+        "$i = Resolve-IntendedTenant $env:T_FLAG $env:T_ENV $env:T_DOTENV\nEmit ($i | ConvertTo-Json -Compress)\n",
+        {"T_FLAG": flag, "T_ENV": env, "T_DOTENV": dotenv},
+    )
+    return json.loads(_emitted(raw))
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("label", "channels", "expected", "expected_explicit"),
+    [
+        ("the flag wins over both", {"flag": _TID, "env": _OTHER_TID, "dotenv": _OTHER_TID}, _TID, True),
+        ("the exported variable beats .env", {"env": _TID, "dotenv": _OTHER_TID}, _TID, False),
+        (".env is the last resort", {"dotenv": _TID}, _TID, False),
+        ("nothing declared", {}, "", False),
+        # Every channel is normalized, not just the one with a reader function of its own.
+        ("a quoted flag", {"flag": f'"{_TID}"'}, _TID, True),
+        ("a quoted exported variable", {"env": f'"{_TID}"'}, _TID, False),
+        ("a padded flag", {"flag": f"  {_TID} "}, _TID, True),
+        # An empty higher channel must not shadow a populated lower one, and must not claim intent.
+        ("an empty flag falls through", {"flag": "", "env": _TID}, _TID, False),
+        ("a whitespace-only flag falls through", {"flag": "   ", "env": _TID}, _TID, False),
+    ],
+)
+def test_the_three_channels_resolve_in_order_and_are_all_normalized(
+    label: str, channels: dict, expected: str, expected_explicit: bool
+) -> None:
+    """Precedence AND normalization, executed - the pipeline they share was previously only grepped.
+
+    Two mutations survived a sweep here: dropping the normalization step, and inverting the
+    precedence. The first is not cosmetic - a quoted `$env:FABRIC_TENANT_ID` then fails the GUID
+    guard and degrades to "no Fabric token could be minted", the quoting bug re-entering through the
+    one channel `Get-DotEnvValue` does not cover. The second silently makes a persisted `.env` beat
+    an in-run `-Tenant`, which also flips the tier from critical to recommended.
+    """
+    intent = _resolve_intent(**channels)
+    assert intent["Tenant"] == expected, label
+    assert intent["IsExplicit"] is expected_explicit, f"{label}: only -Tenant declares intent for this run"
+
+
+def _resolve_domain(domain: str, az_stdout: str) -> str:
+    # `az` is shadowed by a FUNCTION here: PowerShell resolves functions before executables, so the
+    # resolver runs against canned JSON with no CLI, no network and no credentials involved.
+    raw = _run_ps(
+        "Resolve-TenantIdFromDomain,Test-TenantIdShape",
+        "function az { $env:T_AZOUT }\n$r = Resolve-TenantIdFromDomain $env:T_DOMAIN\nEmit $r\n",
+        {"T_DOMAIN": domain, "T_AZOUT": az_stdout},
+    )
+    return _emitted(raw)
+
+
+_AZ_ACCOUNTS = json.dumps(
+    [
+        {"id": "sub-1", "tenantId": _OTHER_TID, "tenantDefaultDomain": "other.onmicrosoft.com"},
+        {"id": "sub-2", "tenantId": _TID, "tenantDefaultDomain": "contoso.onmicrosoft.com"},
+    ]
+)
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("label", "domain", "az_stdout", "expected"),
+    [
+        ("the default domain resolves to its tenant", "contoso.onmicrosoft.com", _AZ_ACCOUNTS, _TID),
+        ("DNS names are case-insensitive", "CONTOSO.OnMicrosoft.COM", _AZ_ACCOUNTS, _TID),
+        ("the right row is chosen, not the first", "other.onmicrosoft.com", _AZ_ACCOUNTS, _OTHER_TID),
+        ("a vanity domain is not the default domain", "contoso.com", _AZ_ACCOUNTS, ""),
+        ("a tenant never signed in to", "fabrikam.onmicrosoft.com", _AZ_ACCOUNTS, ""),
+        ("az said nothing (not logged in)", "contoso.onmicrosoft.com", "", ""),
+        ("az said something that is not JSON", "contoso.onmicrosoft.com", "ERROR: please run az login", ""),
+        ("no domain to resolve", "", _AZ_ACCOUNTS, ""),
+    ],
+)
+def test_a_declared_domain_is_resolved_rather_than_given_up_on(
+    label: str, domain: str, az_stdout: str, expected: str
+) -> None:
+    """ "Cannot compare" was a choice, not a necessity: the CLI already holds the mapping.
+
+    `contoso.onmicrosoft.com` is accepted by `az --tenant` and by `deploy_estate.py --tenant`, so an
+    operator has every reason to use it here too - and before this, that spelling bought zero
+    verification. `az account list --all` returns `tenantDefaultDomain` beside `tenantId`, so the
+    honest answer is available for the asking.
+
+    The failure rows matter just as much: resolution is best-effort, and every way it can fail must
+    return "" (fall back to "cannot compare") rather than throw or guess. A vanity domain is the
+    common one - it is not the DEFAULT domain and will never appear in that mapping.
+    """
+    assert _resolve_domain(domain, az_stdout) == expected, label
 
 
 def _dotenv(key: str) -> str:
     raw = _run_ps(
-        "Get-DotEnvValue,Remove-SurroundingQuotes",
+        "Get-DotEnvValue,ConvertFrom-DotEnvValue,Remove-SurroundingQuotes",
         "Emit (Get-DotEnvValue $env:T_KEY $env:T_PATH)\n",
         {"T_KEY": key, "T_PATH": str(_FIXTURE_ENV)},
     )
@@ -514,10 +732,30 @@ def _dotenv(key: str) -> str:
         ("SINGLE_QUOTED", _TID),
         ("PADDED", _TID),
         ("QUOTED_AND_PADDED", _TID),
+        # An inline note next to a GUID nobody recognizes by sight is the natural thing to write.
+        ("COMMENTED", _TID),
+        ("COMMENTED_TIGHT", _TID),
+        ("QUOTED_AND_COMMENTED", _TID),
+        # ...but inside quotes a '#' is DATA, and one with no whitespace in front of it is part of
+        # the value. Over-stripping corrupts a declaration just as quietly as not stripping at all.
+        ("HASH_INSIDE_QUOTES", "ab #cd"),
+        ("HASH_IS_DATA", "abc#def"),
+        # The closer is the first quote that actually ENDS the value: here the `#` right after it
+        # opens a comment, so the value stops at `ab`...
+        ("HASH_AFTER_INNER_QUOTE", "ab"),
+        # ...whereas here the first inner quote is followed by more value, so the scan keeps going
+        # and the '#' it passed over stays data.
+        ("HASH_STILL_INSIDE", 'a #b" c'),
+        ("ONLY_A_COMMENT", ""),
         # Only a MATCHED outer pair is a quoting convention. Everything else is the value.
         ("UNMATCHED_QUOTE", f'"{_TID}'),
         ("INNER_QUOTES", 'ab"cd"ef'),
         ("HAS_EQUALS", "a=b=c"),
+        # The closing quote must END the value. These two stay visibly malformed rather than
+        # decoding to '' or to a truncated fragment - a silent downgrade to "nothing was declared"
+        # would be worse than the complaint.
+        ("DOUBLE_QUOTED_TWICE", f'"{_TID}"'),
+        ("QUOTE_THEN_TAIL", 'a"b'),
         # Present-but-empty and absent are both "no value" to every caller, which filters falsy;
         # the reader still distinguishes them ('' vs $null) rather than inventing one.
         ("EMPTY", ""),

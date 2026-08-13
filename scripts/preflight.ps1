@@ -47,15 +47,24 @@
   It can also come from `$env:FABRIC_TENANT_ID`, or `FABRIC_TENANT_ID` in the git-ignored `.env` -
   which is the right home for a real customer tenant id, because this repository is PUBLIC.
   Surrounding whitespace and a matched pair of quotes are accepted from any of the three
-  (`FABRIC_TENANT_ID="72f9..."` is ordinary dotenv spelling, not a wrong tenant).
+  (`FABRIC_TENANT_ID="72f9..."` is ordinary dotenv spelling, not a wrong tenant), and a `.env` value
+  may carry a trailing `# comment` - which, next to a GUID nobody recognizes by sight, is exactly
+  where one belongs.
+
+  A default DOMAIN (`contoso.onmicrosoft.com`) is accepted too and resolved to its GUID via
+  `az account list --all`, because `az --tenant` and `deploy_estate.py --tenant` both take that form.
+  A vanity domain, or a tenant this machine has never signed in to, cannot be resolved - preflight
+  then says so rather than guessing, and never blocks on it.
 
   WHERE the declaration came from decides how loudly a mismatch lands, because it is the only
   evidence preflight has of deploy INTENT for THIS run:
     * `-Tenant` on the command line  -> a mismatch is CRITICAL (exit 1). You said, in this
-      invocation, that you are pointing at a tenant; a token for another one is a blocker.
-    * `$env:FABRIC_TENANT_ID` / `.env` -> a mismatch is RECOMMENDED (a visible WARN, exit 0).
-      Persisted configuration is a standing preference, not a statement that this run deploys -
-      and steps 1-6 of an estate run never touch Fabric at all.
+      invocation, that you are pointing at a tenant; a token for another one is a blocker. If it
+      could not be verified at all (unresolvable spelling, no `az`, no token), that is a RECOMMENDED
+      warning: a declared check that did not run is not a pass.
+    * `$env:FABRIC_TENANT_ID` / `.env` -> a mismatch is RECOMMENDED (a visible WARN, exit 0), and a
+      failure to verify is OPTIONAL. Persisted configuration is a standing preference, not a
+      statement that this run deploys - and steps 1-6 of an estate run never touch Fabric at all.
 
 .PARAMETER Subscription
   Optional subscription id/name passed verbatim to `az account get-access-token --subscription`,
@@ -499,11 +508,41 @@ function Remove-SurroundingQuotes([string]$Value) {
     return $v
 }
 
+function ConvertFrom-DotEnvValue([string]$Raw) {
+    # A .env value, read the way every other dotenv consumer reads one: matched surrounding quotes
+    # are a SPELLING, and an inline `# comment` after the value is a comment. Both are ordinary -
+    # `FABRIC_TENANT_ID=72f9... # customer tenant` is the natural thing to write next to a GUID
+    # nobody can recognize by sight - and neither is part of the value.
+    #
+    # Inside quotes, a '#' is DATA. Outside them, a comment starts at the beginning of the value or
+    # after whitespace, so `abc#def` stays whole: over-stripping a legitimate value would be the
+    # same class of bug (quiet corruption of a declaration) as not stripping at all.
+    #
+    # The quoted form only wins when the closing quote actually ENDS the value (bar whitespace or a
+    # comment) - so the closer is the first candidate that satisfies that, which is what every
+    # dotenv reader does. `""guid""` and `"a"b"` therefore have no valid closer until their final
+    # quote and stay visibly malformed, rather than silently decoding to '' or to a fragment.
+    $v = ([string]$Raw).Trim()
+    if ($v.Length -ge 2) {
+        $q = $v.Substring(0, 1)
+        if ($q -eq '"' -or $q -eq "'") {
+            for ($i = 1; $i -lt $v.Length; $i++) {
+                if ($v[$i] -ne $q) { continue }
+                $tail = $v.Substring($i + 1).Trim()
+                if (-not $tail -or $tail.StartsWith('#')) { return $v.Substring(1, $i - 1) }
+            }
+        }
+    }
+    $comment = [regex]::Match($v, '(^|\s)#')
+    if ($comment.Success) { $v = $v.Substring(0, $comment.Index) }
+    return (Remove-SurroundingQuotes $v)
+}
+
 function Get-DotEnvValue([string]$Key, [string]$Path) {
-    # The same minimal KEY=VALUE parse as scripts/tableau_env.py's load_env (trim, skip blank/'#',
-    # split on the FIRST '='), plus ONE deliberate divergence: matched surrounding quotes are
-    # stripped. That divergence is the fix, not an accident - the two parsers previously agreed by
-    # being wrong in the same way, and "identical to Python" was the argument that kept it.
+    # The same minimal KEY=VALUE scan as scripts/tableau_env.py's load_env (trim, skip blank/'#',
+    # split on the FIRST '='), plus the deliberate divergence in ConvertFrom-DotEnvValue above.
+    # That divergence is the fix, not an accident - the two parsers previously agreed by being wrong
+    # in the same way, and "identical to Python" was the argument that kept it.
     # `scripts/tableau_env.py:load_env` should get the same treatment; it is owned elsewhere, so it
     # is flagged rather than edited here. Nothing in Python reads FABRIC_TENANT_ID today, so the
     # divergence is inert until that happens.
@@ -514,30 +553,60 @@ function Get-DotEnvValue([string]$Key, [string]$Path) {
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#') -or ($trimmed -notmatch '=')) { continue }
         $pair = $trimmed -split '=', 2
-        if ($pair[0].Trim() -eq $Key) { return (Remove-SurroundingQuotes $pair[1]) }
+        if ($pair[0].Trim() -eq $Key) { return (ConvertFrom-DotEnvValue $pair[1]) }
     }
     return $null
 }
 
+function Resolve-IntendedTenant([string]$FromFlag, [string]$FromEnv, [string]$FromDotEnv) {
+    # Declaration of intent, in the order a caller expects to win: flag > exported env > .env.
+    # A function rather than an inline pipeline because WHICH channel won decides whether a mismatch
+    # blocks, and because normalizing only two of the three channels is a silent way to reintroduce
+    # the quoting bug through the third (measured: a quoted $env:FABRIC_TENANT_ID then fails the
+    # GUID guard and degrades to "no token could be minted" - the same false negative wearing a
+    # different message). Here it is one line, executed by the tests.
+    $candidates = @($FromFlag, $FromEnv, $FromDotEnv) | ForEach-Object { Remove-SurroundingQuotes $_ }
+    $tenant = $candidates | Where-Object { $_ } | Select-Object -First 1
+    # "$tenant" rather than [string]$tenant: an empty pipeline yields AutomationNull, whose [string]
+    # cast survives as null through ConvertTo-Json and would make "nothing declared" indistinguishable
+    # from a serialization accident to any caller inspecting the object.
+    return [pscustomobject]@{ Tenant = "$tenant"; IsExplicit = [bool]$candidates[0] }
+}
+
 function Test-TenantIdShape([string]$Value) {
-    # The `tid` claim is ALWAYS a GUID. An intended tenant that is not one cannot be compared
-    # against it, and two spellings that are not GUIDs are entirely plausible here:
-    #   * `contoso.onmicrosoft.com` - which `az --tenant` and `deploy_estate.py --tenant` both
-    #     accept, so an operator has every reason to think it belongs in FABRIC_TENANT_ID;
-    #   * a placeholder like `<your-tenant-id>` copied out of a `.env.example`.
-    # Comparing either against a GUID answers "wrong tenant" - the same false blocker as the quoting
-    # bug, arriving by a different route. Preflight says "cannot compare" instead, and never blocks.
+    # The `tid` claim is ALWAYS a GUID, so only a GUID can be compared against it.
     return [bool]($Value -match '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$')
+}
+
+function Resolve-TenantIdFromDomain([string]$Domain) {
+    # `contoso.onmicrosoft.com` is a legitimate spelling everywhere else in this toolchain - both
+    # `az --tenant` and `deploy_estate.py --tenant` accept it - so an operator has every reason to
+    # put one in -Tenant or FABRIC_TENANT_ID. Answering "cannot compare" to that is a CHOICE, not a
+    # necessity: the CLI already holds the mapping, and `az account list --all` returns
+    # tenantDefaultDomain next to tenantId. Giving up would leave a declared, blocking-channel
+    # intent completely unverified under a green "Ready to migrate".
+    #
+    # Resolution is best-effort by design: a VANITY domain (contoso.com) is not the default domain
+    # and will not be found, and a tenant the profile has never seen cannot be mapped. Those fall
+    # back to "cannot compare", which is honest - it is silence that is not.
+    if (-not $Domain) { return '' }
+    $listed = & az account list --all -o json 2>$null
+    if (-not $listed) { return '' }
+    try { $accounts = (($listed | Out-String) | ConvertFrom-Json) } catch { return '' }
+    # -eq is case-insensitive, which is right for a DNS name.
+    $hit = $accounts | Where-Object { $_.tenantDefaultDomain -eq $Domain } | Select-Object -First 1
+    if ($hit -and (Test-TenantIdShape $hit.tenantId)) { return [string]$hit.tenantId }
+    return ''
 }
 
 function Get-TenantVerdict {
     <#
       THE decision. Everything above this gathers evidence; this function alone turns it into
-      Ok/Tier/Detail, so the one line that decides the verdict can be EXECUTED by the test harness
-      rather than matched as a source string. That matters more than usual here: CI cannot run
-      PowerShell, and a mutation test showed both `$tenantOk = $true` (the check can never fire) and
-      an inverted comparison (fires on every correct machine) surviving the whole suite while it was
-      inline.
+      Ok/Tier/Detail/Summary, so the one line that decides the verdict can be EXECUTED by the test
+      harness rather than matched as a source string. That matters more than usual here: CI cannot
+      run PowerShell, and a mutation test showed both `$tenantOk = $true` (the check can never fire)
+      and an inverted comparison (fires on every correct machine) surviving the whole suite while it
+      was inline.
 
       Kind is part of the contract: the caller maps it to a hint, and a Kind with no hint branch is
       a check that renders as silence - the false-green shape this script exists to prevent.
@@ -547,25 +616,48 @@ function Get-TenantVerdict {
         [string]$ActualTenant,
         [bool]$IntentIsExplicit,
         [bool]$AzPresent,
-        [string]$Scope = ''
+        [string]$Scope = '',
+        [string]$DeclaredAs = ''
     )
     # Normalized HERE, not only at the call site, so the comparator is correct in isolation: it is
     # the unit the tests execute, and a caller that forgets cannot manufacture a false WRONG TENANT.
     # Idempotent, so doing it twice costs nothing.
     $IntendedTenant = Remove-SurroundingQuotes $IntendedTenant
     $ActualTenant = Remove-SurroundingQuotes $ActualTenant
+    $DeclaredAs = Remove-SurroundingQuotes $DeclaredAs
+    # Only worth showing when the operator wrote something other than the id being compared - i.e.
+    # when a domain was resolved to a GUID. Otherwise it is the same string twice.
+    $as = if ($DeclaredAs -and $DeclaredAs -ne $IntendedTenant) { " (declared as $DeclaredAs)" } else { '' }
+
+    # An intent DECLARED FOR THIS RUN that could not be verified is not a clean bill of health: it
+    # is a blank space where the operator asked for a check. OPTIONAL is where such a line goes to
+    # be ignored - measured: `-Tenant contoso.onmicrosoft.com` produced zero verification, filed
+    # under OPTIONAL, beneath "Ready to migrate". Configuration-declared intent stays optional,
+    # because it is a standing preference rather than a statement about this run.
+    $unverified = if ($IntentIsExplicit) { 'recommended' } else { 'optional' }
 
     if (-not $IntendedTenant) {
-        return [pscustomobject]@{ Kind = 'no-intent'; Ok = $false; Tier = 'optional'; Detail = 'no intended tenant declared - not checked' }
+        return [pscustomobject]@{ Kind = 'no-intent'; Ok = $false; Tier = 'optional'; Summary = ''
+            Detail                    = 'no intended tenant declared - not checked'
+        }
     }
     if (-not (Test-TenantIdShape $IntendedTenant)) {
-        return [pscustomobject]@{ Kind = 'malformed'; Ok = $false; Tier = 'optional'; Detail = "intended '$IntendedTenant' is not a tenant GUID - not compared" }
+        return [pscustomobject]@{ Kind = 'malformed'; Ok = $false; Tier = $unverified
+            Detail                     = "intended '$IntendedTenant' is not a tenant GUID and could not be resolved to one - not compared"
+            Summary                    = if ($IntentIsExplicit) { "tenant NOT VERIFIED: '$IntendedTenant' could not be resolved to a GUID" } else { '' }
+        }
     }
     if (-not $AzPresent) {
-        return [pscustomobject]@{ Kind = 'no-az'; Ok = $false; Tier = 'optional'; Detail = "intended $IntendedTenant - not verified (az not on PATH)" }
+        return [pscustomobject]@{ Kind = 'no-az'; Ok = $false; Tier = $unverified
+            Detail                     = "intended $IntendedTenant$as - not verified (az not on PATH)"
+            Summary                    = if ($IntentIsExplicit) { "tenant NOT VERIFIED: az not on PATH (intended $IntendedTenant)" } else { '' }
+        }
     }
     if (-not $ActualTenant) {
-        return [pscustomobject]@{ Kind = 'no-token'; Ok = $false; Tier = 'optional'; Detail = "intended $IntendedTenant - no Fabric token could be minted or decoded$Scope" }
+        return [pscustomobject]@{ Kind = 'no-token'; Ok = $false; Tier = $unverified
+            Detail                     = "intended $IntendedTenant$as - no Fabric token could be minted or decoded$Scope"
+            Summary                    = if ($IntentIsExplicit) { "tenant NOT VERIFIED: no Fabric token could be minted (intended $IntendedTenant)" } else { '' }
+        }
     }
 
     # The verdict. `-eq` on strings is case-insensitive in PowerShell, which is exactly right for a
@@ -574,7 +666,9 @@ function Get-TenantVerdict {
     $tenantOk = ($ActualTenant -eq $IntendedTenant)
 
     if ($tenantOk) {
-        return [pscustomobject]@{ Kind = 'match'; Ok = $true; Tier = 'optional'; Detail = "tid matches intended $IntendedTenant$Scope" }
+        return [pscustomobject]@{ Kind = 'match'; Ok = $true; Tier = 'optional'; Summary = ''
+            Detail                     = "tid matches intended $IntendedTenant$as$Scope"
+        }
     }
     # A mismatch blocks only when THIS run declared the tenant on the command line. The check is
     # opt-in either way, but the two opt-ins are not the same statement: `-Tenant <id>` is "I am
@@ -584,17 +678,12 @@ function Get-TenantVerdict {
     # removed (a Desktop-only pin failing a run that never opens Desktop). A WARN still names the
     # problem loudly, and the deploy path - which does pass --tenant - is where exit 1 belongs.
     $tier = if ($IntentIsExplicit) { 'critical' } else { 'recommended' }
-    $detail = "WRONG TENANT: token is for $ActualTenant, intended $IntendedTenant$Scope"
+    $detail = "WRONG TENANT: token is for $ActualTenant, intended $IntendedTenant$as$Scope"
     if (-not $IntentIsExplicit) { $detail += ' [warning only: declared by configuration, not by -Tenant on this run]' }
-    return [pscustomobject]@{ Kind = 'mismatch'; Ok = $false; Tier = $tier; Detail = $detail }
+    return [pscustomobject]@{ Kind = 'mismatch'; Ok = $false; Tier = $tier; Detail = $detail
+        Summary                     = "WRONG TENANT: token is for $ActualTenant, intended $IntendedTenant$as"
+    }
 }
-
-# Declaration of intent, in the order a caller expects to win: flag > exported env > git-ignored .env.
-# Every channel is normalized, because none of them is a place an operator expects to be punished for
-# quoting or for a stray trailing space.
-$tenantIntentIsExplicit = [bool](Remove-SurroundingQuotes $Tenant)
-$intendedTenant = @($Tenant, $env:FABRIC_TENANT_ID, (Get-DotEnvValue 'FABRIC_TENANT_ID')) |
-    ForEach-Object { Remove-SurroundingQuotes $_ } | Where-Object { $_ } | Select-Object -First 1
 
 # Mirrors deploy_estate.py's FABRIC_RESOURCE. Duplicating a well-known constant is a smaller risk
 # than making this PowerShell bootstrap depend on importing Python (see the engine block above for
@@ -602,12 +691,22 @@ $intendedTenant = @($Tenant, $env:FABRIC_TENANT_ID, (Get-DotEnvValue 'FABRIC_TEN
 # would fail loudly on its own.
 $fabricResource = 'https://api.fabric.microsoft.com'
 
+$intent = Resolve-IntendedTenant $Tenant $env:FABRIC_TENANT_ID (Get-DotEnvValue 'FABRIC_TENANT_ID')
+$intendedTenant = $intent.Tenant
+$declaredAs = $intent.Tenant
 $azPresent = [bool](Get-Command az -ErrorAction SilentlyContinue)
 $scoped = if ($Subscription) { " (scoped: --subscription $Subscription)" } else { ' (default az context)' }
 $actualTenant = ''
 
-# The mint sits behind the declaration guard: no declared tenant - or one that cannot be compared -
-# means no `az` call at all, so an operator who only parses workbooks pays nothing. Preflight runs
+# A declared non-GUID gets RESOLVED before it gets given up on (see Resolve-TenantIdFromDomain).
+# Still behind the declaration guard, so an undeclared run pays nothing.
+if ($intendedTenant -and -not (Test-TenantIdShape $intendedTenant) -and $azPresent) {
+    $resolved = Resolve-TenantIdFromDomain $intendedTenant
+    if ($resolved) { $intendedTenant = $resolved }
+}
+
+# The mint sits behind the same guard: no declared tenant - or one that still cannot be compared -
+# means no token call at all, so an operator who only parses workbooks pays nothing. Preflight runs
 # before EVERY migration, so a mandatory token mint here would tax every run for a check that has
 # nothing to compare against.
 if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {
@@ -624,7 +723,7 @@ if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {
 }
 
 $verdict = Get-TenantVerdict -IntendedTenant $intendedTenant -ActualTenant $actualTenant `
-    -IntentIsExplicit $tenantIntentIsExplicit -AzPresent $azPresent -Scope $scoped
+    -IntentIsExplicit $intent.IsExplicit -AzPresent $azPresent -Scope $scoped -DeclaredAs $declaredAs
 
 # One hint per Kind. Anything that needs an extra `az` call lives in its own branch, so the failure
 # path is the only one that pays for it.
@@ -633,7 +732,7 @@ $tenantHint = switch ($verdict.Kind) {
         'Declare the tenant you deploy into and this becomes automatic: -Tenant <id> (blocking, for a run that is about to deploy), $env:FABRIC_TENANT_ID, or FABRIC_TENANT_ID in the git-ignored .env (both warn-only). Same id you pass to deploy_estate.py --tenant. Until then, a WorkspaceNotFound on a workspace you know exists may simply be a token for another tenant.'
     }
     'malformed' {
-        'A token''s `tid` claim is always a GUID, so preflight has nothing to compare a domain name or a placeholder against. Use the GUID form: az account show --query tenantId -o tsv (or Entra > Overview). Note `az --tenant` and deploy_estate.py DO accept contoso.onmicrosoft.com, so this is a preflight-only requirement - and it never blocks.'
+        'Preflight resolves a default domain (contoso.onmicrosoft.com) against `az account list --all`, so this one is either a VANITY domain, a tenant this machine has never signed in to, or a placeholder that was never filled in. Give the GUID instead: az account show --query tenantId -o tsv (or Entra > Overview). Note `az --tenant` and deploy_estate.py DO accept a domain, so this is a preflight-only requirement - and it never blocks.'
     }
     'no-az' {
         'Install the Azure CLI to verify which tenant this machine actually mints Fabric tokens for.'
@@ -674,11 +773,17 @@ foreach ($tier in @('critical', 'recommended', 'optional')) {
     }
 }
 Write-Host ''
+# The tenant verdict is one line in the middle of ~40, and the OK lines that follow it push it off
+# an 80x24 terminal: measured, a WRONG TENANT warning sat at line 22 of 38 while the only text still
+# on screen read "Ready to migrate. 3 recommended warning(s) present." A count is not a diagnosis -
+# name the tenant on the line that survives scrolling. Empty for a match, for an undeclared run, and
+# for a merely configured intent that could not be verified, so the common case stays quiet.
+$tenantNote = if ($verdict.Summary) { " $($verdict.Summary)." } else { '' }
 if ($criticalMissing -gt 0) {
     $suffix = if ($recommendedWarnings -gt 0) { " ($recommendedWarnings recommended warning(s) also present)." } else { '' }
-    Write-Host "PREFLIGHT: $criticalMissing critical item(s) missing - resolve before migrating.$suffix"
+    Write-Host "PREFLIGHT: $criticalMissing critical item(s) missing - resolve before migrating.$suffix$tenantNote"
     exit 1
 }
 $suffix = if ($recommendedWarnings -gt 0) { " $recommendedWarnings recommended warning(s) present; review before relying on affected capabilities." } else { '' }
-Write-Host "PREFLIGHT: all critical dependencies present. Ready to migrate.$suffix"
+Write-Host "PREFLIGHT: all critical dependencies present. Ready to migrate.$suffix$tenantNote"
 exit 0
