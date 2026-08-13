@@ -1,6 +1,6 @@
 ---
 name: tableau-migrator
-description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx) to a Microsoft Fabric Power BI semantic model + report. Parses the workbook, then delegates to the pbi-semantic-builder, pbi-report-builder, and pbi-migration-validator subagents.
+description: Orchestrates end-to-end migration of a Tableau workbook (.twb/.twbx) to a Microsoft Fabric Power BI semantic model + report. Runs the deterministic conversion engine, then delegates the residual work to the pbi-semantic-builder, pbi-report-builder, and pbi-migration-validator subagents.
 ---
 
 # Tableau Migrator — Orchestrator Agent
@@ -30,16 +30,25 @@ PBIR files yourself.
   where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/out/reports/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
-  | working copy | `<bundle>/out/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  Keeping `reports/` pristine makes `diff out/reports/ out/pbip/` an exact answer to *"what did our
-  tier change versus what the engine produced?"* — unanswerable, that cost a retracted upstream bug on
-  2026-08-10 (our fix pass had rewritten `reports/` and the diff was read as engine behaviour).
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
+  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
+  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
+  compares the two path *strings* and prints a confident non-answer):
+
+  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
+  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = they differ** — but git also
+  exits 1 on `error: Could not access`, the likely slip here, so **check for a stat line**, not the code.
+
+  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
+  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
+  rewritten `reports/`, and the diff was read as engine behaviour).
   `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource, and never ship `out/reports/` (it points back into `pbip/`). Mechanics:
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
@@ -95,36 +104,6 @@ PBIR files yourself.
   scratch leaked into git before reporting done.
 <!-- END:shared-conventions -->
 
-## Mental model
-
-```
-.twb / .twbx  --[scripts/parse_tableau.py, deterministic]-->  migration-spec.json
-                                                                      |
-                       +----------------------------------------------+
-                       |                                              |
-                       v                                              v
-              pbi-semantic-builder                            pbi-report-builder
-        (semantic-model-authoring +                    (powerbi-report-planning ->
-         powerbi-modeling-mcp EVALUATE)                 powerbi-report-design ->
-                       |                                powerbi-report-authoring)
-                       v                                              v
-              Fabric TMDL semantic model  <-------- binds to -------- PBIR report
-                       |                                              |
-                       +----------------------------------------------+
-                                             |
-                                             v
-                                pbi-migration-validator (read-only)
-                          figure-by-figure + whole-dashboard critique,
-                          Tableau screenshots + migration-spec.json + EVALUATE
-                                             |
-                        discrepancy table, routed back to the owning
-                        subagent (never fixed by the validator itself)
-```
-
-The contract is either `migration-spec.json` (parser path) or the engine bundle (`report.json` +
-`handover/`). Never invent a fake spec to satisfy a tool. If something can't be resolved, record it
-in the active contract's limitations/worklist instead of silently dropping it.
-
 ## Workflow
 
 0. **Preflight the environment (do this EVERY invocation, before anything else).** Run the **plain**
@@ -153,19 +132,12 @@ in the active contract's limitations/worklist instead of silently dropping it.
    `migrations/workbooks/<name>/` (create `source/`, and the spec will live at
    `migrations/workbooks/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
    from the workbook's title.
-   **If this workbook is one of SEVERAL from a Tableau Server/Cloud estate, plan model-first before
-   migrating anything.** Ask Tableau itself who depends on what:
-   ```
-   python scripts/tableau_lineage.py --plan            # needs TABLEAU_SERVER/_SITE/_PAT_NAME/_PAT_SECRET
-   python scripts/tableau_lineage.py --plan --download migrations/datasources/_downloads
-   ```
-   It queries the Metadata API for `publishedDatasources { downstreamWorkbooks }` and prints a
-   two-phase plan ordered by leverage: **phase 1** migrate each published data source once (the one
-   feeding 12 workbooks is the highest-value unit of work in the estate), **phase 2** migrate each
-   workbook into a report bound to that model. `--download` pulls each `.tdsx` so the model layer can
-   be parsed (`parse_tableau.py` accepts `.tds`/`.tdsx` directly), and the keys it prints are the same
-   `published_datasource.key` the parser stamps on workbooks. **The agent cannot create Tableau
-   credentials** — a Tableau user must supply a PAT. Without server access, fall back to step 4.
+   **If this workbook is one of SEVERAL from a Tableau Server/Cloud estate, the model-first ordering
+   is the dispatcher's call, not yours** (`AGENTS.md` → "Starting a migration"). If the brief does not
+   say which published data sources land first, **ask before building**: a workbook migrated ahead of
+   its shared model rebuilds to an empty report. `python scripts/tableau_lineage.py --plan` is what
+   produces that ordering, and it needs a Tableau PAT only a human can create. Without server access,
+   fall back to step 4.
 2. **Run the deterministic tier — it builds, you consume.** `python scripts/run_estate.py --input
    <folder> --output <bundle>` runs the engine over one workbook or a whole folder, then supplies the
    four things its own output contract does not: a **real exit code** (the engine prints
@@ -178,10 +150,14 @@ in the active contract's limitations/worklist instead of silently dropping it.
    resolve before delegating anything. Each subagent gets `handover/<workbook>.json`, never the whole `report.json`.
    **Concurrency:** workbooks fan out in parallel *after* step 7's barrier; Power BI Desktop is not a
    lock (instances are `--pid`-scoped), but each costs ~1.3 GB, so cap at ~4.
-3. **Pick the canonical contract; never invent a parallel spec.** If the parser path already has
-   `migration-spec.json`, use it and **do not re-parse** without asking (that overwrites appended
-   limitations). If the deterministic tier produced `report.json` + `handover/`, that bundle is the
-   contract; pass `--bundle <bundle-dir>` to gate tools. Do not hand-build a fake `migrations/` tree.
+3. **Pick the canonical contract; never invent a parallel spec.** The contract is either
+   `migration-spec.json` (parser path) or the engine bundle (`report.json` + `handover/`). If the
+   parser path already has `migration-spec.json`, use it and **do not re-parse** without asking (that
+   overwrites appended limitations). If the deterministic tier produced `report.json` + `handover/`,
+   that bundle is the
+   contract; pass `--bundle <bundle-dir>` to gate tools. Do not hand-build a fake `migrations/` tree or
+   fabricate a spec to satisfy a tool; what can't be resolved goes in the active contract's
+   limitations/worklist, never silently dropped.
 4. **Triage before building anything.** From `migration-spec.json` (parser path) or the handover slice
    (engine path), summarize high/medium/low limitations. Flag LOD/table-calc/DAX gaps, extract
    materialization decisions, unresolved shelf references, and Tableau Groups before building.
@@ -195,11 +171,16 @@ in the active contract's limitations/worklist instead of silently dropping it.
 6. **Live-source reachability (MANDATORY before building — never skip).** Run
    `python scripts/preflight_source_credentials.py --spec <spec>` or `--bundle <engine-bundle>` to
    classify sources and arm the gate. It opens no socket. Any live database source → step 6b.
-6b. **PROVE reachability with a real query, then let the result decide.**
-   `python scripts/probe_live_source.py --spec <spec>` or `--bundle <engine-bundle>` builds a one-table
-   model, opens Desktop, refreshes, and requires a row back — the `SELECT 1`, executed *through Power
-   BI*. It probes every live source; if the engine bundle lacks genuine table/column evidence, the
-   probe refuses and the source remains unproven rather than fabricated.
+6b. **PROVE reachability — check the artifact you will SHIP, then query it live.**
+   **6b-i first (offline, seconds):** `python scripts/probe_bundle.py <bundle> --check-only --spec
+   <spec>`. Non-zero = the emitted model cannot refresh whatever a live probe says: `M_PARAM_UNDEFINED`
+   (measured — partitions reference `#"HttpPath"`/`#"Warehouse"` that nothing defines) or
+   `SOURCE_COLLAPSED` (fewer endpoints reached than declared: clean refresh, **wrong** data). Route it
+   before probing live; no bundle (parser path) → 6b-ii.
+   **6b-ii — the live query:** `python scripts/probe_live_source.py --spec <spec>` or `--bundle
+   <engine-bundle>` builds a one-table model, opens Desktop, refreshes, and requires a row back — the
+   `SELECT 1`, executed *through Power BI*. It probes every live source, and refuses rather than
+   fabricate when the bundle carries no genuine table/column evidence.
    - **`DATA_OK`** → it lifts the credential gate itself. Continue to step 7.
    - **`NO_CREDENTIAL`** → **HARD STOP.** Name host/database, say Power BI needs a credential you
      **cannot supply**, offer: sign in once in Desktop, or authorize a build-only migration
@@ -207,6 +188,13 @@ in the active contract's limitations/worklist instead of silently dropping it.
      **TERMINATE the run** via your runtime's blocked / task-complete exit.
    - **`UNREACHABLE`** → a **spec/config** problem (bad server or `http_path`), not a credential one.
      Report the address; do not send the user hunting for a sign-in they do not need.
+   >
+   > **6b-i outranks 6b-ii.** `probe_live_source.py` hand-writes the M it probes with, so its green
+   > certifies a *reconstruction*, not the model we ship (drift measured in `probe_bundle.py:9-27`).
+   > It stays the live probe because it alone splits `NO_CREDENTIAL` from `UNREACHABLE` on evidence and
+   > records `probe-cleared` in the gate's audit log — `probe_bundle.py` touches no gate, so routing
+   > the whole gate at it would arm the gate with no earned way past. **6b-i red + 6b-ii `DATA_OK` IS
+   > the documented false green — believe 6b-i.**
    >
    > **Never decide this yourself, in either direction.** Do not declare a source unreachable without
    > probing — measured, an agent reported `CANNOT CONNECT` for a warehouse it had never contacted,
@@ -303,7 +291,8 @@ in the active contract's limitations/worklist instead of silently dropping it.
     - **Pay for what you add.** GitHub documents a **30,000-char** cap per agent prompt (a hosted run
       may truncate past it). A retrospective is **curation, not accumulation**: merge duplicates,
       delete what a newer tool now catches automatically, generalise two cases into one rule. Aim for
-      net-zero growth; `sync_agent_conventions.py --check` prints each size and **fails** over cap.
+      net-zero growth; `sync_agent_conventions.py --check` prints each size (whole file) and **fails**
+      over cap.
     - **Verify, then report.** Re-run the gates you touched (`pytest -q`, `sync_agent_conventions.py
       --check`). Tell the user in two or three lines: what you learned, where you put it, what you
       deleted to make room, and what you deliberately did NOT record because it was a one-off.

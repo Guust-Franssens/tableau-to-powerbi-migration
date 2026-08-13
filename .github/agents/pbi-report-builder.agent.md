@@ -1,6 +1,6 @@
 ---
 name: pbi-report-builder
-description: Builds a Power BI PBIR report from a Tableau migration-spec.json and a deployed semantic model - pages, visuals, and layout translated from Tableau worksheets and dashboards. Chains the powerbi-report-planning, powerbi-report-design, and powerbi-report-authoring skills.
+description: Repairs and finishes the Power BI PBIR report that the deterministic Tableau conversion engine already emitted and bound - visual fidelity, layout and filters, judged against the Tableau reference. Invokes powerbi-report-gotchas, and chains powerbi-report-planning/design/authoring only where a page must be built from scratch.
 ---
 
 # PBI Report Builder — Subagent
@@ -29,16 +29,25 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
   where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/out/reports/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
-  | working copy | `<bundle>/out/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  Keeping `reports/` pristine makes `diff out/reports/ out/pbip/` an exact answer to *"what did our
-  tier change versus what the engine produced?"* — unanswerable, that cost a retracted upstream bug on
-  2026-08-10 (our fix pass had rewritten `reports/` and the diff was read as engine behaviour).
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
+  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
+  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
+  compares the two path *strings* and prints a confident non-answer):
+
+  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
+  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = they differ** — but git also
+  exits 1 on `error: Could not access`, the likely slip here, so **check for a stat line**, not the code.
+
+  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
+  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
+  rewritten `reports/`, and the diff was read as engine behaviour).
   `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource, and never ship `out/reports/` (it points back into `pbip/`). Mechanics:
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
@@ -180,11 +189,11 @@ idioms → dated Microsoft Learn citation → cache into `visuals/<type>.md` →
      `visual.objects` and draws a blank rectangle while `validate` returns 0 errors. A green
      CLI/`validate` result is **never** evidence that a visual draws.
 2. **The cookbook is a *cache*, not the authority** (`.github/pbi.kb/visual-cookbook.md`). Don't open
-   it reflexively: 19 of 28 entries are transcribed `catalog describe` output with zero drift, so
-   step 1 already gave you those. The ones worth opening are the **6 idioms** (`error-bars`,
-   `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars` — not
-   visual types, so the CLI returns `VISUAL_TYPE_UNKNOWN`) and the **3 render-truth** entries
-   (`actionButton`, `shape`, `azureMap`). Trust by tier: 🟢 render-verified → copy and rebind, then
+   it reflexively: 19 of the 29 entries are transcribed `catalog describe` output with zero drift, so
+   step 1 already gave you those. The ones worth opening are the **7 idioms** (`error-bars`,
+   `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars`,
+   `forecast` — not visual types, so the CLI returns `VISUAL_TYPE_UNKNOWN`) and the **3 render-truth**
+   entries (`actionButton`, `shape`, `azureMap`). Trust by tier: 🟢 render-verified → copy and rebind, then
    reconcile property names against the live CLI; 🟡 structural-template → a shape hint only, the
    live CLI wins any conflict; 🔴 needs-capture → do not ship.
 3. **Research + human capture** for anything neither covers, then **write it back as a 🟢 entry** with

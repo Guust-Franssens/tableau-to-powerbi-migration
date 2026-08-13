@@ -15,8 +15,10 @@ Repairs the npm bridge CLIs **if they are below the correctness floor**, then pr
 readiness matrix. Session start is the **only safe moment** to change them.
 
 - `powerbi-report-author` **>= 0.1.4 is a correctness floor**, not a nicety. Older builds returned
-  `errorCount: 0` for PBIR that Power BI Desktop cannot open (e.g. a `report.json` missing the
-  schema-required `reportVersionAtImport`). A stale CLI silently green-lights a broken report.
+  `errorCount: 0` for PBIR that Power BI Desktop cannot open (e.g. a `report.json` whose
+  `themeCollection` entries are missing `reportVersionAtImport` — it is **required inside each
+  `themeCollection` entry** and **forbidden at the top level**, where 0.1.4 rejects it as an
+  additional property). A stale CLI silently green-lights a broken report.
 - `-Update` is a **floor check, not a blind `@latest`**. At or above the floor it does nothing (so it
   costs no time); it only upgrades an install that is genuinely too old.
 - Being **above** the recorded known-good matrix is not an error — it raises a WARN, because that is

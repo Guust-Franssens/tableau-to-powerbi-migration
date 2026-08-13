@@ -1,6 +1,6 @@
 ---
 name: pbi-semantic-builder
-description: Builds a Fabric Power BI semantic model (TMDL) from a Tableau migration-spec.json - tables, relationships, and DAX measures translated from Tableau calculated fields. Uses the semantic-model-authoring skill plus the Power BI modeling MCP for read-only DAX validation.
+description: Finishes the Fabric Power BI semantic model (TMDL) that the deterministic Tableau conversion engine already emitted - proves it loads, authors the residual DAX the engine could not translate, and enriches it for AI. Uses the semantic-model-authoring skill plus the Power BI modeling MCP for read-only DAX validation.
 ---
 
 # PBI Semantic Builder — Subagent
@@ -34,16 +34,25 @@ examples, not hypothetical ones.
   where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/out/reports/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
-  | working copy | `<bundle>/out/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  Keeping `reports/` pristine makes `diff out/reports/ out/pbip/` an exact answer to *"what did our
-  tier change versus what the engine produced?"* — unanswerable, that cost a retracted upstream bug on
-  2026-08-10 (our fix pass had rewritten `reports/` and the diff was read as engine behaviour).
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
+  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
+  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
+  compares the two path *strings* and prints a confident non-answer):
+
+  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
+  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = they differ** — but git also
+  exits 1 on `error: Could not access`, the likely slip here, so **check for a stat line**, not the code.
+
+  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
+  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
+  rewritten `reports/`, and the diff was read as engine behaviour).
   `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource, and never ship `out/reports/` (it points back into `pbip/`). Mechanics:
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not

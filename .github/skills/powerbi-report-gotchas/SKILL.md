@@ -174,11 +174,12 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
 ## 3. PBIR mechanics
 
 - **Handing a bundle over: keep `definition.pbir`'s `byPath` resolving.** 🟢 Verified 2026-08-11. The
-  deliverable is a **copy** of `<bundle>/out/pbip/` (the engine's `out/reports/` stays pristine as the
-  attribution baseline). Two cases, and only one is a plain copy:
-  - **Model per workbook — plain copy, no rewrite.** `out/pbip/<wb>/` already holds `<Name>.Report/`
+  deliverable is a **copy** of `<bundle>/pbip/` (the engine's `<bundle>/reports/` stays pristine as the
+  attribution baseline; there is no `out/` level — a bundle is
+  `<bundle>/{pbip,reports,semantic_models,handover,data}`). Two cases, and only one is a plain copy:
+  - **Model per workbook — plain copy, no rewrite.** `<bundle>/pbip/<wb>/` already holds `<Name>.Report/`
     and `<Name>.SemanticModel/` as **siblings**, with `"path": "../<Name>.SemanticModel"`, and the
-    delivery folder has the identical shape — so copy the **contents** of `out/pbip/<wb>/`, not the
+    delivery folder has the identical shape — so copy the **contents** of `<bundle>/pbip/<wb>/`, not the
     folder. (That folder is named for the *workbook*; the model inside is named for the *datasource*,
     so copying the folder itself nests them wrongly.)
   - **Shared/published datasource — the reference MUST be rewritten.** The model lands once in a
@@ -187,8 +188,11 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
     `"../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"` — four levels up from inside
     `<Name>.Report/`. **Verify it resolves on disk after writing it:** a broken `byPath` opens as a
     report with *no model*, which reads like a binding defect and sends you debugging the wrong layer.
-  - **Never ship `out/reports/` itself** — its `definition.pbir` points *back into* `pbip/`
-    (`"../../pbip/<wb>/<Name>.SemanticModel"`), so it is a reference-only baseline, not portable.
+  - **Never ship `<bundle>/reports/` itself** — it is a reference-only baseline, not portable. Its
+    `definition.pbir` does not resolve where it sits: `reports/` holds only `*.Report` folders, so the
+    `byPath` next to it has no model to point at (2026-08-11 it read `"../../pbip/<wb>/<Name>.SemanticModel"`;
+    on a 2026-08-13 bundle it reads `"../<Name>.SemanticModel"` — ⚠️ engine-version dependent, and
+    unresolvable either way).
 
 - **Visual-level filter = a top-level `filterConfig` key in `visual.json` (sibling to `visual`, NOT
   nested under it)**, `type:"Categorical"`, `Version:2` `In`-condition. Nesting it under `visual` is
