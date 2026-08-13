@@ -265,13 +265,20 @@ def test_certify_without_the_engine_refuses_rather_than_passing_vacuously():
 
     The dangerous failure here is the silent one: if a missing engine degraded to a pass, every run
     on a machine without the deterministic tier would report CONFORMS having checked nothing.
+
+    The engine now resolves through the ONE canonical resolver (`engine_source`, issue #107), so the
+    absence is simulated by making that resolver raise - which is exactly what it does when the
+    plugin is not installed. It no longer searches a candidate list, so there is no list to blank.
     """
     import dax_oracle_server as module  # noqa: PLC0415
 
-    original = module.CONTRACT_CANDIDATES
-    module.CONTRACT_CANDIDATES = (Path(__file__).parent / "no-such-engine",)
+    def _absent():
+        raise module.EngineNotFoundError("plugin not installed (simulated)")
+
+    original = module.engine_scripts_dir
+    module.engine_scripts_dir = _absent
     try:
         assert module._load_contract() is None
         assert module.certify(module.make_oracle(module._stub_executor)) == 2
     finally:
-        module.CONTRACT_CANDIDATES = original
+        module.engine_scripts_dir = original

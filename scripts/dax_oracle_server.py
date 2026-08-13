@@ -69,13 +69,15 @@ log = logging.getLogger("dax_oracle")
 # alter a model somebody is mid-migration on - is refused before it reaches the connection.
 READ_ONLY_PREFIXES = ("EVALUATE", "DEFINE", "SELECT")
 
-# Where the deterministic tier's contract module may live: the installed plugin first (what an agent
-# actually runs), then a sibling clone (what a developer edits). Import is OPTIONAL - the server runs
-# without it; only `--certify` needs it, because certification is his function, not our reimplementation.
-CONTRACT_CANDIDATES = (
-    Path.home()
-    / ".copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/scripts",
-    REPO_ROOT.parent / "tableau-fabric-skills/skills/tableau-migration/scripts",
+# The deterministic tier's contract module comes from the ONE canonical engine (issue #107): the
+# installed plugin, resolved by `engine_source`, never a second copy found by searching. Import is
+# OPTIONAL - the server runs without it; only `--certify` needs it, because certification is his
+# function, not our reimplementation.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from engine_source import (  # noqa: E402  # pylint: disable=wrong-import-position
+    PLUGIN_ENGINE_ROOT,
+    EngineNotFoundError,
+    engine_scripts_dir,
 )
 
 
@@ -205,16 +207,19 @@ def serve(oracle: Callable[[str], dict], stdin=None, stdout=None) -> int:
 
 def _load_contract():
     """Import the deterministic tier's `fabric_oracle` module, or None if it is not installed."""
-    for candidate in CONTRACT_CANDIDATES:
-        if (candidate / "fabric_oracle.py").is_file():
-            sys.path.insert(0, str(candidate))
-            # Deferred and unresolvable to a static checker on purpose: the deterministic tier is an
-            # OPTIONAL peer, found at runtime on one of two paths. A top-level import would make this
-            # whole script unimportable on a machine that only ever runs the offline modes.
-            # pylint: disable-next=import-outside-toplevel,import-error
-            import fabric_oracle  # noqa: PLC0415
+    try:
+        candidate = engine_scripts_dir()
+    except EngineNotFoundError:
+        return None
+    if (candidate / "fabric_oracle.py").is_file():
+        sys.path.insert(0, str(candidate))
+        # Deferred and unresolvable to a static checker on purpose: the deterministic tier is an
+        # OPTIONAL peer, found at runtime on one of two paths. A top-level import would make this
+        # whole script unimportable on a machine that only ever runs the offline modes.
+        # pylint: disable-next=import-outside-toplevel,import-error
+        import fabric_oracle  # noqa: PLC0415
 
-            return fabric_oracle
+        return fabric_oracle
     return None
 
 
@@ -226,8 +231,8 @@ def certify(oracle: Callable[[str], dict]) -> int:
     """
     contract = _load_contract()
     if contract is None:
-        log.error("CERTIFY: contract module not found in %s", " | ".join(str(c) for c in CONTRACT_CANDIDATES))
-        log.error("  Install the tableau-migration plugin, or clone the engine beside this repo.")
+        log.error("CERTIFY: contract module not found under %s", PLUGIN_ENGINE_ROOT)
+        log.error("  Install the tableau-fabric-skills plugin - it is the single canonical engine (#107).")
         return 2
     result = contract.conforms(oracle)
     for name, passed in sorted(result["checks"].items()):

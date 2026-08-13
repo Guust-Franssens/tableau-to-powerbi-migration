@@ -11,7 +11,9 @@
   (Get-AppxPackage for the Desktop MSIX, Get-OdbcDriver, the JSONC ~/.copilot config), so PowerShell
   is the correct, dependency-free bootstrap.
 
-  Verifies: Python + the parser's Python deps, both skill plugins
+  Verifies: Python + the parser's Python deps, the deterministic conversion engine (the installed
+  `tableau-fabric-skills` plugin, which is its SINGLE canonical source - a second copy anywhere is a
+  hard failure, see issue #107), both skill plugins
   (powerbi-authoring@fabric-collection and powerbi-migration-skills@powerbi-migration-collection),
   the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, and the npm CLI version
   matrix. Prints a per-item status (OK / WARN / MISS) with an install hint for anything absent.
@@ -27,6 +29,12 @@
     - Migration start (orchestrator step 0) -> plain preflight, NEVER `-Update`.
     - Mid-migration -> never. Swapping the validator under a half-built report is worse than a
       slightly old CLI.
+
+.PARAMETER CheckUpstream
+  Opt-in (~3s of network) and ADVISORY. Every other check compares an installed version against a
+  hard-coded number, which answers "is what I have good enough" but never "has the world moved".
+  This asks npm for the latest bridge CLIs and GitHub for the conversion engine's upstream VERSION.
+  It never upgrades and never fails the run.
 
 .NOTES
   Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 [-Update]
@@ -143,6 +151,40 @@ if (Get-Command 'powerbi-report-author' -ErrorAction SilentlyContinue) {
     Add-Check 'powerbi-report-author doctor' 'optional' $docOk `
         $(if ($docOk) { 'self-checks OK (node, ajv, metadata provider)' } else { 'doctor reported a problem' }) `
         'Run `powerbi-report-author doctor` for detail. If schema fetch fails, treat a 0-error `validate` as STRUCTURE-ONLY (see AGENTS.md).'
+}
+
+# --- The deterministic conversion engine: ONE copy, and it is the plugin (issue #107) -------------
+#
+# The engine is a separate project this repo does not pin, so it resolves at RUNTIME. Measured
+# 2026-08-12, this machine had it installed TWICE at different versions - the plugin at 2.113.0 and a
+# sibling clone at 2.126.0 - and different pipeline steps resolved different trees. They are not
+# equivalent: 2.113.0 emits deprecated Bing shapeMap/filledMap visuals and drops a density-map
+# worksheet entirely; 2.126.0 emits azureMap with a heat layer. Nothing in the run output said which
+# one had run.
+#
+# The decision: the INSTALLED PLUGIN is the single canonical engine. So a second tree is not a
+# convenience to warn about, it is THE defect - hence critical, not recommended.
+#
+# The candidate list lives in scripts/engine_source.py, not here, deliberately: duplicating it in
+# PowerShell would recreate the two-definitions-of-one-thing problem this check exists to catch.
+$engineStatus = $null
+if ($py) {
+    $engineRaw = & python (Join-Path $repoRoot 'scripts\engine_source.py') --json 2>$null
+    try { $engineStatus = (($engineRaw | Out-String) | ConvertFrom-Json) } catch { $engineStatus = $null }
+}
+if ($engineStatus) {
+    $alternatives = @($engineStatus.alternatives)
+    Add-Check 'engine: plugin installed' 'critical' ([bool]$engineStatus.present) `
+        $(if ($engineStatus.present) { "VERSION $($engineStatus.version) at $($engineStatus.root)" } else { "not installed at $($engineStatus.root)" }) `
+        $engineStatus.install_hint
+    Add-Check 'engine: single source' 'critical' ($alternatives.Count -eq 0) `
+        $(if ($alternatives.Count) { "ALTERNATIVE COPY: $($alternatives -join '; ')" } else { 'plugin only' }) `
+        'A second engine tree means two versions can build one pipeline with no record of which ran (#107). DELETE the alternative copy after confirming it has no uncommitted/unpushed work: git -C <path> status --porcelain; git -C <path> log --branches --not --remotes.'
+}
+else {
+    Add-Check 'engine: single source' 'critical' $false `
+        $(if ($py) { 'engine_source.py did not report - is scripts/engine_source.py present?' } else { 'not verified (Python unavailable)' }) `
+        'Install Python 3.11+, then re-run. The engine single-source rule is enforced by scripts/engine_source.py --json.'
 }
 
 # --- Skill plugins ---
@@ -274,16 +316,20 @@ if ($CheckUpstream) {
         }
     }
 
-    # The deterministic tier is a git clone, not an npm package, so ask the remote for its HEAD.
-    $enginePath = Join-Path (Split-Path -Parent $repoRoot) 'tableau-fabric-skills'
-    if (Test-Path (Join-Path $enginePath '.git')) {
-        $localHead  = (& git -C $enginePath rev-parse HEAD 2>$null)
-        $remoteHead = ((& git -C $enginePath ls-remote origin HEAD 2>$null) -split '\s+')[0]
-        if ($localHead -and $remoteHead) {
-            $current = $localHead -eq $remoteHead
-            Add-Check 'upstream: tableau-fabric-skills' 'optional' $current `
-                $(if ($current) { "current ($($localHead.Substring(0,7)))" } else { "local $($localHead.Substring(0,7)), remote $($remoteHead.Substring(0,7))" }) `
-                "git -C `"$enginePath`" pull --ff-only  - then RE-VERIFY any open issue against the new build before citing it."
+    # The deterministic engine is an unpacked marketplace plugin with no `.git`, so there is no local
+    # SHA to compare. Ask upstream for the VERSION file itself - one HTTP GET, and it compares the
+    # thing that actually changes behaviour rather than a commit id nobody can interpret.
+    if ($engineStatus -and $engineStatus.present) {
+        $latestEngine = $null
+        try {
+            $latestEngine = ((Invoke-WebRequest -Uri $engineStatus.upstream_version_url -UseBasicParsing -TimeoutSec 15).Content).Trim()
+        }
+        catch { $latestEngine = $null }
+        if ($latestEngine -match '^\d+(\.\d+)+$' -and $engineStatus.version -match '^\d+(\.\d+)+$') {
+            $behindEngine = [version]$engineStatus.version -lt [version]$latestEngine
+            Add-Check 'upstream: conversion engine' 'optional' (-not $behindEngine) `
+                $(if ($behindEngine) { "$($engineStatus.version) installed, $latestEngine upstream" } else { "$($engineStatus.version) (current)" }) `
+                'Between migrations only, and BETWEEN Copilot sessions (the plugin dir is file-locked while one runs): copilot plugin update tableau-fabric-skills@tableau-collection. Mid-session content-only refresh: python scripts/sync_engine_plugin.py --source <checkout>. Then RE-VERIFY any open issue against the new build before citing it.'
         }
     }
 }
