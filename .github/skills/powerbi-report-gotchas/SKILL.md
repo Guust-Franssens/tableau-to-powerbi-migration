@@ -120,14 +120,18 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   undocumented**, which is exactly why it can only be found by rendering — cite the measurement.
   **Consequence for migrations:** when a source tool expresses *both* "this discrete pill forms
   panes" *and* "sort this axis by a measure" (a Tableau `<cols>` pane pill + `<computed-sort>` is
-  exactly this pair), Power BI's native small multiples can honour only one. Decide which property
-  carries more meaning, implement that, and log the other as an accepted limitation — do not assume a
-  structurally intact `sortDefinition` means the sort is live. The only recovery candidate is a
-  numeric rank column plus **Sort by Column** on the category, which is a **semantic-model** change
-  (route it to the model owner), and community reports say even that is unreliable under small
-  multiples. Still retarget the sort onto a field the visual actually projects on an axis before
-  logging the limitation: it costs nothing, it is render-neutral, and it leaves the one encoding
-  that is correct on its own terms, so the order appears for free if Desktop ever honours it.
+  exactly this pair), the **report layer** cannot carry the sort — a `sortDefinition` is ignored once
+  the pane field is in the small-multiples well, whether it names an off-axis or an on-axis field
+  (measured above). **This is NOT an accepted limitation — it has a proven model-side fix.** A
+  model-level **Sort by Column** (`sortByColumn`) on the category, keyed to a numeric rank column,
+  DOES survive small multiples: measured in `powerbi-semantic-model-gotchas` §4 ("a model-level sort
+  SURVIVES small multiples where a visual-level sort does not"), it reordered all 17 categories
+  correctly across all 4 panes on the byte-identical `clusteredBarChart` where the report-layer sort
+  was ignored. So **route the sort to the model owner as the real fix, not a fallback** — a rank
+  column plus `sortByColumn` is the mechanism that works, and it is the model's job, not the
+  report's. Keeping the report-layer `sortDefinition` targeted at a projected field is still a
+  harmless, render-neutral adjunct (belt-and-braces), but do not log an accepted limitation and stop:
+  the sort is recoverable, and we have proven it.
 
 - **A measure's `SourceRef.Entity` must be the measure's HOME table, not the table it aggregates.**
   🟢 verified at query level. `Sales (w/o Category)` = `CALCULATE(SUM('Orders'[Sales]),
