@@ -536,7 +536,8 @@ exists so each question is answered once per migration, not once per session.
   compares the two path *strings* and prints a confident non-answer):
 
   `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
-  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = "differs", not "failed"**.
+  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = they differ** — but git also
+  exits 1 on `error: Could not access`, the likely slip here, so **check for a stat line**, not the code.
 
   Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
   what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had

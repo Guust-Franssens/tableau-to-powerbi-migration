@@ -72,6 +72,23 @@ BUNDLE_DIRS = frozenset({"pbip", "reports", "semantic_models", "handover", "data
 # ``<bundle>/pbip/`` or the brace form ``<bundle>/{pbip,reports,...}`` as written in prose/tables.
 _BUNDLE_PATH = re.compile(r"<bundle>/(\{[^}`]*\}|[A-Za-z0-9_.\-]+)")
 
+
+def _is_file_citation(name: str) -> bool:
+    """True for a bundle-ROOT FILE (`summary.md`, `report.json`), which is not a layout claim.
+
+    The directory rule below must not fire on one. Measured: widening the scan to persona bodies made
+    the perfectly correct sentence *"read `<bundle>/summary.md` first"* fail CI with "`summary.md` is
+    not a bundle directory ... there is no `out/` level" - a message that invents a trailing slash on a
+    filename and then blames an unrelated defect. `docs/operator-runbook.md` already writes 6 distinct
+    files that way, so the cheapest way to appease the gate would have been to delete the citation: a
+    gate that trains people to write worse docs is worse than no gate.
+
+    A dot is the discriminator because no bundle directory has one (`BUNDLE_DIRS` is the whole set) and
+    every bundle-root artifact does.
+    """
+    return "." in name
+
+
 PREAMBLE = (
     "> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**\n"
     "> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not\n"
@@ -208,11 +225,17 @@ def check_bundle_paths(bundle: Path | None) -> list[str]:
     against `BUNDLE_DIRS` but not against disk, because that list describes the layout, not this
     bundle: an estate with no flat-file extracts has no `data/`, and failing it for that would punish a
     correct document with a legitimate bundle.
+
+    Bundle-root FILES (`<bundle>/summary.md`) are citations, not layout claims, so the directory rule
+    skips them - see `_is_file_citation`. Their absence under `--bundle` is a WARNING, never a failure:
+    several are written conditionally (`empty-model-check.json`, `deploy-journal.jsonl` and
+    `deploy-estate-id.txt` are all absent from a real completed bundle), so demanding them would
+    reproduce, one layer down, exactly the false rejection this exemption removes.
     """
     problems = []
     documented = documented_bundle_paths()
     for name, occurrences in sorted(documented.items()):
-        if name not in BUNDLE_DIRS:
+        if name not in BUNDLE_DIRS and not _is_file_citation(name):
             origin, raw = occurrences[0]
             problems.append(
                 f"{origin} documents `{raw}/`, but `{name}` is not a bundle directory. "
@@ -226,7 +249,17 @@ def check_bundle_paths(bundle: Path | None) -> list[str]:
     actual = {p.name for p in bundle.iterdir() if p.is_dir()}
     for name, occurrences in sorted(documented.items()):
         as_location = [origin for origin, raw in occurrences if not raw.endswith("}")]
-        if name in BUNDLE_DIRS and name not in actual and as_location:
+        if not as_location:
+            continue
+        if _is_file_citation(name):
+            if not (bundle / name).exists():
+                log.warning(
+                    "  %s cites `<bundle>/%s`, absent from %s (may be written conditionally)",
+                    as_location[0],
+                    name,
+                    bundle,
+                )
+        elif name in BUNDLE_DIRS and name not in actual:
             problems.append(f"{as_location[0]} documents `<bundle>/{name}/`, which does not exist in {bundle}")
     # The constant is evidence too, so let a real bundle correct it rather than the other way round.
     for name in sorted(BUNDLE_DIRS - actual):
