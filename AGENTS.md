@@ -454,6 +454,12 @@ this session's entire working memory with it — measured, 2026-08-08), and it i
 subagent receives instead of re-deriving intent nobody wrote down. Then invoke `@tableau-migrator`
 per unit of work, handing it the brief.
 
+> **Running the pipeline by hand, or standing behind someone who is?**
+> [`docs/operator-runbook.md`](docs/operator-runbook.md) is the command-by-command version of this
+> section: the day-before checklist, expected timings, the failure playbook (the `estate_survey.py`
+> credential hang, the `exit 3` DoD gate, the storage-decision/union skip), the verification
+> checklist and — importantly — what that checklist does **not** prove.
+
 ### Gate B — after parse + probe, before building
 
 Some decisions genuinely cannot be front-loaded: you do not know a workbook points at a published

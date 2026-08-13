@@ -105,6 +105,11 @@ original dashboards belongs to their respective Tableau Public authors.
   runs first. It checks Python and parser deps, the `powerbi-authoring` plugin, the MCP servers,
   Power BI Desktop and its Bridge CLI, `npx`, the .NET SDK, and the known-good CLI version matrix
   (plus `powerbi-report-author doctor`), printing an install hint for anything missing.
+- **Operator runbook** ([`docs/operator-runbook.md`](docs/operator-runbook.md)): the
+  command-by-command procedure for running a real estate migration — day-before pre-flight, the
+  happy path with measured timings, the decision points where you stop and ask, a symptom → cause →
+  fix failure playbook, a verification checklist, and an explicit list of what that checklist does
+  **not** prove. Start here if you are the one at the keyboard.
 
 ## 🧩 Why a separate parser, not an all-LLM pipeline
 
@@ -249,6 +254,11 @@ Then, in [GitHub Copilot CLI](https://github.com/github/copilot-cli), run the or
 ```
 
 and point it at `migrations\workbooks\<name>\migration-spec.json`.
+
+> **Migrating a whole Tableau *site*, not one workbook?** That is a different, mostly deterministic
+> pipeline — survey → assess → harvest → convert → deploy — and it has its own step-by-step
+> procedure with measured timings, exit codes, decision points and a failure playbook:
+> **[`docs/operator-runbook.md`](docs/operator-runbook.md)**. Read it before the day you need it.
 
 ## 🧪 Try a worked example
 

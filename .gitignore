@@ -14,7 +14,11 @@ build/
 /migrations/workshop-*/
 /migrations/engagement-*/
 /migrations/customer-*/
-/migrations/*/migration-brief.md
+# `**/` not `/migrations/*/`: the depth-1 rule did NOT cover the path AGENTS.md actually instructs -
+# `migrations/workbooks/<slug>/migration-brief.md` is two levels deep, and `git check-ignore` on that
+# exact documented path returned NOT IGNORED. A brief names the customer, their scope, their people
+# and their destination workspace, so the rule has to match wherever a brief can legitimately land.
+**/migration-brief.md
 
 # The three migration trees share one shape (<tree>/<slug>/...), so these rules use `**/` to apply to
 # all of them: examples/ (our worked examples), migrations/workbooks/ (your workbook migrations) and
@@ -78,6 +82,13 @@ candidates.json
 # harvest_estate_assets.py output: downloaded .twbx/.tdsx from a REAL site plus the parse
 # sweep over them. Vendor workbooks and customer content - never commit.
 /_sweep/
+
+# run_estate.py output (the conventional `--output` name, and dated/suffixed variants). A bundle is
+# the most customer-identifying artifact this toolkit produces: report.json carries every workbook
+# and project name and every calculated-field formula, and pbip/ carries the generated TMDL + PBIR.
+# Its siblings above were already ignored; this one was not, which is the more dangerous half.
+/_bundle*/
+/_estate*/
 
 # Power BI Desktop local cache/settings - machine-specific, regenerated automatically on open
 **/.pbi/cache.abf
