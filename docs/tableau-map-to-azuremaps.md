@@ -176,7 +176,7 @@ different engine working trees"* — a plausible-sounding doubt aimed at the wro
 sophisticated confound is not the same as ruling out the simple one, and it can substitute for
 checking. The cheap check (open the third bundle) was never run.
 
-**Generalisable rule: `out/reports/` is not pristine engine output once a fix pass has run.** Any
+**Generalisable rule: `<bundle>/reports/` is not pristine engine output once a fix pass has run.** Any
 claim about engine behaviour must come from a bundle no agent has touched — or from the handover's
 original list, which records what the engine actually said before anything rewrote it.
 

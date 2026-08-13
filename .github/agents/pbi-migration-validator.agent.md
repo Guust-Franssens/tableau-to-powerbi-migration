@@ -68,17 +68,22 @@ reasoning or self-report of success.
   where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/out/reports/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
-  | working copy | `<bundle>/out/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  Keeping `reports/` pristine makes `diff out/reports/ out/pbip/` an exact answer to *"what did our
-  tier change versus what the engine produced?"* — unanswerable, that cost a retracted upstream bug on
-  2026-08-10 (our fix pass had rewritten `reports/` and the diff was read as engine behaviour).
+  **There is no `out/` level** — a bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}`,
+  and the two sides differ in shape: `reports/<wb>.Report/` versus `pbip/<wb>/<wb>.Report/`
+  (✅ verified on a real 38-workbook bundle, 2026-08-13; matches `docs/operator-runbook.md` §0).
+
+  Keeping `reports/` pristine makes `diff -r <bundle>/reports/<wb>.Report <bundle>/pbip/<wb>/<wb>.Report`
+  an exact answer to *"what did our tier change versus what the engine produced?"* — unanswerable, that
+  cost a retracted upstream bug on 2026-08-10 (our fix pass had rewritten `reports/` and the diff was
+  read as engine behaviour).
   `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource, and never ship `out/reports/` (it points back into `pbip/`). Mechanics:
-  `powerbi-report-gotchas` §3.
+  shared datasource, and never ship `<bundle>/reports/` (its `definition.pbir` has no model beside it
+  — reference-only, not portable). Mechanics: `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only

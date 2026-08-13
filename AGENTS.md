@@ -12,6 +12,12 @@ the shared agent conventions**, which `scripts/sync_agent_conventions.py` genera
 > no `include`/`extends` mechanism. So the conventions below are *duplicated* into each agent on
 > purpose, and CI fails if a copy drifts. **Edit them here, then run
 > `python scripts/sync_agent_conventions.py`** — never edit the copy inside an agent file.
+>
+> `--check` fails on three things, and the last two exist because consistency alone was not enough:
+> **drift**, a persona **over the 30,000-char cap** (measured on the whole file — a body-only count
+> read 98 % for a 30,132-char file), and a documented `<bundle>/…` path that **is not a real bundle
+> directory** (`<bundle>/out/pbip/` was wrong in all five copies for weeks, and agreeing with itself
+> was the only thing anyone checked). `--bundle <dir>` additionally resolves those paths on disk.
 
 > **VS Code users:** VS Code Copilot auto-loads `.github/copilot-instructions.md`, *not* this file.
 > That pointer file duplicates only the session-start step below and defers everything else here, so
@@ -29,8 +35,19 @@ powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update
 floor check, not a blind `@latest`, so at or above the floor it costs nothing.
 
 **Why a floor:** `powerbi-report-author` **>= 0.1.4** is a *correctness* floor. Older builds returned
-`errorCount: 0` for PBIR that Power BI Desktop cannot open (e.g. a `report.json` missing the
-schema-required `reportVersionAtImport`) — a stale CLI silently green-lights a broken report.
+`errorCount: 0` for PBIR that Power BI Desktop cannot open (e.g. a `report.json` whose
+`themeCollection` entries are missing `reportVersionAtImport`) — a stale CLI silently green-lights a
+broken report.
+
+⚠️ **`reportVersionAtImport` is location-dependent, and the two locations disagree.** Measured against
+0.1.4: it is **required inside each `themeCollection` entry** (`baseTheme`, `customTheme` — removing
+it gives `PBIR_THEME_VERSION_AT_IMPORT_MISSING`) and **forbidden at the top level** of `report.json`
+(adding it there gives `PBIR_SCHEMA_VALIDATION_ERROR / must NOT have additional properties`). Ground
+truth, a committed deliverable:
+`examples/shipping-kpis/fabric/ShippingKPIs.Report/definition/report.json` — top-level keys are
+`$schema`, `themeCollection`, `resourcePackages`, `settings`, and *both* theme entries carry
+`name`, `type`, `reportVersionAtImport`. Saying only "schema-required" is what put it at the top level
+in a hand-written scaffold five days later; name the location every time.
 
 **Above the known-good matrix is a WARN, not an error.** It means the version-specific Gotchas in
 `.github/agents/` were verified against an older build and may be stale — re-verify the prose; never
@@ -492,17 +509,22 @@ exists so each question is answered once per migration, not once per session.
   where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/out/reports/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
-  | working copy | `<bundle>/out/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  Keeping `reports/` pristine makes `diff out/reports/ out/pbip/` an exact answer to *"what did our
-  tier change versus what the engine produced?"* — unanswerable, that cost a retracted upstream bug on
-  2026-08-10 (our fix pass had rewritten `reports/` and the diff was read as engine behaviour).
+  **There is no `out/` level** — a bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}`,
+  and the two sides differ in shape: `reports/<wb>.Report/` versus `pbip/<wb>/<wb>.Report/`
+  (✅ verified on a real 38-workbook bundle, 2026-08-13; matches `docs/operator-runbook.md` §0).
+
+  Keeping `reports/` pristine makes `diff -r <bundle>/reports/<wb>.Report <bundle>/pbip/<wb>/<wb>.Report`
+  an exact answer to *"what did our tier change versus what the engine produced?"* — unanswerable, that
+  cost a retracted upstream bug on 2026-08-10 (our fix pass had rewritten `reports/` and the diff was
+  read as engine behaviour).
   `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource, and never ship `out/reports/` (it points back into `pbip/`). Mechanics:
-  `powerbi-report-gotchas` §3.
+  shared datasource, and never ship `<bundle>/reports/` (its `definition.pbir` has no model beside it
+  — reference-only, not portable). Mechanics: `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
