@@ -689,16 +689,34 @@ shape as §5, with no credential anywhere in sight; this source was a local file
 **Rules.** Close Desktop **before** editing TMDL, then reopen. **Do not use a graceful close here:**
 it prompts to save, and saving writes the **stale in-memory model back over the corrected TMDL**,
 silently undoing your fix. For an instance *you opened yourself to refresh a model you are editing on
-disk* — whose entire in-memory state you created and can reproduce from `_build/` — a **force-kill**
-(`Stop-Process -Id <literal pid> -Force`) is therefore the correct close, and it also discards
-live-only MCP objects (probe tables) as a free cleanup.
+disk*, a **force-kill** (`Stop-Process -Id <literal pid> -Force`) is the right close **once you have
+confirmed there is no unsaved in-memory state worth keeping** (the cleanliness gate below); it also
+discards live-only MCP *probe* objects (disposable scratch tables) as a free cleanup.
 
-⚠️ **A force-kill discards ALL unsaved state, not only the stale model — so first make sure there is
-nothing to lose.** Confirm via `powerbi-desktop status` that `currentFilePath` is *your* `.pbip` and
-that this is the instance you opened for this refresh cycle. If it is an instance you did **not**
-open, or one that may hold unsaved work you did not create (a report edit, a UI-side model change),
-do **not** decide for the user — **stop and ask** whether to save or discard before killing it.
-Never force-kill a sibling build's instance (the pid-binding rule).
+⚠️ **Authorise a force-kill by a positive cleanliness check, not by provenance.** Knowing you opened
+the instance, and that `currentFilePath` is your `.pbip`, identifies *which* instance you hold — it
+does **not** prove it is clean; an instance you opened can still accumulate unsaved changes. Read the
+per-instance **`hasUnsavedChanges`** flag that `powerbi-desktop status` returns next to
+`currentFilePath`:
+- **`hasUnsavedChanges: false`** — the in-memory model holds nothing the disk lacks; force-kill is
+  safe and your corrected TMDL loads on reopen. (Normal case: editing TMDL *on disk* does not dirty
+  the Desktop document, it only makes the in-memory copy stale.)
+- **`hasUnsavedChanges: true`** — unsaved in-memory state exists; do **not** force-kill on provenance
+  alone, and do **not** scope the question to work *you did not create* — what matters is whether
+  unsaved state exists, not whose it is. Force-kill only if you can *positively confirm* every unsaved
+  change is already reproducible on disk (re-running this cycle's `_build/` script, and/or an
+  `ExportToTmdlFolder` you have already run, rebuilds it exactly). Otherwise **stop and ask** whether
+  to save/export or discard.
+
+**The realistic source of unsaved work you authored yourself is the modeling MCP:** it writes
+tables/measures/relationships **directly into the live Desktop model**, where they exist only in
+memory (and read as `hasUnsavedChanges: true`) until `database_operations ExportToTmdlFolder`
+persists them to the on-disk TMDL — a force-kill silently destroys any you have not exported. Mind
+the interaction with the graceful-close hazard above: here the on-disk TMDL is the *corrected* copy
+and the live model is *stale*, so neither a save nor an export can rescue in-memory work without
+overwriting your fix; if you genuinely hold both an on-disk correction and unexported in-memory
+changes you need, that is a real conflict — **stop and ask.** Never force-kill a sibling build's
+instance (the pid-binding rule).
 
 ### 7.3 Scan for ALL modal windows, not just credential phrases
 
