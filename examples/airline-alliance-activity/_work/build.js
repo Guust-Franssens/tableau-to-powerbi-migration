@@ -16,7 +16,11 @@ const PAGES_DIR = path.join(DEF, 'pages');
 const spec = require(path.join(ROOT, 'migration-spec.json'));
 
 const PAGE_W = 1400, PAGE_H = 950;
-const VC = 'https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json';
+// 2.9.0 is the newest visualContainer schema that RESOLVES (measured 2026-08-13: 2.10.0 .. 2.16.0
+// all 404). A 404 here does not fail loudly - `powerbi-report-author validate` skips JSON-schema
+// checking entirely and still prints 0 errors, so a dead URL silently disables validation for every
+// visual this generator emits. Re-measure before raising it; see .github/pbi.kb/visual-cookbook.md.
+const VC = 'https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json';
 
 // ---- entities ----
 const FA = 'Flight Activity', DATE = 'Date';

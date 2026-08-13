@@ -11,8 +11,12 @@ const REPORT = join(MIGRATION, "fabric/QuadrupleAxisCharts.Report");
 const ORD = "Orders";
 
 // ---------- schema URLs ----------
+// vc: 2.9.0 is the newest visualContainer schema that RESOLVES (measured 2026-08-13: 2.10.0 ..
+// 2.16.0 all 404). A 404 does not fail loudly - `powerbi-report-author validate` skips JSON-schema
+// checking entirely and still prints 0 errors, so a dead URL silently disables validation for every
+// visual emitted here. Re-measure before raising it; see .github/pbi.kb/visual-cookbook.md.
 const S = {
-  vc:  "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json",
+  vc:  "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
   page:"https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/2.1.0/schema.json",
   pages:"https://developer.microsoft.com/json-schemas/fabric/item/report/definition/pagesMetadata/1.1.0/schema.json",
   report:"https://developer.microsoft.com/json-schemas/fabric/item/report/definition/report/3.3.0/schema.json",
