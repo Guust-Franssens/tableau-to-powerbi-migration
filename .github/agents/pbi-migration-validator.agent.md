@@ -72,18 +72,21 @@ reasoning or self-report of success.
   | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  **There is no `out/` level** — a bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}`,
-  and the two sides differ in shape: `reports/<wb>.Report/` versus `pbip/<wb>/<wb>.Report/`
-  (✅ verified on a real 38-workbook bundle, 2026-08-13; matches `docs/operator-runbook.md` §0).
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
+  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
+  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
+  compares the two path *strings* and prints a confident non-answer):
 
-  Keeping `reports/` pristine makes `diff -r <bundle>/reports/<wb>.Report <bundle>/pbip/<wb>/<wb>.Report`
-  an exact answer to *"what did our tier change versus what the engine produced?"* — unanswerable, that
-  cost a retracted upstream bug on 2026-08-10 (our fix pass had rewritten `reports/` and the diff was
-  read as engine behaviour).
+  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
+  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = "differs", not "failed"**.
+
+  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
+  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
+  rewritten `reports/`, and the diff was read as engine behaviour).
   `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource, and never ship `<bundle>/reports/` (its `definition.pbir` has no model beside it
-  — reference-only, not portable). Mechanics: `powerbi-report-gotchas` §3.
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
+  `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only

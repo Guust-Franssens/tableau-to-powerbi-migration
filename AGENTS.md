@@ -17,7 +17,14 @@ the shared agent conventions**, which `scripts/sync_agent_conventions.py` genera
 > **drift**, a persona **over the 30,000-char cap** (measured on the whole file — a body-only count
 > read 98 % for a 30,132-char file), and a documented `<bundle>/…` path that **is not a real bundle
 > directory** (`<bundle>/out/pbip/` was wrong in all five copies for weeks, and agreeing with itself
-> was the only thing anyone checked). `--bundle <dir>` additionally resolves those paths on disk.
+> was the only thing anyone checked). It reports **all three in one run, the path first**: a wrong path
+> in `AGENTS.md` also makes every persona stale, so failing on drift first pointed at the symptom, and
+> the obvious "fix" was to sync the wrong path into all four files. The scan covers the block **and
+> each persona in full** — a wrong path in a persona's own `## Gotchas` used to be invisible — and
+> **write mode exits non-zero too**, because that run has propagated the error, not merely proposed it.
+> `--bundle <dir>` additionally resolves on disk the paths written as a **location**
+> (`<bundle>/reports/`); the `{pbip,reports,…}` enumeration is vocabulary, so an estate with no
+> flat-file extracts, and therefore no `data/`, is not failed for it.
 
 > **VS Code users:** VS Code Copilot auto-loads `.github/copilot-instructions.md`, *not* this file.
 > That pointer file duplicates only the session-start step below and defers everything else here, so
@@ -39,11 +46,21 @@ floor check, not a blind `@latest`, so at or above the floor it costs nothing.
 `themeCollection` entries are missing `reportVersionAtImport`) — a stale CLI silently green-lights a
 broken report.
 
-⚠️ **`reportVersionAtImport` is location-dependent, and the two locations disagree.** Measured against
-0.1.4: it is **required inside each `themeCollection` entry** (`baseTheme`, `customTheme` — removing
-it gives `PBIR_THEME_VERSION_AT_IMPORT_MISSING`) and **forbidden at the top level** of `report.json`
-(adding it there gives `PBIR_SCHEMA_VALIDATION_ERROR / must NOT have additional properties`). Ground
-truth, a committed deliverable:
+⚠️ **`reportVersionAtImport` is location-dependent — and the two theme entries do not even fail the
+same way.** Re-measured 2026-08-13 against 0.1.4, by mutating a scratch copy of
+`examples/shipping-kpis/fabric/ShippingKPIs.Report`:
+
+| mutation | what `validate` actually emits |
+|---|---|
+| remove from `baseTheme` | **`PBIR_SCHEMA_VALIDATION_ERROR` only** — *"/themeCollection/baseTheme must have required property 'reportVersionAtImport'"* (errorCount 1) |
+| remove from `customTheme` | **both** `PBIR_THEME_VERSION_AT_IMPORT_MISSING` **and** `PBIR_SCHEMA_VALIDATION_ERROR` (errorCount 2) |
+| add at the **top level** | `PBIR_SCHEMA_VALIDATION_ERROR` — *"/ must NOT have additional properties (property: "reportVersionAtImport")"* |
+
+So the substance is: **required inside each `themeCollection` entry, forbidden at the top level** of
+`report.json` — but do not attach the named code to both entries. The CLI raises
+`PBIR_THEME_VERSION_AT_IMPORT_MISSING` from `validateCustomTheme` alone (its only emit site in
+`dist/index.js`), so grepping for it after a `baseTheme` failure finds nothing and reads as "not our
+problem". Ground truth, a committed deliverable:
 `examples/shipping-kpis/fabric/ShippingKPIs.Report/definition/report.json` — top-level keys are
 `$schema`, `themeCollection`, `resourcePackages`, `settings`, and *both* theme entries carry
 `name`, `type`, `reportVersionAtImport`. Saying only "schema-required" is what put it at the top level
@@ -513,18 +530,21 @@ exists so each question is answered once per migration, not once per session.
   | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  **There is no `out/` level** — a bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}`,
-  and the two sides differ in shape: `reports/<wb>.Report/` versus `pbip/<wb>/<wb>.Report/`
-  (✅ verified on a real 38-workbook bundle, 2026-08-13; matches `docs/operator-runbook.md` §0).
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
+  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
+  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
+  compares the two path *strings* and prints a confident non-answer):
 
-  Keeping `reports/` pristine makes `diff -r <bundle>/reports/<wb>.Report <bundle>/pbip/<wb>/<wb>.Report`
-  an exact answer to *"what did our tier change versus what the engine produced?"* — unanswerable, that
-  cost a retracted upstream bug on 2026-08-10 (our fix pass had rewritten `reports/` and the diff was
-  read as engine behaviour).
+  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
+  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = "differs", not "failed"**.
+
+  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
+  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
+  rewritten `reports/`, and the diff was read as engine behaviour).
   `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource, and never ship `<bundle>/reports/` (its `definition.pbir` has no model beside it
-  — reference-only, not portable). Mechanics: `powerbi-report-gotchas` §3.
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
+  `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only

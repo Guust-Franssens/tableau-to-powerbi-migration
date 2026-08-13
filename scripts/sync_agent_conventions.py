@@ -169,31 +169,53 @@ def prompt_size(path: Path) -> int:
         return len(handle.read())
 
 
-def documented_bundle_paths() -> dict[str, list[str]]:
-    """Bundle sub-paths named in the canonical block, mapped to the raw text that named them."""
-    found: dict[str, list[str]] = {}
-    for match in _BUNDLE_PATH.finditer(canonical_block()):
-        token = match.group(1)
-        names = token.strip("{}").split(",") if token.startswith("{") else [token]
-        for name in (n.strip() for n in names):
-            if name:
-                found.setdefault(name, []).append(match.group(0))
+def documented_bundle_paths() -> dict[str, list[tuple[str, str]]]:
+    """Bundle sub-paths named in the personas, mapped to (source, raw text) pairs that named them.
+
+    Scope is the canonical block **and every persona file in full**, not just the block: the block was
+    the only thing scanned when this check was written, so the identical wrong path in a persona's own
+    `## Gotchas` - the half of the file the block does not generate - stayed invisible.
+
+    `AGENTS.md` *outside* the block is deliberately NOT scanned. Its preamble cites `<bundle>/out/pbip/`
+    on purpose, as the worked example of the bug this check exists to catch; scanning it would flag the
+    sentence that explains the rule. That is a real blind spot, not an oversight - a wrong path in
+    AGENTS.md prose is caught only by the personas it is copied into.
+    """
+    found: dict[str, list[tuple[str, str]]] = {}
+    sources: list[tuple[str, str]] = [("the shared-conventions block", canonical_block())]
+    sources += [
+        (str(p.relative_to(REPO_ROOT)), p.read_text(encoding="utf-8")) for p in sorted(AGENTS_DIR.glob("*.agent.md"))
+    ]
+    for origin, text in sources:
+        for match in _BUNDLE_PATH.finditer(text):
+            token = match.group(1)
+            names = token.strip("{}").split(",") if token.startswith("{") else [token]
+            for name in (n.strip() for n in names):
+                if name:
+                    found.setdefault(name, []).append((origin, match.group(0)))
     return found
 
 
 def check_bundle_paths(bundle: Path | None) -> list[str]:
-    """Verify every `<bundle>/x` the conventions document is a real bundle directory.
+    """Verify every `<bundle>/x` the personas document is a real bundle directory.
 
     Returns a list of human-readable problems (empty = OK). With `bundle`, the check is grounded in a
     reference bundle on disk; without one it still catches the #123 shape, because `out` is not a
     bundle directory in `BUNDLE_DIRS` no matter how many files agree that it is.
+
+    On-disk resolution is deliberately limited to paths written as a **location** (`<bundle>/reports/`).
+    A name that appears only inside the vocabulary enumeration `<bundle>/{pbip,reports,...}` is checked
+    against `BUNDLE_DIRS` but not against disk, because that list describes the layout, not this
+    bundle: an estate with no flat-file extracts has no `data/`, and failing it for that would punish a
+    correct document with a legitimate bundle.
     """
     problems = []
     documented = documented_bundle_paths()
     for name, occurrences in sorted(documented.items()):
         if name not in BUNDLE_DIRS:
+            origin, raw = occurrences[0]
             problems.append(
-                f"AGENTS.md documents `{occurrences[0]}/`, but `{name}` is not a bundle directory. "
+                f"{origin} documents `{raw}/`, but `{name}` is not a bundle directory. "
                 f"A bundle is <bundle>/{{{','.join(sorted(BUNDLE_DIRS))}}} - there is no `out/` level."
             )
     if bundle is None:
@@ -202,9 +224,10 @@ def check_bundle_paths(bundle: Path | None) -> list[str]:
     if not bundle.is_dir():
         return problems + [f"--bundle {bundle} is not a directory"]
     actual = {p.name for p in bundle.iterdir() if p.is_dir()}
-    for name in sorted(documented):
-        if name in BUNDLE_DIRS and name not in actual:
-            problems.append(f"AGENTS.md documents `<bundle>/{name}/`, which does not exist in {bundle}")
+    for name, occurrences in sorted(documented.items()):
+        as_location = [origin for origin, raw in occurrences if not raw.endswith("}")]
+        if name in BUNDLE_DIRS and name not in actual and as_location:
+            problems.append(f"{as_location[0]} documents `<bundle>/{name}/`, which does not exist in {bundle}")
     # The constant is evidence too, so let a real bundle correct it rather than the other way round.
     for name in sorted(BUNDLE_DIRS - actual):
         log.warning("  BUNDLE_DIRS lists %r, absent from %s - re-verify the constant", name, bundle)
@@ -252,11 +275,30 @@ def main(argv: list[str] | None = None) -> int:
         log.error("No agent files found under %s", AGENTS_DIR)
         return 1
 
-    path_problems = check_bundle_paths(args.bundle)
+    # Order matters: sync first, then check paths. In write mode the check must see the state this run
+    # leaves on disk, not the one it replaced - otherwise a run that FIXES a bad path still reports it
+    # (observed while testing this change), and the operator "fixes" an already-fixed file.
     drifted = [p for p in agents if apply_to(p, write=not args.check)]
+    path_problems = check_bundle_paths(args.bundle)
 
     if args.check:
+        # Report EVERY problem, and report the path first. This used to return on drift before the
+        # paths were even mentioned, so reintroducing `<bundle>/out/pbip/` printed "SHARED CONVENTIONS
+        # OUT OF SYNC" - true, but a symptom: the personas were stale *because* AGENTS.md had just
+        # changed. The wrong path only named itself on a second run, after the first was "fixed" by
+        # syncing it into all four files. A gate that points at the symptom first teaches the wrong fix.
+        failures = 0
+        if path_problems:
+            failures += 1
+            log.error("DOCUMENTED BUNDLE PATH DOES NOT EXIST:")
+            for problem in path_problems:
+                log.error("  %s", problem)
+            log.error(
+                "Consistency between the copies proves nothing here - they are generated from one "
+                "source, so a wrong path is wrong in all of them (issue #123)."
+            )
         if drifted:
+            failures += 1
             log.error("SHARED CONVENTIONS OUT OF SYNC - these agents do not carry the current AGENTS.md block:")
             for path in drifted:
                 log.error("  %s", path.relative_to(REPO_ROOT))
@@ -265,17 +307,8 @@ def main(argv: list[str] | None = None) -> int:
                 "This matters because a subagent receives ONLY its persona file - a convention that "
                 "lives only in AGENTS.md silently does not apply to it."
             )
-            return 1
-        log.info("OK - all %d agent(s) carry the current shared conventions.", len(agents))
-        if path_problems:
-            log.error("DOCUMENTED BUNDLE PATH DOES NOT EXIST:")
-            for problem in path_problems:
-                log.error("  %s", problem)
-            log.error(
-                "Consistency between the copies proves nothing here - they are generated from one "
-                "source, so a wrong path is wrong in all of them (issue #123)."
-            )
-            return 1
+        else:
+            log.info("OK - all %d agent(s) carry the current shared conventions.", len(agents))
         over = report_sizes(agents)
         # The cap is now ENFORCED, not advisory. It was advisory while personas sat at 108-160% and a
         # hard failure would have blocked every commit; as of 2026-08-01 all four fit (~99%), so the
@@ -283,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         # without an exit code behind it is an anti-pattern. Use --allow-over-cap for a deliberate,
         # temporary overage.
         if over and not args.allow_over_cap:
+            failures += 1
             log.error(
                 "\nFAIL: %d persona(s) over the %d-char cap. Move craft knowledge into a skill bundle "
                 "(.github/skills/powerbi-report-gotchas or powerbi-semantic-model-gotchas) rather than "
@@ -291,14 +325,20 @@ def main(argv: list[str] | None = None) -> int:
                 len(over),
                 PROMPT_CHAR_LIMIT,
             )
-            return 1
-        return 0
+        return 1 if failures else 0
 
     for path in drifted:
         log.info("  updated %s", path.relative_to(REPO_ROOT))
-    for problem in path_problems:
-        log.warning("  WARNING: %s", problem)
     log.info("done - %d of %d agent file(s) updated.", len(drifted), len(agents))
+    if path_problems:
+        # Non-zero in write mode too. A warning here is worse than useless: the write has just
+        # PROPAGATED the block into all four personas, so the run that spread the bad path is exactly
+        # the one that must not look successful.
+        log.error("A DOCUMENTED BUNDLE PATH IS NOT A REAL BUNDLE DIRECTORY - written, not just proposed:")
+        for problem in path_problems:
+            log.error("  %s", problem)
+        log.error("Fix the path at the source shown above and re-run; do not commit this state.")
+        return 1
     return 0
 
 
