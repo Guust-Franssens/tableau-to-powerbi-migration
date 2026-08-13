@@ -2,9 +2,11 @@
 
 Two kinds of test live here. Most are **source contracts**: CI runs on Ubuntu while the script
 deliberately depends on Windows/Power BI Desktop primitives, so the tiers and hints are asserted by
-reading the source. The JWT-decoder tests at the bottom are **executed**, because a base64url
-padding bug is invisible to any amount of source reading and would make the wrong-tenant check
-silently answer "cannot decode" on exactly the tokens it exists to inspect.
+reading the source. The tests at the bottom are **executed**, because the two things they cover are
+invisible to any amount of source reading: a base64url padding bug would make the wrong-tenant check
+silently answer "cannot decode" on exactly the tokens it exists to inspect, and the comparison that
+produces the verdict is one line whose two most damaging mutations (``$tenantOk = $true``; an
+inverted ``-ne``) both survived a 15-mutation sweep against source-string assertions alone.
 """
 
 import base64
@@ -178,49 +180,70 @@ def _tenant_block(source: str) -> str:
     return source[source.index("# --- Fabric token TENANT") : source.index("$odbc = ")]
 
 
-def test_the_tenant_check_is_emitted_on_every_branch() -> None:
-    """Every path must report, because a check that renders as nothing reads as a check that passed.
+def test_the_tenant_check_reports_exactly_once_whatever_happens() -> None:
+    """One unconditional emission, and a hint for every outcome the verdict can return.
 
-    Four outcomes exist - nothing declared, `az` absent, no token minted, and the verdict itself -
-    and each must produce a line. This is the same rule the engine block already obeys.
+    Four outcomes became six (a malformed intended id, and the verdict itself), and the previous
+    shape - one ``Add-Check`` per branch - meant a new outcome could be added with no emission at
+    all, which renders as nothing and reads as a check that passed. A single top-level call cannot
+    be skipped; what CAN drift is the hint switch, so every ``Kind`` the function returns must have
+    a branch there.
     """
     block = _tenant_block(_preflight_source())
-    branches = block.count(f"Add-Check '{TENANT_CHECK}'")
-    assert branches == 4, f"expected all four tenant-check branches to report, found {branches}"
+    assert block.count(f"Add-Check '{TENANT_CHECK}'") == 1, "the tenant check must be emitted from exactly one place"
+    assert re.search(rf"(?m)^Add-Check '{re.escape(TENANT_CHECK)}' ", block), (
+        "that one emission must be unconditional (top level), not nested in a branch"
+    )
+    kinds = set(re.findall(r"Kind = '([a-z-]+)'", block))
+    assert len(kinds) >= 6, f"expected every outcome to name a Kind, saw {sorted(kinds)}"
+    hint_branches = set(re.findall(r"(?m)^\s{4}'([a-z-]+)' \{", block))
+    assert kinds - {"match"} <= hint_branches, f"no hint branch for {sorted(kinds - {'match'} - hint_branches)}"
+    # And the emission must carry the VERDICT, not a constant. This one stays a source contract
+    # because the wiring can only be executed by running preflight itself, which probes npm, Desktop
+    # and the plugin cache and cannot run in CI - but it is exactly where a correct verdict can still
+    # be thrown away: rewriting `$verdict.Tier` to `'optional'` leaves every executed test green.
+    assert re.search(
+        rf"(?m)^Add-Check '{re.escape(TENANT_CHECK)}' \$verdict\.Tier \$verdict\.Ok \$verdict\.Detail \$tenantHint$",
+        block,
+    ), "the rendered tier/status/detail must come from the verdict object, not from a literal"
 
 
-def test_only_a_tenant_mismatch_is_critical() -> None:
-    """Blocking is reserved for the one outcome that is unambiguously wrong.
+def test_critical_is_reserved_for_a_mismatch_declared_on_this_run() -> None:
+    """Exit 1 must follow deploy INTENT, and only ``-Tenant`` declares it for the run in hand.
 
-    A mismatch can only fire after someone has explicitly declared "I intend to deploy into tenant
-    X", so it can never block a machine that never declared one - that opt-in is what makes exit 1
-    defensible here. Everything else (undeclared, no `az`, no token) is advisory: those are reasons
-    the check could not run, not evidence that anything is wrong, and the estate pipeline does not
-    touch Fabric at all.
+    ``FABRIC_TENANT_ID`` in ``.env`` is persisted configuration: set once for a deploy, it then
+    outlives that run and would block every later parse-only estate sweep - whose steps 1-6 never
+    call Fabric - re-creating from the other side the false blocker this change set removed (a
+    Desktop-only pin failing a run that never opens Desktop). ``-Tenant <id>`` is a statement about
+    THIS invocation, so a wrong token there is unambiguously a blocker.
+
+    The tier mapping itself is executed by `test_the_verdict_tiers_follow_where_the_intent_came_from`;
+    this pins that ``critical`` appears nowhere else in the block, so no other outcome can acquire it.
     """
     block = _tenant_block(_preflight_source())
-    tiers = re.findall(rf"Add-Check '{re.escape(TENANT_CHECK)}' (\S+)", block)
-    literal = [t for t in tiers if t.startswith("'")]
-    conditional = [t for t in tiers if not t.startswith("'")]
-    assert literal == ["'optional'"] * 3, f"non-verdict branches must stay advisory, saw {literal}"
-    assert len(conditional) == 1, "the verdict branch must choose its tier from the comparison"
-    assert "$(if ($tenantOk) { 'optional' } else { 'critical' })" in block, (
-        "a mismatch must be critical and a match must not be"
+    assigns = [ln.strip() for ln in block.splitlines() if re.search(r"\$tier\s*=", ln)]
+    assert assigns == ["$tier = if ($IntentIsExplicit) { 'critical' } else { 'recommended' }"], (
+        f"exactly one line may decide the tier, and only from explicit intent, saw {assigns}"
+    )
+    others = [ln.strip() for ln in block.splitlines() if "'critical'" in ln and not re.search(r"\$tier\s*=", ln)]
+    assert all("-eq 'critical'" in ln for ln in others), f"'critical' is assigned somewhere else too: {others}"
+    assert "$tenantIntentIsExplicit = [bool](Remove-SurroundingQuotes $Tenant)" in block, (
+        "explicit intent means the -Tenant parameter, not an ambient environment variable"
     )
 
 
-def test_the_tenant_check_costs_nothing_until_a_tenant_is_declared() -> None:
+def test_the_tenant_check_costs_nothing_until_a_comparable_tenant_is_declared() -> None:
     """No declaration, no `az` call: preflight runs before EVERY migration, including parse-only ones.
 
     A mandatory token mint here would tax every run for a check that cannot say anything useful
     without an intended tenant to compare against - the same reasoning that keeps `-CheckUpstream`
-    opt-in.
+    opt-in. The guard also skips the mint for an intended id that is not a GUID, because that one
+    cannot be compared against a `tid` either.
     """
     block = _tenant_block(_preflight_source())
-    guard = block.index("if (-not $intendedTenant)")
+    guard = block.index("if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {")
     assert guard < block.index("'get-access-token'"), "the token mint must sit behind the declaration guard"
-    resolution = block[block.index("$intendedTenant = ") : guard]
-    assert " az " not in resolution, "resolving the intended tenant must not shell out to az"
+    assert "& az" not in block[:guard], "no `az` invocation may precede the declaration guard"
 
 
 def test_the_wrong_tenant_hint_prefers_the_non_mutating_fix() -> None:
@@ -247,6 +270,18 @@ def test_the_wrong_tenant_hint_prefers_the_non_mutating_fix() -> None:
     )
 
 
+def test_a_warning_only_mismatch_says_how_to_make_it_blocking() -> None:
+    """A WARN that does not explain how to get the blocker is a downgrade, not a design.
+
+    An operator who is about to deploy needs to know that the same mismatch fails preflight once the
+    run declares `-Tenant`, or the recommended tier just reads as "we decided this matters less".
+    """
+    block = _tenant_block(_preflight_source())
+    escalation = re.search(r"\$escalation = .*", block)
+    assert escalation, "a warning-only mismatch must carry an escalation note"
+    assert "-Tenant" in escalation.group(0), "the note must name the flag that makes it blocking"
+
+
 def test_no_output_path_can_carry_the_token() -> None:
     """The token is a bearer credential: it must reach the decoder and nothing else.
 
@@ -268,26 +303,244 @@ def test_no_output_path_can_carry_the_token() -> None:
         assert any(pattern.match(stripped) for pattern in allowed), f"the token escapes into: {stripped}"
 
 
-# --- Executed, not merely read: the base64url decode ------------------------------------------------
-# A padding or charset bug here fails CLOSED in the worst way - the check would report "could not
-# decode" for real tokens and never fire, while every source-contract test above still passed.
+# --- Executed, not merely read ---------------------------------------------------------------------
+# Two things here cannot be established by reading the source:
+#   * the base64url decode - a padding or charset bug fails CLOSED in the worst way, reporting "could
+#     not decode" for real tokens so the check never fires, while every source contract still passes;
+#   * the verdict itself - `$tenantOk = $true` and an inverted comparison both survived a 15-mutation
+#     sweep, i.e. the one line that decides OK-vs-MISS was the least covered line in the file.
+# So the decision lives in `Get-TenantVerdict`, and the harness below runs it for real.
 
 _PS = shutil.which("pwsh") or shutil.which("powershell")
 
-# Extract the decoder from the script by AST and dot-source only that function, so running these
+# Extract the functions under test from the script by AST and dot-source only those, so running these
 # tests never executes preflight itself (which probes npm, Desktop and the plugin cache).
-_HARNESS = """
+_EXTRACT_FUNCS = """
 $ErrorActionPreference = 'Stop'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($env:PREFLIGHT_PS1, [ref]$null, [ref]$null)
-$fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                            $n.Name -eq 'Get-JwtTenantId' }, $true)
-if (-not $fn) { Write-Output 'FUNCTION-NOT-FOUND'; exit 3 }
-. ([scriptblock]::Create($fn.Extent.Text))
-$r = Get-JwtTenantId $env:PREFLIGHT_TEST_TOKEN
-if ([string]::IsNullOrEmpty($r)) { Write-Output 'NULL' } else { Write-Output $r }
+$defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
+foreach ($name in ($env:PREFLIGHT_FUNCS -split ',')) {
+    $fn = $defs | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+    if (-not $fn) { Write-Output "FUNCTION-NOT-FOUND:$name"; exit 3 }
+    . ([scriptblock]::Create($fn.Extent.Text))
+}
 """
 
-_TID = "11111111-2222-3333-4444-555555555555"
+# Values are emitted between markers so a stray leading/trailing space is a FAILURE rather than
+# something the test quietly strips - the whole point of these cases is that whitespace and quoting
+# must be normalized by the script, not by the harness.
+_EMIT = "function Emit($v) { if ($null -eq $v) { Write-Output '<<NULL>>' } else { Write-Output ('<<' + $v + '>>') } }\n"
+
+# A synthetic tenant id that deliberately contains hex LETTERS. An all-digit GUID makes every
+# casing test vacuous - measured here: with `11111111-2222-...`, mutating the comparison to the
+# case-SENSITIVE `-ceq` survived the whole suite, because `.upper()` of a digit string is itself.
+_TID = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+_OTHER_TID = "99999999-8888-7777-6666-555555555555"
+_FIXTURE_ENV = REPO_ROOT / "tests" / "fixtures" / "dotenv-spellings.env"
+
+
+def _run_ps(functions: str, body: str, extra_env: dict[str, str]) -> str:
+    # -EncodedCommand rather than piping to `-Command -`: PowerShell 7 consumes stdin line by line,
+    # which silently truncates a multi-line script block (measured: empty output, exit 0). Base64
+    # UTF-16LE is also the one form that needs no shell quoting on either platform.
+    script = _EXTRACT_FUNCS + _EMIT + body
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    result = subprocess.run(  # noqa: S603
+        [_PS, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PREFLIGHT_PS1": str(PREFLIGHT), "PREFLIGHT_FUNCS": functions, **extra_env},
+    )
+    assert "FUNCTION-NOT-FOUND" not in result.stdout, f"renamed or removed: {result.stdout.strip()}"
+    assert result.returncode == 0, f"harness failed: {result.stderr.strip()[:400]}"
+    return result.stdout.strip()
+
+
+def _emitted(raw: str) -> str:
+    marked = re.search(r"<<(.*)>>", raw, re.DOTALL)
+    assert marked, f"harness produced no marked value: {raw!r}"
+    return marked.group(1)
+
+
+def _verdict(
+    intended: str,
+    actual: str = _TID,
+    *,
+    explicit: bool = False,
+    az_present: bool = True,
+) -> dict:
+    raw = _run_ps(
+        "Get-TenantVerdict,Remove-SurroundingQuotes,Test-TenantIdShape",
+        "$v = Get-TenantVerdict -IntendedTenant $env:T_INTENDED -ActualTenant $env:T_ACTUAL "
+        "-IntentIsExplicit ([bool]::Parse($env:T_EXPLICIT)) -AzPresent ([bool]::Parse($env:T_AZ)) -Scope ''\n"
+        "Emit ($v | ConvertTo-Json -Compress)\n",
+        {
+            "T_INTENDED": intended,
+            "T_ACTUAL": actual,
+            "T_EXPLICIT": str(explicit),
+            "T_AZ": str(az_present),
+        },
+    )
+    return json.loads(_emitted(raw))
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_a_matching_tenant_passes_and_a_mismatched_one_does_not() -> None:
+    """The verdict line, executed in both directions.
+
+    This is the test the mutation sweep was missing: with it, `$tenantOk = $true` (the check can
+    never fire) fails on the mismatch case, and `$tenantOk = ($ActualTenant -ne $IntendedTenant)`
+    (fires on every correct machine) fails on the match case. Neither was detectable before, because
+    the verdict was asserted by matching the source string that contains it.
+    """
+    match = _verdict(_TID, _TID)
+    assert (match["Kind"], match["Ok"], match["Tier"]) == ("match", True, "optional")
+    assert _TID in match["Detail"]
+
+    mismatch = _verdict(_OTHER_TID, _TID, explicit=True)
+    assert (mismatch["Kind"], mismatch["Ok"]) == ("mismatch", False)
+    assert "WRONG TENANT" in mismatch["Detail"]
+    assert _OTHER_TID in mismatch["Detail"] and _TID in mismatch["Detail"], (
+        "both tenants must be named, or the operator cannot tell which end is wrong"
+    )
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("label", "declared"),
+    [
+        ("double-quoted, as dotenv convention teaches", f'"{_TID}"'),
+        ("single-quoted", f"'{_TID}'"),
+        ("padded with whitespace", f"  {_TID}  "),
+        ("quoted AND padded", f'  "{_TID}"  '),
+        ("uppercased, as the Entra portal shows it", _TID.upper()),
+    ],
+)
+def test_a_correct_tenant_spelled_differently_is_still_correct(label: str, declared: str) -> None:
+    """Be liberal in what you accept; be strict only about what you compare.
+
+    Measured 2026-08-13 on the version this replaces: `FABRIC_TENANT_ID="72f988bf-..."` naming the
+    CORRECT tenant produced `[MISS] WRONG TENANT ... intended "72f988bf-..."` and exit 1 on a fully
+    configured machine - a hard blocker, in front of a customer, caused by a pair of quotes that
+    every dotenv consumer strips. The casing case is here for the same reason: the portal and the
+    `tid` claim disagree on it, and PowerShell's `-eq` is case-insensitive - a well-meaning "fix" to
+    `-ceq` would reintroduce exactly this class of false blocker.
+    """
+    verdict = _verdict(declared, _TID)
+    assert verdict["Ok"] is True, f"{label} must still match: {verdict['Detail']}"
+    assert verdict["Tier"] == "optional"
+    assert '"' not in verdict["Detail"] and "'" not in verdict["Detail"], (
+        "the normalized id, not the raw spelling, belongs in the output"
+    )
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_the_verdict_tiers_follow_where_the_intent_came_from() -> None:
+    """Blocking follows an in-run declaration; persisted configuration warns (#124 follow-up).
+
+    `-Tenant <id>` says "this run points at that tenant" - a token for another one is a blocker.
+    `FABRIC_TENANT_ID` in `.env` is a standing preference that outlives the deploy it was set for,
+    and a parse-only estate run (steps 1-6 never call Fabric) must not exit 1 because of it.
+    """
+    assert _verdict(_OTHER_TID, _TID, explicit=True)["Tier"] == "critical"
+    ambient = _verdict(_OTHER_TID, _TID, explicit=False)
+    assert ambient["Tier"] == "recommended", "persisted configuration must warn, not block"
+    assert re.search(r"(?i)warning only|-Tenant", ambient["Detail"]), (
+        "a warning-only mismatch must say so, or it reads as an ordinary WARN"
+    )
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    "declared",
+    [
+        "contoso.onmicrosoft.com",  # accepted by `az --tenant` and deploy_estate.py, so plausible here
+        "<your-tenant-id>",  # copied out of a .env.example and never filled in
+        "72f988bf86f141af91ab2d7cd011db47",  # a GUID with the hyphens lost
+        "not-a-guid",
+    ],
+)
+def test_an_uncomparable_tenant_id_never_blocks(declared: str) -> None:
+    """A `tid` is always a GUID, so anything else is "cannot compare", never "wrong tenant".
+
+    Comparing a domain name or a placeholder against a GUID answers WRONG TENANT and exits 1 - the
+    same false blocker as the quoting bug, arriving by a different route. This one is not
+    hypothetical: `FABRIC_TENANT_ID` is currently documented nowhere, and the obvious fix for that
+    (a line in `.env.example`) ships a placeholder to every clone.
+    """
+    verdict = _verdict(declared, _TID)
+    assert (verdict["Kind"], verdict["Ok"], verdict["Tier"]) == ("malformed", False, "optional")
+    assert declared in verdict["Detail"], "name the value that could not be compared"
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("label", "kwargs", "expected_kind"),
+    [
+        ("nothing declared", {"intended": "", "actual": _TID}, "no-intent"),
+        ("az not installed", {"intended": _TID, "actual": "", "az_present": False}, "no-az"),
+        ("declared, az present, no token", {"intended": _TID, "actual": ""}, "no-token"),
+    ],
+)
+def test_every_reason_the_check_could_not_run_is_advisory(label: str, kwargs: dict, expected_kind: str) -> None:
+    """ "Could not run" is not evidence of a problem, and must never spend exit 1.
+
+    Each still reports a line, though: a check that renders as nothing reads as a check that passed,
+    which is the false-green shape this whole script exists to prevent.
+    """
+    verdict = _verdict(**kwargs)
+    assert verdict["Kind"] == expected_kind, label
+    assert verdict["Ok"] is False, f"{label}: an unrun check is not a pass"
+    assert verdict["Tier"] == "optional", f"{label}: must not block"
+    assert verdict["Detail"], f"{label}: must still say something"
+
+
+def _dotenv(key: str) -> str:
+    raw = _run_ps(
+        "Get-DotEnvValue,Remove-SurroundingQuotes",
+        "Emit (Get-DotEnvValue $env:T_KEY $env:T_PATH)\n",
+        {"T_KEY": key, "T_PATH": str(_FIXTURE_ENV)},
+    )
+    return _emitted(raw)
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("PLAIN", _TID),
+        ("DOUBLE_QUOTED", _TID),
+        ("SINGLE_QUOTED", _TID),
+        ("PADDED", _TID),
+        ("QUOTED_AND_PADDED", _TID),
+        # Only a MATCHED outer pair is a quoting convention. Everything else is the value.
+        ("UNMATCHED_QUOTE", f'"{_TID}'),
+        ("INNER_QUOTES", 'ab"cd"ef'),
+        ("HAS_EQUALS", "a=b=c"),
+        # Present-but-empty and absent are both "no value" to every caller, which filters falsy;
+        # the reader still distinguishes them ('' vs $null) rather than inventing one.
+        ("EMPTY", ""),
+        ("ABSENT_FROM_THE_FILE", "NULL"),
+    ],
+)
+def test_the_dotenv_reader_accepts_every_ordinary_spelling(key: str, expected: str) -> None:
+    """`.env` is the documented home for a customer tenant id, so its parse decides the verdict.
+
+    This is where the false blocker actually lived: the reader mirrored
+    `scripts/tableau_env.py:load_env` exactly - `value.strip()`, no quote handling - and the comment
+    saying so was the argument for keeping it. The two parsers agreed by being wrong in the same way.
+    `load_env` is owned elsewhere and should get the same treatment; nothing in Python reads
+    FABRIC_TENANT_ID today, so the divergence is inert until it does.
+    """
+    assert _dotenv(key) == expected
+
+
+# --- The base64url decode --------------------------------------------------------------------------
+
+# Its own id, unrelated to the verdict tests: what matters here is only that whatever went into the
+# payload comes back out byte-for-byte.
+_TOKEN_TID = "11111111-2222-3333-4444-555555555555"
 
 
 def _jwt(payload: dict) -> str:
@@ -303,7 +556,7 @@ def _payload_with_stripped_padding(remainder: int) -> dict:
     remainder has to be reconstructed correctly - 0, 2 and 3 are the three that can occur.
     """
     for size in range(64):
-        payload = {"tid": _TID, "pad": "x" * size}
+        payload = {"tid": _TOKEN_TID, "pad": "x" * size}
         if len(_jwt(payload).split(".")[1]) % 4 == remainder:
             return payload
     raise AssertionError(f"no payload found with segment length {remainder} mod 4")
@@ -319,7 +572,7 @@ def _payload_using_the_url_safe_alphabet() -> dict:
     """
     for filler in ("\u07ff", "\u00ff", "\uffff", "\u0080"):
         for size in range(1, 64):
-            payload = {"tid": _TID, "pad": filler * size}
+            payload = {"tid": _TOKEN_TID, "pad": filler * size}
             segment = _jwt(payload).split(".")[1]
             if "-" in segment and "_" in segment:
                 return payload
@@ -327,20 +580,11 @@ def _payload_using_the_url_safe_alphabet() -> dict:
 
 
 def _decode(token: str) -> str:
-    # -EncodedCommand rather than piping to `-Command -`: PowerShell 7 consumes stdin line by line,
-    # which silently truncates a multi-line script block (measured: empty output, exit 0). Base64
-    # UTF-16LE is also the one form that needs no shell quoting on either platform.
-    encoded = base64.b64encode(_HARNESS.encode("utf-16-le")).decode()
-    result = subprocess.run(  # noqa: S603
-        [_PS, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={**os.environ, "PREFLIGHT_PS1": str(PREFLIGHT), "PREFLIGHT_TEST_TOKEN": token},
+    return _emitted(
+        _run_ps(
+            "Get-JwtTenantId", "Emit (Get-JwtTenantId $env:PREFLIGHT_TEST_TOKEN)\n", {"PREFLIGHT_TEST_TOKEN": token}
+        )
     )
-    assert "FUNCTION-NOT-FOUND" not in result.stdout, "Get-JwtTenantId was renamed or removed"
-    assert result.returncode == 0, f"decoder harness failed: {result.stderr.strip()[:400]}"
-    return result.stdout.strip()
 
 
 @pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
@@ -355,7 +599,7 @@ def _decode(token: str) -> str:
 )
 def test_the_tid_survives_every_base64url_shape(label: str, payload: dict) -> None:
     """The decoded tenant is what the whole check compares against; it must never be approximate."""
-    assert _decode(_jwt(payload)) == _TID, label
+    assert _decode(_jwt(payload)) == _TOKEN_TID, label
 
 
 @pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")

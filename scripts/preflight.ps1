@@ -39,13 +39,23 @@
   It never upgrades and never fails the run.
 
 .PARAMETER Tenant
-  The Entra tenant id you INTEND to deploy into - the same id you pass to `deploy_estate.py
-  --tenant`. Declaring it turns on the wrong-tenant check (see the "Fabric token tenant" block
-  below); omitting it costs nothing and skips that check, so preflight never pays for `az` on a
-  machine that is only parsing workbooks.
+  The Entra tenant id (a GUID) you INTEND to deploy into - the same id you pass to
+  `deploy_estate.py --tenant`. Declaring it turns on the wrong-tenant check (see the "Fabric token
+  tenant" block below); omitting it costs nothing and skips that check, so preflight never pays for
+  `az` on a machine that is only parsing workbooks.
 
   It can also come from `$env:FABRIC_TENANT_ID`, or `FABRIC_TENANT_ID` in the git-ignored `.env` -
   which is the right home for a real customer tenant id, because this repository is PUBLIC.
+  Surrounding whitespace and a matched pair of quotes are accepted from any of the three
+  (`FABRIC_TENANT_ID="72f9..."` is ordinary dotenv spelling, not a wrong tenant).
+
+  WHERE the declaration came from decides how loudly a mismatch lands, because it is the only
+  evidence preflight has of deploy INTENT for THIS run:
+    * `-Tenant` on the command line  -> a mismatch is CRITICAL (exit 1). You said, in this
+      invocation, that you are pointing at a tenant; a token for another one is a blocker.
+    * `$env:FABRIC_TENANT_ID` / `.env` -> a mismatch is RECOMMENDED (a visible WARN, exit 0).
+      Persisted configuration is a standing preference, not a statement that this run deploys -
+      and steps 1-6 of an estate run never touch Fabric at all.
 
 .PARAMETER Subscription
   Optional subscription id/name passed verbatim to `az account get-access-token --subscription`,
@@ -471,28 +481,120 @@ function Get-JwtTenantId([string]$Token) {
     catch { return $null }
 }
 
-function Get-DotEnvValue([string]$Key) {
-    # Deliberately the SAME minimal KEY=VALUE parse as scripts/tableau_env.py's load_env (trim, skip
-    # blank/'#', split on the first '='), so a single .env line cannot mean one thing to Python and
-    # another to PowerShell. .env is git-ignored, which is where a real customer tenant id belongs:
-    # this repository is public.
-    $envFile = Join-Path $repoRoot '.env'
-    if (-not (Test-Path $envFile)) { return $null }
-    foreach ($line in (Get-Content $envFile)) {
+function Remove-SurroundingQuotes([string]$Value) {
+    # Be LIBERAL in what you accept, strict in what you compare. `KEY="value"` is ordinary dotenv
+    # spelling - it is what `.env.example` files teach and what python-dotenv, docker and every
+    # shell `source` accept - so a quoted value is an operator SPELLING, never a different value.
+    # Measured 2026-08-13: without this, `FABRIC_TENANT_ID="72f988bf-..."` naming the CORRECT tenant
+    # produced `MISS WRONG TENANT: token is for 72f988bf-..., intended "72f988bf-..."` and exit 1 on
+    # a perfectly configured machine - a false blocker in front of a customer, which is worse than
+    # the false blocker this same change set removed.
+    # Only a MATCHED pair is stripped, and only the outermost one, so a value that legitimately
+    # contains a quote survives untouched.
+    if (-not $Value) { return '' }
+    $v = $Value.Trim()
+    if ($v.Length -ge 2 -and (($v.StartsWith('"') -and $v.EndsWith('"')) -or ($v.StartsWith("'") -and $v.EndsWith("'")))) {
+        $v = $v.Substring(1, $v.Length - 2).Trim()
+    }
+    return $v
+}
+
+function Get-DotEnvValue([string]$Key, [string]$Path) {
+    # The same minimal KEY=VALUE parse as scripts/tableau_env.py's load_env (trim, skip blank/'#',
+    # split on the FIRST '='), plus ONE deliberate divergence: matched surrounding quotes are
+    # stripped. That divergence is the fix, not an accident - the two parsers previously agreed by
+    # being wrong in the same way, and "identical to Python" was the argument that kept it.
+    # `scripts/tableau_env.py:load_env` should get the same treatment; it is owned elsewhere, so it
+    # is flagged rather than edited here. Nothing in Python reads FABRIC_TENANT_ID today, so the
+    # divergence is inert until that happens.
+    # .env is git-ignored, which is where a real customer tenant id belongs: this repository is public.
+    if (-not $Path) { $Path = Join-Path $repoRoot '.env' }
+    if (-not (Test-Path $Path)) { return $null }
+    foreach ($line in (Get-Content $Path)) {
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith('#') -or ($trimmed -notmatch '=')) { continue }
         $pair = $trimmed -split '=', 2
-        if ($pair[0].Trim() -eq $Key) { return $pair[1].Trim() }
+        if ($pair[0].Trim() -eq $Key) { return (Remove-SurroundingQuotes $pair[1]) }
     }
     return $null
 }
 
+function Test-TenantIdShape([string]$Value) {
+    # The `tid` claim is ALWAYS a GUID. An intended tenant that is not one cannot be compared
+    # against it, and two spellings that are not GUIDs are entirely plausible here:
+    #   * `contoso.onmicrosoft.com` - which `az --tenant` and `deploy_estate.py --tenant` both
+    #     accept, so an operator has every reason to think it belongs in FABRIC_TENANT_ID;
+    #   * a placeholder like `<your-tenant-id>` copied out of a `.env.example`.
+    # Comparing either against a GUID answers "wrong tenant" - the same false blocker as the quoting
+    # bug, arriving by a different route. Preflight says "cannot compare" instead, and never blocks.
+    return [bool]($Value -match '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$')
+}
+
+function Get-TenantVerdict {
+    <#
+      THE decision. Everything above this gathers evidence; this function alone turns it into
+      Ok/Tier/Detail, so the one line that decides the verdict can be EXECUTED by the test harness
+      rather than matched as a source string. That matters more than usual here: CI cannot run
+      PowerShell, and a mutation test showed both `$tenantOk = $true` (the check can never fire) and
+      an inverted comparison (fires on every correct machine) surviving the whole suite while it was
+      inline.
+
+      Kind is part of the contract: the caller maps it to a hint, and a Kind with no hint branch is
+      a check that renders as silence - the false-green shape this script exists to prevent.
+    #>
+    param(
+        [string]$IntendedTenant,
+        [string]$ActualTenant,
+        [bool]$IntentIsExplicit,
+        [bool]$AzPresent,
+        [string]$Scope = ''
+    )
+    # Normalized HERE, not only at the call site, so the comparator is correct in isolation: it is
+    # the unit the tests execute, and a caller that forgets cannot manufacture a false WRONG TENANT.
+    # Idempotent, so doing it twice costs nothing.
+    $IntendedTenant = Remove-SurroundingQuotes $IntendedTenant
+    $ActualTenant = Remove-SurroundingQuotes $ActualTenant
+
+    if (-not $IntendedTenant) {
+        return [pscustomobject]@{ Kind = 'no-intent'; Ok = $false; Tier = 'optional'; Detail = 'no intended tenant declared - not checked' }
+    }
+    if (-not (Test-TenantIdShape $IntendedTenant)) {
+        return [pscustomobject]@{ Kind = 'malformed'; Ok = $false; Tier = 'optional'; Detail = "intended '$IntendedTenant' is not a tenant GUID - not compared" }
+    }
+    if (-not $AzPresent) {
+        return [pscustomobject]@{ Kind = 'no-az'; Ok = $false; Tier = 'optional'; Detail = "intended $IntendedTenant - not verified (az not on PATH)" }
+    }
+    if (-not $ActualTenant) {
+        return [pscustomobject]@{ Kind = 'no-token'; Ok = $false; Tier = 'optional'; Detail = "intended $IntendedTenant - no Fabric token could be minted or decoded$Scope" }
+    }
+
+    # The verdict. `-eq` on strings is case-insensitive in PowerShell, which is exactly right for a
+    # GUID: the portal shows one casing, the `tid` claim another, and neither is a wrong tenant.
+    # Do NOT "tighten" this to -ceq.
+    $tenantOk = ($ActualTenant -eq $IntendedTenant)
+
+    if ($tenantOk) {
+        return [pscustomobject]@{ Kind = 'match'; Ok = $true; Tier = 'optional'; Detail = "tid matches intended $IntendedTenant$Scope" }
+    }
+    # A mismatch blocks only when THIS run declared the tenant on the command line. The check is
+    # opt-in either way, but the two opt-ins are not the same statement: `-Tenant <id>` is "I am
+    # pointing at that tenant right now", while FABRIC_TENANT_ID in `.env` is a persisted preference
+    # that survives every later run - including a parse-only estate sweep whose steps 1-6 never call
+    # Fabric. Blocking those would re-create, from the other side, the false blocker this change set
+    # removed (a Desktop-only pin failing a run that never opens Desktop). A WARN still names the
+    # problem loudly, and the deploy path - which does pass --tenant - is where exit 1 belongs.
+    $tier = if ($IntentIsExplicit) { 'critical' } else { 'recommended' }
+    $detail = "WRONG TENANT: token is for $ActualTenant, intended $IntendedTenant$Scope"
+    if (-not $IntentIsExplicit) { $detail += ' [warning only: declared by configuration, not by -Tenant on this run]' }
+    return [pscustomobject]@{ Kind = 'mismatch'; Ok = $false; Tier = $tier; Detail = $detail }
+}
+
 # Declaration of intent, in the order a caller expects to win: flag > exported env > git-ignored .env.
-# Trimmed because the comparison below is the only thing standing between an operator and a blocked
-# migration: a trailing space in an exported variable is not a wrong tenant, and must not read as one.
+# Every channel is normalized, because none of them is a place an operator expects to be punished for
+# quoting or for a stray trailing space.
+$tenantIntentIsExplicit = [bool](Remove-SurroundingQuotes $Tenant)
 $intendedTenant = @($Tenant, $env:FABRIC_TENANT_ID, (Get-DotEnvValue 'FABRIC_TENANT_ID')) |
-    Where-Object { $_ -and $_.Trim() } | Select-Object -First 1
-if ($intendedTenant) { $intendedTenant = $intendedTenant.Trim() }
+    ForEach-Object { Remove-SurroundingQuotes $_ } | Where-Object { $_ } | Select-Object -First 1
 
 # Mirrors deploy_estate.py's FABRIC_RESOURCE. Duplicating a well-known constant is a smaller risk
 # than making this PowerShell bootstrap depend on importing Python (see the engine block above for
@@ -500,18 +602,15 @@ if ($intendedTenant) { $intendedTenant = $intendedTenant.Trim() }
 # would fail loudly on its own.
 $fabricResource = 'https://api.fabric.microsoft.com'
 
-if (-not $intendedTenant) {
-    # No declaration -> no `az` call at all, so an operator who only parses workbooks pays nothing.
-    # Reported as a WARN rather than an OK because the check did not RUN: a skipped check that
-    # renders as passing is the false-green shape this whole script exists to prevent.
-    Add-Check 'Fabric token tenant' 'optional' $false 'no intended tenant declared - not checked' `
-        'Declare the tenant you deploy into and this becomes automatic: -Tenant <id>, $env:FABRIC_TENANT_ID, or FABRIC_TENANT_ID in the git-ignored .env. Same id you pass to deploy_estate.py --tenant. Until then, a WorkspaceNotFound on a workspace you know exists may simply be a token for another tenant.'
-}
-elseif (-not (Get-Command az -ErrorAction SilentlyContinue)) {
-    Add-Check 'Fabric token tenant' 'optional' $false "intended $intendedTenant - not verified (az not on PATH)" `
-        'Install the Azure CLI to verify which tenant this machine actually mints Fabric tokens for.'
-}
-else {
+$azPresent = [bool](Get-Command az -ErrorAction SilentlyContinue)
+$scoped = if ($Subscription) { " (scoped: --subscription $Subscription)" } else { ' (default az context)' }
+$actualTenant = ''
+
+# The mint sits behind the declaration guard: no declared tenant - or one that cannot be compared -
+# means no `az` call at all, so an operator who only parses workbooks pays nothing. Preflight runs
+# before EVERY migration, so a mandatory token mint here would tax every run for a check that has
+# nothing to compare against.
+if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {
     $azArgs = @('account', 'get-access-token', '--resource', $fabricResource, '-o', 'json')
     # --subscription scopes ONE call. It is offered here so the fix can be verified with the same
     # command shape that applies it, rather than by mutating the CLI profile and hoping.
@@ -519,35 +618,41 @@ else {
     # $tokenJson holds a BEARER TOKEN. It is never echoed, never added to a Detail, and az's own
     # stderr is discarded rather than surfaced, so no code path can leak it.
     $tokenJson = & az @azArgs 2>$null
-    $actualTenant = $null
     if ($tokenJson) {
-        try { $actualTenant = Get-JwtTenantId ((($tokenJson | Out-String) | ConvertFrom-Json).accessToken) } catch { $actualTenant = $null }
-    }
-    $scoped = if ($Subscription) { " (scoped: --subscription $Subscription)" } else { ' (default az context)' }
-
-    if (-not $actualTenant) {
-        Add-Check 'Fabric token tenant' 'optional' $false "intended $intendedTenant - no Fabric token could be minted or decoded$scoped" `
-            'Run `az login`, then re-run preflight. (Preflight never prints the token - only its decoded `tid` claim.)'
-    }
-    else {
-        $tenantOk = ($actualTenant -eq $intendedTenant)
-        # A mismatch is CRITICAL and a match is a quiet OK. Critical is defensible precisely because
-        # the check is OPT-IN: it can only fire once someone has declared "I intend to deploy into
-        # tenant X", and at that point a token for tenant Y makes every Fabric call answer 404 for
-        # things that exist. Nobody who has not declared a tenant can ever be blocked by it.
-        $exampleSub = $null
-        if (-not $tenantOk) {
-            # Turn the advice into something copy-pasteable: name a subscription this machine can
-            # already see INSIDE the intended tenant. Costs one extra `az` call, on the failure path
-            # only.
-            $exampleSub = (& az account list --all --query "[?tenantId=='$intendedTenant'].id" -o tsv 2>$null | Select-Object -First 1)
-        }
-        $subHint = if ($exampleSub) { "e.g. --subscription $exampleSub" } else { '--subscription <a subscription inside that tenant>' }
-        Add-Check 'Fabric token tenant' $(if ($tenantOk) { 'optional' } else { 'critical' }) $tenantOk `
-            $(if ($tenantOk) { "tid matches intended $intendedTenant$scoped" } else { "WRONG TENANT: token is for $actualTenant, intended $intendedTenant$scoped" }) `
-            "This is an IDENTITY problem, not a missing workspace: Fabric will answer WorkspaceNotFound/EntityNotFound for items that exist. Prefer the non-mutating fix, which scopes a single call: az account get-access-token --resource $fabricResource $subHint (re-run preflight with -Subscription <same> to confirm). ``az account set`` also works but rewrites the CLI profile on disk, so every other process on this machine silently follows you - restore it afterwards if you use it. Note deploy_estate.py --tenant is passed to az verbatim and inherits the same ambiguity (az may resolve a different ACCOUNT against that tenant and answer AADSTS90072)."
+        try { $actualTenant = Get-JwtTenantId ((($tokenJson | Out-String) | ConvertFrom-Json).accessToken) } catch { $actualTenant = '' }
     }
 }
+
+$verdict = Get-TenantVerdict -IntendedTenant $intendedTenant -ActualTenant $actualTenant `
+    -IntentIsExplicit $tenantIntentIsExplicit -AzPresent $azPresent -Scope $scoped
+
+# One hint per Kind. Anything that needs an extra `az` call lives in its own branch, so the failure
+# path is the only one that pays for it.
+$tenantHint = switch ($verdict.Kind) {
+    'no-intent' {
+        'Declare the tenant you deploy into and this becomes automatic: -Tenant <id> (blocking, for a run that is about to deploy), $env:FABRIC_TENANT_ID, or FABRIC_TENANT_ID in the git-ignored .env (both warn-only). Same id you pass to deploy_estate.py --tenant. Until then, a WorkspaceNotFound on a workspace you know exists may simply be a token for another tenant.'
+    }
+    'malformed' {
+        'A token''s `tid` claim is always a GUID, so preflight has nothing to compare a domain name or a placeholder against. Use the GUID form: az account show --query tenantId -o tsv (or Entra > Overview). Note `az --tenant` and deploy_estate.py DO accept contoso.onmicrosoft.com, so this is a preflight-only requirement - and it never blocks.'
+    }
+    'no-az' {
+        'Install the Azure CLI to verify which tenant this machine actually mints Fabric tokens for.'
+    }
+    'no-token' {
+        'Run `az login`, then re-run preflight. (Preflight never prints the token - only its decoded `tid` claim.)'
+    }
+    'mismatch' {
+        # Turn the advice into something copy-pasteable: name a subscription this machine can
+        # already see INSIDE the intended tenant. Costs one extra `az` call, on this path only.
+        $exampleSub = (& az account list --all --query "[?tenantId=='$intendedTenant'].id" -o tsv 2>$null | Select-Object -First 1)
+        $subHint = if ($exampleSub) { "e.g. --subscription $exampleSub" } else { '--subscription <a subscription inside that tenant>' }
+        $escalation = if ($verdict.Tier -eq 'critical') { '' } else { ' This is a WARNING rather than a blocker because the intended tenant came from configuration ($env:FABRIC_TENANT_ID or .env), not from -Tenant on this run; pass -Tenant <id> on the run that actually deploys and the same mismatch fails preflight.' }
+        "This is an IDENTITY problem, not a missing workspace: Fabric will answer WorkspaceNotFound/EntityNotFound for items that exist. Prefer the non-mutating fix, which scopes a single call: az account get-access-token --resource $fabricResource $subHint (re-run preflight with -Subscription <same> to confirm). ``az account set`` also works but rewrites the CLI profile on disk, so every other process on this machine silently follows you - restore it afterwards if you use it. Note deploy_estate.py --tenant is passed to az verbatim and inherits the same ambiguity (az may resolve a different ACCOUNT against that tenant and answer AADSTS90072).$escalation"
+    }
+    default { '' }
+}
+
+Add-Check 'Fabric token tenant' $verdict.Tier $verdict.Ok $verdict.Detail $tenantHint
 
 $odbc = (Get-OdbcDriver -ErrorAction SilentlyContinue | Where-Object Name -like '*SQL Server*').Name
 Add-Check 'ODBC Driver 18 (SQL)' 'optional' ($odbc -contains 'ODBC Driver 18 for SQL Server') `
