@@ -25,6 +25,65 @@ ground truth. This cookbook generalizes that: capture/verify each encoding **onc
    anything where structure alone is insufficient (dynamic field parameters + slicer defaults, azureMap
    reference layers, custom polygon/geometry marks, dual-axis secondary binding, analytics-pane lines).
 
+**Neither tier is a claim about the *data*.** Both tiers describe the **shape** of a `visual.json` —
+see the two sections below for exactly how narrow that guarantee is, and for the one line in every
+entry you must not copy blindly.
+
+## What a green `validate` does NOT prove — it never checks model bindings
+
+Every entry here is `validate`d at 0 errors. That is a claim about **shape only**. Measured
+(2026-08-13, CLI 0.1.4), rewriting a *passing* entry's every `Entity` → `NoSuchTable_ZZZ` and every
+`Property` → `NoSuchColumn_ZZZ` — 6 substitutions in `visuals/treemap.visual.json` — still returns:
+
+```json
+{"result":"succeeded","errorCount":0,"warningCount":0}
+```
+
+So `validate` will happily green-light a visual bound to tables and columns **that do not exist in the
+semantic model**. Concretely, for a copied cookbook entry:
+
+- ✅ it proves — the JSON parses, the `visualType` exists, the roles/properties are structurally legal.
+- ❌ it does not prove — that `Entity`/`Property` resolve against *your* model, that `queryRef` /
+  `nativeQueryRef` agree with the field they name, that the measure is the right one, or that anything
+  renders.
+
+**After rebinding a copied entry, the binding is verified by a Desktop open + render (and a value
+compared against the Tableau source), never by `validate`.** This is the repo-wide rule — structural
+validation is necessary, not sufficient — stated where it is easiest to forget: a 🟢 tier is green for
+*composition*, and says nothing about the fields you just swapped in.
+
+## The `$schema` line — copy an encoding, but pin the version yourself
+
+A `visualContainer` `$schema` URL that 404s makes `powerbi-report-author validate` **skip JSON-schema
+checking entirely** and still print `0 errors`, with a single `PBIR_SCHEMA_UNREACHABLE` warning as the
+only trace. A dead `$schema` therefore does not fail loudly — it *silently downgrades* every copy made
+from that entry.
+
+Measured 2026-08-13 by direct fetch of
+`https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/<v>/schema.json`:
+
+| version | HTTP |
+|---|---|
+| `2.14.0`, `2.13.0`, `2.12.0`, `2.11.0`, `2.10.0` | **404** |
+| `2.9.0` ← newest that resolves | 200 |
+| `2.8.0` … `2.1.0` | 200 |
+
+Rules:
+
+- **Cookbook entries declare `2.9.0`** — the newest version that actually resolves. Two 🟢 entries
+  (`actionButton`, `shape`) keep the `2.1.0` their Desktop capture wrote: it resolves, validates at
+  0 errors, and editing a ground-truth capture would make it no longer ground truth.
+- **Re-check the table before trusting it.** Versions get published; the number above is a
+  *measurement with a date*, not a constant. `curl -I <url>` is the whole check.
+- **`PBIR_SCHEMA_UNREACHABLE` means "schema validation did NOT run"** — never "warning, but fine". If
+  it appears after you copy an entry, the `$schema` you pasted is dead; fix it and re-validate before
+  reading the error count. (The deterministic engine currently emits `2.10.0`, which 404s, so its
+  output is schema-skipped too — upstream's to fix, but it means a clean engine `validate` is weaker
+  than it looks.)
+- Same finding, stated for authoring rather than copying, in
+  `.github/skills/powerbi-report-gotchas/SKILL.md` (§1 "Validation-invisible rendering bugs", and its
+  header note that `2.9.0` is the newest published).
+
 ## Precedence — CLI for current truth, cookbook for proven shapes, MS Learn for the mapping
 
 The CLI and the cookbook answer *different* questions. The CLI is the **live vocabulary** (roles,
@@ -57,8 +116,9 @@ Deprecated (do not emit): `filledMap` -> `azureMap`, `map` -> `azureMap`, `qnaVi
 
 ## What's actually in here (measured against CLI 0.1.4, 2026-07-28)
 
-An empirical sweep of all 28 `visuals/*.md` entries against `catalog describe` gives the honest
-breakdown — **use it to decide whether opening an entry is even worth a lookup**:
+An empirical sweep of all 29 `visuals/*.md` entries against `catalog describe` gives the honest
+breakdown — **use it to decide whether opening an entry is even worth a lookup** (19 + 7 + 3 = 29;
+27 of the 29 also ship a sibling `visuals/<type>.visual.json` — `azureMap` and `forecast` do not):
 
 | Category | Count | Do you need the cookbook? |
 |---|---|---|
