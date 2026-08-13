@@ -3,6 +3,8 @@ purpose: deploy a migrated estate into a Fabric LANDING ZONE workspace - models 
          rebound to them - and survive a crash without redeploying or silently skipping anything.
 usage:   python scripts/deploy_estate.py --bundle <dir> --workspace <id> [--dry-run]
          python scripts/deploy_estate.py --bundle <dir> --workspace <id> --tenant <id>
+         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --skip-empty-models
+         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --skip <unit> [--skip <unit>]
 
 Why a landing zone
 ------------------
@@ -46,10 +48,53 @@ partial. A name-only "does it exist?" check answers *present* and a resume skips
 shipping a broken item. Resume therefore skips an item only when the journal says done AND the hash
 matches what is about to be deployed.
 
-There is no idempotency key on the Fabric item APIs, so this is entirely the client's job. A
-duplicate `displayName` + type is rejected (`ItemDisplayNameNotAvailableYet`), which is a safety net
-rather than a solution - and its wording is the language of eventual consistency, so absence from a
-listing is not proof of absence.
+There is no idempotency key on the Fabric item APIs, so this is entirely the client's job - see the
+duplicate-name note below for why nothing in the service will catch a slip for us.
+
+Duplicate item names - SETTLED HERE, because this is the code that makes the calls
+----------------------------------------------------------------------------------
+Two claims about this circulated in the repo, both carrying verification markers, and they cannot
+both describe the same thing. This is the single statement; everywhere else should cite it rather
+than restate it.
+
+**Measured against a real Fabric tenant during the deploy runs of PR #105 (merged 2026-08-13), on
+`POST /v1/workspaces/{id}/items` - Fabric REST *Create Item*, the only path this module creates on
+(`_post_item`) - for `type` of `Report` or `SemanticModel`: a duplicate `displayName` + `type` is
+ACCEPTED, not rejected.** Two overlapping runs of this script created two identical model+report
+pairs and they sat side by side in the workspace afterwards. Every duplicate-prevention rule in this
+file - the journal, the provenance stamp, the run lock, `Landing.claim` - is therefore load-bearing
+rather than belt-and-braces: if any of them is wrong, the service will not save us.
+
+**`ItemDisplayNameNotAvailableYet` / `ItemDisplayNameAlreadyInUse` have never been observed for these
+two types, and are still handled** (`create_item` reads either as "already there, go verify" rather
+than as fatal). The first one's wording is the language of eventual consistency - a name briefly held
+after a delete - so treating it as fatal would break exactly the resume this file exists for. Keeping
+that branch is defensive; it is NOT evidence that the service rejects duplicates, and no logic here
+depends on it doing so.
+
+**Scope, which is the actual answer where two sources disagree:** the measurement above covers the
+REST *Create Item* path and nothing else. Publishing from Power BI Desktop, or importing a `.pbix`
+through the Power BI *import* API, is a different path with its own name-conflict handling; this tool
+never calls it and we have never measured it, so nothing here should be read as describing it. Before
+concluding that another source is wrong, check which path it was measured on.
+
+Leaving a unit behind on purpose
+--------------------------------
+`check_empty_model.py` proves offline that a model would open and load ZERO ROWS, and the runbook's
+verdict for one is *"never deploy it: it looks finished and shows nothing"*. That verdict had no
+supported action - the offered fixes were repair it or repair it - so an operator who needed the
+other 38 units deployed today had to derive a folder-move workaround by reading this source file.
+
+`--skip <unit>` (repeatable) withholds one unit; `--skip-empty-models` withholds every unit that
+`<bundle>/empty-model-check.json` reports EMPTY, so no name has to be retyped under time pressure. A
+withheld unit is never created, never counted as deployed, and named in the run summary. A `--skip`
+that matches no unit REFUSES to start: a typo would otherwise deploy the very unit the operator meant
+to hold back, and they would hear about it from the customer.
+
+Deliberately NOT filtered: the folder tree, which is still mirrored from the whole bundle. A withheld
+unit may leave an empty project folder behind - the repair re-run needs that folder anyway, and
+pruning it would mean re-deriving placement from a filtered slug map, i.e. risking the placement of
+units that ARE deploying to tidy up ones that are not.
 """
 # The deploy loop is one coherent procedure - preflight, folders, models, rebind, reports - and the
 # long prose above each step is the measured knowledge that keeps it correct. Splitting it to satisfy
@@ -60,6 +105,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import hashlib
 import json
 import logging
@@ -118,6 +164,23 @@ HEADROOM = 0.10
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_PREFLIGHT = 2
+# A run that deliberately withheld a unit is neither of the above, and both alternatives lie:
+#   * EXIT_OK would tell a caller "the estate is in the workspace" when it is knowingly not - this
+#     repo's standing rule is that a partial deploy must not exit 0 pretending otherwise;
+#   * EXIT_FAILED would tell it "something broke, run it again", which is false AND actively unhelpful
+#     in a pipeline: nothing failed, and re-running the identical command changes nothing until the
+#     underlying model is repaired.
+# A third code says the only true thing - everything attempted succeeded, and the estate is knowingly
+# incomplete - and a caller that ASKED for the skip can accept exactly that one value. It is the next
+# free number in this script's own space, which is the table an operator reads it against.
+# Failures still win when both happen: a failure is the verdict that wants this command run again.
+EXIT_INCOMPLETE = 3
+
+# Written by `check_empty_model.py` (its `REPORT_NAME`) and refreshed by every `run_estate.py` run.
+# Named here rather than imported: this module deliberately carries no repo-internal imports, so it
+# runs from anywhere with only the standard library. `tests/test_deploy_estate.py` asserts the two
+# constants still agree, which is what catches a rename.
+EMPTY_MODEL_REPORT = "empty-model-check.json"
 
 # A dropped network marks every remaining item "Failed" one by one, which is noise rather than
 # information - and each one then needs reconciling on the resume. Measured: a laptop moved between
@@ -380,6 +443,112 @@ def discover(bundle: Path) -> list[tuple[str, Item, Item | None]]:
     return found
 
 
+# --- withholding a unit on purpose (see the module docstring) -------------------------------------
+#
+# `Pair` is what `discover` returns and what everything below filters: (unit name, model, report).
+# A "unit" is a directory under `<bundle>/pbip/` - one workbook, or one standalone datasource model.
+Pair = tuple[str, Item, "Item | None"]
+
+
+def _empty_reason(model: dict[str, Any]) -> str:
+    """One line naming the artifact that proves THIS model empty, not merely that something is."""
+    findings = model.get("findings") or []
+    first = findings[0] if findings else {}
+    detail = first.get("detail") or "reported EMPTY by check_empty_model.py"
+    more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+    return f"{model.get('model', '?')}: table {first.get('table', '?')!r} {detail}{more}"
+
+
+def empty_model_units(bundle: Path) -> tuple[dict[str, str], str]:
+    """Units whose model would open and load ZERO ROWS, per `<bundle>/empty-model-check.json`.
+
+    Returns (unit -> why, refusal). The report is READ rather than re-derived: `check_empty_model.py`
+    owns that judgement, and an operator holding a failed estate run should not have to retype unit
+    names out of a log that has scrolled away.
+
+    A missing or unreadable report is a REFUSAL, never an empty answer. "I could not read the list of
+    empty models" and "no model is empty" differ by exactly the unit this flag exists to withhold,
+    and reading the first as the second is how one reaches a customer.
+    """
+    path = bundle / EMPTY_MODEL_REPORT
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, (
+            f"--skip-empty-models needs {path}, which could not be read ({exc}). run_estate.py writes "
+            f"it on every run; otherwise run `python scripts/check_empty_model.py {bundle} --json "
+            f"{path}`, or name the units yourself with --skip. Refusing to read an unreadable report "
+            "as 'nothing is empty'. Nothing was deployed."
+        )
+    units: dict[str, str] = {}
+    # One report per scanned target, several wrapped in `roots` (check_empty_model.py:main).
+    for report in payload.get("roots") or [payload]:
+        for model in report.get("models", []):
+            if model.get("status") != "EMPTY":
+                continue
+            parts = Path(str(model.get("model_path", ""))).parts
+            # Only `pbip/<unit>/...` is deployable: `discover` reads nothing else, and the engine's
+            # pristine `semantic_models/` copy of the same model would otherwise arrive as a unit
+            # name no bundle has, and be reported as an operator typo.
+            if len(parts) >= 2 and parts[0] == "pbip":
+                units[parts[1]] = _empty_reason(model)
+    return units, ""
+
+
+def _did_you_mean(name: str, units: set[str]) -> str:
+    """A suggestion for a mistyped unit name, because that is when this is being typed."""
+    close = difflib.get_close_matches(name, sorted(units), n=3)
+    return f" (did you mean {', '.join(repr(match) for match in close)}?)" if close else ""
+
+
+def resolve_skips(bundle: Path, units: set[str], options: argparse.Namespace) -> tuple[dict[str, str], str]:
+    """Which units this run deliberately withholds, and why. Returns (unit -> why, refusal)."""
+    skips: dict[str, str] = {}
+    if getattr(options, "skip_empty_models", False):
+        empty, refusal = empty_model_units(bundle)
+        if refusal:
+            return {}, refusal
+        for unit, why in empty.items():
+            if unit in units:
+                skips[unit] = f"EMPTY MODEL - {why}"
+            else:
+                # Not a typo, so not a refusal: the report predates the unit's removal from the
+                # bundle (the hand-rolled quarantine this flag replaces), or it scanned a different
+                # bundle. There is nothing to withhold, so say it once and carry on.
+                LOG.warning("%s is reported EMPTY but has no folder in this bundle's pbip/ - nothing to skip", unit)
+    named = list(getattr(options, "skip", None) or [])
+    unknown = [name for name in named if name not in units]
+    if unknown:
+        # Refusing beats warning: a mistyped --skip deploys the very unit the operator meant to hold
+        # back, reports success, and they hear about it from the customer.
+        return {}, (
+            "; ".join(f"--skip {name!r} matches no unit in this bundle{_did_you_mean(name, units)}" for name in unknown)
+            + f". A unit is a directory under {bundle / 'pbip'} (--dry-run lists them). Nothing was deployed."
+        )
+    for name in named:
+        # `setdefault`: if it is ALSO a known-empty model, that reason says more than "you asked".
+        skips.setdefault(name, "named with --skip")
+    return skips, ""
+
+
+def withhold(pairs: list[Pair], skips: dict[str, str]) -> tuple[list[Pair], list[tuple[str, int, str]]]:
+    """Split what was discovered into (still deployed, withheld as (unit, item count, why))."""
+    kept = [pair for pair in pairs if pair[0] not in skips]
+    held = [(name, 1 + (1 if report else 0), skips[name]) for name, _model, report in pairs if name in skips]
+    return kept, held
+
+
+def announce_withheld(withheld: list[tuple[str, int, str]]) -> None:
+    """Name every unit left behind, LOUDLY. Quietly leaving one out is the failure being fixed here."""
+    if not withheld:
+        return
+    items = sum(count for _name, count, _why in withheld)
+    LOG.warning("WITHHELD: %d unit(s), %d item(s) NOT deployed and NOT counted as deployed:", len(withheld), items)
+    for name, count, why in withheld:
+        LOG.warning("  %-44s %d item(s) - %s", name, count, why)
+    LOG.warning("Nothing was created for them. Repair them, then re-run without the skip to finish the estate.")
+
+
 class Journal:
     """Append-only record of intent and outcome, so a crashed run resumes instead of restarting.
 
@@ -388,11 +557,10 @@ class Journal:
     id, which lets a resume poll the operation that was already started rather than issuing a second
     create against a name the service may already hold.
 
-    **The journal is the only protection against duplicates.** Measured against a real tenant:
-    Fabric does NOT reject a second `Report` or `SemanticModel` with the same `displayName` and type
-    -- two identical pairs sat side by side in the workspace afterwards. The documented
-    `ItemDisplayNameNotAvailableYet` rejection is therefore not a safety net we can lean on for these
-    types, which makes both the journal and the lock below load-bearing rather than conveniences.
+    **The journal is the only protection against duplicates.** Fabric's REST *Create Item* does NOT
+    reject a second `Report` or `SemanticModel` with the same `displayName` and type -- see the
+    module docstring's duplicate-name note for the measurement, its date and the path it applies to.
+    That makes both this journal and the lock below load-bearing rather than conveniences.
     """
 
     def __init__(self, path: Path, workspace: str = "") -> None:
@@ -503,8 +671,9 @@ class RunLock:
     Not hypothetical: measured. A first deploy was believed finished (its shell had returned, but the
     Python process was still running), a second was started, and each read a journal that did not yet
     contain the other's outcomes -- so both created the same items and the workspace ended with
-    duplicate models and reports. Since Fabric does not reject a duplicate name for these types, the
-    journal alone cannot prevent that; the runs have to be prevented from overlapping.
+    duplicate models and reports. That run is the measurement behind the module docstring's
+    duplicate-name note: Create Item does not reject a repeated name for these types, so the journal
+    alone cannot prevent this; the runs have to be prevented from overlapping.
 
     Deliberately advisory and simple: a stale lock from a hard kill is reported with its age and can
     be overridden, because a lock that cannot be cleared is worse than none in a live session.
@@ -639,8 +808,10 @@ def create_item(workspace: str, tok: str, item: Item, journal: Journal) -> tuple
     """Create one item and wait for its operation. Returns (status, item_id, detail).
 
     Records intent first, then the outcome including the operation id. `ItemDisplayNameNotAvailableYet`
-    is treated as "already there, go verify" rather than as fatal: the wording is the language of
-    eventual consistency, and on a resume it is the expected answer, not an error.
+    is treated as "already there, go verify" rather than as fatal: its wording is the language of
+    eventual consistency, and on a resume it is the expected answer, not an error. We have never seen
+    the service send it for these two types (module docstring) - the branch is defensive, not a
+    duplicate check we rely on.
     """
     journal.intent(item, "create")
     status, headers, resp = _post_item(workspace, tok, item)
@@ -1290,8 +1461,8 @@ def _deploy_one(target: Target, item: Item, kind: str, name: str) -> tuple[str |
       * a transient failure of the *existence check itself*, which read as "absent" and so created a
         second copy while the run still exited 0.
 
-    Fabric does not reject a repeated `Report`/`SemanticModel` name, so nothing downstream would
-    have caught any of them.
+    Fabric's Create Item does not reject a repeated `Report`/`SemanticModel` name (module docstring),
+    so nothing downstream would have caught any of them.
     """
     existing, refusal = target.landing.claim(item, target.journal)
     if refusal:
@@ -1487,21 +1658,41 @@ def _run_all(
     return failures, skipped
 
 
-def _report_failures(failures: list[str], planned: int, workspace_name: str, skipped: int = 0) -> int:
+def _report_failures(
+    failures: list[str],
+    planned: int,
+    workspace_name: str,
+    skipped: int = 0,
+    withheld: list[tuple[str, int, str]] | None = None,
+) -> int:
     """Print the outcome and return the exit code. A partial deploy must not exit 0.
 
     Reports what actually happened rather than what was planned: saying "all 66 deployed" when two
     empty reports were skipped is a small lie that erodes trust in every other number we print.
+
+    Three outcomes, three codes, and the precedence is deliberate. A FAILURE outranks a withheld
+    unit because it is the verdict that wants this exact command run again; a withheld unit wants a
+    repair first, and re-running before that changes nothing. An empty REPORT (`skipped`) stays
+    EXIT_OK, unchanged: there is no item to create, its model still landed, and no follow-up run
+    would do anything - whereas a withheld unit is a whole unit the bundle could have deployed and
+    a second run is genuinely owed.
     """
+    withheld = withheld or []
     if failures:
         LOG.error("%d item(s) failed:", len(failures))
         for line in failures:
             LOG.error("  %s", line)
         LOG.error("Re-run the same command to resume; deployed items are skipped by content hash.")
+        announce_withheld(withheld)
         return EXIT_FAILED
     deployed = planned - skipped
+    empties = f"; {skipped} skipped as empty" if skipped else ""
+    if withheld:
+        LOG.info("%d item(s) deployed into %r%s - NOT the whole estate", deployed, workspace_name, empties)
+        announce_withheld(withheld)
+        return EXIT_INCOMPLETE
     if skipped:
-        LOG.info("%d item(s) deployed into %r; %d skipped as empty", deployed, workspace_name, skipped)
+        LOG.info("%d item(s) deployed into %r%s", deployed, workspace_name, empties)
     else:
         LOG.info("all %d item(s) deployed into %r", deployed, workspace_name)
     return EXIT_OK
@@ -1559,10 +1750,22 @@ def _resolve_folders(bundle: Path, workspace: str, tok: str, options: argparse.N
     return placed
 
 
-def _execute(
-    bundle: Path, workspace: str, workspace_name: str, tok: Any, options: argparse.Namespace
+def _execute(  # pylint: disable=too-many-arguments  # `pairs` is passed IN, see below
+    bundle: Path,
+    workspace: str,
+    workspace_name: str,
+    tok: Any,
+    options: argparse.Namespace,
+    *,
+    pairs: list[Pair],
 ) -> tuple[list[str], int] | None:
-    """Take the lock, build the folders, deploy. None when the lock could not be taken."""
+    """Take the lock, build the folders, deploy. None when the lock could not be taken.
+
+    Six arguments rather than re-deriving one: `pairs` is discovered ONCE in `deploy` and has
+    already had `--skip` applied to it. Calling `discover(bundle)` again here would quietly restore
+    every unit the operator withheld - the deploy would do the exact thing the flag forbids, while
+    the summary printed the filtered list.
+    """
     held = _acquire(bundle, workspace, options)
     if held is None:
         return None
@@ -1583,33 +1786,58 @@ def _execute(
             landing,
             estate_identity(bundle, getattr(options, "estate_id", None)),
         )
-        return _run_all(target, pairs=discover(bundle), folders=folders)
+        return _run_all(target, pairs=pairs, folders=folders)
     finally:
         lock.release()
 
 
+def _plan_units(bundle: Path, options: argparse.Namespace) -> tuple[list[Pair], list[tuple[str, int, str]], str]:
+    """Discover the bundle's units and apply the operator's skips. (deploy these, withheld, refusal)."""
+    discovered = discover(bundle)
+    skips, refusal = resolve_skips(bundle, {name for name, _model, _report in discovered}, options)
+    if refusal:
+        return [], [], refusal
+    pairs, withheld = withhold(discovered, skips)
+    # Announced up front as well as in the summary: an operator who spots the wrong unit here has
+    # not yet paid for a deploy, and on a real estate the summary is a quarter of an hour away.
+    announce_withheld(withheld)
+    return pairs, withheld, ""
+
+
+def _planned_keys(pairs: list[Pair]) -> list[tuple[str, str]]:
+    """Every (name, type) this run would deploy, so preflight can tell new items from existing ones."""
+    keys = [(name, MODEL_TYPE) for name, _model, _report in pairs]
+    return keys + [(name, REPORT_TYPE) for name, _model, report in pairs if report]
+
+
 def deploy(bundle: Path, workspace: str, tok: Any, options: argparse.Namespace) -> int:
     """Deploy every workbook in the bundle, models first. Returns a process exit code."""
-    pairs = discover(bundle)
+    pairs, withheld, refusal = _plan_units(bundle, options)
+    if refusal:
+        LOG.error("%s", refusal)
+        return EXIT_PREFLIGHT
+
     planned = sum(1 + (1 if report else 0) for _, _, report in pairs)
-    planned_keys = [(name, MODEL_TYPE) for name, _, _ in pairs]
-    planned_keys += [(name, REPORT_TYPE) for name, _, report in pairs if report]
     LOG.info("%d workbook(s) in %s -> %d item(s)", len(pairs), bundle, planned)
 
-    ok, message, info = preflight(workspace, tok, planned, planned_keys)
+    ok, message, info = preflight(workspace, tok, planned, _planned_keys(pairs))
     LOG.info("preflight: %s", message)
     if not ok:
         return EXIT_PREFLIGHT
     workspace_name = info.get("displayName", workspace)
 
     if options.dry_run:
+        # EXIT_OK even with units withheld: a dry run creates nothing, so there is no incomplete
+        # estate to report - and `--dry-run` then the real run is the documented ritual, which a
+        # non-zero code here would break for anyone chaining the two. The withheld block printed
+        # above is the signal; the item count dropping is the confirmation.
         return _print_plan(pairs, workspace_name, planned, _placement_plan(bundle, options))
 
-    outcome = _execute(bundle, workspace, workspace_name, tok, options)
+    outcome = _execute(bundle, workspace, workspace_name, tok, options, pairs=pairs)
     if outcome is None:
         return EXIT_PREFLIGHT
     failures, skipped = outcome
-    return _report_failures(failures, planned, workspace_name, skipped)
+    return _report_failures(failures, planned, workspace_name, skipped, withheld)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1629,6 +1857,27 @@ def main(argv: list[str] | None = None) -> int:
         help="assess_estate.py estate.db, so the Tableau project tree is mirrored as workspace folders",
     )
     parser.add_argument("--no-folders", action="store_true", help="deploy everything to the workspace root")
+    parser.add_argument(
+        "--skip",
+        action="append",
+        default=[],
+        metavar="UNIT",
+        help=(
+            "leave one unit out of this deploy (a directory name under <bundle>/pbip/); repeatable. "
+            "Nothing is created for it, it is named in the summary, and the run exits "
+            f"{EXIT_INCOMPLETE} because the estate is knowingly incomplete. A name that matches no "
+            "unit refuses to start rather than silently deploying it."
+        ),
+    )
+    parser.add_argument(
+        "--skip-empty-models",
+        action="store_true",
+        help=(
+            "also leave out every unit that <bundle>/empty-model-check.json reports as EMPTY - a "
+            "model that opens and loads no rows must never be deployed, and this saves retyping the "
+            "names. Refuses to start if that report is missing or unreadable."
+        ),
+    )
     parser.add_argument(
         "--estate-id",
         help=(
