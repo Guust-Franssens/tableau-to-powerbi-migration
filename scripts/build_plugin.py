@@ -1,10 +1,9 @@
 """
 purpose: build an installable GitHub Copilot CLI marketplace from this repo's skill bundles, so the
          source-tool-agnostic ones can be installed as a plugin and referenced BY NAME from agent
-         personas. A repo-local `.github/skills/` bundle is NOT registered in a subagent's skill
-         registry - the `skill` tool rejects the name outright (docs/agent-architecture.md section
-         6.1) - so path-reading is the only option today. Plugin-provided skills ARE registered, which
-         is the whole reason this build exists.
+         personas. The installed plugin copy SHADOWS same-named repo-local `.github/skills/` bundles for
+         subagents. Plugin-provided skills are registered by name, which is why this build exists;
+         the installed copy must stay byte-for-byte current with the repo bundles.
 
          The marketplace is published to a SEPARATE, thin repo on purpose: `/plugin marketplace add`
          clones the whole repository, and this one carries ~108 MB of history plus ~62 MB of tracked
@@ -27,10 +26,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = REPO_ROOT / ".github" / "skills"
 
-MARKETPLACE_NAME = "powerbi-playbook-collection"
-PLUGIN_NAME = "powerbi-playbook"
+MARKETPLACE_NAME = "powerbi-migration-collection"
+PLUGIN_NAME = "powerbi-migration-skills"
 VERSION = "0.3.0"
-PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-playbook"
+PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-migration-skills"
 
 # Only source-tool-agnostic bundles ship. `sentinel-probe` is a diagnostic, and anything
 # Tableau-specific belongs in the migration repo's personas, not in a reusable plugin.

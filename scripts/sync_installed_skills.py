@@ -1,7 +1,7 @@
 """
 purpose: sync the INSTALLED copilot plugin's skill bundles from this repo, in place, without the
          `copilot plugin update` that a running Copilot session blocks.
-usage:   python scripts/sync_installed_skills.py [--check] [--verbose]
+usage:   python scripts/sync_installed_skills.py [--check] [--verbose] [--plugin-root PATH]
 
 Why this exists
 ---------------
@@ -12,8 +12,8 @@ you exit" - and that is what the toolkit assumed for weeks.
 It is wrong. Measured 2026-08-01, the lock is narrower than the error implies:
 
     <base>                                  RENAME BLOCKED   (a running session holds it)
-    <base>/powerbi-playbook         RENAME BLOCKED
-    <base>/powerbi-playbook/skills  renameable
+    <base>/<plugin>                 RENAME BLOCKED
+    <base>/<plugin>/skills          renameable
     any file inside                         freely writable, creatable and deletable
 
 `plugin update` fails because it replaces the plugin by swapping the top-level directory, which is
@@ -37,13 +37,13 @@ import filecmp
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
+from build_plugin import PLUGIN_NAME
+from skill_plugin_source import DEFAULT_INSTALL_HINT, PLUGIN_ROOT_ENV, discover_skill_plugin
+
 REPO = Path(__file__).resolve().parent.parent
-INSTALLED = (
-    Path.home() / ".copilot" / "installed-plugins" / "powerbi-playbook-collection" / "powerbi-playbook" / "skills"
-)
+REFERENCE_BUILD = REPO / "_build" / "skill-plugin-reference"
 
 
 def build_reference_copy(workdir: Path) -> Path:
@@ -59,7 +59,7 @@ def build_reference_copy(workdir: Path) -> Path:
         capture_output=True,
         text=True,
     )
-    built = workdir / "plugins" / "powerbi-playbook" / "skills"
+    built = workdir / "plugins" / PLUGIN_NAME / "skills"
     if not built.is_dir():
         raise SystemExit(f"build_plugin.py did not produce {built}")
     return built
@@ -86,27 +86,39 @@ def diff_tree(src: Path, dst: Path) -> tuple[list[Path], list[Path]]:
     return changed, extra
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches
     """Sync the installed bundles from the repo, or report drift under --check."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="report drift and exit 1; change nothing")
     parser.add_argument("--verbose", action="store_true", help="list every file")
+    parser.add_argument(
+        "--plugin-root",
+        type=Path,
+        help=f"explicit installed plugin root; also supported via {PLUGIN_ROOT_ENV}",
+    )
     args = parser.parse_args(argv)
 
-    if not INSTALLED.is_dir():
-        print(f"SYNC: ERROR - plugin not installed at {INSTALLED}")
-        print(
-            "      Install it once between sessions: copilot plugin install "
-            "powerbi-playbook@powerbi-playbook-collection"
-        )
+    discovery = discover_skill_plugin(plugin_root_override=args.plugin_root)
+    if discovery.status == "multiple":
+        print("SYNC: ERROR - multiple installed plugins carry these skill bundles")
+        for candidate in discovery.candidates:
+            print(f"      {candidate}")
+        print("      Remove the duplicate; otherwise one copy can silently shadow another.")
+        return 4
+    if not discovery.ok or not discovery.skills_dir:
+        print(f"SYNC: ERROR - plugin not installed ({discovery.detail})")
+        print(f"      {discovery.install_hint or DEFAULT_INSTALL_HINT}")
         return 2
 
-    with tempfile.TemporaryDirectory() as tmp:
-        src = build_reference_copy(Path(tmp))
-        changed, extra = diff_tree(src, INSTALLED)
+    installed = discovery.skills_dir
+    if REFERENCE_BUILD.exists():
+        shutil.rmtree(REFERENCE_BUILD)
+    try:
+        src = build_reference_copy(REFERENCE_BUILD)
+        changed, extra = diff_tree(src, installed)
 
         if not changed and not extra:
-            print(f"SYNC: IN_SYNC - {INSTALLED}")
+            print(f"SYNC: IN_SYNC - {installed} ({discovery.identity})")
             return 0
 
         for rel in changed:
@@ -119,23 +131,28 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         for rel in changed:
-            target = INSTALLED / rel
+            target = installed / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src / rel, target)
         for rel in extra:
-            (INSTALLED / rel).unlink()
+            (installed / rel).unlink()
 
         # Re-diff rather than trusting the copies. The whole reason this script exists is a lock
         # that makes some filesystem operations fail, so "it did not raise" is not evidence.
-        still, _ = diff_tree(src, INSTALLED)
+        still, _ = diff_tree(src, installed)
         if still:
             print(f"SYNC: ERROR - {len(still)} file(s) still differ after copying")
             return 3
 
-        print(f"SYNC: UPDATED - {len(changed)} file(s) copied, {len(extra)} removed")
+        print(
+            f"SYNC: UPDATED - {len(changed)} file(s) copied, {len(extra)} removed at {installed} ({discovery.identity})"
+        )
         print("      Skills are snapshotted at session start, so a RUNNING session keeps the old")
         print("      copy in memory. New sessions (and subagents they spawn) get this one.")
         return 0
+    finally:
+        if REFERENCE_BUILD.exists():
+            shutil.rmtree(REFERENCE_BUILD)
 
 
 if __name__ == "__main__":

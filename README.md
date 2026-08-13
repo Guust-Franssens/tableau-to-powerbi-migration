@@ -156,7 +156,7 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
 
 - [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Declares the required plugins
   (`powerbi-authoring@fabric-collection` from `microsoft/skills-for-fabric`, plus this repo's own
-  `powerbi-playbook@powerbi-playbook-collection`), the MCP servers, and the conventions every
+  `powerbi-migration-skills@powerbi-migration-collection`), the MCP servers, and the conventions every
   agent inherits. **Read this first.**
 - [`.vscode/mcp.json`](.vscode/mcp.json): MCP server definitions (auto-read by VS Code Copilot; CLI
   users add the same with `/mcp`).
@@ -191,8 +191,8 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
   stops the *accidental* case outright but only *detects* deliberate circumvention.
 
 In Copilot CLI, install the plugins once with `/plugin` (add marketplaces `microsoft/skills-for-fabric`
-and `Guust-Franssens/powerbi-playbook`, enable `powerbi-authoring` and
-`powerbi-playbook`) and register the MCP servers with `/mcp`. Then run
+and `Guust-Franssens/powerbi-migration-skills`, enable `powerbi-authoring` and
+`powerbi-migration-skills`) and register the MCP servers with `/mcp`. Then run
 `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
 
 </details>
