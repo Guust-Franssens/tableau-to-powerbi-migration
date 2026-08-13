@@ -22,6 +22,7 @@ the code persisted by default).
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -43,15 +44,120 @@ def _model(root: Path, name: str = "MyMigration", compat: int | None = None) -> 
     return root / f"{name}.SemanticModel" / ".pbi" / "cache.abf"
 
 
-def _valid_abf_bytes() -> bytes:
-    """Bytes that pass `_is_complete_abf`: the CFBF signature padded to a full 512-byte header.
+def _build_minimal_cfbf() -> bytes:
+    """A genuine, minimal 3-sector Microsoft Compound File Binary (v3, 512-byte sectors).
 
-    A real `cache.abf` is a Microsoft Compound File Binary, so the completeness check (#113, round-2
-    blocker 1) requires the OLE2 magic AND at least one header. Happy-path tests must therefore write
-    something that actually looks like a backup, not an arbitrary non-empty blob.
+    Layout: a 512-byte header + one FAT sector + one directory sector (1536 bytes total). This is a
+    REAL CFBF container - header fields set to their only legal values, the FAT self-referencing, and
+    a Root Entry directory record - not merely the magic bytes with zero padding. `_is_complete_abf`
+    validates the header STRUCTURE (round-3 blocker 1), so fixtures must be structurally valid, and
+    every truncation of THIS blob is a realistic torn write.
     """
-    padding = refresh_pbip_model._CFBF_HEADER_BYTES - len(refresh_pbip_model._CFBF_MAGIC)
-    return refresh_pbip_model._CFBF_MAGIC + b"\x00" * padding
+    sector = 512
+    endofchain, freesect, fatsect, nostream = 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFFF
+
+    header = bytearray(sector)
+    header[0:8] = refresh_pbip_model._CFBF_MAGIC
+    struct.pack_into("<H", header, 24, 0x003E)  # minor version
+    struct.pack_into("<H", header, 26, 3)  # major version 3 -> 512-byte sectors
+    struct.pack_into("<H", header, 28, 0xFFFE)  # byte-order mark
+    struct.pack_into("<H", header, 30, 9)  # sector shift (1<<9 == 512)
+    struct.pack_into("<H", header, 32, 6)  # mini sector shift (fixed)
+    struct.pack_into("<I", header, 40, 0)  # num directory sectors (0 for v3)
+    struct.pack_into("<I", header, 44, 1)  # num FAT sectors
+    struct.pack_into("<I", header, 48, 1)  # first directory sector -> sector 1
+    struct.pack_into("<I", header, 56, 4096)  # mini-stream cutoff
+    struct.pack_into("<I", header, 60, endofchain)  # first mini-FAT sector
+    struct.pack_into("<I", header, 64, 0)  # num mini-FAT sectors
+    struct.pack_into("<I", header, 68, endofchain)  # first DIFAT sector
+    struct.pack_into("<I", header, 72, 0)  # num DIFAT sectors
+    for i in range(109):  # DIFAT: FAT lives at sector 0, the rest are free
+        struct.pack_into("<I", header, 76 + i * 4, 0 if i == 0 else freesect)
+
+    fat = bytearray(sector)
+    struct.pack_into("<I", fat, 0, fatsect)  # sector 0 is the FAT itself
+    struct.pack_into("<I", fat, 4, endofchain)  # sector 1 (directory) ends its chain
+    for i in range(2, sector // 4):
+        struct.pack_into("<I", fat, i * 4, freesect)
+
+    directory = bytearray(sector)
+    name = "Root Entry".encode("utf-16-le")
+    directory[0 : len(name)] = name
+    struct.pack_into("<H", directory, 64, len(name) + 2)  # name length incl. terminating NUL
+    directory[66] = 5  # object type: root storage
+    directory[67] = 1  # colour: black
+    struct.pack_into("<I", directory, 68, nostream)  # left sibling
+    struct.pack_into("<I", directory, 72, nostream)  # right sibling
+    struct.pack_into("<I", directory, 76, nostream)  # child
+    struct.pack_into("<I", directory, 116, endofchain)  # mini-stream start sector
+    struct.pack_into("<Q", directory, 120, 0)  # stream size
+    for entry in range(1, 4):  # remaining directory records are unallocated
+        base = entry * 128
+        struct.pack_into("<I", directory, base + 68, nostream)
+        struct.pack_into("<I", directory, base + 72, nostream)
+        struct.pack_into("<I", directory, base + 76, nostream)
+
+    return bytes(header) + bytes(fat) + bytes(directory)
+
+
+def _valid_abf_bytes() -> bytes:
+    """Bytes that pass `_is_complete_abf`: a genuine minimal CFBF container, not magic + zero padding.
+
+    A real `cache.abf` is a Microsoft Compound File Binary, and the completeness check validates the
+    CFBF header structure (#113, round-3 blocker 1), so happy-path tests must write something that is
+    actually a container - the previous magic-plus-zeros blob no longer qualifies (its byte-order mark
+    was 0, not 0xFFFE), which is the whole point of the stricter check.
+    """
+    return _build_minimal_cfbf()
+
+
+def test_is_complete_abf_accepts_a_genuine_cfbf_container(tmp_path: Path) -> None:
+    """The positive control: a structurally valid minimal CFBF is accepted."""
+    good = tmp_path / "cache.abf"
+    good.write_bytes(_build_minimal_cfbf())
+    assert refresh_pbip_model._is_complete_abf(good) is True
+
+
+def test_is_complete_abf_rejects_magic_with_only_zero_padding(tmp_path: Path) -> None:
+    """The old fixture shape - CFBF magic then zeros - is NOT a container and must be rejected.
+
+    Its byte-order mark is 0 rather than 0xFFFE and it references no sectors, so the round-2 check
+    (magic + size>=512) waved it through while the structural check rejects it (round-3 blocker 1).
+    """
+    blob = tmp_path / "cache.abf"
+    blob.write_bytes(refresh_pbip_model._CFBF_MAGIC + b"\x00" * (refresh_pbip_model._CFBF_HEADER_BYTES - 8))
+    assert refresh_pbip_model._is_complete_abf(blob) is False
+
+
+def test_is_complete_abf_rejects_a_non_sector_aligned_truncation(tmp_path: Path) -> None:
+    """A 600-byte torn write - keeps the magic, not a whole number of sectors - must be rejected.
+
+    This is the reviewer's exact reproduction: 600 bytes passed round-2 (magic + >=512) and reached
+    `os.replace`, destroying the old cache (round-3 blocker 1). A complete container is a whole number
+    of sectors, so a length that is not is a partial write.
+    """
+    truncated = tmp_path / "cache.abf"
+    truncated.write_bytes(_build_minimal_cfbf()[:600])
+    assert refresh_pbip_model._is_complete_abf(truncated) is False
+
+
+def test_is_complete_abf_rejects_a_sector_aligned_truncation(tmp_path: Path) -> None:
+    """Even a sector-ALIGNED truncation is rejected: its header points at sectors now past EOF.
+
+    Truncating the valid 1536-byte container to 1024 keeps the header (which names a directory at
+    sector 1) but drops that sector, so the referenced index now sits beyond the file - the signature
+    of an interrupted write that a size/alignment-only check cannot catch (round-3 blocker 1).
+    """
+    truncated = tmp_path / "cache.abf"
+    truncated.write_bytes(_build_minimal_cfbf()[:1024])
+    assert refresh_pbip_model._is_complete_abf(truncated) is False
+
+
+def test_is_complete_abf_rejects_a_header_only_file(tmp_path: Path) -> None:
+    """A lone 512-byte header (no data sectors) is not a usable backup and is rejected."""
+    header_only = tmp_path / "cache.abf"
+    header_only.write_bytes(_build_minimal_cfbf()[:512])
+    assert refresh_pbip_model._is_complete_abf(header_only) is False
 
 
 def test_a_failed_write_does_not_destroy_an_existing_good_cache(tmp_path: Path) -> None:
@@ -226,6 +332,10 @@ def test_persist_rolls_back_the_compat_bump_when_os_replace_raises(tmp_path: Pat
     leaving database.tmdl declaring 1702 for a cache that was never written - state the caller then
     carried into the UI Save (#113, round-2 blocker 2). The staging write here is a COMPLETE ABF, so
     the failure is purely the replace, isolating the exception path.
+
+    The patch is SCOPED to the cache swap (dst == cache.abf), because the rollback ITSELF now restores
+    atomically via `os.replace` (round-3 blocker 2); a blanket patch would break the very rollback the
+    test means to observe.
     """
     cache = _model(tmp_path, compat=1604)
     model_dir = cache.parent.parent
@@ -235,8 +345,12 @@ def test_persist_rolls_back_the_compat_bump_when_os_replace_raises(tmp_path: Pat
     def good_write(staging: Path) -> None:
         staging.write_bytes(_valid_abf_bytes())
 
-    def raising_replace(_src, _dst):
-        raise PermissionError("The process cannot access the file because it is being used")
+    real_replace = refresh_pbip_model.os.replace
+
+    def raising_replace(src, dst):
+        if str(dst).endswith("cache.abf"):
+            raise PermissionError("The process cannot access the file because it is being used")
+        return real_replace(src, dst)
 
     monkeypatch.setattr(refresh_pbip_model.os, "replace", raising_replace)
 
@@ -245,6 +359,116 @@ def test_persist_rolls_back_the_compat_bump_when_os_replace_raises(tmp_path: Pat
     assert database_tmdl.read_bytes() == before, "an exception on replace must restore database.tmdl exactly"
     assert not cache.exists(), "no cache may be left behind when the replace failed"
     assert not cache.with_name(cache.name + ".tmp").exists(), "the staging file must be cleaned up"
+
+
+def test_a_commit_then_raise_keeps_the_new_cache_and_the_aligned_compat(tmp_path: Path, monkeypatch) -> None:
+    """If `os.replace` MOVED the cache but still raised, that is a COMMIT - keep the aligned compat.
+
+    Commit is judged by the filesystem, not the writer's return flag (round-3 blocker 2). Here the
+    replace installs the new cache and then raises; the round-2 code saw the exception, treated the
+    write as "not committed", and rolled the compatibility level back UNDER the freshly installed
+    cache - a 1702 image in a project re-declared 1604, the downgrade crash on reopen. The alignment
+    must STAY at 1702 and no exception may escape.
+    """
+    cache = _model(tmp_path, compat=1604)
+    model_dir = cache.parent.parent
+    database_tmdl = model_dir / "definition" / "database.tmdl"
+    new_bytes = _valid_abf_bytes()
+
+    def good_write(staging: Path) -> None:
+        staging.write_bytes(new_bytes)
+
+    real_replace = refresh_pbip_model.os.replace
+
+    def commit_then_raise(src, dst):
+        if str(dst).endswith("cache.abf"):
+            real_replace(src, dst)  # actually install the cache...
+            raise PermissionError("moved, then lost the handle")  # ...then surface an error anyway
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(refresh_pbip_model.os, "replace", commit_then_raise)
+
+    ok, message = refresh_pbip_model._persist_image(cache, model_dir, 1702, good_write)
+    assert ok is True, "a moved-then-raised replace is a commit, judged by the filesystem"
+    assert "1702" in message
+    assert cache.read_bytes() == new_bytes, "the installed cache must be kept"
+    assert "compatibilityLevel: 1702" in database_tmdl.read_text(encoding="utf-8"), (
+        "compat must NOT be rolled back under a committed cache"
+    )
+    assert not cache.with_name(cache.name + ".tmp").exists()
+
+
+def test_a_failed_rollback_is_fatal_and_raises_compat_rollback_error(tmp_path: Path, monkeypatch) -> None:
+    """If the write did not land AND the compat rollback itself fails, that is FATAL, not a soft return.
+
+    A partial state where database.tmdl was bumped but the cache was never written, and the bump
+    cannot be undone, must NOT be quietly converted into a UI-save fallback (round-3 blocker 2): saving
+    would persist the mismatch. `_persist_image` raises `CompatRollbackError` so the caller can stop.
+    Here the write cleanly does nothing (not committed) and the rollback's `os.replace` onto
+    database.tmdl is blocked.
+    """
+    cache = _model(tmp_path, compat=1604)
+    model_dir = cache.parent.parent
+
+    def failing_write(_staging: Path) -> None:
+        return None
+
+    real_replace = refresh_pbip_model.os.replace
+
+    def block_rollback(src, dst):
+        if str(dst).endswith("database.tmdl"):
+            raise PermissionError("database.tmdl is locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(refresh_pbip_model.os, "replace", block_rollback)
+
+    with pytest.raises(refresh_pbip_model.CompatRollbackError):
+        refresh_pbip_model._persist_image(cache, model_dir, 1702, failing_write)
+
+
+def test_every_rollback_path_is_attempted_even_when_the_first_fails(tmp_path: Path, monkeypatch) -> None:
+    """A failure on one rollback path must not abandon the others (round-3 blocker 2).
+
+    The alignment touches TWO files - database.tmdl and the generated-edit ledger. If restoring the
+    first fails, the second must STILL be restored (the round-2 loop stopped at the first failure,
+    leaving a subset reverted). We block database.tmdl's restore and assert the ledger was rolled back
+    regardless, while the overall failure is still surfaced as fatal.
+    """
+    cache = _model(tmp_path, compat=1604)
+    model_dir = cache.parent.parent
+    database_tmdl = model_dir / "definition" / "database.tmdl"
+    before_hash = refresh_pbip_model.sha256_file(database_tmdl)
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "generated_artifacts": {
+                    "version": 1,
+                    "run_id": "engine-run",
+                    "recorded_at": "2026-08-10T08:00:00+00:00",
+                    "report_sha256": "report-hash",
+                    "files": {"MyMigration.SemanticModel/definition/database.tmdl": before_hash},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def failing_write(_staging: Path) -> None:
+        return None
+
+    real_replace = refresh_pbip_model.os.replace
+
+    def block_database_tmdl(src, dst):
+        if str(dst).endswith("database.tmdl"):
+            raise PermissionError("database.tmdl is locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(refresh_pbip_model.os, "replace", block_database_tmdl)
+
+    ledger = tmp_path / "_build" / "generated-edit-declarations.json"
+    with pytest.raises(refresh_pbip_model.CompatRollbackError):
+        refresh_pbip_model._persist_image(cache, model_dir, 1702, failing_write)
+    assert not ledger.exists(), "the ledger must be rolled back even though database.tmdl's restore failed"
 
 
 def _frontmatter(text: str) -> str:

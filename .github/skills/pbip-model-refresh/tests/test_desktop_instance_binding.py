@@ -34,6 +34,13 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 CREDENTIAL_PROBE_PS1 = SKILL_ROOT / "scripts" / "probe_desktop_credential.ps1"
 REF_TABLE_RE = re.compile(r"^ref table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 
+# Real Power BI auto date/time tables ALWAYS carry a canonical 8-4-4-4-12 GUID suffix, and the
+# identity fingerprint now filters them by that exact shape rather than a name prefix (round-3
+# blocker 4). Fixtures that stand in for the scaffolding must therefore use the real generated shape;
+# a short stub like `LocalDateTable_abc` is (correctly) treated as a genuine user table now.
+AUTO_DATE_LOCAL = "LocalDateTable_9f2c1e4a-1111-2222-3333-444455556666"
+AUTO_DATE_TEMPLATE = "DateTableTemplate_0a1b2c3d-4e5f-6789-abcd-ef0123456789"
+
 
 def _example_models() -> list[Path]:
     """This repo's committed `examples/` corpus, if the host repo has one.
@@ -186,7 +193,7 @@ class _FakeConnection:
 
 def test_table_names_filters_the_auto_date_scaffolding_but_can_keep_hidden_tables() -> None:
     """A hidden table is part of a model's fingerprint; `LocalDateTable_*` never is (not in TMDL)."""
-    rows = [("Sales", False), ("Bridge", True), ("LocalDateTable_abc", True), ("DateTableTemplate_x", True)]
+    rows = [("Sales", False), ("Bridge", True), (AUTO_DATE_LOCAL, True), (AUTO_DATE_TEMPLATE, True)]
     assert table_names(_FakeConnection(rows)) == ["Sales"]
     assert table_names(_FakeConnection(rows), include_hidden=True) == ["Sales", "Bridge"]
 
@@ -261,11 +268,35 @@ def test_auto_date_tables_on_disk_do_not_look_like_a_stranger(monkeypatch, tmp_p
     The live side already strips them, so leaving them in the disk side would report them as
     "missing from the connected model" and abort every such migration with WRONG_MODEL.
     """
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders", "LocalDateTable_9f2c", "DateTableTemplate_1a"])
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders", AUTO_DATE_LOCAL, AUTO_DATE_TEMPLATE])
     assert tmdl_tables(cache.parent.parent) == {"Orders"}
     _stub_live_to_match_disk(monkeypatch, cache)
     ok, message = same_model(52001, cache)
     assert ok, message
+
+
+def test_a_user_table_named_like_the_auto_date_prefix_stays_in_the_disk_fingerprint(tmp_path: Path) -> None:
+    """A GENUINE user table like `LocalDateTableSales` must NOT be mistaken for auto date/time scaffolding.
+
+    The round-2 filter matched anything starting with `LocalDateTable`/`DateTableTemplate`, so a real
+    user table with that prefix vanished from the fingerprint entirely - columns, measures and all -
+    hiding real differences between two models (round-3 blocker 4). Only the exact GUID-suffixed shape
+    is scaffolding; everything else is compared.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders", "LocalDateTableSales", "DateTableTemplateArchive"])
+    assert tmdl_tables(cache.parent.parent) == {"Orders", "LocalDateTableSales", "DateTableTemplateArchive"}
+
+
+def test_is_auto_date_table_name_matches_only_the_generated_guid_shape() -> None:
+    """The scaffolding predicate is exact: a canonical GUID suffix is required, a prefix is not enough."""
+    assert probe_desktop_query.is_auto_date_table_name(AUTO_DATE_LOCAL)
+    assert probe_desktop_query.is_auto_date_table_name(AUTO_DATE_TEMPLATE)
+    # Genuine user tables that merely start with the words are NOT scaffolding.
+    assert not probe_desktop_query.is_auto_date_table_name("LocalDateTableSales")
+    assert not probe_desktop_query.is_auto_date_table_name("DateTableTemplateArchive")
+    # A short/truncated suffix is not the generated shape either, so it is kept (fail closed).
+    assert not probe_desktop_query.is_auto_date_table_name("LocalDateTable_abc")
+    assert not probe_desktop_query.is_auto_date_table_name("LocalDateTable_9f2c1e4a-1111-2222-3333")
 
 
 def test_same_model_accepts_an_exact_case_insensitive_match(monkeypatch, tmp_path: Path) -> None:
@@ -395,12 +426,28 @@ def test_tmdl_columns_measures_skips_auto_date_tables(tmp_path: Path) -> None:
     tables_dir = tmp_path / "M.SemanticModel" / "definition" / "tables"
     tables_dir.mkdir(parents=True)
     (tables_dir / "Sales.tmdl").write_text("table Sales\n\n\tcolumn Amount\n", encoding="utf-8")
-    (tables_dir / "LocalDateTable_x.tmdl").write_text(
-        "table LocalDateTable_x\n\n\tcolumn Year\n\tmeasure M = 1\n", encoding="utf-8"
+    (tables_dir / f"{AUTO_DATE_LOCAL}.tmdl").write_text(
+        f"table {AUTO_DATE_LOCAL}\n\n\tcolumn Year\n\tmeasure M = 1\n", encoding="utf-8"
     )
     columns, measures = refresh_pbip_model.tmdl_columns_measures(tmp_path / "M.SemanticModel")
     assert columns == {("Sales", "Amount")}
     assert measures == set()
+
+
+def test_tmdl_columns_measures_keeps_a_user_table_named_like_the_auto_date_prefix(tmp_path: Path) -> None:
+    """A user table `LocalDateTableSales` keeps its columns and measures in the fingerprint (round-3 B4).
+
+    The prefix filter dropped this whole table, so two models differing only inside it looked
+    identical - the exact defence `same_model` exists to provide. The GUID-shape filter keeps it.
+    """
+    tables_dir = tmp_path / "M.SemanticModel" / "definition" / "tables"
+    tables_dir.mkdir(parents=True)
+    (tables_dir / "LocalDateTableSales.tmdl").write_text(
+        "table LocalDateTableSales\n\n\tcolumn Region\n\tmeasure Revenue = 1\n", encoding="utf-8"
+    )
+    columns, measures = refresh_pbip_model.tmdl_columns_measures(tmp_path / "M.SemanticModel")
+    assert columns == {("LocalDateTableSales", "Region")}
+    assert measures == {("LocalDateTableSales", "Revenue")}
 
 
 class _FingerprintReader:  # pylint: disable=too-few-public-methods
@@ -461,7 +508,7 @@ def test_column_names_filters_rownumber_and_auto_date_columns() -> None:
     preferring the explicit model name over the engine's inferred one.
     """
     conn = _FingerprintConn(
-        tables={"t1": "Orders", "t2": "LocalDateTable_abc"},
+        tables={"t1": "Orders", "t2": AUTO_DATE_LOCAL},
         columns=[
             ("t1", "Amount", "Amount", 1),  # data column -> kept
             ("t1", "", "Qty", 2),  # calculated, no explicit name -> InferredName
@@ -473,10 +520,23 @@ def test_column_names_filters_rownumber_and_auto_date_columns() -> None:
     assert probe_desktop_query.column_names(conn) == {("Orders", "Amount"), ("Orders", "Qty")}
 
 
+def test_column_names_keeps_a_user_table_named_like_the_auto_date_prefix() -> None:
+    """The live column fingerprint keeps a genuine `LocalDateTableSales`, only the GUID shape is dropped."""
+    conn = _FingerprintConn(
+        tables={"t1": "LocalDateTableSales", "t2": AUTO_DATE_LOCAL},
+        columns=[
+            ("t1", "Region", "Region", 1),  # user table that merely starts with the prefix -> kept
+            ("t2", "Date", "Date", 1),  # real auto date-table column -> filtered
+        ],
+        measures=[],
+    )
+    assert probe_desktop_query.column_names(conn) == {("LocalDateTableSales", "Region")}
+
+
 def test_measure_names_filters_auto_date_measures() -> None:
     """Measures on the auto date/time tables are filtered too, mirroring the disk side."""
     conn = _FingerprintConn(
-        tables={"t1": "Sales", "t2": "DateTableTemplate_1"},
+        tables={"t1": "Sales", "t2": AUTO_DATE_TEMPLATE},
         columns=[],
         measures=[("t1", "Total Sales"), ("t2", "Some Auto Measure")],
     )
@@ -610,6 +670,35 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.exists(), "a default refresh must persist cache.abf"
+
+
+def test_a_compat_rollback_failure_is_fatal_and_does_not_fall_back_to_ui_save(monkeypatch, tmp_path, capsys):
+    """A `CompatRollbackError` from persist is FATAL - the run must NOT drive the UI Save on top of it.
+
+    When the cache write fails AND the compatibility alignment cannot be rolled back, database.tmdl
+    declares a level no cache was written at. Saving over that inconsistent state would persist the
+    mismatch, so `main` must exit with an error and never reach the UI-save fallback (round-3 blocker
+    2). Round-2 converted every ImageSave exception into a UI-save fallback, so this case saved anyway.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _stub_live_to_match_disk(monkeypatch, cache)
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
+
+    def raise_rollback_error(port: int, cache_path: Path, model_dir=None):
+        del port, cache_path, model_dir
+        raise refresh_pbip_model.CompatRollbackError("compatibility rollback FAILED for database.tmdl")
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", raise_rollback_error)
+    monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run after a rollback failure"))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--tables", "Orders"])
+    out = capsys.readouterr().out
+    assert exit_code == 2
+    assert "compatibility rollback failed" in out.lower()
+    assert "do NOT save" in out
 
 
 def test_compatibility_alignment_declares_generated_edit(tmp_path: Path) -> None:
@@ -783,6 +872,70 @@ def test_cache_file_uses_the_stem_only_when_no_binding_resolves(monkeypatch, tmp
     assert resolved == tmp_path / "Proj.SemanticModel" / ".pbi" / "cache.abf"
 
 
+def _project_with_binding_outside_the_folder(root: Path, *, target_exists: bool) -> Path:
+    """A `.pbip` whose report binds to a model OUTSIDE its own folder, plus ONE adjacent decoy model.
+
+    Structure (returns the `.pbip`, stem `Proj`)::
+
+        root/proj/Proj.pbip                      -> artifacts: Proj.Report
+        root/proj/Proj.Report/definition.pbir    -> byPath: ../../elsewhere/Real.SemanticModel
+        root/proj/Decoy.SemanticModel/...         (the single adjacent sibling - a DECOY)
+        root/elsewhere/Real.SemanticModel/...     (the bound model, present only if target_exists)
+
+    This is the round-3 mandate case: with exactly ONE `.SemanticModel` beside the `.pbip`, the
+    round-2 `len(models)==1` shortcut returned that lone sibling BEFORE consulting the binding, so a
+    binding pointing outside the folder was ignored and the decoy was written into - a wrong-project
+    write reachable even with a single adjacent model.
+    """
+    proj = root / "proj"
+    decoy = proj / "Decoy.SemanticModel" / "definition" / "tables"
+    decoy.mkdir(parents=True)
+    (decoy / "T.tmdl").write_text("table 'T'\n\n\tcolumn X\n", encoding="utf-8")
+    if target_exists:
+        real = root / "elsewhere" / "Real.SemanticModel" / "definition" / "tables"
+        real.mkdir(parents=True)
+        (real / "T.tmdl").write_text("table 'T'\n\n\tcolumn X\n", encoding="utf-8")
+    report = proj / "Proj.Report"
+    report.mkdir(parents=True)
+    (report / "definition.pbir").write_text(
+        json.dumps({"version": "1.0", "datasetReference": {"byPath": {"path": "../../elsewhere/Real.SemanticModel"}}}),
+        encoding="utf-8",
+    )
+    pbip = proj / "Proj.pbip"
+    pbip.write_text(
+        json.dumps({"version": "1.0", "artifacts": [{"report": {"path": "Proj.Report"}}]}), encoding="utf-8"
+    )
+    return pbip
+
+
+def test_cache_file_follows_a_binding_that_points_outside_the_folder(monkeypatch, tmp_path: Path) -> None:
+    """A binding to a model OUTSIDE the `.pbip` folder wins over the lone adjacent decoy (round-3 mandate).
+
+    The authoritative binding is resolved DIRECTLY from the byPath, not intersected with the `.pbip`
+    folder's `*.SemanticModel` siblings, so it resolves the real owner even though it lives elsewhere -
+    and the single adjacent `Decoy` model never shadows it. Round-2 returned the decoy via the
+    `len(models)==1` shortcut that ran ahead of the binding.
+    """
+    pbip = _project_with_binding_outside_the_folder(tmp_path, target_exists=True)
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
+    resolved = refresh_pbip_model.cache_file(111)
+    assert resolved == tmp_path / "elsewhere" / "Real.SemanticModel" / ".pbi" / "cache.abf"
+    assert resolved != tmp_path / "proj" / "Decoy.SemanticModel" / ".pbi" / "cache.abf"
+
+
+def test_cache_file_fails_closed_when_the_binding_points_at_a_missing_model(monkeypatch, tmp_path: Path) -> None:
+    """A binding present but UNRESOLVABLE (its target is gone) fails closed - it must NOT fall to the decoy.
+
+    "Binding absent" (heuristics may apply) and "binding present but unresolvable" (fail closed) are
+    different conditions and must not share a code path. Here the byPath names a model that does not
+    exist, so `cache_file` returns None rather than silently writing the lone adjacent `Decoy` - the
+    wrong-project write the round-3 mandate closes.
+    """
+    pbip = _project_with_binding_outside_the_folder(tmp_path, target_exists=False)
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
+    assert refresh_pbip_model.cache_file(111) is None
+
+
 def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path: Path, capsys) -> None:
     """`--port` must EQUAL the pid-derived port, or the run aborts before touching anything.
 
@@ -924,10 +1077,22 @@ def test_credential_arbiter_enumerates_all_windows_and_fails_closed() -> None:
     pinned structurally: it must enumerate all top-level windows (`Get-PidWindows`/`FindAll`, not the
     old single-window `FindFirst`), and when no Refresh control was ever invoked it must report
     UNKNOWN rather than asserting a credential is present.
+
+    The not-invoked verdict is checked INSIDE the `if (-not $invoked) { ... }` block, not anywhere in
+    the file: a bare `VERDICT: UNKNOWN` search passed even when that branch was mutated to emit
+    `CREDENTIAL_PRESENT`, because a second `VERDICT: UNKNOWN` (the no-window guard) still matched
+    (round-3 major 5). Scoping the assertions to the block is what makes the test able to fail.
     """
     text = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
     assert "Get-PidWindows" in text, "must enumerate windows via the all-windows helper"
     assert "FindAll" in text, "must use FindAll (every top-level window)"
     assert "FindFirst" not in text, "the single-window FindFirst scan was the fail-open enumeration bug"
-    assert re.search(r"-not\s+\$invoked", text), "must guard the case where no Refresh was invoked"
-    assert re.search(r"VERDICT:\s*UNKNOWN", text), "the not-invoked case must report UNKNOWN, not CREDENTIAL_PRESENT"
+
+    block_match = re.search(r"if \(-not \$invoked\)\s*\{(.*?)\}", text, re.DOTALL)
+    assert block_match, "must guard the case where no Refresh was invoked with an `if (-not $invoked)` block"
+    block = block_match.group(1)
+    assert re.search(r"VERDICT:\s*UNKNOWN", block), "the not-invoked branch itself must report UNKNOWN"
+    assert re.search(r"\bexit\s+3\b", block), "the not-invoked branch must exit 3 (the UNKNOWN code)"
+    assert "CREDENTIAL_PRESENT" not in block, (
+        "the not-invoked branch must NOT report CREDENTIAL_PRESENT - that is the fail-open arbiter bug"
+    )

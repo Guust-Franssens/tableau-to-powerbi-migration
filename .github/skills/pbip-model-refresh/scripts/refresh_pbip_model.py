@@ -93,13 +93,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 # pylint: disable=wrong-import-position
 from probe_desktop_query import (
-    AUTO_DATE_TABLE_PREFIXES,
     _load_adomd,
     column_names,
     discover_port,
     first_table,
+    is_auto_date_table_name,
     measure_names,
     table_names,
+)
+
+# Cache-file integrity + atomic staged-write/rollback primitives live in _abf so this module
+# stays under its line cap; re-exported here so callers and tests reach them via refresh_pbip_model.
+from _abf import (  # noqa: F401  # pylint: disable=unused-import
+    _CFBF_HEADER_BYTES,
+    _CFBF_MAGIC,
+    CompatRollbackError,
+    _cache_committed,
+    _cache_fingerprint,
+    _cleanup_staging,
+    _is_complete_abf,
+    _restore_rollback_snapshot,
+    _staged_image_write,
 )
 
 SAVE_SETTLE_SECONDS = 3
@@ -136,12 +150,6 @@ MEASURE_DECL_RE = re.compile(r"^\s*measure\s+(?:'([^']+)'|([^=\s]+))", re.MULTIL
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
 
-# A persisted `cache.abf` is an Analysis Services backup, which is a Microsoft Compound File Binary
-# (OLE2) container - it always begins with this 8-byte signature and is at least one 512-byte CFBF
-# header. Verifying that before swapping a staged file over a good cache is what stops a truncated or
-# interrupted write from being mistaken for a real one and destroying the existing cache (#113).
-_CFBF_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-_CFBF_HEADER_BYTES = 512
 
 # The credential arbiter that settles a refresh TIMEOUT (slow source vs. sign-in modal). Resolved
 # relative to THIS file so the runtime recovery instruction always points at the copy that ships
@@ -449,25 +457,6 @@ def _compat_rollback_paths(model_dir: Path | None) -> list[Path]:
     return paths
 
 
-def _is_complete_abf(path: Path) -> bool:
-    """Is `path` a fully-written cache.abf, not a truncated or partial one?
-
-    A cache.abf is an Analysis Services backup, i.e. a Microsoft Compound File Binary (OLE2)
-    container, so a complete one begins with `_CFBF_MAGIC` and is at least one CFBF header
-    (`_CFBF_HEADER_BYTES`). This is a NECESSARY, cheap check, not a full parse: paired with only
-    suppressing the one benign AMO exception (`_is_benign_imagesave_response_error`), it keeps a
-    disk-full or interrupted write from replacing a good cache with rubble (#113). It stays
-    conservative - rejecting a VALID cache would be worse than the bug - so it checks only the
-    signature and a minimum size, never an exact length or sector alignment.
-    """
-    try:
-        with path.open("rb") as handle:
-            head = handle.read(len(_CFBF_MAGIC))
-        return head == _CFBF_MAGIC and path.stat().st_size >= _CFBF_HEADER_BYTES
-    except OSError:
-        return False
-
-
 def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
     """AMO's ImageSave raises even after a fully correct write - only THAT error is benign.
 
@@ -481,84 +470,52 @@ def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
     return "unrecognizable response" in str(exc).lower()
 
 
-def _staged_image_write(cache_path: Path, write_image) -> bool:
-    """Write the cache to a staging file and swap it in atomically. Returns True only on a COMPLETE write.
-
-    `FileMode.Create` on the live `cache.abf` truncates a good cache the instant the write begins, so
-    an ImageSave that then fails half way leaves the project WORSE than before -- no fresh cache and
-    no old one. Staging to `cache.abf.tmp` and only `os.replace`-ing it over the original once it is a
-    COMPLETE backup means a failed or partial write cannot destroy an existing good cache. Two rules
-    make "complete" mean what it says (#113): `write_image` is expected NOT to raise (`image_save`
-    absorbs the one benign AMO error and re-raises everything else), so any exception reaching here --
-    including from `os.replace` -- is a REAL failure that PROPAGATES after the staging file is removed,
-    letting the caller roll the compatibility bump back; and even on a clean return the staged file
-    must look like a backup (`_is_complete_abf`) before it is swapped in.
-    """
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    staging = cache_path.with_name(cache_path.name + ".tmp")
-    if staging.exists():
-        staging.unlink()
-    swapped = False
-    try:
-        write_image(staging)
-        if _is_complete_abf(staging):
-            os.replace(staging, cache_path)
-            swapped = True
-    finally:
-        # Never leave a partial cache.abf.tmp behind. `finally` does not suppress the exception, so a
-        # real write/replace error still propagates to _persist_image, which rolls the compat back.
-        if not swapped and staging.exists():
-            staging.unlink()
-    return swapped
-
-
-def _restore_rollback_snapshot(snapshot: dict[Path, bytes | None]) -> None:
-    """Restore each snapshotted path to exactly its pre-alignment state (bytes, or absence)."""
-    for path, original in snapshot.items():
-        if original is None:
-            if path.exists():
-                path.unlink()
-        elif not path.exists() or path.read_bytes() != original:
-            path.write_bytes(original)
-
-
 def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, write_image) -> tuple[bool, str]:
     """Align compat, stage the cache write, swap atomically, and roll compat back UNLESS it committed.
 
-    Pure-Python (no .NET), so the atomic-write and rollback guarantees are unit-testable without a
-    live Analysis Services instance. ``write_image(staging_path)`` performs the actual engine write.
-
-    The whole align -> write -> replace sequence is wrapped so the compatibility bump is provisional:
-    it is kept ONLY if the cache was definitively committed. The rollback therefore runs on the clean
-    "write did not land" return AND on any exception raised along the way -- a stale-temp unlink, a
-    ``stat()``, or a Windows ``os.replace`` that raises ``PermissionError`` because the cache is
-    locked. Before this was a ``finally`` the rollback ran only on the ``False`` return, so an
-    exception left ``database.tmdl`` bumped for a cache that was never written, and the caller carried
-    that state into the UI Save (#113, round-2 blocker 2).
+    Pure-Python (no .NET), so the guarantees are unit-testable without a live AS instance.
+    ``write_image(staging_path)`` performs the actual engine write. Commit is decided by the
+    FILESYSTEM (:func:`_cache_committed`), so an ``os.replace`` that moved the file yet still raised is
+    recognised as committed and the alignment KEPT - never rolled back under a freshly installed cache.
+    When the write did NOT land, the alignment is restored atomically from the snapshot, every path is
+    attempted, and a residual failure raises :class:`CompatRollbackError` (round-3 blocker 2).
     """
     rollback_paths = _compat_rollback_paths(model_dir)
     snapshot = {path: (path.read_bytes() if path.exists() else None) for path in rollback_paths}
-    committed = False
+    staging = cache_path.with_name(cache_path.name + ".tmp")
+    before = _cache_fingerprint(cache_path)
+    swapped = False
+    write_error: BaseException | None = None
     try:
         aligned = _align_compatibility(model_dir, live_level)
         if aligned:
             print(f"  save   : {aligned}")
+        swapped = _staged_image_write(cache_path, write_image)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught  # commit judged below by the filesystem
+        write_error = exc
 
-        committed = _staged_image_write(cache_path, write_image)
-        if committed:
-            # The cache is written and swapped in; a post-commit stat failure must NOT undo it, so the
-            # size note is best-effort and never flips `committed` back to False.
-            try:
-                size_note = f"{cache_path.stat().st_size / 1024:.1f} KB, "
-            except OSError:
-                size_note = ""
-            return True, f"persisted via AMO ImageSave ({size_note}compatibilityLevel {live_level})"
-        return False, "ImageSave did not produce a complete cache file (compatibility alignment rolled back)"
-    finally:
-        # Undo the (provisional) alignment unless the cache actually committed. A failed persist must
-        # never leave database.tmdl declaring a level that was never written to a cache.
-        if not committed:
-            _restore_rollback_snapshot(snapshot)
+    if swapped or _cache_committed(cache_path, staging, before):
+        _cleanup_staging(staging)
+        try:
+            size_note = f"{cache_path.stat().st_size / 1024:.1f} KB, "
+        except OSError:
+            size_note = ""
+        return True, f"persisted via AMO ImageSave ({size_note}compatibilityLevel {live_level})"
+
+    # The cache was NOT installed, so the provisional alignment must come back exactly.
+    _cleanup_staging(staging)
+    failures = _restore_rollback_snapshot(snapshot)
+    if failures:
+        raise CompatRollbackError(
+            "compatibility rollback FAILED for "
+            + ", ".join(str(path) for path in failures)
+            + " - database.tmdl no longer matches the cache; restore it from source control before retrying"
+        )
+    if write_error is not None:
+        # A real write/replace failure with a CLEAN rollback: the project is consistent, so re-raise
+        # and let the caller fall back to the UI save (an ordinary ImageSave failure).
+        raise write_error
+    return False, "ImageSave did not produce a complete cache file (compatibility alignment rolled back)"
 
 
 def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
@@ -669,19 +626,37 @@ Write-Output 'NO_INVOKABLE_SAVE'; exit 1
     )
 
 
-def _model_from_pbip_binding(pbip: Path, models: list[Path]) -> Path | None:
-    """The `.SemanticModel` a `.pbip` actually binds to, read from the binding, not guessed.
+def _looks_like_semantic_model(path: Path) -> bool:
+    """A resolved `byPath` target that is really an on-disk `.SemanticModel` folder.
 
-    A `.pbip` names its report; the report's `definition.pbir` names the model by a relative
-    `datasetReference.byPath.path`. Following that chain identifies the owning model even when a
-    folder holds several `.SemanticModel` directories. Returns None when the binding cannot be read
-    unambiguously - the caller then fails closed rather than guessing `models[0]`.
+    Requires the `.SemanticModel` suffix AND an existing `definition/` dir, so a binding pointing at a
+    deleted/renamed model is rejected here and the caller then fails closed.
     """
-    report_dirs: list[Path] = []
+    return path.is_dir() and path.name.endswith(".SemanticModel") and (path / "definition").is_dir()
+
+
+def _resolve_pbip_binding(pbip: Path) -> tuple[str, Path | None]:
+    """Resolve the `.pbip` -> report -> `definition.pbir` `byPath` binding to a model, TRI-STATE.
+
+    Returns exactly one of:
+      ("resolved", model_dir) - one binding target that is a real `.SemanticModel` (possibly OUTSIDE
+                                this `.pbip`'s folder). Use it.
+      ("unresolvable", None)  - a binding EXISTS but names no single real model (missing/renamed, or
+                                several reports disagree). FAIL CLOSED.
+      ("absent", None)        - no `byPath` anywhere; a name/count heuristic MAY now apply.
+
+    "Absent" and "present-but-unresolvable" are deliberately DIFFERENT results: the first permits a
+    heuristic, the second forbids it. Collapsing them (round-2) let a dangling or outside-the-folder
+    binding fall through to `models[0]` - a wrong-project write reachable even with a single adjacent
+    model. The target is resolved DIRECTLY from `byPath`, NOT intersected with the pbip folder's
+    siblings, so an outside-the-folder binding still resolves and a lone decoy cannot shadow it
+    (round-3 mandate, points 2-3).
+    """
     try:
         pbip_data = json.loads(pbip.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         pbip_data = None
+    report_dirs: list[Path] = []
     if isinstance(pbip_data, dict):
         for artifact in pbip_data.get("artifacts", []) or []:
             report = artifact.get("report") if isinstance(artifact, dict) else None
@@ -691,8 +666,8 @@ def _model_from_pbip_binding(pbip: Path, models: list[Path]) -> Path | None:
     if not report_dirs:
         report_dirs = [pbir.parent for pbir in pbip.parent.glob("*.Report")]
 
-    matches: set[Path] = set()
-    model_by_resolved = {model.resolve(): model for model in models}
+    saw_binding = False
+    targets: set[Path] = set()
     for report_dir in report_dirs:
         pbir = report_dir / "definition.pbir"
         try:
@@ -702,52 +677,56 @@ def _model_from_pbip_binding(pbip: Path, models: list[Path]) -> Path | None:
         by_path = (((data.get("datasetReference") or {}).get("byPath")) or {}).get("path")
         if not by_path:
             continue
+        saw_binding = True
         target = (pbir.parent / by_path).resolve()
-        if target in model_by_resolved:
-            matches.add(target)
-    if len(matches) == 1:
-        return model_by_resolved[matches.pop()]
+        if _looks_like_semantic_model(target):
+            targets.add(target)
+    if not saw_binding:
+        return "absent", None
+    if len(targets) == 1:
+        return "resolved", next(iter(targets))
+    return "unresolvable", None
+
+
+def _cache_from_absent_binding(pbip: Path) -> Path | None:
+    """Name/count heuristic for the owning model - reached ONLY when no `byPath` binding exists.
+
+    Kept in its own function so no branch of it can precede the authoritative binding lookup in
+    :func:`cache_file` (the early-return shape that failed review twice). One model -> it; otherwise
+    the single sibling whose stem matches the `.pbip`; else None (ambiguous, fail closed).
+    """
+    models = sorted(pbip.parent.glob("*.SemanticModel"))
+    if not models:
+        return None
+    if len(models) == 1:
+        return models[0] / ".pbi" / "cache.abf"
+    stem = pbip.stem.lower()
+    by_name = [model for model in models if model.stem.lower() == stem]
+    if len(by_name) == 1:
+        return by_name[0] / ".pbi" / "cache.abf"
     return None
 
 
 def cache_file(pid: int) -> Path | None:
     """Where `<Name>.SemanticModel/.pbi/cache.abf` belongs for the model this instance has open.
 
-    Resolves the DESTINATION, not an existing file: on a first build there is no cache yet, and
-    globbing for one returned None and silently sent the save down the UI-Automation fallback.
-
-    When a folder holds several `.SemanticModel` directories the model is resolved from the PBIP
-    BINDING (the `.pbip` -> report -> `definition.pbir` `byPath` chain) FIRST, because that is the
-    authoritative statement of which model the `.pbip` opens. Only if the binding cannot be read is
-    an exact stem match used as a weaker fallback, and otherwise this returns None so the identity
-    gate fails closed. The order matters: consulting the name first let a same-named sibling shadow
-    the model the binding actually points at (#114, round-2 blocker 3a), and the old `models[0]`
-    fallback silently bound the run to an arbitrary sibling - the wrong-instance write this exists to
-    prevent.
+    Resolves the DESTINATION, not an existing file (on a first build there is no cache yet). There is
+    exactly ONE resolution order, with the authoritative binding consulted FIRST and UNCONDITIONALLY -
+    no early return can precede it. This failed review twice with the same shape (round-1 a stem
+    heuristic ran first; round-2 a `len(models)==1` shortcut), so the binding is now tri-state
+    (round-3 mandate): resolved -> use it (even OUTSIDE this folder); unresolvable -> None (fail
+    closed); absent -> and only then a name/count heuristic may run.
     """
     inst = _instance(pid)
     if inst is None or not inst.get("currentFilePath"):
         return None
     pbip = Path(inst["currentFilePath"])
-    models = sorted(pbip.parent.glob("*.SemanticModel"))
-    if not models:
-        return None
-    if len(models) == 1:
-        return models[0] / ".pbi" / "cache.abf"
-    # Authoritative: follow the .pbip -> report -> definition.pbir byPath binding.
-    bound = _model_from_pbip_binding(pbip, models)
-    if bound is not None:
+    state, bound = _resolve_pbip_binding(pbip)
+    if state == "resolved":
         return bound / ".pbi" / "cache.abf"
-    # Only when the binding is unreadable/absent: fall back to an exact stem match. This is a weaker
-    # heuristic and must NEVER run ahead of the binding, or a same-named sibling shadows the model
-    # the .pbip actually opens.
-    stem = pbip.stem.lower()
-    by_name = [model for model in models if model.stem.lower() == stem]
-    if len(by_name) == 1:
-        return by_name[0] / ".pbi" / "cache.abf"
-    # Ambiguous, and no binding resolved it: refuse to guess. Returning None makes the identity gate
-    # fail closed rather than persist into whichever sibling happened to sort first.
-    return None
+    if state == "unresolvable":
+        return None
+    return _cache_from_absent_binding(pbip)
 
 
 def tmdl_tables(model_dir: Path) -> set[str]:
@@ -765,7 +744,7 @@ def tmdl_tables(model_dir: Path) -> set[str]:
     for tmdl in sorted(definition.glob("tables/*.tmdl")):
         text = tmdl.read_text(encoding="utf-8-sig", errors="replace")
         names.update(quoted or bare for quoted, bare in TABLE_DECL_RE.findall(text))
-    return {name for name in names if not name.startswith(AUTO_DATE_TABLE_PREFIXES)}
+    return {name for name in names if not is_auto_date_table_name(name)}
 
 
 def _live_tables(port: int) -> set[str]:
@@ -796,7 +775,7 @@ def tmdl_columns_measures(model_dir: Path) -> tuple[set[tuple[str, str]], set[tu
         if not decl:
             continue
         table = decl.group(1) or decl.group(2)
-        if table.startswith(AUTO_DATE_TABLE_PREFIXES):
+        if is_auto_date_table_name(table):
             continue
         columns.update((table, quoted or bare) for quoted, bare in COLUMN_DECL_RE.findall(text))
         measures.update((table, quoted or bare) for quoted, bare in MEASURE_DECL_RE.findall(text))
@@ -1008,6 +987,16 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
     if cache is not None and not args.ui_save:
         try:
             saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
+        except CompatRollbackError as exc:
+            # FATAL: the cache write failed AND the compatibility alignment could not be rolled back,
+            # so database.tmdl declares a level that was never written to a cache. Driving the UI Save
+            # on top of that inconsistent state would persist the mismatch, so do NOT fall back to it.
+            print(f"  save   : {exc}")
+            print(
+                "REFRESH: ERROR compatibility rollback failed - database.tmdl left inconsistent; "
+                "do NOT save. Restore database.tmdl from source control before retrying."
+            )
+            return 2
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
     if not saved:

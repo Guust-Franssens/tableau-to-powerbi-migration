@@ -194,9 +194,13 @@ Two traps:
 - The AMO client raises **"The server sent an unrecognizable response"** *while writing the file
   correctly*. Judge success by the FILE, never by the absence of an exception — but "the file" means a
   **complete** ABF: only that specific benign response is tolerated, and the staged `cache.abf.tmp` is
-  swapped in only after it is validated as a real Analysis Services backup (CFBF/OLE2 magic + a full
-  header), so a truncated or disk-full write is rejected instead of replacing a good cache. Any other
-  exception propagates and the compatibility-level alignment is rolled back.
+  swapped in only after its CFBF/OLE2 header **structure** validates against MS-CFB — the fixed header
+  fields, a whole-sector file length, and every referenced sector sitting inside the file, not merely
+  the 8-byte magic — so a truncated, sector-aligned or disk-full write is rejected instead of replacing
+  a good cache, and the check **fails closed** on any uncertainty. Any other exception propagates and
+  the provisional compatibility-level alignment is rolled back; if that rollback cannot itself be
+  completed the run **stops fatally** rather than falling through to the UI Save, because
+  `database.tmdl` would otherwise ship declaring a level no cache was ever written at.
 - `database_operations ExportToTmdlFolder` persists model *definition* changes but carries no rows.
   It cannot substitute for this.
 

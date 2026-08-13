@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import subprocess
 import sys
 import time
@@ -49,7 +50,26 @@ PORT_DISCOVERY_INTERVAL_SECONDS = 2
 # Power BI's auto date/time scaffolding. Present in the engine, and serialized into a PBIP's
 # `definition/tables/` too when auto date/time is (or ever was) on - so a comparison of the two
 # sides has to strip it from BOTH, not just from the engine.
-AUTO_DATE_TABLE_PREFIXES = ("LocalDateTable", "DateTableTemplate")
+#
+# Matching is by the EXACT generated-name SHAPE, not a name prefix. Power BI always names these
+# tables `LocalDateTable_<GUID>` / `DateTableTemplate_<GUID>` with a canonical 8-4-4-4-12 hex GUID,
+# so requiring that whole shape is reliable. A prefix test (`startswith`) silently deleted a genuine
+# user table like `LocalDateTableSales` - columns and measures and all - from the identity
+# fingerprint, hiding real differences (round-3 blocker 4). Anything that is not the exact generated
+# shape is KEPT (fail closed toward comparing more, never less).
+_AUTO_DATE_TABLE_RE = re.compile(
+    r"^(?:LocalDateTable|DateTableTemplate)_[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$"
+)
+
+
+def is_auto_date_table_name(name: str) -> bool:
+    """Is `name` Power BI's auto date/time scaffolding (`LocalDateTable_<GUID>`/`DateTableTemplate_<GUID>`)?
+
+    True ONLY for the exact generated shape - a canonical GUID suffix - so a user table that merely
+    starts with those words (e.g. `LocalDateTableSales`) is NOT mistaken for generated scaffolding and
+    stays in the fingerprint. Fails closed: unusual input keeps the table rather than dropping it.
+    """
+    return bool(_AUTO_DATE_TABLE_RE.match(name))
 
 
 def _load_adomd():
@@ -173,7 +193,7 @@ def table_names(conn, *, include_hidden: bool = False) -> list[str]:
             name = str(reader.GetValue(0))
             if not include_hidden and bool(reader.GetValue(1)):
                 continue
-            if not name.startswith(AUTO_DATE_TABLE_PREFIXES):
+            if not is_auto_date_table_name(name):
                 names.append(name)
     finally:
         reader.Close()
@@ -230,7 +250,7 @@ def column_names(conn) -> set[tuple[str, str]]:
             if int(reader.GetValue(3)) == _COLUMN_TYPE_ROWNUMBER:
                 continue
             table = id_to_name.get(str(reader.GetValue(0)))
-            if table is None or table.startswith(AUTO_DATE_TABLE_PREFIXES):
+            if table is None or is_auto_date_table_name(table):
                 continue
             explicit = reader.GetValue(1)
             name = str(explicit) if explicit not in (None, "") else str(reader.GetValue(2))
@@ -254,7 +274,7 @@ def measure_names(conn) -> set[tuple[str, str]]:
     try:
         while reader.Read():
             table = id_to_name.get(str(reader.GetValue(0)))
-            if table is None or table.startswith(AUTO_DATE_TABLE_PREFIXES):
+            if table is None or is_auto_date_table_name(table):
                 continue
             pairs.add((table, str(reader.GetValue(1))))
     finally:
