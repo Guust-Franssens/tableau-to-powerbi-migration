@@ -4,16 +4,24 @@ purpose: robust LOCAL data-source preflight for a migrated model open in Power B
          against the loaded model. A returned row proves, in one shot, that credentials are present, the
          source is reachable, and the M/partition is valid - the real gate before building the report.
 usage:   python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py
-             [--pid <pbidesktop-pid>] [--table "<table>"] [--port <n>]
+             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--port <n>]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/probe_desktop_query.py` in this repo is a forwarding shim.)
 
 If --port is omitted, the port is discovered from the msmdsrv process owned by (a child of) the given
 Desktop pid. That scoping is STRICT: a named pid never falls back to another instance's msmdsrv, it
 retries briefly (msmdsrv binds its port a moment after Desktop starts) and then fails. With no --pid
-the single running msmdsrv is used, and more than one is an error rather than a coin flip. If --table
-is omitted, the first non-hidden table is probed.
-Emits a final line: PREFLIGHT: DATA_OK (rows returned) / PREFLIGHT: NO_DATA / PREFLIGHT: ERROR <msg>.
+the single running msmdsrv is used, and more than one is an error rather than a coin flip.
+
+Name one canary table per distinct live source with --canaries: every named source is probed and an
+all-non-zero result earns the model-level PREFLIGHT: DATA_OK. If NO table is named, only the first
+queryable table is probed and the verdict is downgraded to PREFLIGHT: TABLE_OK '<table>' - a static
+parameter/CSV table can return rows while a live source never loaded, so one arbitrary table can
+never certify the model. (`--tables`/`--table` are accepted aliases; this script only READS, so
+naming canaries here never narrows anything. In `refresh_pbip_model` they are NOT interchangeable:
+there `--tables` narrows the refresh itself, which is why `--canaries` exists.)
+Emits a final line: PREFLIGHT: DATA_OK (all canaries returned rows) / PREFLIGHT: TABLE_OK '<table>'
+(implicit single-table probe only) / PREFLIGHT: NO_DATA / PREFLIGHT: ERROR <msg>.
 
 Windows-only: queries the Desktop's local AS via ADOMD.NET (pythonnet). This is the sanctioned
 Windows-API exception to the "committed scripts default to .py/.sh" rule.
@@ -24,6 +32,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import re
 import subprocess
 import sys
 import time
@@ -43,7 +52,26 @@ PORT_DISCOVERY_INTERVAL_SECONDS = 2
 # Power BI's auto date/time scaffolding. Present in the engine, and serialized into a PBIP's
 # `definition/tables/` too when auto date/time is (or ever was) on - so a comparison of the two
 # sides has to strip it from BOTH, not just from the engine.
-AUTO_DATE_TABLE_PREFIXES = ("LocalDateTable", "DateTableTemplate")
+#
+# Matching is by the EXACT generated-name SHAPE, not a name prefix. Power BI always names these
+# tables `LocalDateTable_<GUID>` / `DateTableTemplate_<GUID>` with a canonical 8-4-4-4-12 hex GUID,
+# so requiring that whole shape is reliable. A prefix test (`startswith`) silently deleted a genuine
+# user table like `LocalDateTableSales` - columns and measures and all - from the identity
+# fingerprint, hiding real differences (round-3 blocker 4). Anything that is not the exact generated
+# shape is KEPT (fail closed toward comparing more, never less).
+_AUTO_DATE_TABLE_RE = re.compile(
+    r"^(?:LocalDateTable|DateTableTemplate)_[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}$"
+)
+
+
+def is_auto_date_table_name(name: str) -> bool:
+    """Is `name` Power BI's auto date/time scaffolding (`LocalDateTable_<GUID>`/`DateTableTemplate_<GUID>`)?
+
+    True ONLY for the exact generated shape - a canonical GUID suffix - so a user table that merely
+    starts with those words (e.g. `LocalDateTableSales`) is NOT mistaken for generated scaffolding and
+    stays in the fingerprint. Fails closed: unusual input keeps the table rather than dropping it.
+    """
+    return bool(_AUTO_DATE_TABLE_RE.match(name))
 
 
 def _load_adomd():
@@ -167,7 +195,7 @@ def table_names(conn, *, include_hidden: bool = False) -> list[str]:
             name = str(reader.GetValue(0))
             if not include_hidden and bool(reader.GetValue(1)):
                 continue
-            if not name.startswith(AUTO_DATE_TABLE_PREFIXES):
+            if not is_auto_date_table_name(name):
                 names.append(name)
     finally:
         reader.Close()
@@ -182,33 +210,135 @@ def first_table(conn) -> str:
     return names[0]
 
 
-def probe(port: int, table: str | None) -> int:
-    """Run EVALUATE TOPN(1, <table>) against localhost:<port>; return process exit code."""
+# TMSCHEMA_COLUMNS.Type == 3 is the auto-generated per-table RowNumber (index) column. It is NEVER
+# serialized into TMDL, so an identity fingerprint that compared it would report every real model as
+# a stranger - it must be filtered from the live side, not compared. (1=Data, 2=Calculated,
+# 3=RowNumber, 4=CalculatedTableColumn.)
+_COLUMN_TYPE_ROWNUMBER = 3
+
+
+def _table_id_to_name(conn) -> dict[str, str]:
+    """Map each table's engine ID to its name, so column/measure rows can name their table."""
+    cmd = conn.CreateCommand()
+    cmd.CommandText = "SELECT [ID], [Name] FROM $SYSTEM.TMSCHEMA_TABLES"
+    reader = cmd.ExecuteReader()
+    mapping: dict[str, str] = {}
+    try:
+        while reader.Read():
+            mapping[str(reader.GetValue(0))] = str(reader.GetValue(1))
+    finally:
+        reader.Close()
+    return mapping
+
+
+def column_names(conn) -> set[tuple[str, str]]:
+    """`(table, column)` pairs from TMSCHEMA_COLUMNS, part of a model's identity fingerprint.
+
+    Two classes of AUTO-GENERATED column are filtered so the fingerprint compares only what the TMDL
+    actually declares (otherwise a legitimate model would fail its own identity gate):
+    * the per-table RowNumber index (`Type == _COLUMN_TYPE_ROWNUMBER`), which is never in TMDL; and
+    * every column of the `LocalDateTable_*` / `DateTableTemplate_*` auto date/time scaffolding, which
+      is filtered at TABLE level on the disk side too.
+    `ExplicitName` is the model name; `InferredName` is the fallback for a column whose name the
+    engine inferred. Comparison is case-folded by the caller.
+    """
+    id_to_name = _table_id_to_name(conn)
+    cmd = conn.CreateCommand()
+    cmd.CommandText = "SELECT [TableID], [ExplicitName], [InferredName], [Type] FROM $SYSTEM.TMSCHEMA_COLUMNS"
+    reader = cmd.ExecuteReader()
+    pairs: set[tuple[str, str]] = set()
+    try:
+        while reader.Read():
+            if int(reader.GetValue(3)) == _COLUMN_TYPE_ROWNUMBER:
+                continue
+            table = id_to_name.get(str(reader.GetValue(0)))
+            if table is None or is_auto_date_table_name(table):
+                continue
+            explicit = reader.GetValue(1)
+            name = str(explicit) if explicit not in (None, "") else str(reader.GetValue(2))
+            pairs.add((table, name))
+    finally:
+        reader.Close()
+    return pairs
+
+
+def measure_names(conn) -> set[tuple[str, str]]:
+    """`(table, measure)` pairs from TMSCHEMA_MEASURES, part of a model's identity fingerprint.
+
+    Measures on the auto date/time scaffolding are filtered for the same reason as its columns.
+    Comparison is case-folded by the caller.
+    """
+    id_to_name = _table_id_to_name(conn)
+    cmd = conn.CreateCommand()
+    cmd.CommandText = "SELECT [TableID], [Name] FROM $SYSTEM.TMSCHEMA_MEASURES"
+    reader = cmd.ExecuteReader()
+    pairs: set[tuple[str, str]] = set()
+    try:
+        while reader.Read():
+            table = id_to_name.get(str(reader.GetValue(0)))
+            if table is None or is_auto_date_table_name(table):
+                continue
+            pairs.add((table, str(reader.GetValue(1))))
+    finally:
+        reader.Close()
+    return pairs
+
+
+def _probe_one(port: int, conn, table: str) -> int:
+    """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
+    dax = f"EVALUATE TOPN(1, '{table}')"
+    cmd = conn.CreateCommand()
+    cmd.CommandText = dax
+    reader = cmd.ExecuteReader()
+    cols = [reader.GetName(i) for i in range(reader.FieldCount)]
+    rows = 0
+    first_values: list[str] = []
+    while reader.Read():
+        rows += 1
+        if rows == 1:
+            first_values = [str(reader.GetValue(i)) for i in range(reader.FieldCount)]
+    reader.Close()
+    print(f"port={port}  table='{table}'  dax={dax}")
+    print(f"  columns ({len(cols)}): {cols[:8]}")
+    if rows:
+        print(f"  row: {first_values[:8]}")
+    return rows
+
+
+def probe(port: int, tables: list[str] | None) -> int:
+    """Probe each canary table with a 1-row read against localhost:<port>; return a process exit code.
+
+    With an explicit canary set (one per distinct live source) an all-non-zero result earns the
+    model-level ``PREFLIGHT: DATA_OK``. With NO table named, only the first queryable table is
+    probed and the verdict is ``PREFLIGHT: TABLE_OK '<table>'`` - a single arbitrary table is not a
+    model-level guarantee, because a static parameter/CSV table can return rows while a live source
+    never loaded (see the powerbi-semantic-model-gotchas rule: prove a REAL read per live source).
+    """
     adomd_connection = _load_adomd()
     conn = adomd_connection(f"Data Source=localhost:{port}")
     conn.Open()
     try:
-        target = table or first_table(conn)
-        dax = f"EVALUATE TOPN(1, '{target}')"
-        cmd = conn.CreateCommand()
-        cmd.CommandText = dax
-        reader = cmd.ExecuteReader()
-        cols = [reader.GetName(i) for i in range(reader.FieldCount)]
-        rows = 0
-        first_values: list[str] = []
-        while reader.Read():
-            rows += 1
-            if rows == 1:
-                first_values = [str(reader.GetValue(i)) for i in range(reader.FieldCount)]
-        reader.Close()
-        print(f"port={port}  table='{target}'  dax={dax}")
-        print(f"columns ({len(cols)}): {cols[:8]}")
-        if rows:
-            print(f"row: {first_values[:8]}")
-            print("PREFLIGHT: DATA_OK")
+        implicit = not tables
+        targets = list(tables) if tables else [first_table(conn)]
+        results = [(target, _probe_one(port, conn, target)) for target in targets]
+        empty = [target for target, rows in results if rows <= 0]
+        if empty:
+            print(
+                f"PREFLIGHT: NO_DATA (0 rows from: {', '.join(empty)} - source empty, "
+                "credential missing, or refresh failed)"
+            )
+            return 1
+        if implicit:
+            only = results[0][0]
+            print(f"PREFLIGHT: TABLE_OK '{only}'")
+            print(
+                f"  note: single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
+                "parameter/CSV table can return rows while a live source never loaded. Pass --canaries "
+                "<one per live source> to certify every source."
+            )
             return 0
-        print("PREFLIGHT: NO_DATA (query ran but returned 0 rows - source empty or refresh failed)")
-        return 1
+        print("PREFLIGHT: DATA_OK")
+        return 0
     finally:
         conn.Close()
 
@@ -222,13 +352,28 @@ def main(argv: list[str] | None = None) -> int:
         help="Power BI Desktop process id - required when several instances are open "
         "(`powerbi-desktop status` maps pid -> open file)",
     )
-    parser.add_argument("--table", help="Table to probe (default: first queryable table)")
+    parser.add_argument("--table", help="Single canary table (legacy alias for --canaries with one name)")
+    parser.add_argument(
+        "--tables",
+        nargs="*",
+        help="Alias for --canaries. Kept for existing callers; this script never refreshes, so the "
+        "two mean the same thing HERE (they do not in refresh_pbip_model.py)",
+    )
+    parser.add_argument(
+        "--canaries",
+        nargs="*",
+        help="Canary tables to probe, one per distinct live source. With none, only the first "
+        "queryable table is probed and the verdict is downgraded to name that single table",
+    )
     parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
     args = parser.parse_args(argv)
 
+    # Preference order: --canaries (the name that means the same thing in both scripts), then
+    # --tables (plural), then --table as a one-name alias for old callers.
+    tables = list(args.canaries or args.tables or ([args.table] if args.table else [])) or None
     port = args.port or discover_port(args.pid)
     try:
-        return probe(port, args.table)
+        return probe(port, tables)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"PREFLIGHT: ERROR {type(exc).__name__}: {exc}")
         return 2

@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and OPTIONALLY persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is opt-in - `--save` - because a persisted cache can make the PBIP unopenable. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -19,6 +19,10 @@ and AMO client libraries under `~/.nuget/packages`, and `npx` for
 - [**`scripts/probe_desktop_query.py`**](scripts/probe_desktop_query.py) - read-only preflight: port
   discovery, ADOMD loading, table listing, and the one-row DAX probe. `refresh_pbip_model.py`
   imports from this file and from nothing else.
+- [**`scripts/probe_desktop_credential.ps1`**](scripts/probe_desktop_credential.ps1) - the arbiter a
+  refresh TIMEOUT names: a UI-Automation check for a data-source sign-in modal, so "slow" and
+  "blocked" are told apart by evidence, not guessed. Ships **inside** the bundle, so the instruction
+  the script prints at runtime resolves to a file that is actually here.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
@@ -36,7 +40,7 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 ## Run it
 
 ```
-python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
+python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
                                      [--no-save] [--verify-only] [--ui-save]
 ```
 
@@ -95,7 +99,8 @@ stay byte-identical.
 > and it was wrong: measured 2026-08-04 it fired on 2 of 5 Desktop instances opened on the *same*
 > bundle that refreshed cleanly on the other 3 (38.8 s on a good run, >87 s on a slow one, against a
 > 90 s ceiling — a ~3 s margin). It now reports `REFRESH: TIMEOUT` with the cause **UNKNOWN** and
-> names the arbiter (`scripts/probe_desktop_credential.ps1`).
+> names the arbiter (`scripts/probe_desktop_credential.ps1`, which **ships in this bundle** — the
+> script prints its absolute path at runtime so the instruction always points at a file that is here).
 >
 > **The ceiling is 300 s and is deliberately NOT agent-tunable — there is no flag.** A knob here is
 > an attractive nuisance: an agent that hits a timeout reaches for a bigger number, and the one case
@@ -107,12 +112,32 @@ stay byte-identical.
 Read-only preflight (proves credentials + source reachability without changing anything):
 
 ```
-python scripts/probe_desktop_query.py [--pid <pbidesktop-pid>] [--table "<table>"]
+python scripts/probe_desktop_query.py [--pid <pbidesktop-pid>] [--canaries "A" "B"]
 ```
 
-Both print a machine-readable last line: `REFRESH: DATA_OK + PERSISTED` / `NO_DATA` /
-`NOT_PERSISTED` / `WRONG_MODEL` / `ERROR <msg>`, and `PREFLIGHT: DATA_OK` / `NO_DATA` / `ERROR`.
-Exit 0 only on the good outcome, so these are usable as gates.
+**Name one canary table per distinct live source** with `--canaries`. A model-level `DATA_OK` is only
+emitted when *every* named canary returns rows; with **no** table named, only the first queryable
+table is probed and the verdict is **downgraded** to `TABLE_OK '<table>'` — a static parameter/CSV
+table can return rows while a live source never loaded, so one arbitrary table can never certify the
+whole model. This mirrors the `powerbi-semantic-model-gotchas` rule: *prove a REAL read per live
+source*.
+
+⚠️ **`--canaries` verifies; `--tables` narrows the refresh. They are different knobs, on purpose.**
+They used to be one, and that built a trap: the only documented way to earn `DATA_OK` was to name
+tables in `--tables`, which simultaneously refreshed **only** those tables — certifying a *model*-level
+verdict over a *partially* refreshed model, i.e. the "next agent gets an empty model" failure this
+bundle exists to prevent, wearing a green badge. So `refresh_pbip_model.py` now emits
+`TABLES_OK '<a>', '<b>'` — never `DATA_OK` — whenever `--tables` narrowed the refresh, and
+`--canaries` verifies without narrowing anything. `--tables` alone still supplies the canary set (old
+callers keep a probe), it just can no longer certify the whole model. `probe_desktop_query.py` never
+refreshes, so there `--tables`/`--table` remain plain aliases for `--canaries`.
+
+Both print a machine-readable last line: `REFRESH: DATA_OK + PERSISTED` / `TABLES_OK '<a>', '<b>'` /
+`TABLE_OK '<table>'` / `NO_DATA` / `NOT_PERSISTED` / `WRONG_MODEL` / `ERROR <msg>`, and
+`PREFLIGHT: DATA_OK` / `TABLE_OK '<table>'` / `NO_DATA` / `ERROR`. Exit 0 is the good outcome — but it
+covers a model verdict (`DATA_OK`), a scoped verdict (`TABLES_OK`) **and** a single-table verdict
+(`TABLE_OK`), so a gate that needs model-level certainty must require the literal `DATA_OK` — which
+means running a **whole-model** refresh with explicit `--canaries`, not merely exit 0.
 
 ## Order matters, do not refresh before you finish editing
 
@@ -133,12 +158,15 @@ Re-localizing, reopening, refreshing and saving again produced a cache that **di
 `Stop-Process -Force` + reopen (`PREFLIGHT: DATA_OK`, no refresh). So "refresh last, after sanitize"
 does not rescue the cache: Desktop keys the cache to the definition it was built from.
 
-> **Hand-off rule:** leave the model **localized + refreshed**, and tell whoever commits to run the
-> sanitize step. ⚠️ **Revised 2026-08-04 — this used to say "+ persisted".** That was wrong, and it
-> was the more expensive of the two errors: persisting is what makes the PBIP unopenable (see the
-> `--save` warning above), so the guidance to always persist actively broke the hand-off it was
-> written to protect. Persist only with `--save`, only when the next step needs data to survive a
-> restart, and verify the PBIP still opens afterwards.
+> **Hand-off rule:** leave the model **localized + refreshed**. Persisting is the default and safe —
+> the compatibility alignment above keeps the cache loadable — but a persisted cache only *survives*
+> a hand-off when nothing rewrites the TMDL afterwards, and the committer still has to run the
+> sanitize step, which invalidates it. So either persist and tell whoever commits to re-run this
+> script after sanitizing, or hand off refreshed-but-not-persisted with `--no-save` and have them
+> refresh once more post-sanitize. ⚠️ **Revised 2026-08-04, corrected 2026-08-07:** an earlier note
+> here blamed *persisting* for making the PBIP unopenable and told you to persist only with a flag;
+> root-caused, that was a compatibility-level mismatch `image_save` now aligns away, not persistence
+> itself, so persisting is the safe default again.
 
 **`powerbi-desktop reload` does NOT re-read edited TMDL.** Measured 2026-08-01: after editing two
 measures on disk, `reload` returned `{"success": true}` and `INFO.MEASURES()` still showed the **old**
@@ -152,12 +180,14 @@ number you read back.
 
 | Path | What it is | Status |
 |---|---|---|
-| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless. | **Opt-in (`--save`)** |
+| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless; staged to a per-run private file and swapped in atomically, so a failed/partial write (or a concurrent second run) can't destroy an existing good cache. | **Default (opt out with `--no-save`)** |
 | **UI Automation (`InvokePattern` on the "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Fallback / `--ui-save` |
 
-⚠️ **Read the `--save` warning above before using either.** Both write the same `cache.abf`, and a
-present cache was measured to make the PBIP unopenable. The mechanism below is sound and worth
-keeping - the error was making it the default, not building it.
+⚠️ **Read the `--no-save` warning above before using either.** Both write the same `cache.abf`. A
+present cache was once believed to make the PBIP unopenable; root-caused 2026-08-07, that was a
+compatibility-level **mismatch**, which `image_save` now prevents by aligning `database.tmdl` (and
+rolling that alignment back if the write fails). With the hazard gone, persisting is the DEFAULT and
+matches this script's stated purpose; `--no-save` opts out for read-only or validate-then-deploy work.
 
 **Why ImageSave exists at all**, because the obvious answer says it should not: the guidance is that
 writing model state back to `.pbip`/`cache.abf` "is a separate Save action that only the Desktop UI
@@ -172,8 +202,22 @@ data can only have come from the cache.
 Two traps:
 
 - The AMO client raises **"The server sent an unrecognizable response"** *while writing the file
-  correctly*. Judge success by the FILE (exists, non-empty, mtime advanced), never by the absence of
-  an exception.
+  correctly*. Judge success by the FILE, never by the absence of an exception — but "the file" means a
+  **complete** ABF: only that specific benign response is tolerated, and the staged file is swapped in
+  only after its **block chain** walks cleanly to EOF. A `cache.abf` is an Analysis Services backup,
+  **not** a Compound File / OLE2 container — an earlier round asserted CFBF and its check therefore
+  rejected 100% of real caches, silently disabling persist-by-default on every run. Measured across 13
+  real caches (17 KB → 60 MB, written by Desktop *and* by `ImageSave`): a 100-byte UTF-16LE
+  `"This backup was created using XPress9 compression."` preamble, a 2-byte pad, then blocks of
+  `uint32 uncompressed, uint32 lengthFromTheMagic, 4-byte magic 2A D7 86 4E, payload`, where the next
+  header sits at `offset + 8 + length` and the chain ends **exactly** at EOF. A truncated write leaves a
+  block claiming bytes past EOF; a write that stopped on a chunk boundary leaves a full-2 MiB *final*
+  block (every measured final block is smaller), so both are rejected instead of replacing a good cache.
+  The check **fails closed** on any uncertainty and **prints the reason** it refused — a predicate that
+  can only say "no" is how the CFBF mistake survived a whole review round. Any other exception propagates and
+  the provisional compatibility-level alignment is rolled back; if that rollback cannot itself be
+  completed the run **stops fatally** rather than falling through to the UI Save, because
+  `database.tmdl` would otherwise ship declaring a level no cache was ever written at.
 - `database_operations ExportToTmdlFolder` persists model *definition* changes but carries no rows.
   It cannot substitute for this.
 
@@ -192,18 +236,32 @@ machine") this writes *another migration's model into your own correct-looking `
 downstream signal still agrees: the file exists, is non-empty, is newly written, and the row count
 queries that same wrong port.
 
-So, before refreshing, querying or saving anything, `same_model()` compares the connected model's
-tables against the TMDL that owns the destination cache; a mismatch aborts with `WRONG_MODEL`. File
-metadata fundamentally cannot tell you whose rows are in a blob, only the model's own contents can. In
-a parallel batch **always pass `--pid`** (`powerbi-desktop status` maps pid to open file); with
-several instances open the scripts refuse to guess.
+So, before refreshing, querying or saving anything, two guards run. First, **if you pass `--port` it
+must EQUAL the port derived from `--pid`** — a mismatch aborts, so `--port` can never bypass PID-based
+discovery to point the read (and the `ImageSave` write) at another instance. Second, `same_model()`
+compares the connected model against the TMDL that owns the destination cache and requires an **exact
+match of tables, columns AND measures** — table names alone are too coarse (a bound sibling with the
+same table names but different columns or measures would pass), so the fingerprint descends into each
+table's columns and the model's measures, filtering only the auto-generated noise that never appears in
+TMDL (RowNumber system columns, `LocalDateTable_*` / `DateTableTemplate_*` auto-date tables). A
+mismatch — or an identity it cannot establish at all (no model folder resolved, or no TMDL to
+fingerprint) — aborts with `WRONG_MODEL`, **failing closed** rather than assuming it is fine. A superset
+schema (all your tables plus more) is a mismatch, not a "confirmed". File metadata fundamentally cannot
+tell you whose rows are in a blob, only the model's own contents can. When a project folder holds
+several `.SemanticModel` directories the destination is resolved from the `.pbip` → report →
+`definition.pbir` `byPath` **binding first**; only if no binding resolves does a single same-named
+sibling act as a last-resort fallback — the binding is authoritative and the name heuristic can never
+short-circuit it. In a parallel batch **always pass `--pid`** (`powerbi-desktop status` maps pid to open
+file); with several instances open the scripts refuse to guess.
 
 **Sweep for orphans before you build, not just siblings while you build.** Measured 2026-08-01: a
 Desktop instance was already running on the *exact `.pbip` path* about to be generated, left over from
-an earlier, since-deleted attempt. `same_model()` would not have caught it — its TMDL tables matched —
-but `INFO.MEASURES()` showed measures the new build never defines, i.e. a **different model held in
-memory on your path**, one Save away from overwriting the files you are generating. So at the start of
-a build, list `Get-Process PBIDesktop`, read each one's command line
+an earlier, since-deleted attempt. The tables-only fingerprint then in force would not have caught it —
+its TMDL tables matched — though the columns+measures fingerprint now would, because `INFO.MEASURES()`
+showed measures the new build never defines. But do not lean on that: an orphan whose schema is
+byte-for-byte your model (the common re-open case) is **identical** to `same_model()`, one Save away
+from overwriting the files you are generating. So at the start of a build, list `Get-Process
+PBIDesktop`, read each one's command line
 (`Get-CimInstance Win32_Process -Filter "ProcessId=<pid>"`), and force-close any instance already bound
 to your own `.pbip` before writing to it. Identify by `MainWindowTitle` + command line, never by "the
 one instance that is running".
@@ -211,10 +269,12 @@ one instance that is running".
 ## Reusing this in another migration repo
 
 Nothing here is Tableau-specific, the input is already a Power BI model. **Copy this folder.**
-`SKILL.md`, the two scripts it runs and the tests that gate them are one unit: the scripts import
-only each other, and `tests/conftest.py` resolves them at `../scripts`, so the suite runs from
-wherever the folder lands. Drop it in the target repo's skill location (`.github/skills/`) or promote
-it to a global one such as `~/.copilot/skills/`, then prove the copy on the spot:
+`SKILL.md`, the two Python scripts it runs, the `probe_desktop_credential.ps1` arbiter they name at
+runtime, and the tests that gate them are one unit: the scripts import only each other, name the
+arbiter by their own bundled path, and `tests/conftest.py` resolves them at `../scripts`, so the
+suite — and every runtime instruction the scripts print — runs from wherever the folder lands. Drop
+it in the target repo's skill location (`.github/skills/`) or promote it to a global one such as
+`~/.copilot/skills/`, then prove the copy on the spot:
 
 ```
 pytest tests
