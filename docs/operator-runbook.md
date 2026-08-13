@@ -21,7 +21,26 @@ same pipeline with steps 1–4 skipped.
 | ⚠️ **reported** | measured in a previous run and recorded elsewhere; not re-checked here |
 | ❌ **not proven** | we do *not* have evidence for this — do not claim it to a customer |
 
-Measurements below come from a real 38-workbook estate run on 2026-08-12 with engine **2.126.0**.
+A ✅ is a promise that costs more than it looks: a *wrong* ✅ is worse than no marker, because it
+stops the reader checking. One was wrong in the first edition (§1.3a claimed a key was in
+`.env.example` that has never been there) and it broke the very first step for a cold operator. If
+you edit this file, re-read the code — do not carry a marker forward.
+
+**Where the numbers come from — read this before quoting one to a customer.** Every reference
+number below comes from **one** 38-workbook Tableau site:
+
+| what | when | engine | note |
+|---|---|---|---|
+| survey/assess/harvest/convert timings, `bound=23/38`, the union trap, `pbip/`=39 | 2026-08-12 | 2.126.0 | the *reference bundle* referred to throughout |
+| deploy rate, 76 planned / 74 created, 36/36 report bindings, `PBI_DESKTOP_PATH`, the wrong-tenant 404 | 2026-08-13 | 2.126.0 | a cold-start operator run against the **same** site |
+| re-checks marked ✅ in this edition | 2026-08-13 | 2.126.0 | code at `master` @ `181324a` |
+
+One site is one shape. It is also a **structural blind spot**: this document's numbers were measured
+on the site it was written against, so re-running that site can never catch a number that has gone
+stale — which is exactly how a 2.4×-optimistic deploy estimate survived until an operator with a
+stopwatch ran it. **The next cold run should use a different estate.** Treat every count and duration
+here as an order of magnitude, and re-measure on the customer's estate (`--dry-run` for counts, the
+deploy journal for rate) before quoting one.
 
 ---
 
@@ -77,7 +96,8 @@ powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 -Update -CheckUps
 | **migration start** | `preflight.ps1` (plain) | confirm READY without swapping tools mid-flow |
 | **mid-migration** | **never** | swapping the validator under a half-built report is worse than a slightly old one |
 
-Exit codes ✅ verified (`preflight.ps1:388-395`):
+Exit codes ✅ verified (the render block at the end of `preflight.ps1` — `$criticalMissing` decides,
+nothing else does; cited by symbol because the line numbers drift on every edit):
 
 | exit | meaning |
 |---|---|
@@ -88,11 +108,41 @@ A `[WARN]` in the RECOMMENDED tier **never** changes the exit code. Being *above
 version matrix is a WARN, not an error — it means the version-specific prose in `.github/agents/`
 was written against an older build. Re-verify the prose; never "fix" it by downgrading.
 
+**"Critical" does not mean "blocks the estate pipeline."** Preflight is tiered for the *whole*
+toolkit, agents included, and steps 1–6 of §2 never open Power BI Desktop, never call an MCP server
+and never invoke a skill (`run_estate.py`'s own docstring: *"never opens Power BI Desktop"* ✅
+verified). So a `[MISS]` can be genuinely fatal or entirely irrelevant to the run in front of you.
+Which is which ✅ verified by reading every `Add-Check`/`Add-Cli` tier in `preflight.ps1`:
+
+| critical check | blocks §2 steps 1–6? | blocks the agent / Desktop phase? |
+|---|---|---|
+| `Python >= 3.11`, `python: lxml`, `python: jsonschema` | **yes** | yes |
+| `engine: plugin installed`, `engine: single source` | **yes** — step 5 resolves the plugin (§1.2) | yes |
+| `cli: powerbi-report-author` + its version floor | no | yes — it is the PBIR validator |
+| `plugin: powerbi-authoring@…`, `skill bundles installed`, `skill bundles match published plugin` | no | yes |
+| `cli: npx`, `cli: powerbi-desktop`, `Power BI Desktop`, **`PBI_DESKTOP_PATH`** | no | yes |
+| `cli: dotnet` | no | yes — offline TMDL validator |
+
+And the reverse trap, which is the more dangerous direction: **`az` is tiered `optional`, but step 6
+cannot run without it** ✅ verified — `deploy_estate.py` mints its token by shelling out to
+`az account get-access-token`. A green preflight is not a green light for the deploy; §1.3b is.
+
+⚠️ **`PBI_DESKTOP_PATH` is the one that stops a cold start** (⚠️ reported: ~5 minutes lost,
+2026-08-13). A machine with everything else in place reports NOT READY with:
+
+```
+[MISS] PBI_DESKTOP_PATH (bridge exe pin) - not set - the bridge is using its own version-pinned discovery
+```
+
+It is critical for a real reason — it removes a mismatch rather than detecting one, so a Desktop
+auto-update stops silently breaking the Bridge — but it gates **nothing in steps 1–6**. See §1.4 for
+how to set it, including why the hint preflight prints does not fix your current shell.
+
 `-CheckUpstream` costs ~3s of network and is **advisory only**. It is the only check that asks *"has
 the world moved"* rather than *"is what I have good enough"* — every other check compares against a
 hard-coded number.
 
-### 1.2 Know which engine you are running — and write it down
+### 1.2 Know which engine you are running — the bundle records it for you
 
 **This has caused three retracted defect reports.** The engine resolves at runtime and is not pinned
 by this repo, and it has been installed **twice at different versions on one machine**, with
@@ -101,69 +151,80 @@ deprecated Bing `shapeMap`/`filledMap` visuals and dropped a density-map workshe
 2.126.0 emits `azureMap` with a heat layer. Nothing in the run output said which one ran.
 ⚠️ reported (issue #107).
 
-Check both known locations before you start:
+**That is fixed, and the manual workaround this section used to mandate is gone.** PR #109 merged
+2026-08-13; ✅ verified against `master` @ `181324a`:
+
+- **The installed plugin is the single canonical engine.** `run_estate.py --help` now reads
+  *"DELIBERATE OVERRIDE ONLY. Defaults to the installed tableau-fabric-skills plugin"* — the default
+  no longer points at a sibling clone.
+- **A non-canonical `--engine` fails closed.** ✅ verified by running it: pointing `--engine` at
+  another directory exits **5** with `ESTATE: ENGINE_SOURCE - … is not the canonical engine plugin
+  … Pass --allow-noncanonical-engine to override deliberately; the bundle receipt will record the
+  run as non-canonical.`
+- **`preflight.ps1` blocks on a second tree** — `engine: plugin installed` and `engine: single
+  source`, both **critical** (§1.1).
+- **The bundle answers *"what built me?"* by itself.** `migration_bundle.write_engine_receipt` writes
+  an `engine` key into `engine-output-receipt.json` from `engine_source.engine_provenance` — the
+  resolved root, its `VERSION`, whether it was canonical, and where it came from:
 
 ```powershell
-$roots = @(
-  "$env:USERPROFILE\.copilot\installed-plugins\tableau-collection\tableau-fabric-skills",
-  "$env:USERPROFILE\vscode-projects\tableau-fabric-skills"
-)
-foreach ($e in $roots) {
-  $v = Join-Path $e "skills\tableau-migration\VERSION"
-  if (Test-Path $v) { "$e => $((Get-Content $v -Raw).Trim())" } else { "$e => ABSENT" }
-}
+python -c "import json;print(json.load(open(r'<bundle>\engine-output-receipt.json',encoding='utf-8')).get('engine'))"
+# {'root': '...\tableau-collection\tableau-fabric-skills', 'version': '2.126.0', 'canonical': True, 'source': 'plugin'}
 ```
 
-**Today (master), on this machine, both trees exist and both report `2.126.0`** ✅ verified. Equal
-versions are luck, not a control.
+The run also prints it before it starts — `ENGINE SOURCE: <path> VERSION=2.126.0 (canonical plugin)`
+✅ verified from a `--dry-run`.
 
-**Where `--engine` resolves today** ✅ verified against master:
+⚠️ **An OLD bundle has no `engine` key, and that is not a defect — it is an age check.** ✅ measured
+on the 2026-08-12 reference bundle: its receipt carries only `version`, `created_at`,
+`report_sha256`, `input_manifest_sha256`, `artifacts`. Any bundle produced before #109 (merged
+2026-08-13 11:32 local) predates the field. If `.engine` is absent, the bundle cannot tell you what
+built it — do not guess, and do not file a defect against a version you inferred.
 
-| caller | resolves to |
-|---|---|
-| `run_estate.py` | argparse default `~/vscode-projects/tableau-fabric-skills` (**the sibling clone**) |
-| `harvest_estate_assets.py`, `dax_oracle_server.py` | installed plugin first, then the sibling clone — first hit wins, silently |
-| `transpile_tableau_calc.py` | installed plugin only |
-
-So a single pipeline can legitimately survey with one tree and convert with another.
-
-**Landing in parallel (branch `feat/single-engine-source`, issue #107 → **PR #109**, open, not merged
-at the time of writing):** `scripts/engine_source.py` makes the **installed plugin the single
-canonical engine** and *raises* rather than falling back; `run_estate.py --engine` becomes a
-deliberate override that requires `--allow-noncanonical-engine` and adds `EXIT_ENGINE_SOURCE = 5`;
-`preflight.ps1` gains two **critical** checks (`engine: plugin installed`, `engine: single source`)
-that block on a second tree; and the resolved path + `VERSION` + a canonical/override flag land in
-`engine-output-receipt.json` under a new `engine` key (`migration_bundle.write_engine_receipt(bundle,
-engine)` → `engine_source.engine_provenance`). ✅ verified against `origin/feat/single-engine-source`.
-
-**When #109 merges, delete the manual step below and read the receipt instead** — and re-point
-step 5's `--engine` guidance, because the default flips from the sibling clone to the plugin.
-
-**Until it merges, the receipt does NOT record the engine** ✅ verified on `master` —
-`migration_bundle.write_engine_receipt` writes only `version`, `created_at`, `report_sha256`,
-`input_manifest_sha256`, `artifacts`. **So record it by hand:**
-
-```powershell
-# run this INTO the bundle, immediately after step 5, before anything else touches it
-"engine=$((Get-Content "$env:USERPROFILE\vscode-projects\tableau-fabric-skills\skills\tableau-migration\VERSION" -Raw).Trim())" |
-  Out-File <bundle>\ENGINE-VERSION.txt
-```
-
-A bundle that cannot answer *"what built me?"* cannot support a defect report. Do not skip this.
+> **On "delete this when X merges" notes.** The previous edition of this section carried exactly such
+> a note, and rotted **within six hours** of the merge it predicted — the manual step it mandated
+> then made §5.1 check 10 *fail on a correct bundle*. A promise to a future reader is not a
+> mechanism. If you must write one, make it **checkable by the reader in one command, at the moment
+> they read it**, and phrase the surrounding prose so both states are safe:
+> *"run `<command>`; if it prints X the section below is live, if it prints Y it is stale — and here
+> is what to do in each case."* The `.engine` check above is written that way on purpose: absent key
+> → old bundle, present key → read it. Neither answer needs this paragraph to be up to date.
 
 ### 1.3 Credentials — test them the day before
 
 Two independent credentials, and both have a failure mode that looks like a hang.
 
-**a. Tableau PAT.** Copy `.env.example` to `.env` (git-ignored ✅ verified) and fill in:
+**a. Tableau PAT.** Copy `.env.example` to `.env` (git-ignored ✅ verified) and fill in the four keys
+it ships ✅ verified by reading the file:
 
 ```
 TABLEAU_SERVER_URL=https://<pod>.online.tableau.com
 TABLEAU_SITE=<site-content-url>          # empty string for a Tableau Server Default site
 TABLEAU_PAT_NAME=<pat-name>
 TABLEAU_PAT_SECRET=<pat-secret>
-TABLEAU_PAT_VALUE=<pat-secret>           # SAME VALUE, second name — see §4.1. Not optional.
 ```
+
+❌ **Correction — `.env.example` has NO `TABLEAU_PAT_VALUE=` line.** The previous edition printed one
+here and marked it *"✅ verified in `.env.example`"*. It is not there and never was: the file
+*explains* the second name in prose but ships no key for it. So copying `.env.example` → `.env` as
+instructed and running §2 step 1 produced the 13-minute hang in §4.1 — the wrong ✅ *caused* the
+worst stumble in the pipeline.
+
+That copy is still correct for everything **our** scripts run: `scripts/tableau_env.py` accepts
+either name, and when our Python spawns an engine script it sets the engine's name automatically ✅
+verified from `.env.example`'s own note. **The gap is exactly one command: §2 step 1, where you run
+the engine's `estate_survey.py` yourself.** That crosses a process boundary no bridge reaches. Two
+ways to close it, both fine:
+
+```powershell
+# EITHER: add the second name to .env (same value, second key — one more place to rotate)
+#   TABLEAU_PAT_VALUE=<pat-secret>
+# OR (what the cold operator used — the secret stays written down exactly once):
+$env:TABLEAU_PAT_VALUE = (Select-String .env '^TABLEAU_PAT_SECRET=(.*)$').Matches[0].Groups[1].Value
+```
+
+Either way, **always pass `--no-prompt`** to the engine script (§4.1): it converts a silent block
+into an instant, explanatory error.
 
 We cannot mint a PAT for the customer: Tableau's API answers **HTTP 405** to create-PAT, so a
 Tableau user with access must issue it, and it inherits that user's permissions (a restricted
@@ -173,7 +234,7 @@ Smoke-test it **the day before**, in this order — each is cheap and each prove
 
 ```powershell
 # 1. our tier reads .env and reaches the Metadata API (read-only, downloads nothing)
-python scripts\tableau_lineage.py --plan --env .env --save-json _assessment\lineage.json
+python scripts\tableau_lineage.py --plan --env .env --survey _assessment\estate_survey.json --save-json _assessment\lineage.json
 
 # 2. the ENGINE's own auth path, which is a different code path — see §4.1
 python <engine>\skills\tableau-migration\scripts\estate_survey.py `
@@ -189,9 +250,44 @@ az login --tenant <tenant-id>
 az account get-access-token --resource https://api.fabric.microsoft.com | Out-Null   # must succeed
 ```
 
+⚠️ **A token that mints successfully is not necessarily for the right tenant.** This is the single
+most expensive stumble recorded against this document (⚠️ reported: ~15 minutes, and it hit **four
+times across two independent operators on 2026-08-13**). On a multi-account machine the token
+minted fine, for the *corp* tenant, while the landing zone lived in another — and `GET /workspaces/
+{id}` then answered **`WorkspaceNotFound`** for a workspace that had just been filled with 74 items.
+It reads like *"your deploy went somewhere else"*, and it lands in the phase where you are
+reassuring the customer.
+
+**Decode the token before you trust it.** ✅ verified end to end on 2026-08-13 — this prints the
+claims and never the token:
+
+```powershell
+$tok = az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv
+$p = $tok.Split('.')[1].Replace('-','+').Replace('_','/'); $p += '=' * ((4 - $p.Length % 4) % 4)
+$claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+"tid=$($claims.tid)  aud=$($claims.aud)  upn=$($claims.upn)"   # tid must be the LANDING ZONE's tenant
+```
+
+`tid` matched `az account show --query tenantId` exactly ✅ verified, and `aud` proves the token was
+scoped to `https://api.fabric.microsoft.com` rather than ARM.
+
+**If `tid` is wrong**, in order of preference:
+
+| do | why |
+|---|---|
+| `az account get-access-token --resource … --subscription <sub-id-in-that-tenant>` | ✅ verified as a real `az` flag (*"if the subscription argument isn't specified, the current account is used"*). Selects the account without mutating anything |
+| `az login --tenant <id>` for the account that actually exists there | ⚠️ adding `--tenant` alone made it **worse** on the cold run: az picked the corp account and failed `AADSTS90072 … does not exist in tenant` |
+| `az account set --subscription <id>` | works, but it changes the Azure CLI's **default** — not scoped to your shell, so it affects other work on the machine. ⚠️ reported; deliberately not re-tested here, because running it would mutate a shared machine |
+
+⚠️ **`deploy_estate.py --tenant` inherits the same ambiguity** ✅ verified: it is appended verbatim to
+the `az account get-access-token` command line, and there is **no `--subscription` passthrough**. So
+fix the identity *before* the deploy — either by proving `tid` with the snippet above, or by taking
+the `--subscription` route in your own `az` call and leaving `--tenant` off.
+
 The identity needs **Contributor** on the landing-zone workspace. `deploy_estate.py:preflight`
 distinguishes `404 does not exist (or this identity cannot see it)` from `403 no access … needs the
-Contributor role` on purpose — conflating them costs an afternoon. ✅ verified.
+Contributor role` on purpose — conflating them costs an afternoon. ✅ verified. Note that a
+wrong-tenant token lands in the **404** bucket, not the 403 one: see §4.4.
 
 The landing zone must **already exist**: `--workspace` is documented as *"EXISTING landing-zone
 workspace id (never created here)"* ✅ verified. Creating one means choosing a capacity, which is not
@@ -201,15 +297,41 @@ module's own comment.
 
 ### 1.4 Power BI Desktop
 
+**Steps 1–6 never open Desktop** ✅ verified (`run_estate.py`: *"never opens Power BI Desktop"*).
+Everything in this section is for the per-workbook agent phase and for visual verification — but two
+of its prerequisites are checked *early*, so do them the day before.
+
+**Two prerequisites, and preflight can only see one of them.**
+
+**a. `PBI_DESKTOP_PATH` — critical in preflight, and the hint it prints will not fix your shell.**
+✅ verified from `preflight.ps1`: it is tiered `critical`, and unset it reports
+`not set - the bridge is using its own version-pinned discovery`. It exists to *remove* a mismatch
+rather than detect one — the Bridge honours it and it wins over the Bridge's built-in, version-pinned
+exe discovery, so a Desktop auto-update stops silently breaking every downstream call.
+
+⚠️ The printed hint is `setx PBI_DESKTOP_PATH "…" (then reopen the shell)`. **`setx` does not affect
+an already-open shell**, and an agent's tool shells inherit the parent environment — so following it
+verbatim leaves preflight failing in the session you are actually working in. Set both:
+
+```powershell
+$exe = (Join-Path (Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop).InstallLocation 'bin\PBIDesktop.exe')
+$env:PBI_DESKTOP_PATH = $exe     # this shell, right now
+setx PBI_DESKTOP_PATH $exe       # every future shell
+```
+
+Re-set it after a Desktop auto-update — preflight's `version: Power BI Desktop` WARN is the reminder.
+
+**b. Privacy Levels — preflight cannot check this at all**, and states so honestly rather than
+asserting a check it cannot perform (Desktop is MSIX; the setting lives in the package's private
+`settings.dat`, which needs `SeRestorePrivilege` and is locked while Desktop runs) ✅ verified from
+`preflight.ps1`'s own comment. Set it by hand, once: **Options → Global → Privacy → "Always ignore
+Privacy Level settings"**. Without it, any multi-source model raises a modal *before the model
+loads*, which no automation can dismiss and which looks exactly like a hang.
+
 Concurrent Desktop instances are **fine** — the Bridge addresses one by `--pid` natively. What is
 *not* fine is an unnamed lookup with several running: that is a coin flip, and it is a deliberate
 error, not bad luck. Note your PID when you open one, and close only what you opened
 (`Stop-Process -Id <literal-pid> -Force`; map instance → migration by `MainWindowTitle`).
-
-One-time Desktop setting, and preflight **cannot** check it (Desktop is MSIX, the setting is not in
-the registry): **Options → Global → Privacy → "Always ignore Privacy Level settings"**. Without it,
-any multi-source model raises a modal *before the model loads*, which no automation can dismiss and
-which looks exactly like a hang.
 
 ### 1.5 Write the brief
 
@@ -239,16 +361,32 @@ convention — see §7 for which ones actually are.
 |---|---|---|---|
 | 1 | `python <engine>/…/estate_survey.py --server <host> --site <site> --pat-name <name> --env-file .env --no-prompt --json _assessment/estate_survey.json` | ⚠️ ~32 s | REST dependency ground truth |
 | 2 | `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` | ⚠️ ~34 s | `report.md`, `assessment.json`, `estate.db` |
-| 3 | `python scripts/tableau_lineage.py --plan` | seconds | model-first order |
-| 4 | `python scripts/harvest_estate_assets.py --out _harvest` | ✅ **120 s / 55 assets** | `_harvest/assets/*`, `parse-sweep.md` |
-| 5 | `python scripts/run_estate.py --input _harvest/assets --output _bundle` | ✅ **81.7 s total** (engine 41.3 s, provenance 38.7 s) | `_bundle/` |
-| 6 | `python scripts/deploy_estate.py --bundle _bundle --workspace <workspace-id> --tenant <tenant-id> --estate-db _assessment/estate.db --journal _bundle/deploy-journal.jsonl` | ⚠️ ~13 min / 64 items | items in the landing zone |
+| 3 | `python scripts/tableau_lineage.py --plan --survey _assessment/estate_survey.json` | seconds | model-first order — **survey edges override the Metadata API** |
+| 4 | `python scripts/harvest_estate_assets.py --out _sweep` | ✅ **120 s / 55 assets** | `_sweep/assets/*`, `parse-sweep.md` |
+| 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s) | `_bundle/` |
+| 6 | `python scripts/deploy_estate.py --bundle _bundle --workspace <workspace-id> --tenant <tenant-id> --estate-db _assessment/estate.db --journal _bundle/deploy-journal.jsonl` | ⚠️ **~25 s per item** — budget 30 min for 75 items | items in the landing zone |
 
-> **Timing discrepancy, stated plainly.** Issue #106 records step 5 as *"137 s for 38 workbooks"*,
-> but the bundle's own `phase-timings.json` records `total_elapsed_sec: 81.7` ✅ verified by reading
-> the artifact. 137 s is plausible as wall-clock including interpreter start and shell overhead;
-> 81.7 s is what the script measured. **Trust `phase-timings.json`** — it is written by the run
-> itself. If a step feels slow, read that file rather than guessing.
+> ⚠️ **`--out _sweep`, not `_harvest`** — the previous edition said `_harvest`, which `.gitignore`
+> reserves for a **different** tool. See §7: choosing an unignored name here stages real customer
+> `.twbx` files in a public repo. Prove your exact path with `git check-ignore -v` before you
+> download anything.
+
+> **What `phase-timings.json` does and does not measure.** `total_elapsed_sec` is the plain **sum of
+> the recorded phases** ✅ verified (`write_phase_record`: `sum(p["elapsed_sec"] for p in phases)`),
+> which is *"where did the time go inside the run"* — **not** how long your command took. Work that
+> sits outside a phase timer is invisible to it: reading the ~1.8 MB `report.json`, and the
+> generated-artifact hash manifest that runs just before the `engine_receipt` timer starts.
+> Interpreter start + engine resolution is ✅ measured at **0.3 s**, so the gap is normally small —
+> but it is a *floor*, not a total. **If you need wall clock, measure wall clock**
+> (`Measure-Command { … }`); if you want to know which phase was slow, read the file.
+>
+> ✅ **Re-measured 2026-08-13, correcting a report that said otherwise:** the empty-model scan **is**
+> inside a recorded phase — `check_empty_models()` runs within the `adjudicate` timer in `main()`.
+> Scanning the reference bundle's **55 models took 8.7 s** on this machine (the reference bundle
+> shows `adjudicate: 0.0` only because it was built on 2026-08-12, before that check existed). So
+> expect `adjudicate` to be seconds, not zero, on any bundle built today — and no, it is not the
+> unrecorded phase it was once thought to be. Issue #106's *"137 s"* against the file's `81.7` is the
+> same wall-clock-vs-phases distinction.
 
 ### Step 1 — survey the site
 
@@ -303,10 +441,50 @@ and locally parsed workbooks line up ✅ verified.
 Migrating workbook-by-workbook rebuilds a near-identical semantic model every time, and those copies
 then drift. That is the whole reason this step exists.
 
+> ⛔ **Where step 3 and step 1 disagree, STEP 1 WINS. Read them side by side before you act.**
+>
+> This step reads the **Metadata API** (GraphQL), and the Metadata-API blindness that step 2 already
+> warns about applies here identically — the warning was simply never attached to step 3. ⚠️ reported
+> from the cold run, same estate, minutes apart:
+>
+> | | says |
+> |---|---|
+> | step 1 (`estate_survey.py`, REST) | *38 workbooks; **10** depend on a published datasource; **11** datasources must be fetched first* — with explicit edges |
+> | step 3 without `--survey` (`tableau_lineage.py --plan`, GraphQL only) | *17 published data sources feed **1** workbook* and warns that sources with no consumers have **no downstream usage VISIBLE TO THE METADATA API** — **not** evidence they are unused |
+>
+> Every certified source the survey proves is a **hard dependency** is unknown on the no-survey path.
+> Treating that as abandoned at §3.1 means telling the customer their live sources are dead and
+> migrating the consumers first — which is exactly the ordering that produces **empty reports**.
+>
+> **Always pass the survey.** ✅ verified 2026-08-13 against `tableau_lineage.py --help`:
+> `--survey SURVEY` is `estate_survey.py --json output. Its dependency edges OVERRIDE the Metadata
+> API's, which is blind to 'sqlproxy' connections. Without this the plan is known-incomplete.`
+> Issue #126 is closed by #138. Without `--survey`, read every "no downstream usage VISIBLE TO THE
+> METADATA API" line as unknown, never as unused; with `--survey`, the REST-derived dependency edges
+> from step 1 are fed into the plan directly.
+
 ### Step 4 — harvest
 
 Downloads every workbook and published datasource to `<out>/assets/`, then runs **both** parsers over
 all of them and writes `parse-sweep.md` / `parse-sweep.json`.
+
+⛔ **Choose `--out` before you download, and prove it is ignored.** `--out` is required and has no
+default ✅ verified (`--help`: *"output directory (must be git-ignored, see below)"*), and this directory will
+hold the customer's actual `.twbx`/`.tdsx`. `.gitignore`'s own comment assigns
+`harvest_estate_assets.py` output to **`/_sweep*/`** (`/_harvest*/` belongs to
+`harvest_tableau_public.py`'s public-corpus tool) ✅ verified. And ⚠️ measured 2026-08-13, the trap
+that makes this urgent is now gated by code: `harvest_estate_assets.py` refuses to start unless git
+already ignores probe files under `--out` (or `--allow-unignored-out` is passed deliberately) —
+
+```powershell
+git check-ignore -v _sweep/x.twbx        # ignored
+git check-ignore -v _sweep2/x.twbx       # ignored too: /_sweep*/ is a prefix glob
+```
+
+The natural move when `_sweep/` is already occupied by a previous run — appending a date or a suffix
+— is covered now, but the operational rule did not change: **`git check-ignore -v` before the
+download, every time**. It is one second, the script enforces it, and this repo has already paid for
+a history rewrite.
 
 The sweep is worth more than the download: a workbook that one parser reads and the other refuses is
 a finding *by construction*, and which way round it fails says which tier owns it. It also turns an
@@ -318,28 +496,39 @@ token truncated a 58-asset run repeatedly; fresh-per-asset completed. Slower, an
 finishes. Assets are fetched **by LUID, never by name** — Tableau permits duplicate names across
 projects, and name-keyed identity has already produced four separate defects here.
 
-Reference run ✅ verified from `_harvest.log`: `55 asset(s) — ours failed 0, his failed 0, both
+Reference run ✅ verified from the harvest log: `55 asset(s) — ours failed 0, his failed 0, both
 parsed 55` in 120 s.
 
-Useful flags: `--limit N` (quick pass), `--skip-download` (reuse `<out>/assets`), `--workbooks-only`,
-`--db _assessment/estate.db` (take LUIDs from the assessment).
+Useful flags ✅ verified against `--help`: `--limit N` (quick pass), `--skip-download` (reuse
+`<out>/assets`), `--workbooks-only`, `--db _assessment/estate.db` (take LUIDs from the assessment).
 
 ### Step 5 — convert
 
 **This is the gate.** The engine exits 0 regardless; our wrapper is what turns its report into an
 answer.
 
-`run_estate.py` exit codes ✅ verified (`run_estate.py:75-79`, and the `main()` returns):
+`run_estate.py` exit codes ✅ verified — read out of the `EXIT_*` constants and `final_verdict()`,
+and 2/5 reproduced by running the command:
 
 | exit | constant | meaning | what to do |
 |---|---|---|---|
 | `0` | `EXIT_OK` | `ESTATE: READY` — DoD not failed, no approval collisions, no empty models | proceed |
 | `1` | `EXIT_ENGINE_FAILED` | the engine itself exited non-zero | read the last 2000 chars it printed (the wrapper prints them to stderr) |
-| `2` | *(argparse/usage)* | `--input` missing and `--slice-only` not given | fix the command |
+| `2` | `EXIT_USAGE` | ✅ reproduced both shapes: `--input` missing without `--slice-only` prints `ERROR: --input is required…`; a missing `--output` is argparse's own exit 2 | fix the command |
 | `3` | `EXIT_DOD_FAILED` | engine's definition of done is `failed` | **§3 decision point** — do not deploy |
 | `4` | `EXIT_COLLISION` | two models claim the same calc name with different formulas | resolve before approving DAX |
-| `5` | `EXIT_ENGINE_SOURCE` | *(pending branch only)* non-canonical engine | see §1.2 |
-| `6` | `EXIT_EMPTY_MODEL` | *(pending branch only)* a model would open and load **zero rows** — an Import partition over a flat file that never landed | read `<bundle>/empty-model-check.json`; land the file and repoint the partition, or make the table live. Never deploy it: it looks finished and shows nothing |
+| `5` | `EXIT_ENGINE_SOURCE` | **live** ✅ reproduced: a non-canonical `--engine` without `--allow-noncanonical-engine` | see §1.2 |
+| `6` | `EXIT_EMPTY_MODEL` | **live** — a model would open and load **zero rows** (an Import partition over a flat file that never landed) | read `<bundle>/empty-model-check.json`; see the block below |
+
+❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
+§5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
+
+⚠️ **One run, one exit code — but an estate can trip more than one gate.** `final_verdict()` returns
+the **first** blocking verdict in a fixed order (collision → DoD → empty model), so a bundle that is
+both `failed` **and** carries an empty model exits **3** and never mentions 6 in its exit status.
+The empty-model block *is* printed — deliberately before the verdict, and on a pass as well as a
+fail — so **read the log body and `empty-model-check.json`, not just `$LASTEXITCODE`**. ⚠️ reported:
+this is exactly what happened on the cold run, which saw the `EMPTY-MODEL CHECK` block and an exit 3.
 
 Note `warn` is **deliberately allowed through** — it is the normal state of a real migration
 (deferred visuals, stubbed calcs), and blocking on it would make the wrapper useless ✅ verified
@@ -354,17 +543,22 @@ Reference run ✅ verified from `_convert.log`: `bound=23/38 failed=15 warned=20
 > needs no `--force`. **All DAX approvals land in ONE run; per-workbook agent work starts only
 > afterwards.** ✅ verified from `run_estate.py`'s own docstring.
 
-What a bundle contains ✅ verified against the reference bundle:
+What a bundle contains ✅ verified against the reference bundle by listing it, 2026-08-13:
 
 | path | what | may I edit it? |
 |---|---|---|
-| `report.json` | the engine's full estate report (~1.8 MB for 38 workbooks) | no |
+| **`summary.md`** | **read this first** — the engine's human-readable estate report (~30 KB). Opens with the DEFINITION OF DONE verdict and a one-line reason **per failing workbook**, then the pending review gates, then a copy-pasteable list of every openable `.pbip`. It answers "what happened and why" faster than any JSON here | no |
+| `report.json` | the engine's full estate report (~1.8 MB for 38 workbooks) — the machine-readable form of the above | no |
 | `handover/` | one slice per workbook, so a per-workbook agent never loads the whole report | no |
 | `pbip/` | **the working copy** — one folder per deployable unit; what `deploy_estate.py` reads | **yes** |
 | `reports/`, `semantic_models/` | the engine's pristine output — the free baseline for `diff` | **never** |
-| `phase-timings.json` | per-phase elapsed seconds | — |
-| `engine-output-receipt.json` | hashes of the engine's output (see §1.2 for what it does *not* record) | — |
+| `data/` | flat-file data landed next to the models that import it (4 folders on the reference bundle) | no |
+| `empty-model-check.json` | the exit-6 verdict: every model, its partitions, and why any of them would load zero rows. **Written on every run, pass or fail** | — |
+| `phase-timings.json` | per-phase elapsed seconds — see the note under §2's table for what it does *not* cover | — |
+| `engine-output-receipt.json` | hashes of the engine's output **and `engine` — what built this bundle** (§1.2) | — |
+| `.credential-gate-audit.log` | append-only audit trail; `credential_gate.py verify` reads it. **This is the non-narrative record** — trust it over any summary, including your own | — |
 | `input_manifest.json`, `source-provenance.json` | what went in, and where upstream it came from | — |
+| `deploy-journal.jsonl` | written by step 6, not step 5: intent-then-outcome per item (§6.1) | — |
 | `deploy-estate-id.txt` | **minted at first deploy — keep it with the bundle** (§3.3) | — |
 
 **`pbip/` is not one folder per workbook.** On the reference bundle it held **39** folders = **23**
@@ -372,6 +566,33 @@ converted workbooks + **16** datasource-only semantic models ✅ verified by rec
 against `report.json`. That is model-first migration working as intended: a shared published
 datasource becomes one model, not one per consumer. **The item count is not the workbook count** —
 get the real number from `deploy_estate.py --dry-run`.
+
+#### If one model is empty and the rest of the estate is fine
+
+The verdict says *"never deploy it: it looks finished and shows nothing"*, and the two fixes it
+offers — land the file and repoint the partition, or make the table live — are both *repairs*. On a
+workshop clock the third option is usually the real one: **deploy the other N and leave that one
+behind.**
+
+✅ **Use the supported skip path — do not hand-move folders.** Verified against
+`deploy_estate.py --help` and the module docstring: `--skip <unit>` withholds one named unit, and
+`--skip-empty-models` withholds every unit that `<bundle>\empty-model-check.json` reports EMPTY.
+Issue #127 is closed by #140.
+
+Run a dry run first and confirm the item count drops by the withheld unit's model/report count:
+
+```powershell
+python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --skip-empty-models --dry-run
+# or, for one known unit:
+python scripts\deploy_estate.py --bundle <bundle> --workspace <workspace-id> --skip <unit-folder> --dry-run
+```
+
+The count dropping by exactly **2** (the model and its report) is the confirmation signal — a drop of
+1, or no drop, means you withheld a model-only unit or named the wrong folder. A `--skip` name that
+matches no directory under `<bundle>\pbip` refuses to start rather than silently deploying it.
+Record the withheld unit in the brief: an accepted gap is a decision, an unmentioned one is a
+defect. The real run exits **3 / `EXIT_INCOMPLETE`** when the attempted deploy succeeds but a unit
+was withheld (§2 step 6).
 
 ### Step 6 — deploy
 
@@ -384,18 +605,41 @@ python scripts\deploy_estate.py --bundle _bundle --workspace <workspace-id> --te
 `model + report` or `model only`, how many folders it would create, how many workbooks have no known
 Tableau project (they land at the root), and finally the **item count** — *"the number to agree
 BEFORE deploying, since each item carries a cost in the customer's capacity and licensing terms"* ✅
-verified. On the reference bundle a dry run plans **76 items** (39 pairs, 2 reports skipped as empty)
-✅ verified by calling `discover()` + `report_is_empty()` offline against the bundle.
+verified. On the **2026-08-12 reference bundle** a dry run plans **76 items** — 39 units × 2, minus
+2 reports skipped as empty ✅ re-verified 2026-08-13 by calling `discover()` + `report_is_empty()`
+offline against that bundle. (The cold run's newer bundle landed on 76 too, but only *after* the
+empty model was withheld — do not read one estate's number as the other's.)
 
 Then drop `--dry-run`.
 
-`deploy_estate.py` exit codes ✅ verified (`deploy_estate.py:129-131`):
+⚠️ **Budget ~25 seconds per item, and say "about half an hour", not "about a quarter of an hour".**
+The previous edition said *"~13 min / 64 items"* (~12 s/item) and was **2.4× optimistic**: measured
+2026-08-13, **76 planned / 74 created took 30.4 minutes** — ~24 s per item, with nothing failing. It
+is simply slow: every item is a create plus a `202` polled to a terminal state, and the poll's
+own first sleep is 3 s ✅ verified (`await_operation`). This is the **only planning number an
+operator has**, so an under-promise here is half an hour of silence in front of a customer.
 
-| exit | constant | meaning |
-|---|---|---|
-| `0` | `EXIT_OK` | everything planned was deployed (skipped-as-empty reports are reported honestly, not counted as deployed) |
-| `1` | `EXIT_FAILED` | at least one item failed, **or one or more workbooks were refused** — the run names them |
-| `2` | `EXIT_PREFLIGHT` | never started: workspace missing, no access, or the item budget does not fit |
+**Confirm the rate from the journal after the first ten items** rather than trusting either number —
+one line is appended per intent and per outcome, so it is a live progress meter:
+
+```powershell
+# in a second shell, while the deploy runs
+(Get-Content <bundle>\deploy-journal.jsonl | Measure-Object -Line).Lines   # re-run; watch it climb
+Get-Content <bundle>\deploy-journal.jsonl -Tail 3                          # what it is doing right now
+```
+
+Elapsed ÷ items-done, extrapolated to the dry-run count, is a better estimate than anything in this
+document — and it is the number to give the customer once you have it.
+
+`deploy_estate.py` exit codes ✅ verified (the `EXIT_OK` / `EXIT_FAILED` / `EXIT_PREFLIGHT` /
+`EXIT_INCOMPLETE` constants):
+
+| exit | constant | meaning | what to do |
+|---|---|---|---|
+| `0` | `EXIT_OK` | everything planned was deployed (skipped-as-empty reports are reported honestly, not counted as deployed) | proceed |
+| `1` | `EXIT_FAILED` | at least one item failed, **or one or more workbooks were refused** — the run names them | fix the named failures/refusals, then re-run the same command to resume |
+| `2` | `EXIT_PREFLIGHT` | never started: workspace missing, no access, item budget does not fit, an unreadable empty-model report was requested, or a `--skip` name matched no unit | fix the preflight/refusal message; for a bad `--skip`, use a directory name under `<bundle>\pbip` (or `--dry-run` to list them) |
+| `3` | `EXIT_INCOMPLETE` | everything attempted succeeded, but one or more whole units were deliberately withheld by `--skip` / `--skip-empty-models`; nothing was created for those units, so the estate is knowingly incomplete | repair the withheld units, then re-run without the skip to finish the estate; a caller that intentionally withheld them may accept exactly this code |
 
 What it does, in order, and why the order is not negotiable:
 
@@ -415,10 +659,23 @@ hand-roll it ✅ verified from the module docstring:
   declares `additionalProperties: false` and allows exactly `connectionString`. Sending the old form
   gets `Workload_FailedToParseFile`; omitting the guid gets `InvalidConnectionInformation`.
 - **`202 Accepted` tells you nothing.** Create returns an empty body; a FAILED operation is
-  indistinguishable from success until `/operations/{id}` is polled.
-- **Fabric does not reject duplicate item names** for `Report`/`SemanticModel`. Two identical pairs
-  sat side by side in a real workspace. Nothing downstream catches this — which is exactly why the
-  ownership stamp, the journal and the run lock exist.
+  indistinguishable from success until `/operations/{id}` is polled. **This is not only a create
+  problem** — it applies to every long-running item call, including the `getDefinition` a verifier
+  reaches for. See §5.1 check 8, where the naive version fabricates a plausible false defect.
+- **Duplicate item names.** Cite the deployer's settled source-of-truth; do not restate an older
+  contradiction here:
+
+  > **Measured against a real Fabric tenant, via this script's own path** (`POST
+  > https://api.fabric.microsoft.com/v1/workspaces/{id}/items`, Create Item, item types `Report` and
+  > `SemanticModel`): **Fabric did NOT reject a second item with the same `displayName` and type** —
+  > two identical pairs sat side by side in the workspace afterwards.
+
+  ✅ verified 2026-08-13 from `deploy_estate.py`'s module docstring. The code still handles
+  `ItemDisplayNameNotAvailableYet`/`ItemDisplayNameAlreadyInUse` defensively as *"already there, go
+  verify"*, but the same source states those errors have **never been observed** for this create path
+  and are **not** evidence that the service rejects duplicates. Operational rule: assume a duplicate
+  name will be *accepted*, and let the journal (§6.1), run lock and ownership guard (§3.3) do the
+  protecting. Nothing downstream catches it if you are wrong.
 
 ---
 
@@ -436,15 +693,22 @@ first rebuilds an incomplete model.
 
 **Ask:** fetch the `.tds`/`.tdsx` and migrate the datasource first, or proceed knowingly incomplete?
 
-### 3.2 After convert — the DoD gate (`exit 3`)
+### 3.2 After convert — the DoD gate (`exit 3`) and the empty-model gate (`exit 6`)
 
 `bound=<X>/<N> failed=<F> warned=<W>` is the whole decision. Read the *per-workbook* detail, never the
-summary line: `report.json`, and the `handover/` slices.
+summary line: start with `summary.md` (one line per failing workbook, in English), then `report.json`
+and the `handover/` slices.
 
 **Ask:** resolve the failing workbooks, explicitly accept them as out of scope, or narrow the estate?
 
 **Do not deploy an `exit 3` bundle** because "most of it is fine". If the customer accepts the gap,
 record that acceptance in the brief — an accepted gap is a decision, an ignored one is a defect.
+
+**Ask about any empty model in the same breath, because you will only get one exit code.** A bundle
+that fails the DoD *and* contains a model that would load zero rows exits **3** and never says 6
+(§2 step 5). Read `empty-model-check.json` on every run, and put the question in this same block:
+repair it (land the data, or make the table live), or quarantine the unit and deploy the rest — the
+folder-move recipe and its dry-run confirmation are in §2 step 5.
 
 ### 3.3 Before deploy — the ownership decision
 
@@ -496,6 +760,13 @@ a human.
 
 Ordered by what actually cost time.
 
+> **Two rules that pre-empt half of this section.** ① A **`202 Accepted` is not an answer** — from
+> any Fabric item call, create *or* `getDefinition`. The body is empty; you must poll the operation
+> and then read `/result`. Parsing the `202` itself yields a clean-looking, entirely fictional
+> result — see §5.1 check 8 for the recipe and the false defect it prevents. ② When a Fabric call
+> disagrees with what you believe about your access, **check the token before you check the object**
+> (§4.4).
+
 ### 4.1 `estate_survey.py` sits there doing nothing
 
 | | |
@@ -503,7 +774,7 @@ Ordered by what actually cost time.
 | **symptom** | the command produces no further output and never returns. ⚠️ reported: 13 minutes lost; the tell was **0.11 CPU-seconds and zero network connections** |
 | **cause** | it is **blocked on a hidden `getpass` prompt** for the PAT secret |
 | **check** | `Get-Process -Id <pid> \| Select-Object CPU` — near-zero CPU with no sockets is a prompt, not work. Then: does `.env` contain **`TABLEAU_PAT_VALUE`**? |
-| **fix** | add `TABLEAU_PAT_VALUE=<secret>` to `.env` (alongside `TABLEAU_PAT_SECRET`), **and always pass `--no-prompt`** |
+| **fix** | make the secret visible to the engine's own key — add `TABLEAU_PAT_VALUE=<secret>` to `.env`, or set `$env:TABLEAU_PAT_VALUE` for that one call (§1.3a has both) — **and always pass `--no-prompt`** |
 
 **Why our `.env` is not enough on its own** ✅ verified: our scripts document the secret as
 `TABLEAU_PAT_SECRET`; the engine reads it as `TABLEAU_PAT_VALUE`. `scripts/tableau_env.py` bridges
@@ -572,7 +843,24 @@ was reported as unresolvable.
 model was produced, so there is nothing to deploy for them yet. It is a known upstream defect with a
 filed issue — not a property of their data, and not a failed migration.
 
-### 4.4 `deploy_estate.py` refuses a workbook
+### 4.4 `WorkspaceNotFound` on a workspace you know exists
+
+| | |
+|---|---|
+| **symptom** | `WorkspaceNotFound` / `EntityNotFound` (an HTTP **404**) for a workspace you can see in the portal — worst case, one you have *just* filled with items |
+| **cause** | the token minted successfully **for the wrong tenant**. Fabric answers "not found" for a workspace your identity cannot see, so an identity problem arrives dressed as a missing object |
+| **check** | **decode the token's `tid` before you check anything about the workspace** — the snippet in §1.3b prints `tid`/`aud` without printing the token |
+| **fix** | re-mint scoped: `az account get-access-token --resource https://api.fabric.microsoft.com --subscription <sub-id-in-that-tenant>`. See §1.3b for why `--tenant` alone can make it worse, and why `deploy_estate.py --tenant` inherits the ambiguity |
+
+⚠️ reported: ~15 minutes lost, and it recurred **four times across two independent operators on
+2026-08-13** — every time presenting as a 404 rather than as an identity problem. If a `404` and a
+`403` disagree with what you believe about your access, believe the token.
+
+A genuine 404 (wrong workspace id, or an identity that truly lacks access) looks identical, so this
+check is cheap *because* it is unambiguous: a `tid` that matches the landing zone's tenant rules the
+whole class out in one command.
+
+### 4.5 `deploy_estate.py` refuses a workbook
 
 Read the refusal text — it is written to be actionable. Three distinct shapes ✅ verified:
 
@@ -582,7 +870,7 @@ Read the refusal text — it is written to be actionable. Three distinct shapes 
 | *"N items share this name, so which one to update is ambiguous"* | duplicates already in the workspace | remove the extras in the workspace, re-run |
 | *"came from '<other-estate>', not '<this-estate>'"* | a **second estate** in the same landing zone | separate landing zone per estate — or `--adopt-existing` if you truly mean to overwrite |
 
-### 4.5 Deploy stops partway naming connectivity
+### 4.6 Deploy stops partway naming connectivity
 
 ✅ verified: after **3 consecutive** `HTTP 0` failures (our client failing to resolve/reach the host,
 not a service verdict) the run stops rather than marking the rest of the estate failed. A laptop
@@ -592,20 +880,21 @@ moving between networks mid-deploy previously burned through an entire estate em
 **Fix connectivity, then re-run the identical command.** Everything already deployed is skipped by
 **content hash** — see §6.
 
-### 4.6 `401 TokenExpired` mid-deploy
+### 4.7 `401 TokenExpired` mid-deploy
 
 Handled ✅ verified: the token re-mints itself once on `401 TokenExpired` and continues. A 66-item
 deploy previously outran its token and failed every remaining call. If you still see it, `az login`
-has expired entirely — re-authenticate and re-run.
+has expired entirely — re-authenticate and re-run. ⚠️ If re-authenticating "fixes" it but the
+workspace then 404s, you have changed identity as well as refreshed it — §4.4.
 
-### 4.7 A report fails with `invalid package content stream`
+### 4.8 A report fails with `invalid package content stream`
 
 The report has **no pages** (`pageOrder: []`), because the source workbook had no convertible
 worksheets. ✅ verified: `report_is_empty()` detects this *before* the call and skips it with
 `report has NO PAGES - skipping (the model is still deployed)`, so it should not reach you as a
 service error. If it does, you are deploying by hand rather than through this script.
 
-### 4.8 The engine's pristine output fails `powerbi-report-author validate`
+### 4.9 The engine's pristine output fails `powerbi-report-author validate`
 
 ⚠️ reported (issue #108), engine 2.126.0. Straight out of `run_estate.py`, no agent edits:
 `PBIR_FORMATTING_PROP_UNKNOWN` on `azureMap` `dataPoint.defaultColor`, and `PBIR_ROLE_MAX_EXCEEDED`
@@ -617,7 +906,7 @@ pristine baseline — §0). Also stale in the same area: `viz_fidelity` still la
 `shape_map`/`filled_map` and advises enabling a **preview feature that is no longer needed**. Do not
 send a customer to that toggle.
 
-### 4.9 Something feels stuck
+### 4.10 Something feels stuck
 
 **Report elapsed time whenever an operation exceeds ~60 s.** An anomaly in elapsed time or tool-call
 count is a signal, not noise. Ground truth is readable *mid-run* — `phase-timings.json`, the deploy
@@ -635,18 +924,66 @@ Run in order. Each line says what it proves — and §5.2 says what none of them
 | # | check | how | pass |
 |---|---|---|---|
 | 1 | conversion was adjudicated | `echo $LASTEXITCODE` after step 5 | `0` |
-| 2 | DoD not failed | `phase-timings.json` + the `definition_of_done` line in the run summary | `status` ≠ `failed` |
-| 3 | inputs are accounted for | `_harvest/parse-sweep.md` | `ours failed 0, his failed 0` |
+| 2 | DoD not failed | `summary.md`'s first heading, and the `definition_of_done` line in the run summary | `status` ≠ `failed` |
+| 3 | inputs are accounted for | `_sweep/parse-sweep.md` (§2 step 4 — **not** `_harvest/`) | `ours failed 0, his failed 0` |
 | 4 | the item count was agreed | `deploy_estate.py --dry-run` | number matches what the customer signed off |
-| 5 | deploy completed | `echo $LASTEXITCODE` after step 6 | `0` (`1` = at least one failure or refusal — read the named list) |
+| 5 | deploy completed | `echo $LASTEXITCODE` after step 6 | `0`, or `3` when you deliberately withheld a unit (`1` = at least one failure or refusal — read the named list) |
 | 6 | nothing was silently skipped | the final line: `all N item(s) deployed` **or** `N deployed; M skipped as empty` | M is a number you can explain |
 | 7 | the journal has no unfinished intent | `Select-String -Path <bundle>\deploy-journal.jsonl -Pattern '"status":"failed"'` | no hits, or hits you have triaged |
-| 8 | every report resolves its model | the portal: open each report; it loads its model rather than erroring | ⚠️ reported 31/31 on a previous estate; **not re-verified here** |
+| 8 | every report resolves its model | `python scripts\verify_bindings.py --workspace <workspace-id> --tenant <tenant-id>` (the API, polled) | exit `0`: every report resolves to a `SemanticModel` in this workspace; exit `1` = findings; exit `2` = the check could not be performed |
 | 9 | the estate identity survived | `Get-Content <bundle>\deploy-estate-id.txt` | non-empty, and stored with the bundle |
-| 10 | the engine version is recorded | `<bundle>\ENGINE-VERSION.txt` (§1.2) | present |
-| 11 | connections the customer must make | `python scripts\connections_manifest.py --bundle <bundle> --out <dir>` | `connections.md` delivered |
+| 10 | the engine version is recorded | `.engine` in `<bundle>\engine-output-receipt.json` (§1.2) | present, with `canonical: true` |
+| 11 | no model would load zero rows | `<bundle>\empty-model-check.json` | `"status": "OK"`, or a unit you deliberately withheld with `--skip` / `--skip-empty-models` (§2 step 5) |
+| 12 | connections the customer must make | `python scripts\connections_manifest.py --bundle <bundle> --out <dir>` | `connections.md` delivered |
 
-**Check 11 is a deliverable, not a diagnostic.** Credentials do not travel with a migrated item.
+❌ **Correction: check 10 no longer looks for `ENGINE-VERSION.txt`.** That file was a manual
+workaround, deleted with §1.2 — the previous edition's check therefore **failed on a correct
+bundle**. Read the receipt:
+
+```powershell
+python -c "import json;print(json.load(open(r'<bundle>\engine-output-receipt.json',encoding='utf-8')).get('engine'))"
+```
+
+An absent `.engine` key means the bundle predates #109 (2026-08-13), not that something is wrong with
+today's run — see §1.2.
+
+#### Check 8 — the recipe, and the false defect it prevents
+
+Check 8 used to say *"open each report in the portal"*, which nobody does at 36 reports, so an
+operator reaches for the API — and **the obvious call returns a clean-looking wrong answer**:
+
+> `POST /v1/workspaces/{ws}/items/{id}/getDefinition` returns **`202 Accepted` with an empty body**.
+> Parsing that body yields `byPath=False  semanticModelId=NONE`, which reads exactly like a report
+> bound to nothing — a real and serious defect. It is not. It is the *"`202` tells you nothing"*
+> trap that `deploy_estate.py`'s docstring documents for **create**, applying identically to
+> **getDefinition**.
+
+⚠️ reported: 12 minutes lost on 2026-08-13 and a critical bug report nearly filed — and it caught a
+second, independent operator the same day. That is a property of the documentation, not of the
+operators, which is why the recipe now lives here.
+
+**Poll it.** The shape ✅ verified against `deploy_estate.py`'s own `await_operation` + `/result`
+handling, which is the same contract:
+
+1. `POST {API}/workspaces/{ws}/items/{id}/getDefinition` → `202`, and a **`Location`** header (fall
+   back to `{API}/operations/{x-ms-operation-id}` if absent);
+2. `GET {Location}` every few seconds until `status` is `Succeeded` / `Failed` / `Undetermined` —
+   ~15 lines, and the only part the naive version skips;
+3. `GET {Location}/result` → the real body: `definition.parts[]`, base64 in `payload`;
+4. decode the part whose `path` is `definition.pbir` and read `datasetReference`:
+   `byConnection.connectionString` should contain `semanticModelId=<guid>`; a surviving
+   `byPath` means the rebind did not happen.
+
+For orientation, the *pre-deploy* form on disk is the failing one — ✅ verified by reading a
+`definition.pbir` straight out of the reference bundle:
+`{"datasetReference": {"byPath": {"path": "../<name>.SemanticModel"}}}`. Step 6 rewrites that to
+`byConnection` at deploy time (§2 step 6), so `byPath` in the *service* is the defect signal;
+`byPath` in the *bundle* is normal.
+
+⚠️ reported, 2026-08-13: **36/36 reports carried a `semanticModelId` guid resolving to a semantic
+model in the same workspace, none `byPath`.** Which proves they bind — and nothing more; see §5.2.
+
+**Check 12 is a deliverable, not a diagnostic.** Credentials do not travel with a migrated item.
 Without this list the customer discovers which sources need connecting **one failed refresh at a
 time**. It never emits a secret (host/database/account are configuration; passwords and keys are
 not — a test proves no credential-shaped value reaches it), and it never calls an extract
@@ -658,10 +995,11 @@ datasource feeding twelve workbooks is a different task from one feeding a singl
 ### 5.2 What this does NOT prove — say this out loud
 
 ❌ **We have never verified that a migrated report RENDERS.** The strongest claim we can make is
-⚠️ reported: on a previous estate, **31/31 reports bound `byConnection` to a real semantic model in
-the service**. **Binding resolves ≠ the report works.** We have not confirmed the visuals draw, with
-data, matching the Tableau original. Treat the deployed estate as *ready for review*, never as
-*validated*.
+⚠️ reported: **36/36 reports on 2026-08-13, and 31/31 on an earlier estate, bound `byConnection` to a
+real semantic model in the service** (check 8). **Binding resolves ≠ the report works.** We have not
+confirmed the visuals draw, with data, matching the Tableau original. A better check-8 recipe raises
+the *confidence* of the binding claim; it does not change *what is claimed*. Treat the deployed
+estate as *ready for review*, never as *validated*.
 
 ❌ **A green `validate` is necessary, not sufficient.** TMDL deserialization and
 `powerbi-report-author validate` both pass defects that only surface in Desktop **with data**. And
@@ -669,7 +1007,7 @@ data, matching the Tableau original. Treat the deployed estate as *ready for rev
 (`PBIR_SCHEMA_UNREACHABLE`) — `preflight.ps1` checks mechanically whether a green result this session
 means "schema-checked" or only "structure-checked".
 
-❌ **The engine's own output currently fails `validate`** on this estate (§4.8, issue #108), so a red
+❌ **The engine's own output currently fails `validate`** on this estate (§4.9, issue #108), so a red
 result there is not evidence about *your* migration.
 
 ❌ **No numbers have been reconciled against Tableau.** "It renders / it returned a number" is not
@@ -677,7 +1015,7 @@ verification; "it matches the Tableau value" is. That comparison is the `pbi-mig
 agent's job and is a separate phase.
 
 ❌ **Refresh has not been proven.** Live sources need a connection + credential established in the
-target workspace (check 11) before any refresh can succeed.
+target workspace (check 12) before any refresh can succeed.
 
 ---
 
@@ -742,22 +1080,38 @@ reporting done.
 This repo is public, and customer-identifying files **have been committed here before** — a workshop
 plan and a prerequisites email were pushed before anyone noticed, and required a history rewrite.
 
-**Ignored ✅ verified with `git check-ignore -v`:**
+**Ignored ✅ verified by running `git check-ignore -v` on every row, 2026-08-13:**
 
 | path | rule |
 |---|---|
-| `.env`, `.env.local` | `.gitignore:87-88` |
+| `.env`, `.env.local` | git-ignored — prove it, do not trust a line number here |
 | `_assessment*/` | `/_assessment*/` — real estate: workbook/project names, owner LUIDs, group membership, permissions |
-| `_harvest/`, `_sweep/` | downloaded `.twbx`/`.tdsx` from a real site |
+| `_sweep*/` | `harvest_estate_assets.py` output — downloaded `.twbx`/`.tdsx` from a real site |
+| `_harvest*/` | ⚠️ **a different tool's** output (`harvest_tableau_public.py`'s public corpus). Ignored, but not where §2 step 4 should write |
+| `_bundle*/`, `_estate*/` | convert output — `report.json` carries every workbook name and calc formula |
 | `migrations/workshop-*/`, `engagement-*/`, `customer-*/` | engagement notes |
 | `**/data/`, `**/source/*.twb` | extracted customer data and source workbooks |
 
-**Before this runbook landed, two holes were open and are now closed** (same PR):
+⛔ **The harvest entries are prefix globs now, not exact directory names.** ✅ verified from
+`.gitignore` (`/_harvest*/`, `/_sweep*/`) and `git check-ignore -v`, after #137/#125:
+
+| path | ignored? |
+|---|---|
+| `_harvest/`, `_sweep/` | **yes** |
+| `_harvest-op/`, `_sweep2/`, `_harvest-2026-08-13/` | **yes** — `/_harvest*/` and `/_sweep*/` are globs |
+| `_assessment2/`, `_bundle2/`, `_bundleX/`, `_estate9/` | yes — `/_assessment*/`, `/_bundle*/`, `/_estate*/` are globs |
+
+The old failure was entirely natural: `_sweep/` already holds yesterday's run, so you date the new
+one, and the dated name was not covered. That is fixed, but **prove your exact path with
+`git check-ignore -v` before the download** anyway. The cold operator tested three candidate names
+before fetching a single file — that is the correct amount of paranoia here.
+
+**Two holes closed when this runbook landed** (PR #110):
 
 | path | why it was a hole |
 |---|---|
 | `migrations/workbooks/<slug>/migration-brief.md` | the rule was `/migrations/*/migration-brief.md` — **one level deep** — but `AGENTS.md` instructs writing the brief **two** levels deep, at `migrations/workbooks/<slug>/`. `git check-ignore` returned **NOT IGNORED** for the exact documented path. The brief holds the customer's name, scope and destination workspace. |
-| `_bundle/` (and `_bundle*/`) | the conventional convert output. It contains `report.json` with every workbook name, every calculated-field formula, and the generated TMDL/PBIR — i.e. the customer's content — while its siblings `_assessment*/` and `_harvest/` were already ignored. |
+| `_bundle/` (and `_bundle*/`) | the conventional convert output. It contains `report.json` with every workbook name, every calculated-field formula, and the generated TMDL/PBIR — i.e. the customer's content — while its sibling `_assessment*/` was already ignored. |
 
 **Habit, regardless:** before staging anything during an engagement,
 
@@ -779,25 +1133,33 @@ Placeholders used in this document — and where the real value lives:
 
 ## 8. Quick reference
 
-**Exit codes**
+**Exit codes** ✅ verified 2026-08-13
 
-| script | 0 | 1 | 2 | 3 | 4 | 5 |
-|---|---|---|---|---|---|---|
-| `preflight.ps1` | ready | critical missing | — | — | — | — |
-| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | *(pending)* engine source |
-| `deploy_estate.py` | all deployed | item failed / refused | preflight | — | — | — |
+`—` means that script cannot return that exit code.
+
+| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| `preflight.ps1` | ready | critical missing | — | — | — | — | — |
+| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** |
+| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — |
+
+One run returns **one** code, in the order collision → DoD → empty model — so a bundle can trip a
+gate the exit code never mentions. Read the log body and `empty-model-check.json` too (§2 step 5).
 
 **Where the truth lives**
 
 | question | file |
 |---|---|
-| how long did each phase take? | `<bundle>/phase-timings.json` |
+| what happened, in English? | `<bundle>/summary.md` — **start here** |
+| how long did each phase take? | `<bundle>/phase-timings.json` (sum of *recorded* phases, not wall clock) |
 | what did the engine actually produce? | `<bundle>/report.json`, `<bundle>/handover/<workbook>.json` |
-| which engine built this bundle? | `<bundle>/ENGINE-VERSION.txt` (manual today — §1.2) |
-| what did the deploy do, and when? | `<bundle>/deploy-journal.jsonl` |
+| which engine built this bundle? | `.engine` in `<bundle>/engine-output-receipt.json` (§1.2) |
+| would any model load zero rows? | `<bundle>/empty-model-check.json` |
+| what did the deploy do, and when? | `<bundle>/deploy-journal.jsonl` — also the live progress meter |
 | which estate do these items belong to? | `<bundle>/deploy-estate-id.txt`, and each item's description in the service |
 | what must the customer connect? | `connections.md` from `scripts/connections_manifest.py` |
 | what is in scope, and who decided? | the migration brief (git-ignored) |
+| am I holding the right token? | decode `tid`/`aud` — §1.3b |
 
 **Related reading:** [`/AGENTS.md`](../AGENTS.md) (dispatcher flow, Gate B, shared conventions) ·
 [`docs/capabilities-and-limitations.md`](capabilities-and-limitations.md) ·
