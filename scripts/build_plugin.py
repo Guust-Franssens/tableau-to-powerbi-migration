@@ -49,13 +49,13 @@ SHIPPED_SKILLS = (
 )
 
 PLUGIN_DESCRIPTION = (
-    "Reusable Power BI skills: make a semantic model AI-ready, persist a refreshed local PBIP, and "
-    "avoid the PBIR and TMDL defects that pass validation but break at open, refresh or render. "
-    "Covers descriptions, enumerated domains, model-level AI instructions (CustomInstructions) and "
-    "the qnaEnabled switch that silently voids them; refreshing a PBIP in Power BI Desktop and "
-    "saving it headlessly to cache.abf via AMO ImageSave; and two hard-won gotcha catalogues for "
-    "report authoring and semantic modelling. Source-tool agnostic - the input is "
-    "already a Power BI model - so it applies to Tableau, Qlik and Cognos migrations alike."
+    "Reusable Power BI skills: make a semantic model AI-ready, and avoid the PBIR and TMDL defects "
+    "that pass validation but break at open, refresh or render. Covers descriptions, enumerated "
+    "domains, model-level AI instructions (CustomInstructions) and the qnaEnabled switch that "
+    "silently voids them; plus two hard-won gotcha catalogues for report authoring and semantic "
+    "modelling, each entry paid for by a real debugging cycle on a real migration. Source-tool "
+    "agnostic - the input is already a Power BI model - so it applies to Tableau, Qlik and Cognos "
+    "migrations alike."
 )
 
 KEYWORDS = [
@@ -91,7 +91,8 @@ equally to a Tableau, Qlik or Cognos migration.
 | Skill | Use it for |
 |---|---|
 | `powerbi-ai-readiness` | Descriptions, enumerated categorical domains, model-level AI instructions (`CustomInstructions`), and the `qnaEnabled` switch that silently voids all of it |
-| `pbip-model-refresh` | Refreshing a local PBIP/TMDL model in Power BI Desktop and persisting it to `.pbi/cache.abf` headlessly via AMO `ImageSave`, with strict pid binding |
+| `powerbi-report-gotchas` | PBIR authoring and Desktop verification: defects that pass `validate` but render wrong, conditional-formatting encodings, azureMap/scatter/matrix recipes |
+| `powerbi-semantic-model-gotchas` | TMDL and DAX pitfalls that crash Desktop on open, fail to bind, or throw only at query time - each one paid for by a real debugging cycle |
 
 ## Why a plugin and not a repo-local skill
 
