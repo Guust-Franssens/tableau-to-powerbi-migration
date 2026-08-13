@@ -68,9 +68,12 @@ build/
 [Bb]in/
 [Oo]bj/
 
-# Tableau Public harvester downloads + parsed specs (bulk .twbx + specs, transient
-# corpus for parser stress-testing / hard-workbook selection - never commit).
-/_harvest/
+# `harvest_tableau_public.py` output (`--out-dir`, default `_harvest`): Tableau Public downloads +
+# parsed specs (bulk .twbx + specs, transient corpus for parser stress-testing / hard-workbook
+# selection - never commit). `classify_harvest_hardness.py` reads `_harvest/specs` from here.
+# GLOB, not an exact name: a second run under `_harvest-2`/`_harvest-2026-08-13` - the natural move
+# once `_harvest/` is occupied - was NOT ignored, and staged .twbx on a PUBLIC repo (issue #125).
+/_harvest*/
 candidates.json
 
 # assess_estate.py output. This is a REAL CUSTOMER ESTATE: workbook and project names,
@@ -79,9 +82,14 @@ candidates.json
 # so ignore the conventional name rather than relying on everyone remembering.
 /_assessment*/
 
-# harvest_estate_assets.py output: downloaded .twbx/.tdsx from a REAL site plus the parse
-# sweep over them. Vendor workbooks and customer content - never commit.
-/_sweep/
+# `harvest_estate_assets.py` output (`--out`): downloaded .twbx/.tdsx from a REAL site plus the parse
+# sweep over them (`parse-sweep.json` carries every workbook and datasource NAME). Customer content -
+# never commit. `_sweep` is THE convention for this tool; `_harvest*` above belongs to the OTHER
+# harvester, and one folder documented for two tools is how a name collision starts (issue #125).
+# GLOB for the same reason as above, so `_sweep2`/`_sweep-2026-08-13` are covered by default. The
+# script itself now refuses to write to an unignored in-repo path, so this rule is enforced, not
+# merely hoped for.
+/_sweep*/
 
 # run_estate.py output (the conventional `--output` name, and dated/suffixed variants). A bundle is
 # the most customer-identifying artifact this toolkit produces: report.json carries every workbook
