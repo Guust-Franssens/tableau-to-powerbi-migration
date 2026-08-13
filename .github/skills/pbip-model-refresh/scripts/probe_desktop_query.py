@@ -4,7 +4,7 @@ purpose: robust LOCAL data-source preflight for a migrated model open in Power B
          against the loaded model. A returned row proves, in one shot, that credentials are present, the
          source is reachable, and the M/partition is valid - the real gate before building the report.
 usage:   python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py
-             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--port <n>]
+             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--port <n>]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/probe_desktop_query.py` in this repo is a forwarding shim.)
 
@@ -13,11 +13,13 @@ Desktop pid. That scoping is STRICT: a named pid never falls back to another ins
 retries briefly (msmdsrv binds its port a moment after Desktop starts) and then fails. With no --pid
 the single running msmdsrv is used, and more than one is an error rather than a coin flip.
 
-Name one canary table per distinct live source with --tables: every named source is probed and an
+Name one canary table per distinct live source with --canaries: every named source is probed and an
 all-non-zero result earns the model-level PREFLIGHT: DATA_OK. If NO table is named, only the first
 queryable table is probed and the verdict is downgraded to PREFLIGHT: TABLE_OK '<table>' - a static
 parameter/CSV table can return rows while a live source never loaded, so one arbitrary table can
-never certify the model.
+never certify the model. (`--tables`/`--table` are accepted aliases; this script only READS, so
+naming canaries here never narrows anything. In `refresh_pbip_model` they are NOT interchangeable:
+there `--tables` narrows the refresh itself, which is why `--canaries` exists.)
 Emits a final line: PREFLIGHT: DATA_OK (all canaries returned rows) / PREFLIGHT: TABLE_OK '<table>'
 (implicit single-table probe only) / PREFLIGHT: NO_DATA / PREFLIGHT: ERROR <msg>.
 
@@ -306,7 +308,7 @@ def _probe_one(port: int, conn, table: str) -> int:
 def probe(port: int, tables: list[str] | None) -> int:
     """Probe each canary table with a 1-row read against localhost:<port>; return a process exit code.
 
-    With explicit `tables` (one canary per distinct live source) an all-non-zero result earns the
+    With an explicit canary set (one per distinct live source) an all-non-zero result earns the
     model-level ``PREFLIGHT: DATA_OK``. With NO table named, only the first queryable table is
     probed and the verdict is ``PREFLIGHT: TABLE_OK '<table>'`` - a single arbitrary table is not a
     model-level guarantee, because a static parameter/CSV table can return rows while a live source
@@ -331,8 +333,8 @@ def probe(port: int, tables: list[str] | None) -> int:
             print(f"PREFLIGHT: TABLE_OK '{only}'")
             print(
                 f"  note: single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
-                "parameter/CSV table can return rows while a live source never loaded. Pass --tables "
-                "<one canary per live source> to certify every source."
+                "parameter/CSV table can return rows while a live source never loaded. Pass --canaries "
+                "<one per live source> to certify every source."
             )
             return 0
         print("PREFLIGHT: DATA_OK")
@@ -350,9 +352,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Power BI Desktop process id - required when several instances are open "
         "(`powerbi-desktop status` maps pid -> open file)",
     )
-    parser.add_argument("--table", help="Single canary table (legacy alias for --tables with one name)")
+    parser.add_argument("--table", help="Single canary table (legacy alias for --canaries with one name)")
     parser.add_argument(
         "--tables",
+        nargs="*",
+        help="Alias for --canaries. Kept for existing callers; this script never refreshes, so the "
+        "two mean the same thing HERE (they do not in refresh_pbip_model.py)",
+    )
+    parser.add_argument(
+        "--canaries",
         nargs="*",
         help="Canary tables to probe, one per distinct live source. With none, only the first "
         "queryable table is probed and the verdict is downgraded to name that single table",
@@ -360,8 +368,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
     args = parser.parse_args(argv)
 
-    # --tables (plural, the canary set) wins; --table stays as a one-name alias for old callers.
-    tables = list(args.tables) if args.tables else ([args.table] if args.table else None)
+    # Preference order: --canaries (the name that means the same thing in both scripts), then
+    # --tables (plural), then --table as a one-name alias for old callers.
+    tables = list(args.canaries or args.tables or ([args.table] if args.table else [])) or None
     port = args.port or discover_port(args.pid)
     try:
         return probe(port, tables)

@@ -607,7 +607,7 @@ def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_p
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
 
-    assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "--save"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--save"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.read_bytes() == b"cache"
@@ -635,7 +635,7 @@ def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, 
     monkeypatch.setattr(refresh_pbip_model, "image_save", _explode("image_save must not run"))
     monkeypatch.setattr(refresh_pbip_model, "save", _explode("save must not run"))
 
-    assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "--no-save"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--no-save"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK" in out
     assert "PERSISTED" not in out
@@ -666,7 +666,7 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
     monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run"))
 
-    assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.exists(), "a default refresh must persist cache.abf"
@@ -694,7 +694,7 @@ def test_a_compat_rollback_failure_is_fatal_and_does_not_fall_back_to_ui_save(mo
     monkeypatch.setattr(refresh_pbip_model, "image_save", raise_rollback_error)
     monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run after a rollback failure"))
 
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--tables", "Orders"])
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
     out = capsys.readouterr().out
     assert exit_code == 2
     assert "compatibility rollback failed" in out.lower()
@@ -974,7 +974,7 @@ def test_a_matching_port_is_accepted(monkeypatch, tmp_path: Path, capsys) -> Non
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
 
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "--port", "52001"])
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--port", "52001"])
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "REFRESH: DATA_OK + PERSISTED" in out
@@ -1037,6 +1037,113 @@ def test_an_empty_canary_reports_no_data_naming_the_table(monkeypatch, tmp_path:
     assert exit_code == 1
     assert "REFRESH: NO_DATA" in out
     assert "Live" in out, "the empty canary must be named"
+
+
+def test_narrowing_the_refresh_cannot_earn_a_model_level_data_ok(monkeypatch, tmp_path: Path, capsys) -> None:
+    """`--tables` narrows the REFRESH, so it may never certify the whole model (round-4 finding 5).
+
+    Round 3 made `--tables` both the refresh scope AND the canary set, while the host repo's
+    `pbi-semantic-builder` gate mandates `DATA_OK + PERSISTED`. An agent chasing that verdict would
+    have added `--tables a b`, thereby refreshing ONLY those tables and certifying a model-level
+    result over a partially refreshed model - the exact "next agent gets an empty model" failure this
+    bundle exists to prevent. The scope flag now earns a scoped `TABLES_OK`; `--canaries` verifies
+    without narrowing, and is what earns `DATA_OK`.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _stub_live_to_match_disk(monkeypatch, cache)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "refresh",
+        lambda port, tables, timeout: seen.update(refreshed=tables) or (True, "refreshed"),
+    )
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "row_counts",
+        lambda port, tables: (seen.update(probed=tables), ([("Orders", 42)], False))[1],
+    )
+
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        del port, model_dir
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cache")
+        return True, "persisted"
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+
+    assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders"]) == 0
+    out = capsys.readouterr().out
+    assert "REFRESH: TABLES_OK 'Orders' + PERSISTED" in out
+    assert "REFRESH: DATA_OK" not in out, "a narrowed refresh must not certify the whole model"
+    assert seen["refreshed"] == ["Orders"], "--tables must still scope the refresh"
+    assert seen["probed"] == ["Orders"], "--tables still supplies the canary set when it is the only flag"
+
+
+def test_canaries_verify_the_whole_model_without_narrowing_the_refresh(monkeypatch, tmp_path: Path, capsys) -> None:
+    """The way out of the trap: `--canaries` probes named tables while the refresh stays model-wide."""
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _stub_live_to_match_disk(monkeypatch, cache)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "refresh",
+        lambda port, tables, timeout: seen.update(refreshed=tables) or (True, "refreshed"),
+    )
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "row_counts",
+        lambda port, tables: (seen.update(probed=tables), ([("Orders", 42)], False))[1],
+    )
+
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        del port, model_dir
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cache")
+        return True, "persisted"
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+
+    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 0
+    out = capsys.readouterr().out
+    assert "REFRESH: DATA_OK + PERSISTED" in out
+    assert seen["refreshed"] is None, "--canaries must NOT narrow the refresh"
+    assert seen["probed"] == ["Orders"], "--canaries must be the probed set"
+
+
+def test_the_bundled_credential_arbiter_never_fails_open() -> None:
+    """The arbiter must not answer CREDENTIAL_PRESENT when it never managed to invoke a Refresh.
+
+    "No modal appeared" is evidence only if something was actually triggered. The copy that shipped at
+    the repo root reported PRESENT in that case - a fail-open arbiter, which is worse than no arbiter,
+    because an agent trusts it and builds against a source it cannot read.
+    """
+    body = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
+    assert "if (-not $invoked)" in body, "the not-invoked branch is the fail-open guard"
+    guard = body.split("if (-not $invoked)", 1)[1].split("$deadline", 1)[0]
+    assert "VERDICT: UNKNOWN" in guard and "exit 3" in guard
+    assert "CREDENTIAL_PRESENT" not in guard
+
+
+def test_the_repo_root_credential_probe_is_a_forwarding_shim() -> None:
+    """One arbiter, not two. The root path is what the docs cite, so it must REACH this bundled copy.
+
+    Two same-named probes had silently diverged, and the one the documentation pointed at was the
+    fail-open one. HOST-repo fixture, so it skips where this bundle has been copied out.
+    """
+    for parent in SKILL_ROOT.parents:
+        root_probe = parent / "scripts" / "probe_desktop_credential.ps1"
+        if root_probe.exists():
+            body = root_probe.read_text(encoding="utf-8")
+            assert "@args" in body and "pbip-model-refresh" in body, (
+                "scripts/probe_desktop_credential.ps1 is a second arbiter again, not a forwarding shim"
+            )
+            assert "UIAutomationClient" not in body, "the shim must not carry its own UIA implementation"
+            return
+    pytest.skip("no host repo scripts/ folder next to this bundle")
 
 
 def _explode(name: str):

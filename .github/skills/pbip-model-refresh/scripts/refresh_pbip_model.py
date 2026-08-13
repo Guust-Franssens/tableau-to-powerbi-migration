@@ -2,7 +2,7 @@
 purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--no-save]
+             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"] [--no-save]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -105,19 +105,43 @@ from probe_desktop_query import (
 # Cache-file integrity + atomic staged-write/rollback primitives live in _abf so this module
 # stays under its line cap; re-exported here so callers and tests reach them via refresh_pbip_model.
 from _abf import (  # noqa: F401  # pylint: disable=unused-import
-    _CFBF_HEADER_BYTES,
-    _CFBF_MAGIC,
+    _ABF_BLOCK_MAGIC,
+    _ABF_MAX_BLOCK_BYTES,
+    _ABF_PREAMBLE,
     CompatRollbackError,
+    _abf_rejection_reason,
     _cache_committed,
     _cache_fingerprint,
     _cleanup_staging,
     _is_complete_abf,
     _restore_rollback_snapshot,
+    _snapshot_rollback_paths,
     _staged_image_write,
+    _staging_path,
+)
+
+# Per-model interprocess lock for the persist transaction, in its own module for the same reason;
+# re-exported so callers and tests reach it via refresh_pbip_model.
+from _lock import (  # noqa: F401  # pylint: disable=unused-import
+    ModelLockTimeout,
+    model_lock,
+)
+
+# The verdict/reporting layer lives in _verdict for the same line-cap reason as _abf and _lock;
+# re-exported here so callers and tests reach it via refresh_pbip_model.
+from _verdict import (  # noqa: F401  # pylint: disable=unused-import
+    _canary_tables,
+    _emit_data_verdict,
 )
 
 SAVE_SETTLE_SECONDS = 3
 SAVE_TIMEOUT_SECONDS = 120
+# How long a persist waits for a CONCURRENT persist of the same model to finish before giving up
+# (issue #114). A persist writes ~114 KB and takes seconds, so a live peer clears well within this;
+# the wait only bites a genuinely stuck LIVE holder (a dead holder's lock is reclaimed at once, never
+# waited on). On timeout `_persist_image` raises `ModelLockTimeout`, and `_refresh_and_save` degrades
+# to the UI Save - which does its own compatibility alignment - rather than forcing the #114 race.
+PERSIST_LOCK_TIMEOUT_SECONDS = 120.0
 # The XMLA refresh ceiling. NOT agent-tunable on purpose - there is no CLI flag for it.
 #
 # 300s is chosen from measurement, not intuition. A 246,236-row, 11-table refresh took 38.8s on a
@@ -470,7 +494,13 @@ def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
     return "unrecognizable response" in str(exc).lower()
 
 
-def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, write_image) -> tuple[bool, str]:
+def _persist_image(
+    cache_path: Path,
+    model_dir: Path | None,
+    live_level: int,
+    write_image,
+    lock_timeout: float = PERSIST_LOCK_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
     """Align compat, stage the cache write, swap atomically, and roll compat back UNLESS it committed.
 
     Pure-Python (no .NET), so the guarantees are unit-testable without a live AS instance.
@@ -479,10 +509,35 @@ def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, wr
     recognised as committed and the alignment KEPT - never rolled back under a freshly installed cache.
     When the write did NOT land, the alignment is restored atomically from the snapshot, every path is
     attempted, and a residual failure raises :class:`CompatRollbackError` (round-3 blocker 2).
+
+    The ENTIRE transaction (snapshot -> align -> write -> commit-or-rollback) runs under a per-model
+    interprocess lock (issue #114). Two runs against one model share BOTH the staging file (now given
+    a private per-run name) AND the provisional compatibility edit on ``database.tmdl``; a hostile
+    interleaving of the compat edit alone leaves the project declaring a level no present cache
+    matches. The lock serialises the whole transaction so no interleaving is possible; a dead holder's
+    lock is reclaimed rather than blocking forever, and a live holder that overruns ``lock_timeout``
+    surfaces as :class:`ModelLockTimeout` rather than an unbounded wait.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_path.with_name(cache_path.name + ".lock")
+    with model_lock(lock_path, timeout=lock_timeout):
+        return _persist_image_locked(cache_path, model_dir, live_level, write_image)
+
+
+def _persist_image_locked(cache_path: Path, model_dir: Path | None, live_level: int, write_image) -> tuple[bool, str]:
+    """The persist transaction itself, run while the per-model lock is held (see :func:`_persist_image`).
+
+    ``KeyboardInterrupt`` handling is the subtle part (issue #113 route 2). The commit-detection and
+    rollback below MUST run even when the write is interrupted, or a Ctrl+C during alignment/ImageSave
+    leaves ``database.tmdl`` bumped for a cache that was never written - the same brick, different
+    route. So the write is guarded with ``except BaseException`` (``KeyboardInterrupt`` is NOT an
+    ``Exception``), the interrupt is stashed in ``write_error``, and it is re-raised only AFTER a clean
+    rollback. If the rollback itself fails, :class:`CompatRollbackError` is raised INSTEAD (chained
+    from the interrupt): a bricked project matters more than a tidy Ctrl+C.
     """
     rollback_paths = _compat_rollback_paths(model_dir)
-    snapshot = {path: (path.read_bytes() if path.exists() else None) for path in rollback_paths}
-    staging = cache_path.with_name(cache_path.name + ".tmp")
+    snapshot = _snapshot_rollback_paths(rollback_paths)
+    staging = _staging_path(cache_path)
     before = _cache_fingerprint(cache_path)
     swapped = False
     write_error: BaseException | None = None
@@ -490,8 +545,8 @@ def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, wr
         aligned = _align_compatibility(model_dir, live_level)
         if aligned:
             print(f"  save   : {aligned}")
-        swapped = _staged_image_write(cache_path, write_image)
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught  # commit judged below by the filesystem
+        swapped = _staged_image_write(cache_path, write_image, staging)
+    except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught  # KeyboardInterrupt must NOT bypass rollback; commit judged below by the filesystem
         write_error = exc
 
     if swapped or _cache_committed(cache_path, staging, before):
@@ -510,10 +565,11 @@ def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, wr
             "compatibility rollback FAILED for "
             + ", ".join(str(path) for path in failures)
             + " - database.tmdl no longer matches the cache; restore it from source control before retrying"
-        )
+        ) from write_error
     if write_error is not None:
-        # A real write/replace failure with a CLEAN rollback: the project is consistent, so re-raise
-        # and let the caller fall back to the UI save (an ordinary ImageSave failure).
+        # A real write/replace failure OR an interrupt, WITH a clean rollback: the project is
+        # consistent again, so re-raise. For an interrupt this honours the Ctrl+C; for an ordinary
+        # ImageSave failure the caller falls back to the UI save.
         raise write_error
     return False, "ImageSave did not produce a complete cache file (compatibility alignment rolled back)"
 
@@ -887,11 +943,12 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
     """Row counts per canary table - the gate of record. Returns (results, implicit).
 
     A refresh that "succeeded" but returns no rows is not a refresh; only data proves the source was
-    reachable, the credential worked and the M was valid. With explicit `tables` (one canary per
-    distinct source), every source is asserted, so an all-non-zero result justifies a model-level
-    verdict. With no tables the first queryable table is probed and ``implicit`` is True - that is a
-    single-table probe, NOT a model-level guarantee: a static parameter/CSV table can return rows
-    while a live source never loaded. The caller downgrades the verdict wording accordingly.
+    reachable, the credential worked and the M was valid. With an explicit canary set (one per
+    distinct source), every source is asserted. With none, the first queryable table is probed and
+    ``implicit`` is True - that is a single-table probe, NOT a model-level guarantee: a static
+    parameter/CSV table can return rows while a live source never loaded. Whether an all-non-zero
+    result earns a MODEL-level verdict is not decided here: it also depends on whether the refresh
+    covered the whole database (see :func:`_emit_data_verdict`).
     """
     adomd_connection = _load_adomd()
     conn = adomd_connection(f"Data Source=localhost:{port}")
@@ -1060,9 +1117,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tables",
         nargs="*",
-        help="Tables to refresh AND the canary set to verify (default: whole database). Name one "
-        "table per distinct live source to earn a model-level DATA_OK; with none, only the first "
-        "queryable table is probed and the verdict is downgraded to name that single table",
+        help="Tables to REFRESH (default: the whole database). This narrows the refresh, so it can "
+        "never earn a model-level DATA_OK - name canaries with --canaries instead",
+    )
+    parser.add_argument(
+        "--canaries",
+        nargs="*",
+        help="Tables to VERIFY after the refresh, one per distinct live source. A whole-database "
+        "refresh whose canaries all return rows earns the model-level DATA_OK. Defaults to --tables "
+        "when only that is given; with neither, the first queryable table is probed and the verdict "
+        "is downgraded to name that single table",
     )
     parser.add_argument(
         "--save",
@@ -1085,65 +1149,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
     )
     return parser
-
-
-def _emit_data_verdict(
-    cache: Path | None,
-    before_stamp: float,
-    args: argparse.Namespace,
-    results: list[tuple[str, int]],
-    implicit: bool,
-) -> int:
-    """Print the data/cache lines and the machine-readable verdict; return the process exit code.
-
-    Split out of `main()` so the mutating path (identity gate + refresh + persist) and the reporting
-    path stay individually simple.
-    """
-    after_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
-    persisted = cache is not None and after_stamp > before_stamp
-
-    for table, rows in results:
-        print(f"  data   : {rows} row(s) in '{table}'")
-    # Say what HAPPENED, not where a file would go. Printing the path alone reads as "written" -
-    # it misled a reader on 2026-08-05 into believing a probe run had persisted a 1-row cache.
-    # For a probe that distinction matters twice over: a persisted 1-row `cache.abf` is a trap, and
-    # a cache whose compatibility level disagrees with the project's makes the PBIP unopenable (see
-    # `--no-save`; `image_save` prevents that by aligning `database.tmdl`).
-    if persisted:
-        print(f"  cache  : PERSISTED -> {cache}")
-    elif cache is None:
-        print("  cache  : not persisted (no cache path resolved)")
-    elif args.no_save:
-        print("  cache  : not persisted (--no-save; the project is byte-identical)")
-    else:
-        # Persisting was requested (the default) and nothing landed. Naming the wrong reason here
-        # sent me looking in the wrong place for ten minutes; the real one is on the 'save' line.
-        print("  cache  : not persisted (the write did not land - see 'save' above)")
-
-    empty = [table for table, rows in results if rows <= 0]
-    if empty:
-        print(f"REFRESH: NO_DATA (empty: {', '.join(empty)} - check the source and credentials)")
-        return 1
-    wanted_save = not args.no_save and not args.verify_only
-    if wanted_save and not persisted:
-        print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
-        return 1
-    suffix = " + PERSISTED" if wanted_save else ""
-    if implicit:
-        # No canaries were named, so only the first queryable table was probed. That is NOT a
-        # model-level guarantee (a static parameter/CSV table can pass while a live source never
-        # loaded), so the verdict names the single table actually probed instead of claiming DATA_OK.
-        only = results[0][0]
-        print(f"REFRESH: TABLE_OK '{only}'{suffix}")
-        print(
-            f"  note   : single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
-            "parameter/CSV table can return rows while a live source never loaded. Pass "
-            "--tables <one canary per live source> to certify every source (this mirrors the "
-            "powerbi-semantic-model-gotchas rule: prove a REAL read per live source)."
-        )
-        return 0
-    print(f"REFRESH: DATA_OK{suffix}")
-    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1181,7 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
         if outcome is not None:
             return outcome
 
-    results, implicit = row_counts(port, args.tables)
+    results, implicit = row_counts(port, _canary_tables(args))
     return _emit_data_verdict(cache, before_stamp, args, results, implicit)
 
 

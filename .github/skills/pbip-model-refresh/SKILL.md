@@ -40,7 +40,7 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 ## Run it
 
 ```
-python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
+python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
                                      [--no-save] [--verify-only] [--ui-save]
 ```
 
@@ -112,22 +112,32 @@ stay byte-identical.
 Read-only preflight (proves credentials + source reachability without changing anything):
 
 ```
-python scripts/probe_desktop_query.py [--pid <pbidesktop-pid>] [--tables "A" "B"]
+python scripts/probe_desktop_query.py [--pid <pbidesktop-pid>] [--canaries "A" "B"]
 ```
 
-**Name one canary table per distinct live source** with `--tables`. A model-level `DATA_OK` is only
+**Name one canary table per distinct live source** with `--canaries`. A model-level `DATA_OK` is only
 emitted when *every* named canary returns rows; with **no** table named, only the first queryable
 table is probed and the verdict is **downgraded** to `TABLE_OK '<table>'` — a static parameter/CSV
 table can return rows while a live source never loaded, so one arbitrary table can never certify the
 whole model. This mirrors the `powerbi-semantic-model-gotchas` rule: *prove a REAL read per live
-source*. `refresh_pbip_model.py` applies the same rule to its own data check (its `--tables` is both
-the refresh scope and the canary set).
+source*.
 
-Both print a machine-readable last line: `REFRESH: DATA_OK + PERSISTED` / `TABLE_OK '<table>'` /
-`NO_DATA` / `NOT_PERSISTED` / `WRONG_MODEL` / `ERROR <msg>`, and `PREFLIGHT: DATA_OK` /
-`TABLE_OK '<table>'` / `NO_DATA` / `ERROR`. Exit 0 is the good outcome — but it covers **both** a
-model verdict (`DATA_OK`) and a single-table verdict (`TABLE_OK`), so a gate that needs model-level
-certainty must require the literal `DATA_OK` (i.e. pass explicit canaries), not merely exit 0.
+⚠️ **`--canaries` verifies; `--tables` narrows the refresh. They are different knobs, on purpose.**
+They used to be one, and that built a trap: the only documented way to earn `DATA_OK` was to name
+tables in `--tables`, which simultaneously refreshed **only** those tables — certifying a *model*-level
+verdict over a *partially* refreshed model, i.e. the "next agent gets an empty model" failure this
+bundle exists to prevent, wearing a green badge. So `refresh_pbip_model.py` now emits
+`TABLES_OK '<a>', '<b>'` — never `DATA_OK` — whenever `--tables` narrowed the refresh, and
+`--canaries` verifies without narrowing anything. `--tables` alone still supplies the canary set (old
+callers keep a probe), it just can no longer certify the whole model. `probe_desktop_query.py` never
+refreshes, so there `--tables`/`--table` remain plain aliases for `--canaries`.
+
+Both print a machine-readable last line: `REFRESH: DATA_OK + PERSISTED` / `TABLES_OK '<a>', '<b>'` /
+`TABLE_OK '<table>'` / `NO_DATA` / `NOT_PERSISTED` / `WRONG_MODEL` / `ERROR <msg>`, and
+`PREFLIGHT: DATA_OK` / `TABLE_OK '<table>'` / `NO_DATA` / `ERROR`. Exit 0 is the good outcome — but it
+covers a model verdict (`DATA_OK`), a scoped verdict (`TABLES_OK`) **and** a single-table verdict
+(`TABLE_OK`), so a gate that needs model-level certainty must require the literal `DATA_OK` — which
+means running a **whole-model** refresh with explicit `--canaries`, not merely exit 0.
 
 ## Order matters, do not refresh before you finish editing
 
@@ -170,7 +180,7 @@ number you read back.
 
 | Path | What it is | Status |
 |---|---|---|
-| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless; staged to `cache.abf.tmp` and swapped in atomically, so a failed/partial write can't destroy an existing good cache. | **Default (opt out with `--no-save`)** |
+| **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless; staged to a per-run private file and swapped in atomically, so a failed/partial write (or a concurrent second run) can't destroy an existing good cache. | **Default (opt out with `--no-save`)** |
 | **UI Automation (`InvokePattern` on the "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Fallback / `--ui-save` |
 
 ⚠️ **Read the `--no-save` warning above before using either.** Both write the same `cache.abf`. A
@@ -193,11 +203,18 @@ Two traps:
 
 - The AMO client raises **"The server sent an unrecognizable response"** *while writing the file
   correctly*. Judge success by the FILE, never by the absence of an exception — but "the file" means a
-  **complete** ABF: only that specific benign response is tolerated, and the staged `cache.abf.tmp` is
-  swapped in only after its CFBF/OLE2 header **structure** validates against MS-CFB — the fixed header
-  fields, a whole-sector file length, and every referenced sector sitting inside the file, not merely
-  the 8-byte magic — so a truncated, sector-aligned or disk-full write is rejected instead of replacing
-  a good cache, and the check **fails closed** on any uncertainty. Any other exception propagates and
+  **complete** ABF: only that specific benign response is tolerated, and the staged file is swapped in
+  only after its **block chain** walks cleanly to EOF. A `cache.abf` is an Analysis Services backup,
+  **not** a Compound File / OLE2 container — an earlier round asserted CFBF and its check therefore
+  rejected 100% of real caches, silently disabling persist-by-default on every run. Measured across 13
+  real caches (17 KB → 60 MB, written by Desktop *and* by `ImageSave`): a 100-byte UTF-16LE
+  `"This backup was created using XPress9 compression."` preamble, a 2-byte pad, then blocks of
+  `uint32 uncompressed, uint32 lengthFromTheMagic, 4-byte magic 2A D7 86 4E, payload`, where the next
+  header sits at `offset + 8 + length` and the chain ends **exactly** at EOF. A truncated write leaves a
+  block claiming bytes past EOF; a write that stopped on a chunk boundary leaves a full-2 MiB *final*
+  block (every measured final block is smaller), so both are rejected instead of replacing a good cache.
+  The check **fails closed** on any uncertainty and **prints the reason** it refused — a predicate that
+  can only say "no" is how the CFBF mistake survived a whole review round. Any other exception propagates and
   the provisional compatibility-level alignment is rolled back; if that rollback cannot itself be
   completed the run **stops fatally** rather than falling through to the UI Save, because
   `database.tmdl` would otherwise ship declaring a level no cache was ever written at.

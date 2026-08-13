@@ -1,12 +1,13 @@
 """Cache-file integrity and atomic staged writes for ``refresh_pbip_model``.
 
-A persisted ``<Name>.SemanticModel/.pbi/cache.abf`` is an Analysis Services backup, i.e. a Microsoft
-Compound File Binary (OLE2/CFBF) container. This module holds the self-contained primitives that make
-persisting one SAFE (issue #113): proving a staged file is a COMPLETE CFBF container before it may
-replace a good cache, swapping it in atomically, and restoring a provisional compatibility alignment
-when the write does not land. ``refresh_pbip_model._persist_image`` orchestrates these with the
-compat/manifest policy layer, and every public name here is re-exported from ``refresh_pbip_model`` so
-callers and tests reach them through that module.
+A persisted ``<Name>.SemanticModel/.pbi/cache.abf`` is an Analysis Services backup: a UTF-16LE
+preamble followed by a chain of XPress9-compressed blocks (see ``_abf_rejection_reason`` for the
+measured layout). This module holds the self-contained primitives that make persisting one SAFE
+(issue #113): proving a staged file is a COMPLETE backup before it may replace a good cache, swapping
+it in atomically, and restoring a provisional compatibility alignment when the write does not land.
+``refresh_pbip_model._persist_image`` orchestrates these with the compat/manifest policy layer, and
+every public name here is re-exported from ``refresh_pbip_model`` so callers and tests reach them
+through that module.
 
 Extracted from ``refresh_pbip_model`` so that module stays under its line cap; nothing here depends on
 the rest of the bundle, only on ``os``/``struct``/``pathlib``.
@@ -16,95 +17,152 @@ from __future__ import annotations
 
 import os
 import struct
+import uuid
 from pathlib import Path
 
-# A persisted `cache.abf` is an Analysis Services backup = a Microsoft Compound File Binary
-# (OLE2/CFBF) container. `_is_complete_abf` validates the 512-byte CFBF header STRUCTURE (per MS-CFB),
-# not just the 8-byte magic: a torn write can keep the magic yet be rubble past it, and swapping that
-# over a good cache is the data loss #113 exists to prevent.
-_CFBF_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-_CFBF_HEADER_BYTES = 512
-_CFBF_BYTE_ORDER_LE = 0xFFFE  # header offset 28: little-endian mark; the only value CFBF permits
-_CFBF_MINI_SECTOR_SHIFT = 6  # header offset 32: fixed at 6 (64-byte mini sectors)
-# major version (offset 26) -> sector shift (offset 30): v3 = 512-byte sectors, v4 = 4096. No other pairing.
-_CFBF_VERSION_TO_SECTOR_SHIFT = {3: 9, 4: 12}
+# THE FORMAT, MEASURED - not assumed. An earlier round asserted a cache.abf was a Microsoft Compound
+# File Binary (OLE2/CFBF, magic `D0 CF 11 E0 ...`). It is NOT, and the cost of that guess was total:
+# `_is_complete_abf` returned False for every real cache, so the staged write NEVER swapped and
+# persist-by-default silently stopped working, falling back to the UI save on every single run.
+# Ground truth, from all 13 `cache.abf` files on this machine (17,478 B -> 60,688,851 B; 1 -> 47
+# blocks; written by Power BI Desktop AND by this script's own ImageSave):
+#
+#   0..99    UTF-16LE "This backup was created using XPress9 compression." (exactly 100 bytes)
+#   100..101 uint16 pad, 0 in all 13
+#   102..    block chain, each block: uint32 uncompressedBytes, uint32 blockBytes, 4-byte magic,
+#            then payload. `blockBytes` is measured FROM THE MAGIC, so the next block header starts
+#            at (headerOffset + 8 + blockBytes). The chain ends EXACTLY at EOF in all 13 files.
+_ABF_PREAMBLE = "This backup was created using XPress9 compression.".encode("utf-16-le")
+_ABF_FIRST_BLOCK_OFFSET = len(_ABF_PREAMBLE) + 2  # 100-byte preamble + the 2-byte pad
+_ABF_BLOCK_MAGIC = b"\x2a\xd7\x86\x4e"
+_ABF_BLOCK_HEADER_BYTES = 8 + len(_ABF_BLOCK_MAGIC)  # uint32 uncompressed + uint32 length + magic
+# Every one of the 60 NON-final blocks measured declares exactly 2 MiB uncompressed, and every one of
+# the 13 FINAL blocks declares less. So a file whose last block is a full 2 MiB is a write that
+# stopped on a block boundary with more to come - the one truncation a chain-walk alone cannot see.
+_ABF_MAX_BLOCK_BYTES = 2 * 1024 * 1024
 
 
-def _is_complete_abf(path: Path) -> bool:
-    """Is `path` a fully-written cache.abf, not a truncated or partial one?
+def _abf_rejection_reason(path: Path) -> str | None:
+    """Why `path` is not a complete cache.abf, or ``None`` when it is one.
 
-    A cache.abf is an Analysis Services backup, i.e. a Microsoft Compound File Binary (OLE2/CFBF)
-    container, so this validates the 512-byte CFBF header STRUCTURE against MS-CFB - not merely the
-    8-byte magic. A torn write keeps the magic and the first-written header fields yet loses the
-    sectors they point at, becoming rubble past the header; checking the fixed fields, whole-sector
-    length, and that every referenced sector is inside the file catches that (#113).
+    Walks the block chain described above and requires it to land EXACTLY on EOF. That is what makes
+    a partial write detectable: a torn write leaves a block header whose declared length runs past
+    the end of the file, and only a complete file consumes itself precisely.
+
+    Returns the reason rather than a bare bool so a rejection is DIAGNOSABLE. The CFBF bug above was
+    invisible for a whole round precisely because the predicate could only say "no"; a caller that
+    prints "preamble mismatch (got 54 00 68 00 ...)" names the defect in one run.
 
     **Fails CLOSED on any uncertainty:** rejecting a valid cache only routes the save to the slower
-    UI-Automation fallback, while accepting a truncated one destroys the existing cache.
+    UI-Automation fallback (and now says why), while accepting a truncated one destroys the existing
+    cache. The one known false reject that policy buys is an image whose uncompressed size is an exact
+    multiple of 2 MiB, whose final block would then be full-sized; none of the 13 measured files is
+    such a file, and the cost if one appears is the fallback, not data loss.
     """
     try:
         size = path.stat().st_size
         with path.open("rb") as handle:
-            header = handle.read(_CFBF_HEADER_BYTES)
-    except OSError:
-        return False
-    if size < _CFBF_HEADER_BYTES or len(header) < _CFBF_HEADER_BYTES or header[: len(_CFBF_MAGIC)] != _CFBF_MAGIC:
-        return False
-    try:
-        major = struct.unpack_from("<H", header, 26)[0]
-        byte_order = struct.unpack_from("<H", header, 28)[0]
-        sector_shift = struct.unpack_from("<H", header, 30)[0]
-        mini_shift = struct.unpack_from("<H", header, 32)[0]
-        num_fat = struct.unpack_from("<I", header, 44)[0]
-        first_dir = struct.unpack_from("<I", header, 48)[0]
-        difat = struct.unpack_from("<109I", header, 76)
-    except struct.error:
-        return False
-    if (
-        byte_order != _CFBF_BYTE_ORDER_LE
-        or mini_shift != _CFBF_MINI_SECTOR_SHIFT
-        or _CFBF_VERSION_TO_SECTOR_SHIFT.get(major) != sector_shift
-    ):
-        return False
-    sector_size = 1 << sector_shift
-    # A complete container is a whole number of sectors and holds at least the header plus one
-    # referenced sector; a non-aligned length or a header-only file is a torn write (rejects the
-    # 600-byte and sector-aligned truncations). Every referenced sector must sit inside the file -
-    # a truncation keeps these header indices but loses the sectors they name (now past EOF), and
-    # num_fat must be 1..109 (a cache.abf never needs the 0 or DIFAT-sector cases we do not walk).
-    if size % sector_size != 0 or size < 2 * sector_size:
-        return False
-    total_sectors = size // sector_size - 1
-    return (
-        1 <= num_fat <= len(difat)
-        and first_dir < total_sectors
-        and all(entry < total_sectors for entry in difat[:num_fat])
-    )
+            preamble = handle.read(len(_ABF_PREAMBLE))
+            if preamble != _ABF_PREAMBLE:
+                return f"not an AS backup preamble (first {len(preamble)} byte(s): {preamble[:16].hex(' ')})"
+            return _walk_abf_blocks(handle, size)
+    except OSError as exc:
+        return f"unreadable ({type(exc).__name__})"
 
 
-def _staged_image_write(cache_path: Path, write_image) -> bool:
+def _abf_block_header_problem(header: bytes, ordinal: int, offset: int, size: int) -> str | None:
+    """Why this block header is not well formed, or None. Split out to keep the chain walk flat."""
+    if len(header) < _ABF_BLOCK_HEADER_BYTES:
+        return f"truncated inside block {ordinal}'s header at offset {offset} (size {size})"
+    if header[8:] != _ABF_BLOCK_MAGIC:
+        return f"block {ordinal} at offset {offset} has magic {header[8:].hex(' ')}, not an AS block"
+    uncompressed, length = struct.unpack_from("<II", header, 0)
+    if not 0 < uncompressed <= _ABF_MAX_BLOCK_BYTES:
+        return f"block {ordinal} declares {uncompressed} uncompressed byte(s) (max {_ABF_MAX_BLOCK_BYTES})"
+    if length <= len(_ABF_BLOCK_MAGIC):
+        return f"block {ordinal} declares {length} byte(s), too short to hold any payload"
+    return None
+
+
+def _walk_abf_blocks(handle, size: int) -> str | None:
+    """Walk the XPress9 block chain from the first header; return a reason string, or None if intact."""
+    offset = _ABF_FIRST_BLOCK_OFFSET
+    blocks = 0
+    while True:
+        handle.seek(offset)
+        header = handle.read(_ABF_BLOCK_HEADER_BYTES)
+        problem = _abf_block_header_problem(header, blocks + 1, offset, size)
+        if problem is not None:
+            return problem
+        uncompressed, length = struct.unpack_from("<II", header, 0)
+        blocks += 1
+        end = offset + 8 + length
+        if end > size:
+            return f"block {blocks} needs {end} byte(s) but the file is {size} - truncated write"
+        if end < size:
+            offset = end
+            continue
+        if uncompressed == _ABF_MAX_BLOCK_BYTES:
+            return f"ends on a full {_ABF_MAX_BLOCK_BYTES}-byte block boundary after {blocks} block(s) - more was due"
+        return None
+
+
+def _is_complete_abf(path: Path) -> bool:
+    """Is `path` a fully-written cache.abf, not a truncated or partial one? See `_abf_rejection_reason`."""
+    return _abf_rejection_reason(path) is None
+
+
+def _staging_path(cache_path: Path) -> Path:
+    """A per-run staging filename, unique across concurrent runs against the SAME cache (issue #114).
+
+    Every run used to stage to one fixed ``cache.abf.tmp``. Two runs against a single model then
+    shared that path, and :func:`_staged_image_write`'s own ``if staging.exists(): unlink`` (below)
+    would delete the OTHER run's in-flight staging file. The victim run, seeing its staging gone,
+    concludes it did not commit and rolls its compatibility bump back UNDER the other run's freshly
+    written cache - leaving ``database.tmdl`` declaring a level no present cache matches, the #114
+    brick. Tagging the name with the PID and a random token makes each run's staging private, so no
+    run can disturb another's. That is necessary but NOT sufficient: the compatibility edit on
+    ``database.tmdl`` is also shared, so the whole transaction is additionally serialised by the
+    per-model lock in ``_lock``. Both defences are needed.
+    """
+    return cache_path.with_name(f"{cache_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
+
+
+def _staged_image_write(cache_path: Path, write_image, staging: Path | None = None) -> bool:
     """Write the cache to a staging file and swap it in atomically. Returns True only on a COMPLETE write.
 
     `FileMode.Create` on the live `cache.abf` truncates a good cache the instant the write begins, so
     an ImageSave that then fails half way leaves the project WORSE than before -- no fresh cache and
-    no old one. Staging to `cache.abf.tmp` and only `os.replace`-ing it over the original once it is a
-    COMPLETE backup means a failed or partial write cannot destroy an existing good cache. Two rules
-    make "complete" mean what it says (#113): `write_image` is expected NOT to raise (`image_save`
-    absorbs the one benign AMO error and re-raises everything else), so any exception reaching here --
-    including from `os.replace` -- is a REAL failure that PROPAGATES after the staging file is removed,
-    letting the caller roll the compatibility bump back; and even on a clean return the staged file
-    must look like a backup (`_is_complete_abf`) before it is swapped in.
+    no old one. Staging to a PER-RUN file (`_staging_path`, unique per process so concurrent runs
+    cannot delete each other's -- issue #114) and only `os.replace`-ing it over the original once it
+    is a COMPLETE backup means a failed or partial write cannot destroy an existing good cache. Two
+    rules make "complete" mean what it says (#113): `write_image` is expected NOT to raise
+    (`image_save` absorbs the one benign AMO error and re-raises everything else), so any exception
+    reaching here -- including from `os.replace` -- is a REAL failure that PROPAGATES after the
+    staging file is removed, letting the caller roll the compatibility bump back; and even on a clean
+    return the staged file must look like a backup (`_is_complete_abf`) before it is swapped in.
+
+    `_persist_image` generates the unique `staging` once and passes it in, so the same path is used
+    for the write, the filesystem-based commit check, and cleanup; a direct caller may omit it and a
+    private one is generated.
+
+    A staged file that is REJECTED is announced, not swallowed. A silent "did not swap" is how a
+    wrong acceptance predicate hid for a whole review round while persist-by-default was dead.
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    staging = cache_path.with_name(cache_path.name + ".tmp")
+    if staging is None:
+        staging = _staging_path(cache_path)
     if staging.exists():
         staging.unlink()
     swapped = False
     try:
         write_image(staging)
-        if _is_complete_abf(staging):
+        reason = _abf_rejection_reason(staging)
+        if reason is None:
             os.replace(staging, cache_path)
             swapped = True
+        else:
+            print(f"  save   : staged cache REJECTED - {reason}")
     finally:
         # Never leave a partial cache.abf.tmp behind. `finally` does not suppress the exception, so a
         # real write/replace error still propagates to _persist_image, which rolls the compat back.
@@ -153,14 +211,35 @@ def _cleanup_staging(staging: Path) -> None:
         pass
 
 
-def _restore_rollback_snapshot(snapshot: dict[Path, bytes | None]) -> list[Path]:
+def _snapshot_rollback_paths(paths: list[Path]) -> dict[Path, tuple[bytes, int, int] | None]:
+    """Capture each path's CONTENT **and TIMESTAMPS**, or ``None`` where the file does not exist yet.
+
+    The timestamps are not tidiness. Power BI Desktop discards a ``cache.abf`` that is OLDER than the
+    model definition beside it (SKILL.md: "NO_DATA despite a 113 KB cache sitting right there"). A
+    rollback that rewrites ``database.tmdl`` byte-for-byte but with a fresh mtime therefore leaves the
+    definition NEWER than the good cache the failed persist was supposed to protect - silently arming
+    the very cache-discard the bundle exists to prevent, while every byte-level check says "unchanged".
+    """
+    snapshot: dict[Path, tuple[bytes, int, int] | None] = {}
+    for path in paths:
+        try:
+            stat = path.stat()
+            snapshot[path] = (path.read_bytes(), stat.st_atime_ns, stat.st_mtime_ns)
+        except OSError:
+            snapshot[path] = None
+    return snapshot
+
+
+def _restore_rollback_snapshot(snapshot: dict[Path, tuple[bytes, int, int] | None]) -> list[Path]:
     """Restore each snapshotted path to its pre-alignment state ATOMICALLY. Returns the FAILED paths.
 
-    Three properties the round-2 version lacked (round-3 blocker 2): **atomic** (via a sibling
+    Four properties (round-3 blocker 2, plus round-4's mtime finding): **atomic** (via a sibling
     ``.rollback.tmp`` + ``os.replace``, so a crash mid-restore cannot itself tear ``database.tmdl``);
-    **all paths attempted** (the old loop raised on the first failure, leaving a subset reverted); and
+    **all paths attempted** (the old loop raised on the first failure, leaving a subset reverted);
     **failures reported, not swallowed** (the returned list lets the caller treat a residual failure
-    as FATAL rather than pretend success).
+    as FATAL rather than pretend success); and **timestamps restored too**, so "unchanged" means
+    unchanged to Desktop's cache-freshness comparison as well as to a byte diff
+    (see :func:`_snapshot_rollback_paths`).
     """
     failures: list[Path] = []
     for path, original in snapshot.items():
@@ -169,16 +248,17 @@ def _restore_rollback_snapshot(snapshot: dict[Path, bytes | None]) -> list[Path]
                 if path.exists():
                     path.unlink()
                 continue
-            if path.exists() and path.read_bytes() == original:
-                continue
-            tmp = path.with_name(path.name + ".rollback.tmp")
-            try:
-                tmp.write_bytes(original)
-                os.replace(tmp, path)
-            finally:
-                # A failed os.replace leaves the staging copy behind; never litter the model folder.
-                if tmp.exists():
-                    tmp.unlink()
+            content, atime_ns, mtime_ns = original
+            if not path.exists() or path.read_bytes() != content:
+                tmp = path.with_name(path.name + ".rollback.tmp")
+                try:
+                    tmp.write_bytes(content)
+                    os.replace(tmp, path)
+                finally:
+                    # A failed os.replace leaves the staging copy behind; never litter the model folder.
+                    if tmp.exists():
+                        tmp.unlink()
+            os.utime(path, ns=(atime_ns, mtime_ns))
         except OSError:
             failures.append(path)
     return failures
