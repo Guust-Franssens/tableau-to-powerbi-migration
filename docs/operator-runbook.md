@@ -234,7 +234,7 @@ Smoke-test it **the day before**, in this order — each is cheap and each prove
 
 ```powershell
 # 1. our tier reads .env and reaches the Metadata API (read-only, downloads nothing)
-python scripts\tableau_lineage.py --plan --env .env --save-json _assessment\lineage.json
+python scripts\tableau_lineage.py --plan --env .env --survey _assessment\estate_survey.json --save-json _assessment\lineage.json
 
 # 2. the ENGINE's own auth path, which is a different code path — see §4.1
 python <engine>\skills\tableau-migration\scripts\estate_survey.py `
@@ -361,7 +361,7 @@ convention — see §7 for which ones actually are.
 |---|---|---|---|
 | 1 | `python <engine>/…/estate_survey.py --server <host> --site <site> --pat-name <name> --env-file .env --no-prompt --json _assessment/estate_survey.json` | ⚠️ ~32 s | REST dependency ground truth |
 | 2 | `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` | ⚠️ ~34 s | `report.md`, `assessment.json`, `estate.db` |
-| 3 | `python scripts/tableau_lineage.py --plan` | seconds | model-first order — **read it against step 1, see below** |
+| 3 | `python scripts/tableau_lineage.py --plan --survey _assessment/estate_survey.json` | seconds | model-first order — **survey edges override the Metadata API** |
 | 4 | `python scripts/harvest_estate_assets.py --out _sweep` | ✅ **120 s / 55 assets** | `_sweep/assets/*`, `parse-sweep.md` |
 | 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s) | `_bundle/` |
 | 6 | `python scripts/deploy_estate.py --bundle _bundle --workspace <workspace-id> --tenant <tenant-id> --estate-db _assessment/estate.db --journal _bundle/deploy-journal.jsonl` | ⚠️ **~25 s per item** — budget 30 min for 75 items | items in the landing zone |
@@ -450,17 +450,18 @@ then drift. That is the whole reason this step exists.
 > | | says |
 > |---|---|
 > | step 1 (`estate_survey.py`, REST) | *38 workbooks; **10** depend on a published datasource; **11** datasources must be fetched first* — with explicit edges |
-> | step 3 (`tableau_lineage.py --plan`, GraphQL) | *17 published data sources feed **1** workbook. **12** have **NO downstream workbooks** … **these may be abandoned***|
+> | step 3 without `--survey` (`tableau_lineage.py --plan`, GraphQL only) | *17 published data sources feed **1** workbook* and warns that sources with no consumers have **no downstream usage VISIBLE TO THE METADATA API** — **not** evidence they are unused |
 >
-> Every certified source the survey proves is a **hard dependency** was listed as possibly abandoned.
-> Acting on that at §3.1 means telling the customer their live sources are dead and migrating the
-> consumers first — which is exactly the ordering that produces **empty reports**.
+> Every certified source the survey proves is a **hard dependency** is unknown on the no-survey path.
+> Treating that as abandoned at §3.1 means telling the customer their live sources are dead and
+> migrating the consumers first — which is exactly the ordering that produces **empty reports**.
 >
-> **Read "no downstream workbooks" as "no downstream usage visible to the Metadata API"**, which is
-> all the tool can support. ✅ verified 2026-08-13: `tableau_lineage.py --help` has **no `--survey`
-> flag**, so there is currently no way to hand it step 1's ground truth — issue #126 tracks adding
-> one and softening the wording. If your build offers `--survey`, pass it; until then, do the
-> comparison by eye and trust `_assessment/estate_survey.json`.
+> **Always pass the survey.** ✅ verified 2026-08-13 against `tableau_lineage.py --help`:
+> `--survey SURVEY` is `estate_survey.py --json output. Its dependency edges OVERRIDE the Metadata
+> API's, which is blind to 'sqlproxy' connections. Without this the plan is known-incomplete.`
+> Issue #126 is closed by #138. Without `--survey`, read every "no downstream usage VISIBLE TO THE
+> METADATA API" line as unknown, never as unused; with `--survey`, the REST-derived dependency edges
+> from step 1 are fed into the plan directly.
 
 ### Step 4 — harvest
 
