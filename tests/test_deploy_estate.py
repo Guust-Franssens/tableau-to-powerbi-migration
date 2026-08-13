@@ -45,7 +45,15 @@ def _bundle(tmp_path: Path, workbooks: dict[str, bool]) -> Path:
 
 
 def _options(**kwargs) -> argparse.Namespace:
-    defaults = {"dry_run": False, "force_unlock": False, "journal": None, "estate_db": None, "no_folders": False}
+    defaults = {
+        "dry_run": False,
+        "force_unlock": False,
+        "journal": None,
+        "estate_db": None,
+        "no_folders": False,
+        "skip": [],
+        "skip_empty_models": False,
+    }
     return argparse.Namespace(**{**defaults, **kwargs})
 
 
@@ -1613,3 +1621,328 @@ def test_a_quote_in_a_workspace_name_is_escaped_rather_than_breaking_the_value()
     assert de._conn_value("plain") == '"plain"'
     assert de._conn_value('has "quote"') == "'has \"quote\"'"
     assert de._conn_value("both \" and '") == '"both "" and \'"'
+
+
+# --- issue #127: withholding a unit on purpose, and the duplicate-name claim beside it ------------
+#
+# S6: `check_empty_model.py` can prove a model would load ZERO ROWS and the runbook says "never
+# deploy it" - but there was no flag to not deploy it, so a cold operator derived a folder-move
+# workaround by reading the source. These tests are the supported action.
+
+
+def _import_partition(model: Path, path: str) -> None:
+    """Give a model an Import partition over a local file, the shape check_empty_model.py judges.
+
+    A POSIX absolute path is deliberate: it reads as `foreign_path` on Windows and `missing_file` on
+    Linux, and BOTH block - so the fixture is EMPTY on either CI host rather than on one of them.
+    It is also the shape the real finding had (a Mac-authored workbook's `/Users/...` path).
+    """
+    tables = model / "definition" / "tables"
+    tables.mkdir(parents=True, exist_ok=True)
+    (tables / "Orders.tmdl").write_text(
+        "table Orders\n\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet\n"
+        f'\t\t\t    Source = Excel.Workbook(File.Contents("{path}"), null, true)\n'
+        "\t\t\tin\n"
+        "\t\t\t    Source\n",
+        encoding="utf-8",
+    )
+
+
+def _empty_model_report(bundle: Path, models: list[tuple[str, str]], *, roots: bool = False) -> Path:
+    """Write a check_empty_model.py-shaped report from [(model_path, status)]."""
+    payload: dict = {
+        "version": 1,
+        "models_scanned": len(models),
+        "models_empty": sum(1 for _p, status in models if status == "EMPTY"),
+        "status": "EMPTY_MODELS" if any(status == "EMPTY" for _p, status in models) else "OK",
+        "models": [
+            {
+                "model": Path(path).name,
+                "model_path": path,
+                "owner": Path(path).parts[1] if len(Path(path).parts) > 1 else "?",
+                "status": status,
+                "findings": [{"table": "Orders", "partition": "Orders", "detail": "file does not exist"}]
+                if status == "EMPTY"
+                else [],
+            }
+            for path, status in models
+        ],
+    }
+    out = bundle / de.EMPTY_MODEL_REPORT
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"version": 1, "roots": [payload]} if roots else payload, indent=2), encoding="utf-8")
+    return out
+
+
+def test_a_named_unit_is_withheld_from_a_real_deploy(tmp_path, caplog):
+    """The whole point: deploy the other units NOW and leave this one behind, with no folder-moving.
+
+    Run end-to-end rather than against `withhold()` alone: `_execute` used to re-`discover()` the
+    bundle after the filtering had happened, so a unit-level test would have passed while every
+    withheld unit was deployed anyway.
+    """
+    bundle = _bundle(tmp_path / "b", {"Sales": True, "Empty": True})
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        with caplog.at_level("INFO"):
+            code = _deploy_into(bundle, service, tmp_path / "j.jsonl", skip=["Empty"])
+    finally:
+        importlib.reload(de)
+
+    assert {(row["displayName"], row["type"]) for row in service.items} == {
+        ("Sales", de.MODEL_TYPE),
+        ("Sales", de.REPORT_TYPE),
+    }, f"nothing may be created for a withheld unit: {service.items}"
+    assert code == de.EXIT_INCOMPLETE
+    assert "2 planned (2 new)" in caplog.text, "preflight budgets the run that will happen, not the bundle"
+    assert "WITHHELD" in caplog.text and "Empty" in caplog.text
+
+
+def test_a_withheld_unit_is_not_counted_as_deployed(tmp_path, caplog):
+    """ "All 4 deployed" over an estate that is missing one unit is the lie this exists to prevent."""
+    bundle = _bundle(tmp_path / "b", {"Sales": True, "Empty": True})
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        with caplog.at_level("INFO"):
+            _deploy_into(bundle, service, tmp_path / "j.jsonl", skip=["Empty"])
+    finally:
+        importlib.reload(de)
+
+    assert "2 item(s) deployed" in caplog.text
+    assert "all 4" not in caplog.text and "4 item(s) deployed" not in caplog.text
+    assert "1 unit(s), 2 item(s) NOT deployed" in caplog.text, caplog.text
+
+
+def test_the_exit_code_says_incomplete_rather_than_ok_or_failed():
+    """Deliberate: EXIT_OK would claim a complete estate, EXIT_FAILED would ask for a pointless re-run."""
+    held = [("Empty", 2, "EMPTY MODEL - loads no rows")]
+    assert de.EXIT_INCOMPLETE not in (de.EXIT_OK, de.EXIT_FAILED)
+    assert de._report_failures([], 2, "LZ", 0, held) == de.EXIT_INCOMPLETE
+    assert de._report_failures([], 2, "LZ", 0, []) == de.EXIT_OK
+    # A failure outranks a skip: it is the verdict that wants this exact command run again.
+    assert de._report_failures(["Sales (Report): boom"], 2, "LZ", 0, held) == de.EXIT_FAILED
+
+
+def test_a_failed_run_still_names_the_units_it_withheld(caplog):
+    """Two things went wrong; reporting only the louder one hides the estate's real shape."""
+    with caplog.at_level("INFO"):
+        de._report_failures(["Sales (Report): boom"], 2, "LZ", 0, [("Empty", 2, "EMPTY MODEL - no rows")])
+    assert "1 item(s) failed" in caplog.text
+    assert "WITHHELD" in caplog.text and "Empty" in caplog.text
+
+
+def test_an_empty_report_is_still_exit_zero_and_a_withheld_unit_is_not():
+    """The two skips are different: an empty report has no item to create and no follow-up run owed."""
+    assert de._report_failures([], 2, "LZ", skipped=1) == de.EXIT_OK
+    assert de._report_failures([], 2, "LZ", 1, [("Empty", 1, "why")]) == de.EXIT_INCOMPLETE
+
+
+def test_the_withheld_item_count_matches_what_would_have_been_created(tmp_path):
+    """The count is what an operator reconciles against the dry run, so a pair is 2 and a model is 1."""
+    bundle = _bundle(tmp_path, {"Pair": True, "ModelOnly": False})
+    kept, held = de.withhold(de.discover(bundle), {"Pair": "why-a", "ModelOnly": "why-b"})
+
+    assert kept == []
+    assert sorted(held) == [("ModelOnly", 1, "why-b"), ("Pair", 2, "why-a")]
+
+
+def test_a_mistyped_skip_refuses_to_start_rather_than_deploying_the_unit(tmp_path, caplog):
+    """A typo would deploy the very unit being held back, and report success while doing it."""
+    bundle = _bundle(tmp_path / "b", {"global_superstores_db": True})
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        with caplog.at_level("ERROR"):
+            code = _deploy_into(bundle, service, tmp_path / "j.jsonl", skip=["global_superstore_db"])
+    finally:
+        importlib.reload(de)
+
+    assert code == de.EXIT_PREFLIGHT
+    assert service.items == [], "a refused skip must not deploy anything at all"
+    assert "matches no unit" in caplog.text
+    assert "'global_superstores_db'" in caplog.text, "name the near miss - this is typed under pressure"
+
+
+def test_skip_empty_models_reads_the_report_so_no_name_is_retyped(tmp_path, caplog):
+    """The operator has a verdict in hand already; retyping unit names from it is where slips happen."""
+    bundle = _bundle(tmp_path / "b", {"Sales": True, "global_superstores_db": True})
+    _empty_model_report(
+        bundle,
+        [
+            ("pbip/Sales/Sales.SemanticModel", "OK"),
+            ("pbip/global_superstores_db/Orders (Global Superstore).SemanticModel", "EMPTY"),
+        ],
+    )
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        with caplog.at_level("INFO"):
+            code = _deploy_into(bundle, service, tmp_path / "j.jsonl", skip_empty_models=True)
+    finally:
+        importlib.reload(de)
+
+    assert code == de.EXIT_INCOMPLETE
+    assert {row["displayName"] for row in service.items} == {"Sales"}
+    assert "EMPTY MODEL" in caplog.text and "file does not exist" in caplog.text
+
+
+def test_a_missing_empty_model_report_refuses_rather_than_reading_it_as_nothing_is_empty(tmp_path):
+    """ "I could not read the list" and "the list is empty" differ by exactly the unit at stake."""
+    bundle = _bundle(tmp_path / "b", {"Sales": False})
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        code = _deploy_into(bundle, service, tmp_path / "j.jsonl", skip_empty_models=True)
+    finally:
+        importlib.reload(de)
+
+    assert code == de.EXIT_PREFLIGHT
+    assert service.items == []
+
+
+def test_an_unreadable_empty_model_report_is_refused_too(tmp_path):
+    """A torn or half-written report is the same unknown, and must not read as an all-clear."""
+    bundle = _bundle(tmp_path, {"Sales": False})
+    (bundle / de.EMPTY_MODEL_REPORT).write_text('{"models": [', encoding="utf-8")
+
+    skips, refusal = de.resolve_skips(bundle, {"Sales"}, _options(skip_empty_models=True))
+
+    assert skips == {}
+    assert refusal and "could not be read" in refusal
+
+
+def test_the_multi_target_form_of_the_report_is_understood(tmp_path):
+    """check_empty_model.py wraps several scanned roots in `roots`; missing that skips nothing."""
+    bundle = _bundle(tmp_path, {"Sales": False, "Empty": False})
+    _empty_model_report(bundle, [("pbip/Empty/Empty.SemanticModel", "EMPTY")], roots=True)
+
+    skips, refusal = de.resolve_skips(bundle, {"Sales", "Empty"}, _options(skip_empty_models=True))
+
+    assert refusal == ""
+    assert set(skips) == {"Empty"}
+
+
+def test_only_pbip_models_can_be_withheld(tmp_path):
+    """The engine's pristine `semantic_models/` copy is not a deployable unit, and is not a typo either.
+
+    A bundle scan reports every `.SemanticModel` under the bundle, so the same datasource shows up
+    twice when it was migrated both standalone and inside a workbook. Taking the unit name from any
+    path but `pbip/<unit>/` withholds a HEALTHY workbook because its non-deployable twin is empty -
+    the exact inverse of this flag's job.
+    """
+    bundle = _bundle(tmp_path, {"Sales": False})
+    _empty_model_report(
+        bundle,
+        [
+            ("semantic_models/Shared.SemanticModel", "EMPTY"),
+            ("semantic_models/Sales/Sales.SemanticModel", "EMPTY"),
+            ("pbip/Sales/Sales.SemanticModel", "OK"),
+        ],
+    )
+
+    skips, refusal = de.resolve_skips(bundle, {"Sales"}, _options(skip_empty_models=True))
+
+    assert refusal == ""
+    assert skips == {}, "only pbip/<unit>/ is deployable, so only pbip/<unit>/ can be withheld"
+
+
+def test_a_reported_unit_that_is_not_in_the_bundle_is_a_warning_not_a_refusal(tmp_path, caplog):
+    """It was already quarantined by hand, or the report scanned another bundle - nothing to withhold."""
+    bundle = _bundle(tmp_path, {"Sales": False})
+    _empty_model_report(bundle, [("pbip/Ghost/Ghost.SemanticModel", "EMPTY")])
+
+    with caplog.at_level("WARNING"):
+        skips, refusal = de.resolve_skips(bundle, {"Sales"}, _options(skip_empty_models=True))
+
+    assert (skips, refusal) == ({}, "")
+    assert "Ghost" in caplog.text and "nothing to skip" in caplog.text
+
+
+def test_an_explicit_skip_that_is_also_empty_keeps_the_more_informative_reason(tmp_path):
+    """ "You asked for it" says less than the artifact that proves the model empty."""
+    bundle = _bundle(tmp_path, {"Empty": False})
+    _empty_model_report(bundle, [("pbip/Empty/Empty.SemanticModel", "EMPTY")])
+
+    skips, _refusal = de.resolve_skips(bundle, {"Empty"}, _options(skip=["Empty"], skip_empty_models=True))
+
+    assert "EMPTY MODEL" in skips["Empty"]
+
+
+def test_the_dry_run_item_count_drops_by_the_withheld_unit(tmp_path, caplog):
+    """The operator's confirmation signal, and it must stay exit 0 so `--dry-run` can gate the real run."""
+    bundle = _bundle(tmp_path / "b", {"Sales": True, "Empty": True})
+    service = _FakeFabric()
+    de.call = service.call
+    try:
+        with caplog.at_level("INFO"):
+            code = _deploy_into(bundle, service, tmp_path / "j.jsonl", skip=["Empty"], dry_run=True)
+    finally:
+        importlib.reload(de)
+
+    assert code == de.EXIT_OK, "a dry run creates nothing, so there is no incomplete estate to report"
+    assert "2 item(s) would be created" in caplog.text
+    assert "WITHHELD" in caplog.text
+    assert service.items == []
+
+
+def test_the_report_this_flag_reads_is_the_one_check_empty_model_writes(tmp_path):
+    """A contract test across the two scripts: the filename AND the shape, not one or the other.
+
+    Hand-rolled fixtures elsewhere in this file pin the parsing; this pins that the parsing is aimed
+    at a real report. `check_empty_model.py` produces it here from actual TMDL rather than from a
+    dict we wrote ourselves.
+    """
+    import check_empty_model as cem  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    bundle = _bundle(tmp_path, {"Sales": True, "global_superstores_db": True})
+    _import_partition(
+        bundle / "pbip" / "global_superstores_db" / "global_superstores_db.SemanticModel",
+        "/Users/bs/Mac Drive/Global Superstore.xlsx",
+    )
+    assert de.EMPTY_MODEL_REPORT == cem.REPORT_NAME, "the file this reads is the file that one writes"
+    report = cem.scan(bundle)
+    assert report["status"] == "EMPTY_MODELS", "precondition: the fixture really is an empty model"
+    (bundle / de.EMPTY_MODEL_REPORT).write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    units, refusal = de.empty_model_units(bundle)
+
+    assert refusal == ""
+    assert set(units) == {"global_superstores_db"}
+
+
+def test_the_skip_flags_reach_deploy_and_repeat(monkeypatch, tmp_path):
+    """The issue was "there is no flag", so pin the flag: repeatable, and inert when not passed."""
+    seen: dict[str, argparse.Namespace] = {}
+    monkeypatch.setattr(de, "token", lambda tenant: "tok")
+    monkeypatch.setattr(de, "deploy", lambda bundle, ws, tok, options: seen.setdefault("o", options) and 0)
+
+    de.main(["--bundle", str(tmp_path), "--workspace", "ws", "--skip", "A", "--skip", "B", "--skip-empty-models"])
+    assert (seen["o"].skip, seen["o"].skip_empty_models) == (["A", "B"], True)
+
+    seen.clear()
+    de.main(["--bundle", str(tmp_path), "--workspace", "ws"])
+    assert (seen["o"].skip, seen["o"].skip_empty_models) == ([], False), "a run that skips nothing is unchanged"
+
+
+def test_neither_duplicate_name_error_is_treated_as_fatal(tmp_path, monkeypatch):
+    """S9: the module docstring settles what the service does, and this pins what the code does.
+
+    Fabric's REST Create Item does NOT reject a duplicate `displayName` + type for `Report` /
+    `SemanticModel` (measured; see the module docstring). These two error codes have never been seen
+    for these types, and the branch that handles them is DEFENSIVE - `ItemDisplayNameNotAvailableYet`
+    is the language of eventual consistency, so treating it as fatal would break the resume this file
+    exists for. Neither may become a failure.
+    """
+    item = de.Item("WB", de.MODEL_TYPE, tmp_path)
+    journal = de.Journal(tmp_path / "j.jsonl", "ws")
+    for code in ("ItemDisplayNameNotAvailableYet", "ItemDisplayNameAlreadyInUse"):
+        monkeypatch.setattr(de, "_post_item", lambda ws, tok, it, code=code: (400, {}, {"errorCode": code}))
+        state, item_id, detail = de.create_item("ws", "tok", item, journal)
+        assert (state, item_id) == ("AlreadyExists", None), f"{code} must mean 'go and verify', not 'failed'"
+        assert code in detail
