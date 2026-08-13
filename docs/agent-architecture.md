@@ -361,6 +361,12 @@ back in a persona.
    were extracted from the personas. Note `copilot plugin install` fails with `Access is denied`
    while a Copilot session is running, so installs are a **between-sessions** step.)
 
+   ⚠️ **Every transcript in this section is quoted verbatim as measured, so it carries the plugin's
+   FORMER name.** The marketplace was renamed to `powerbi-playbook@powerbi-playbook-collection` at
+   v0.3.0 (repo `Guust-Franssens/powerbi-playbook`), because none of the shipped bundles are
+   migration-specific. The names below are left as they were recorded rather than rewritten — a
+   measurement that is silently re-labelled is no longer evidence of anything.
+
    **The full loop is proven repeatable, not a one-off (2026-08-01).** After v0.2.0 was published and
    installed between sessions, a `pbi-report-builder` subagent in a fresh process invoked **both** new
    bundles by name and got `SUCCESS`, each resolving to the plugin:
