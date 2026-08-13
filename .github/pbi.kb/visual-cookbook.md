@@ -64,15 +64,37 @@ Measured 2026-08-13 by direct fetch of
 
 | version | HTTP |
 |---|---|
-| `2.14.0`, `2.13.0`, `2.12.0`, `2.11.0`, `2.10.0` | **404** |
+| `2.16.0`, `2.15.0`, `2.14.0`, `2.13.0`, `2.12.0`, `2.11.0`, `2.10.0` | **404** |
 | `2.9.0` ← newest that resolves | 200 |
 | `2.8.0` … `2.1.0` | 200 |
+
+`visualContainer` is the only kind with a dead version in use here. Re-measured the same day across
+every distinct `$schema` under `examples/`: `page/2.1.0` + `page/1.4.0`, `pagesMetadata/1.0.0` +
+`1.1.0`, `versionMetadata/1.0.0`, `report/3.0.0` + `3.3.0` and the theme schema all return 200 — so
+they were left alone. Don't generalize a version across kinds; each is published independently
+(`page` stops at `2.1.0`, `report` at `3.3.0`).
+
+**`0 errors` is also what a *skipped* validation prints, so the fix is proved by injection, not by a
+green run.** Measured 2026-08-13, same defect (`"x": "NOT_A_NUMBER"`) in the same visual:
+
+| `$schema` | result |
+|---|---|
+| `2.11.0` (dead) | `0 error(s), 1 warning(s); result=succeededWithWarnings` — defect invisible |
+| `2.9.0` (resolves) | `1 error(s); result=failed` — `Schema validation: /position/x must be number` |
+| `2.1.0` (resolves) | `1 error(s); result=failed` — same |
 
 Rules:
 
 - **Cookbook entries declare `2.9.0`** — the newest version that actually resolves. Two 🟢 entries
   (`actionButton`, `shape`) keep the `2.1.0` their Desktop capture wrote: it resolves, validates at
   0 errors, and editing a ground-truth capture would make it no longer ground truth.
+- **The `examples/` deliverables are swept too, so an *in-situ* copy is safe as well.** 776
+  `visual.json` files under `examples/**` declared the dead `2.11.0`; all now declare `2.9.0`
+  (`$schema` line only — no encoding changed). The 64 files at `2.1.0` (interactive-resume's
+  Desktop-built report + one `image`) were **deliberately left**: `2.1.0` resolves and really
+  validates (table above), so they were never schema-skipped, and they are ground-truth captures for
+  the same reason `actionButton`/`shape` are. They do also pass at `2.9.0` (measured), so pin them if
+  you ever have a reason to — it is a preference, not a fix.
 - **Re-check the table before trusting it.** Versions get published; the number above is a
   *measurement with a date*, not a constant. `curl -I <url>` is the whole check.
 - **`PBIR_SCHEMA_UNREACHABLE` means "schema validation did NOT run"** — never "warning, but fine". If
@@ -148,6 +170,14 @@ Legend: 🟢 render-proven · 🟡 structural template (CLI) · 🔴 needs human
 > then open that `visual.json` and rebind fields. If a row's location is vague ("all migrations"), any
 > hit from that glob is a valid, render-proven starting point. Do **not** treat a missing
 > `visuals/<type>.md` as "unproven" for these types.
+>
+> **At copy time, check the `$schema` line you just pasted — before rebinding, not after validating.**
+> Every `examples/` source declares a version that resolves today (`2.9.0`, or `2.1.0` in the
+> Desktop-built reports), so a straight copy is fine; keep whichever one you copied. But the line is
+> *inherited*, so if your destination report or the engine's output declares a **404** version
+> (the engine emits `2.10.0`), the pasted visual is schema-skipped in its new home even though the
+> source was clean. Rewrite it to `2.9.0` **then** validate — `PBIR_SCHEMA_UNREACHABLE` afterwards is
+> the last line of defence, not the check.
 
 | Type | Example location |
 |---|---|
