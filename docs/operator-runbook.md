@@ -367,8 +367,9 @@ convention — see §7 for which ones actually are.
 | 6 | `python scripts/deploy_estate.py --bundle _bundle --workspace <workspace-id> --tenant <tenant-id> --estate-db _assessment/estate.db --journal _bundle/deploy-journal.jsonl` | ⚠️ **~25 s per item** — budget 30 min for 75 items | items in the landing zone |
 
 > ⚠️ **`--out _sweep`, not `_harvest`** — the previous edition said `_harvest`, which `.gitignore`
-> reserves for a **different** tool. See §7: choosing the wrong name here stages real customer
-> `.twbx` files in a public repo. Prove it with `git check-ignore -v` before you download anything.
+> reserves for a **different** tool. See §7: choosing an unignored name here stages real customer
+> `.twbx` files in a public repo. Prove your exact path with `git check-ignore -v` before you
+> download anything.
 
 > **What `phase-timings.json` does and does not measure.** `total_elapsed_sec` is the plain **sum of
 > the recorded phases** ✅ verified (`write_phase_record`: `sum(p["elapsed_sec"] for p in phases)`),
@@ -467,21 +468,22 @@ Downloads every workbook and published datasource to `<out>/assets/`, then runs 
 all of them and writes `parse-sweep.md` / `parse-sweep.json`.
 
 ⛔ **Choose `--out` before you download, and prove it is ignored.** `--out` is required and has no
-default ✅ verified (`--help`: *"output directory (should be git-ignored)"*), and this directory will
+default ✅ verified (`--help`: *"output directory (must be git-ignored, see below)"*), and this directory will
 hold the customer's actual `.twbx`/`.tdsx`. `.gitignore`'s own comment assigns
-`harvest_estate_assets.py` output to **`/_sweep/`** (`/_harvest/` belongs to
+`harvest_estate_assets.py` output to **`/_sweep*/`** (`/_harvest*/` belongs to
 `harvest_tableau_public.py`'s public-corpus tool) ✅ verified. And ⚠️ measured 2026-08-13, the trap
-that makes this urgent: the harvest entries are **exact directory names**, not prefix globs —
+that makes this urgent is now gated by code: `harvest_estate_assets.py` refuses to start unless git
+already ignores probe files under `--out` (or `--allow-unignored-out` is passed deliberately) —
 
 ```powershell
 git check-ignore -v _sweep/x.twbx        # ignored
-git check-ignore -v _sweep2/x.twbx       # NOT IGNORED  <-- customer data, staged, public repo
+git check-ignore -v _sweep2/x.twbx       # ignored too: /_sweep*/ is a prefix glob
 ```
 
-so the natural move when `_sweep/` is already occupied by a previous run — appending a date or a
-suffix — silently defeats it. Issue #125 tracks making them prefix globs; `_assessment*/`,
-`_bundle*/` and `_estate*/` already are. See §7 for the full table. **`git check-ignore -v` before
-the download, every time** — it is one second and this repo has already paid for a history rewrite.
+The natural move when `_sweep/` is already occupied by a previous run — appending a date or a suffix
+— is covered now, but the operational rule did not change: **`git check-ignore -v` before the
+download, every time**. It is one second, the script enforces it, and this repo has already paid for
+a history rewrite.
 
 The sweep is worth more than the download: a workbook that one parser reads and the other refuses is
 a finding *by construction*, and which way round it fails says which tier owns it. It also turns an
@@ -493,7 +495,7 @@ token truncated a 58-asset run repeatedly; fresh-per-asset completed. Slower, an
 finishes. Assets are fetched **by LUID, never by name** — Tableau permits duplicate names across
 projects, and name-keyed identity has already produced four separate defects here.
 
-Reference run ✅ verified from `_harvest.log`: `55 asset(s) — ours failed 0, his failed 0, both
+Reference run ✅ verified from the harvest log: `55 asset(s) — ours failed 0, his failed 0, both
 parsed 55` in 120 s.
 
 Useful flags ✅ verified against `--help`: `--limit N` (quick pass), `--skip-download` (reuse
@@ -504,14 +506,14 @@ Useful flags ✅ verified against `--help`: `--limit N` (quick pass), `--skip-do
 **This is the gate.** The engine exits 0 regardless; our wrapper is what turns its report into an
 answer.
 
-`run_estate.py` exit codes ✅ verified — read out of the constants and `final_verdict()`, and 2/5
-reproduced by running the command:
+`run_estate.py` exit codes ✅ verified — read out of the `EXIT_*` constants and `final_verdict()`,
+and 2/5 reproduced by running the command:
 
 | exit | constant | meaning | what to do |
 |---|---|---|---|
 | `0` | `EXIT_OK` | `ESTATE: READY` — DoD not failed, no approval collisions, no empty models | proceed |
 | `1` | `EXIT_ENGINE_FAILED` | the engine itself exited non-zero | read the last 2000 chars it printed (the wrapper prints them to stderr) |
-| `2` | *(usage)* | ✅ reproduced both shapes: `--input` missing without `--slice-only` prints `ERROR: --input is required…`; a missing `--output` is argparse's own exit 2 | fix the command |
+| `2` | `EXIT_USAGE` | ✅ reproduced both shapes: `--input` missing without `--slice-only` prints `ERROR: --input is required…`; a missing `--output` is argparse's own exit 2 | fix the command |
 | `3` | `EXIT_DOD_FAILED` | engine's definition of done is `failed` | **§3 decision point** — do not deploy |
 | `4` | `EXIT_COLLISION` | two models claim the same calc name with different formulas | resolve before approving DAX |
 | `5` | `EXIT_ENGINE_SOURCE` | **live** ✅ reproduced: a non-canonical `--engine` without `--allow-noncanonical-engine` | see §1.2 |
@@ -628,14 +630,15 @@ Get-Content <bundle>\deploy-journal.jsonl -Tail 3                          # wha
 Elapsed ÷ items-done, extrapolated to the dry-run count, is a better estimate than anything in this
 document — and it is the number to give the customer once you have it.
 
-`deploy_estate.py` exit codes ✅ verified (the `EXIT_OK` / `EXIT_FAILED` / `EXIT_PREFLIGHT`
-constants):
+`deploy_estate.py` exit codes ✅ verified (the `EXIT_OK` / `EXIT_FAILED` / `EXIT_PREFLIGHT` /
+`EXIT_INCOMPLETE` constants):
 
-| exit | constant | meaning |
-|---|---|---|
-| `0` | `EXIT_OK` | everything planned was deployed (skipped-as-empty reports are reported honestly, not counted as deployed) |
-| `1` | `EXIT_FAILED` | at least one item failed, **or one or more workbooks were refused** — the run names them |
-| `2` | `EXIT_PREFLIGHT` | never started: workspace missing, no access, or the item budget does not fit |
+| exit | constant | meaning | what to do |
+|---|---|---|---|
+| `0` | `EXIT_OK` | everything planned was deployed (skipped-as-empty reports are reported honestly, not counted as deployed) | proceed |
+| `1` | `EXIT_FAILED` | at least one item failed, **or one or more workbooks were refused** — the run names them | fix the named failures/refusals, then re-run the same command to resume |
+| `2` | `EXIT_PREFLIGHT` | never started: workspace missing, no access, item budget does not fit, an unreadable empty-model report was requested, or a `--skip` name matched no unit | fix the preflight/refusal message; for a bad `--skip`, use a directory name under `<bundle>\pbip` (or `--dry-run` to list them) |
+| `3` | `EXIT_INCOMPLETE` | everything attempted succeeded, but one or more whole units were deliberately withheld by `--skip` / `--skip-empty-models`; nothing was created for those units, so the estate is knowingly incomplete | repair the withheld units, then re-run without the skip to finish the estate; a caller that intentionally quarantined them may accept exactly this code |
 
 What it does, in order, and why the order is not negotiable:
 
@@ -930,7 +933,7 @@ Run in order. Each line says what it proves — and §5.2 says what none of them
 | 5 | deploy completed | `echo $LASTEXITCODE` after step 6 | `0` (`1` = at least one failure or refusal — read the named list) |
 | 6 | nothing was silently skipped | the final line: `all N item(s) deployed` **or** `N deployed; M skipped as empty` | M is a number you can explain |
 | 7 | the journal has no unfinished intent | `Select-String -Path <bundle>\deploy-journal.jsonl -Pattern '"status":"failed"'` | no hits, or hits you have triaged |
-| 8 | every report resolves its model | **the API, polled** — recipe below; `scripts/verify_bindings.py` when it lands (issue #128) | every report reports a `semanticModelId` guid, none `byPath` |
+| 8 | every report resolves its model | `python scripts\verify_bindings.py --workspace <workspace-id> --tenant <tenant-id>` (the API, polled) | exit `0`: every report resolves to a `SemanticModel` in this workspace; exit `1` = findings; exit `2` = the check could not be performed |
 | 9 | the estate identity survived | `Get-Content <bundle>\deploy-estate-id.txt` | non-empty, and stored with the bundle |
 | 10 | the engine version is recorded | `.engine` in `<bundle>\engine-output-receipt.json` (§1.2) | present, with `canonical: true` |
 | 11 | no model would load zero rows | `<bundle>\empty-model-check.json` | `"status": "OK"`, or a quarantine you decided on (§2 step 5) |
@@ -1086,27 +1089,25 @@ plan and a prerequisites email were pushed before anyone noticed, and required a
 |---|---|
 | `.env`, `.env.local` | git-ignored — prove it, do not trust a line number here |
 | `_assessment*/` | `/_assessment*/` — real estate: workbook/project names, owner LUIDs, group membership, permissions |
-| `_sweep/` | `harvest_estate_assets.py` output — downloaded `.twbx`/`.tdsx` from a real site |
-| `_harvest/` | ⚠️ **a different tool's** output (`harvest_tableau_public.py`'s public corpus). Ignored, but not where §2 step 4 should write |
+| `_sweep*/` | `harvest_estate_assets.py` output — downloaded `.twbx`/`.tdsx` from a real site |
+| `_harvest*/` | ⚠️ **a different tool's** output (`harvest_tableau_public.py`'s public corpus). Ignored, but not where §2 step 4 should write |
 | `_bundle*/`, `_estate*/` | convert output — `report.json` carries every workbook name and calc formula |
 | `migrations/workshop-*/`, `engagement-*/`, `customer-*/` | engagement notes |
 | `**/data/`, `**/source/*.twb` | extracted customer data and source workbooks |
 
-⛔ **The harvest entries are EXACT DIRECTORY NAMES. The others are prefix globs.** ✅ measured
-2026-08-13 with `git check-ignore -v`, and this is the one that leaks customer `.twbx` into a public
-repo:
+⛔ **The harvest entries are prefix globs now, not exact directory names.** ✅ verified from
+`.gitignore` (`/_harvest*/`, `/_sweep*/`) and `git check-ignore -v`, after #137/#125:
 
 | path | ignored? |
 |---|---|
 | `_harvest/`, `_sweep/` | **yes** |
-| `_harvest-op/`, `_sweep2/`, `_harvest-2026-08-13/` | **NO** |
+| `_harvest-op/`, `_sweep2/`, `_harvest-2026-08-13/` | **yes** — `/_harvest*/` and `/_sweep*/` are globs |
 | `_assessment2/`, `_bundle2/`, `_bundleX/`, `_estate9/` | yes — `/_assessment*/`, `/_bundle*/`, `/_estate*/` are globs |
 
-The failure is entirely natural: `_sweep/` already holds yesterday's run, so you date the new one —
-and the dated name is not covered. Issue #125 tracks making the harvest patterns prefix globs; **do
-not wait for it.** For a second run prefer a name under `_assessment*`/`_bundle*`/`_estate*`, and
-either way **prove it with `git check-ignore -v` before the download**. The cold operator tested
-three candidate names before fetching a single file — that is the correct amount of paranoia here.
+The old failure was entirely natural: `_sweep/` already holds yesterday's run, so you date the new
+one, and the dated name was not covered. That is fixed, but **prove your exact path with
+`git check-ignore -v` before the download** anyway. The cold operator tested three candidate names
+before fetching a single file — that is the correct amount of paranoia here.
 
 **Two holes closed when this runbook landed** (PR #110):
 
@@ -1137,11 +1138,13 @@ Placeholders used in this document — and where the real value lives:
 
 **Exit codes** ✅ verified 2026-08-13
 
+`—` means that script cannot return that exit code.
+
 | script | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|---|
 | `preflight.ps1` | ready | critical missing | — | — | — | — | — |
 | `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** |
-| `deploy_estate.py` | all deployed | item failed / refused | preflight | — | — | — | — |
+| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — |
 
 One run returns **one** code, in the order collision → DoD → empty model — so a bundle can trip a
 gate the exit code never mentions. Read the log body and `empty-model-check.json` too (§2 step 5).

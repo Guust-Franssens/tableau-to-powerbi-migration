@@ -89,6 +89,7 @@ DOD_BLOCKING = {"failed"}
 
 EXIT_OK = 0
 EXIT_ENGINE_FAILED = 1
+EXIT_USAGE = 2
 EXIT_DOD_FAILED = 3
 EXIT_COLLISION = 4
 EXIT_ENGINE_SOURCE = 5
@@ -502,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.slice_only and not args.input:
         print("ERROR: --input is required unless --slice-only is given", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
 
     engine, engine_code = resolve_run_engine(args)
     if engine_code != EXIT_OK:
