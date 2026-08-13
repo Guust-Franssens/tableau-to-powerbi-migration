@@ -34,7 +34,7 @@ import check_empty_model as cem  # noqa: E402  # pylint: disable=wrong-import-po
 
 # The shape that ships empty: an absolute path belonging to the machine the Tableau workbook was
 # authored on. Kept POSIX so it is foreign on the Windows CI/dev host and vice versa.
-MAC_AUTHOR_PATH = "/Users/tableau-author/Datasets/Global Superstore.xlsx"
+MAC_AUTHOR_PATH = "/Users/<author>/Datasets/Global Superstore.xlsx"
 WINDOWS_AUTHOR_PATH = r"D:\Datasets\Global Superstore.xlsx"
 
 
@@ -133,12 +133,18 @@ def _categories(model_dir: Path, root: Path | None = None) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def test_an_unlanded_flat_file_import_is_reported_as_empty(tmp_path: Path) -> None:
+def test_an_unlanded_flat_file_import_is_reported_as_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The measured silent success: builds, binds, validates, deploys, contains zero rows.
 
     This is the whole point of the gate. If this test can pass while the check is disabled, the gate
     is decorative.
+
+    The host is pinned because the *reason* is host-dependent and the verdict must not be: on the
+    Windows host that produced the measured estate this path is `foreign_path`; on the Linux CI
+    runner the same path is simply `missing_file`. Both block. Pinning keeps the assertion about the
+    behaviour rather than about which runner happened to execute it.
     """
+    monkeypatch.setattr(cem, "HOST_OS", "nt")
     bundle = tmp_path / "bundle"
     _model(bundle / "pbip" / "global_superstores_db", tables={"Orders": _excel_partition(MAC_AUTHOR_PATH)})
 
@@ -149,6 +155,18 @@ def test_an_unlanded_flat_file_import_is_reported_as_empty(tmp_path: Path) -> No
     finding = report["models"][0]["findings"][0]
     assert finding["category"] == cem.CATEGORY_FOREIGN
     assert finding["path"] == MAC_AUTHOR_PATH
+
+
+def test_the_unlanded_flat_file_blocks_on_either_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The category differs by host; the VERDICT must not. Same fixture, both hosts, both blocked."""
+    monkeypatch.setattr(cem, "HOST_OS", "posix")
+    bundle = tmp_path / "bundle"
+    _model(bundle / "pbip" / "wb", tables={"Orders": _excel_partition(MAC_AUTHOR_PATH)})
+
+    report = cem.scan(bundle)
+
+    assert report["status"] == "EMPTY_MODELS"
+    assert report["models"][0]["findings"][0]["category"] == cem.CATEGORY_MISSING
 
 
 def test_a_missing_native_path_is_reported_as_empty(tmp_path: Path) -> None:
@@ -276,7 +294,12 @@ def test_an_unresolvable_path_expression_is_not_judged(tmp_path: Path) -> None:
 
 def test_a_mixed_model_blocks_on_the_broken_table_only(tmp_path: Path) -> None:
     """One unloadable table among healthy ones is still a silent-success failure - the report shows
-    partial data, which is worse than none because it looks plausible."""
+    partial data, which is worse than none because it looks plausible.
+
+    Host is deliberately NOT pinned here: the healthy table points at a real file under `tmp_path`,
+    whose flavour is whatever the runner uses. So the assertion is on the SHAPE of the verdict -
+    exactly one blocking finding, on the right table - not on which blocking category it lands in.
+    """
     bundle = tmp_path / "bundle"
     landed = _landed_csv(bundle / "data" / "Extract.csv")
     _model(
@@ -293,12 +316,10 @@ def test_a_mixed_model_blocks_on_the_broken_table_only(tmp_path: Path) -> None:
 
     assert model["status"] == "EMPTY"
     assert [f["table"] for f in model["findings"]] == ["Orders"]
-    assert model["categories"] == {
-        cem.CATEGORY_FILE_OK: 1,
-        cem.CATEGORY_FOREIGN: 1,
-        "calculated": 1,
-        "live": 1,
-    }
+    assert model["findings"][0]["category"] in cem.BLOCKING_CATEGORIES
+    assert model["categories"][cem.CATEGORY_FILE_OK] == 1
+    assert model["categories"]["calculated"] == 1
+    assert model["categories"]["live"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +449,7 @@ def test_a_standalone_datasource_model_is_labelled_as_one(tmp_path: Path) -> Non
 
 
 def test_a_posix_path_is_foreign_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """On Windows `Path('/Users/x/y').exists()` is probed against the CURRENT DRIVE, so a same-named
+    """On Windows `Path('/Users/<name>/y').exists()` is probed against the CURRENT DRIVE, so a same-named
     local folder can answer "present" for a file the model can never read. The flavour check runs
     first precisely so that remap cannot produce a false pass."""
     monkeypatch.setattr(cem, "HOST_OS", "nt")
@@ -447,16 +468,23 @@ def test_a_windows_path_is_foreign_on_posix(monkeypatch: pytest.MonkeyPatch, tmp
     assert cem.scan(bundle)["models"][0]["findings"][0]["category"] == cem.CATEGORY_FOREIGN
 
 
-def test_a_native_path_is_never_called_foreign(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The false-positive guard on the host check itself: every landed bundle path is native."""
-    monkeypatch.setattr(cem, "HOST_OS", "posix")
+@pytest.mark.parametrize(("host", "native_path"), [("nt", r"D:\Datasets\Orders.csv"), ("posix", "/data/Orders.csv")])
+def test_a_native_path_is_never_called_foreign(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str, native_path: str
+) -> None:
+    """The false-positive guard on the host check itself.
+
+    Every path the engine lands is native to the host that produced the bundle, so `foreign_path`
+    must be reachable ONLY by a genuinely cross-OS path. A missing native file is still reported -
+    as `missing_file`, which names the right remedy - but it is never blamed on the wrong OS.
+    """
+    monkeypatch.setattr(cem, "HOST_OS", host)
     bundle = tmp_path / "bundle"
-    landed = _landed_csv(bundle / "data" / "Extract.csv")
-    _model(bundle / "pbip" / "wb", tables={"Extract": _csv_partition(f'"/{landed.as_posix().lstrip("/")}"')})
+    _model(bundle / "pbip" / "wb", tables={"Extract": _csv_partition(f'"{native_path}"')})
 
-    categories = cem.scan(bundle)["models"][0]["categories"]
+    findings = cem.scan(bundle)["models"][0]["findings"]
 
-    assert cem.CATEGORY_FOREIGN not in categories
+    assert [f["category"] for f in findings] == [cem.CATEGORY_MISSING]
 
 
 # ---------------------------------------------------------------------------

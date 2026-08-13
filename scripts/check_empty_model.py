@@ -52,7 +52,7 @@ left two thirds of its own subject matter unjudged:
                      (a POSIX `/Users/...` path on Windows, a `C:\\...` path on Linux). This is the
                      shape a Tableau workbook authored on a Mac produces, and it is called out
                      separately because `Path.exists()` alone can silently REMAP it - on Windows,
-                     `/Users/bob/x` is probed against the current drive, so a same-named local folder
+                     `/Users/<name>/x` is probed against the current drive, so a same-named local folder
                      would answer "present" for a file the model can never read.
 3. `empty_file`    - the file exists but carries no data rows: zero bytes, or a delimited text file
                      with nothing after its header.
@@ -310,7 +310,7 @@ def _host_flavour() -> str:
 def _is_foreign(flavour: str) -> bool:
     """Whether an absolute path is written for a different OS than the one running this check.
 
-    Deliberately decided BEFORE any `exists()` call: on Windows, `Path('/Users/bob/x').exists()` is
+    Deliberately decided BEFORE any `exists()` call: on Windows, `Path('/Users/<name>/x').exists()` is
     probed against the current drive, so a mac path can be answered by an unrelated local folder and
     an unreadable model would pass silently.
     """
