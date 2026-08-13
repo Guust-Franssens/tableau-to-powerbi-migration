@@ -111,8 +111,10 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   time** with `Column 'CDD_0_1' cannot be found`. Whenever you rename a column for any reason, grep
   every measure/calculated-column expression that references it and update to the new `name`.
 - **Always pass an explicit culture to M type-conversion calls** (`Table.TransformColumnTypes`,
-  `Number.FromText`, `Date.FromText` — e.g. `Table.TransformColumnTypes(#"prior step", {...},
-  "en-US")`). This is cheap insurance against a real failure mode: on a machine with a non-standard
+  `Number.FromText`, `Date.FromText`) — **and make its value match the source's actual textual
+  representation, never a fixed constant and never the model's `culture`** (a hard-coded constant is
+  the exact thing that silently corrupts a legacy `.xls`; evidence and decision tree below). Passing
+  *a* culture is cheap insurance against a real failure mode: on a machine with a non-standard
   Windows regional format (e.g. language=English, region=Belgium — a "custom locale", LCID
   4096/`LOCALE_CUSTOM_UNSPECIFIED`), an XMLA-triggered refresh (`partition_operations
   RefreshWithXMLA`, or any MCP-driven refresh/commit) can fail with `'4096' locale is not supported`
@@ -123,9 +125,10 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   **try Power BI Desktop's own UI "Refresh" button** — empirically, a UI-triggered refresh can
   succeed where an externally-issued XMLA commit fails identically, so it's worth trying before
   escalating.
-- ⚠️ **…but a HARD-CODED `"en-US"` SILENTLY CORRUPTS a legacy `.xls` source — the culture must match
-  the MACHINE, not the model** [measured, book_5-1-Table-Calcs, en-BE host]. The rule above is
-  necessary and **not sufficient**, and `"en-US"` is the exact value that breaks this case.
+- ⚠️ **A hard-coded culture SILENTLY CORRUPTS a legacy `.xls` source** [measured,
+  book_5-1-Table-Calcs, en-BE host] — this is the concrete proof of the "match the source, not a
+  constant" half of the rule above, and it fails *silently and green*. `"en-US"` is the exact
+  constant that breaks this case.
   - **Mechanism, proven step by step.** `Excel.Workbook(File.Contents(…), null, …)` reading a genuine
     BIFF `.xls` (magic `D0 CF 11 E0`) returns numeric and date cells as **text**
     (`Value.Is(sv, type text)` = `true`), and it formats that text in the **OS user locale** — *not*
@@ -142,11 +145,16 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   - **The discriminator that proves it is ONE cause, not two bugs:** sweep candidate cultures in a probe
     table. `en-GB` fixes the dates and still corrupts the numbers; `en-BE`/`nl-BE`/`fr-BE`/`de-DE` all
     reproduce source truth exactly. Two symptoms, one text round-trip.
-  - **Fix: detect the OS locale at build time** (`GetUserDefaultLocaleName`) and emit *that* as the
-    parse culture — do not hard-code either `"en-US"` or `"en-BE"`. **No locale-independent M fix
-    exists**: the reader's output locale is not observable from M, and `"1,234"` is genuinely
-    ambiguous. ⚠️ This makes the emitted `.tmdl` **host-dependent**, so the real fix belongs upstream —
-    land legacy `.xls` as `.csv`/`.xlsx`, where the values never become text at all.
+  - **Decision tree — choose the culture by source, and prefer removing the `.xls` reader entirely:**
+    1. **Durable fix — land the sheet as `.csv`/`.xlsx` upstream** (invariant `yyyy-MM-dd` dates, `.`
+       decimals), where the values never become text and no culture can corrupt them. This is the
+       real answer; fuller treatment and the deterministic reproduction are in §6.
+    2. **Stopgap, only if you must parse the `.xls` in place — detect the OS locale at build time**
+       (`GetUserDefaultLocaleName`) and emit *that* as the parse culture (it is the locale the reader
+       used to format the text). Do **not** hard-code either `"en-US"` or `"en-BE"`. **No
+       locale-independent M fix exists**: the reader's output locale is not observable from M, and
+       `"1,234"` is genuinely ambiguous. ⚠️ This makes the emitted `.tmdl` **host-dependent** (it
+       corrupts on the next machine), so it is a stopgap, not the fix.
 - ⚠️ **A legacy `.xls` also needs a different NAVIGATION KEY, or the model cannot refresh at all**
   [same workbook]. The `.xlsx`-shaped `Source{[Item="Orders", Kind="Sheet"]}[Data]` does not resolve
   against a BIFF `.xls`, whose nav table has only `Name | Data` columns — there is no `Item` or `Kind`
@@ -286,21 +294,28 @@ measure, **`sortByColumn` is the mechanism that works** — and it is the model'
   cleanly, so only a screenshot catches it. ⚠️ **The leaf must be the qualified key, not the bare
   city**: on this 9,994-row extract `City` alone is 531 values but `(City, State)` is **604** — 57
   city names repeat across states (4 Springfields), so `City` alone silently merges/mis-geocodes
-  **21.5%** of marks. Emit `column 'City, State' = IF(OR(t[City]="", t[State]=""), BLANK(), t[City] &
+  **21.5%** of marks. Emit `column 'Map Location' = IF(OR(t[City]="", t[State]=""), BLANK(), t[City] &
   ", " & t[State])` with **`dataCategory: Address`** (the free-form category — a partial address
   geocodes to the city centroid; that doc explicitly warns against stuffing composite values into
   `City`/`StateOrProvince`) and `summarizeBy: none`. Concatenating location fields into one mapped
   column is first-party guidance
   ([learn](https://learn.microsoft.com/power-bi/create-reports/desktop-tips-and-tricks-for-creating-reports#improve-geocoding-with-more-specific-locations)).
-  A comma **is legal** in a Tabular object name (verified against a live engine: TOM accepted the
-  create and `'Orders'[City, State]` parses — brackets delimit). Do **not** reach for Lat/Long unless
+  ⚠️ **Give the column a comma-free name** (e.g. `'Map Location'`, above). The engine *does* accept a
+  comma — verified against a live engine: TOM accepted the create, `'Orders'[City, State]` parses
+  (brackets delimit), and every table-qualified reference evaluates — so it does **not** fail. But
+  `,` is documented-invalid for table/column/measure names
+  ([DAX naming requirements](https://learn.microsoft.com/en-us/dax/dax-syntax-reference)) and works
+  only because hand-authored TMDL bypasses the validation Power BI Desktop's UI enforces: unsupported
+  territory that external tooling (Tabular Editor, BPA, downstream parsers) may reject, with no
+  guarantee it keeps working. Prefer the comma-free name and **tell the report builder the exact
+  name**. Do **not** reach for Lat/Long unless
   the source actually has them: Tableau's `Latitude (generated)` is its geocoder's *output*, not
   workbook data, so synthesising coordinates means importing a gazetteer the migration never had.
 - **Provision EVERY dashboard-visible metric.** If a Tableau dashboard shows a KPI tile/value, the model
   must have a backing measure or column for it — the report builder works against a *frozen* model and can
   only render a static placeholder card for a metric that has no backing field (seen: 3 Airline tiles).
-- **A city-grain bubble map needs a concatenated `Place` column FROM YOU, and the name cannot contain a
-  comma** [seen, Superstore `8-1-Dashboards`]. Bing geocodes a Location field **by name**, so bare US city
+- **A city-grain bubble map needs a concatenated `Place` column FROM YOU, and it needs a comma-free
+  name** [seen, Superstore `8-1-Dashboards`]. Bing geocodes a Location field **by name**, so bare US city
   names put Springfield/Columbus/Franklin in Europe, Africa and Australia — verified 100 % US data (1
   country, 49 states, 531 cities) rendering across three continents. The report layer **cannot** fix this:
   dragging `Country`/`State` in beside `City` turns the Location well into a **geo-hierarchy** that renders
@@ -309,9 +324,11 @@ measure, **`sortByColumn` is the mechanism that works** — and it is the model'
   fix is one calculated column `City & ", " & State` with **`dataCategory: Place`** (that doc's tip 4 —
   Place is the category *for* a single column carrying full location info; the "keep `City` = `Southampton`,
   not `Southampton, New York`" warning applies to **City**-categorized columns, so leave the original
-  `City`/`State`/`Country` categories untouched). ⚠️ **A comma is not a legal DAX column-name character**,
-  so the obvious name `'City, State'` is illegal — name it e.g. `'Map Location'` and **tell the report
-  builder the exact name**. Expect the **bubble count to rise** (531 → 604 here): the new column's
+  `City`/`State`/`Country` categories untouched). ⚠️ **Name it without a comma** — e.g.
+  `'Map Location'` — and **tell the report builder the exact name**. (A comma *works* but is
+  documented-invalid and survives only by bypassing Desktop's UI validation, so it is unsupported
+  territory; full evidence in the azureMap point-map entry above. Don't ship `'City, State'`.) Expect
+  the **bubble count to rise** (531 → 604 here): the new column's
   cardinality equals the distinct `(City, State)` pair count, which *matches* Tableau's own mark grain when
   its Detail shelf carried City + State + Country — a fidelity gain, not a regression, but say so or it
   reads as a bug.
@@ -669,10 +686,19 @@ Once that modal is up, **every XMLA refresh blocks indefinitely instead of retur
 shape as §5, with no credential anywhere in sight; this source was a local file). The error that
 *would* have been returned is never delivered, so a genuinely broken M reads as a timeout.
 
-**Rules.** Close Desktop **before** editing TMDL, then reopen. Close it with a **force-kill**
-(`Stop-Process -Id <literal pid> -Force`) rather than a graceful close: a graceful close prompts to
-save, and saving writes the **stale in-memory model back over the corrected TMDL**, silently undoing
-the fix. Force-killing also discards live-only MCP objects (probe tables), which is a free cleanup.
+**Rules.** Close Desktop **before** editing TMDL, then reopen. **Do not use a graceful close here:**
+it prompts to save, and saving writes the **stale in-memory model back over the corrected TMDL**,
+silently undoing your fix. For an instance *you opened yourself to refresh a model you are editing on
+disk* — whose entire in-memory state you created and can reproduce from `_build/` — a **force-kill**
+(`Stop-Process -Id <literal pid> -Force`) is therefore the correct close, and it also discards
+live-only MCP objects (probe tables) as a free cleanup.
+
+⚠️ **A force-kill discards ALL unsaved state, not only the stale model — so first make sure there is
+nothing to lose.** Confirm via `powerbi-desktop status` that `currentFilePath` is *your* `.pbip` and
+that this is the instance you opened for this refresh cycle. If it is an instance you did **not**
+open, or one that may hold unsaved work you did not create (a report edit, a UI-side model change),
+do **not** decide for the user — **stop and ask** whether to save or discard before killing it.
+Never force-kill a sibling build's instance (the pid-binding rule).
 
 ### 7.3 Scan for ALL modal windows, not just credential phrases
 
@@ -682,16 +708,40 @@ filter **misses any other modal**, and any modal blocks refresh just as effectiv
 containing Bing map visuals, so it recurs on every automated cycle — silently blocked the refresh,
 and a credential-filtered scan reported "no modal found".
 
-Enumerate every child window and ask whether it is modal, rather than matching on text:
+So **enumerate every child window and REPORT whether it is modal** (detect on `IsModal`, not on
+text) — but **do not blanket-close them.** A modal can be a save prompt, an error dialog, an upgrade
+nag, a security warning or a **credential/sign-in prompt**, and dismissing the wrong one destroys
+work or silently defeats the stop-and-ask rule this bundle enforces elsewhere (§5: a missing
+credential goes to a human, it is never worked around). Close only modals on an **explicit allowlist
+of known, side-effect-free nuisance dialogs** — the `Bing map visuals are going away` deprecation
+dialog is the canonical entry. **A credential/sign-in modal is NEVER auto-dismissed** — closing it
+does not supply the credential, it just turns a recoverable stop-and-ask into a silent empty refresh;
+surface the exact data source and escalate, exactly as §5 requires. Anything else not on the
+allowlist: report it and leave it open for the caller to decide.
 
 ```powershell
+# Auto-close ONLY these known, side-effect-free nuisance dialogs (they recur every cycle):
+$modalAllowlist  = 'Bing map visuals are going away'
+# Wording that marks a credential/sign-in modal - NEVER auto-close; escalate to a human (see §5):
+$credentialModal = 'signed in|Personal Access|Sign in|credential|account|password'
+
 $wcond = New-Object System.Windows.Automation.PropertyCondition(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::Window)
 foreach ($d in $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $wcond)) {
-    $wp = $d.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
-    "$($d.Current.Name)  IsModal=$($wp.Current.IsModal)"
-    if ($wp.Current.IsModal) { $wp.Close() }          # WindowPattern.Close beats clicking a button
+    $wp   = $d.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
+    $name = $d.Current.Name
+    if (-not $wp.Current.IsModal) { continue }
+    "MODAL: $name"                                     # always REPORT every modal found
+    if ($name -match $credentialModal) {
+        "  -> credential/sign-in modal: DO NOT close - escalate to a human (see §5)"; continue
+    }
+    if ($name -match $modalAllowlist) {
+        $wp.Close()                                    # WindowPattern.Close beats clicking a button
+        "  -> closed (allowlisted nuisance dialog)"
+    } else {
+        "  -> not on allowlist: left open, reporting it for the caller to decide"
+    }
 }
 ```
 
