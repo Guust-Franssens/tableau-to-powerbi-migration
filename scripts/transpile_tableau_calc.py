@@ -11,10 +11,10 @@ work "there is no script" for.
 
 Known debt, all deliberate and none yet fixed - do not treat this as a repo tool:
   1. `--table` defaults to an airline-specific table name.
-  2. Imports `translation_router.check_candidate_dax` from the INSTALLED plugin by an expanded `~`
-     path, and raises ImportError at import time when the plugin is absent. Deliberate - reusing
-     his gate rather than reimplementing it is the point - but it needs to fail with a readable
-     message instead of a traceback.
+  2. Imports `translation_router.check_candidate_dax` from the INSTALLED plugin (resolved by
+     `engine_source`, the single canonical engine - issue #107), and raises ImportError at import
+     time when the plugin is absent. Deliberate - reusing his gate rather than reimplementing it is
+     the point - but it needs to fail with a readable message instead of a traceback.
 
 The pylint suppressions cover its compact research-code style and plugin import. They should be
 deleted by the refactor, not carried forward.
@@ -28,12 +28,14 @@ deleted by the refactor, not carried forward.
 
 import argparse
 import json
-import os
 import re
 import sys
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from engine_source import engine_skill_dir  # noqa: E402
 
 # ---- reference rewriting ----------------------------------------------------------
 REF = re.compile(r"\[Parameters\]\.\[([^\]]+)\]|\[([^\]]+)\]")
@@ -358,9 +360,7 @@ def main():
     parser.add_argument("--table")
     args = parser.parse_args()
 
-    skill = Path(os.path.expanduser("~")) / (
-        r".copilot\installed-plugins\tableau-collection\tableau-fabric-skills\skills\tableau-migration"
-    )
+    skill = engine_skill_dir()
     sys.path.insert(0, str(skill / "scripts"))
     from translation_router import check_candidate_dax as candidate_gate
 

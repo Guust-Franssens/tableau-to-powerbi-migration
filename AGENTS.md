@@ -47,7 +47,9 @@ schema-required `reportVersionAtImport`) — a stale CLI silently green-lights a
 **`-CheckUpstream` answers a question the version matrix cannot.** Every other check compares an
 installed version against a **hard-coded** number — that says "is what I have good enough", never
 "has the world moved". `-CheckUpstream` asks npm for the latest `powerbi-report-author` /
-`powerbi-desktop`, and asks the deterministic engine's git remote for its HEAD. It is **opt-in**
+`powerbi-desktop`, and asks GitHub for the deterministic engine's upstream `VERSION` (the plugin is
+an unpacked marketplace copy with no `.git`, so there is no local SHA to compare — and a VERSION
+comparison names the thing that actually changes behaviour). It is **opt-in**
 (~3s of network) and **advisory** — it never upgrades and never fails the run, because being behind
 is not an error; the timing rule above still decides *when* acting on it is safe.
 
@@ -352,9 +354,10 @@ copies then drift.
 | **A `.tds`/`.tdsx`** (data source, no workbook) | `parse_tableau.py` accepts it directly | This is **phase 1** of a model-first estate: a semantic model with **no report**. Also the fix for a `sqlproxy` published source, whose calcs live on the server and are therefore *under-reported* by any workbook that merely points at it. |
 
 `estate_survey.py` is the deterministic **engine's** script, not ours, so it is not on `PATH` — it
-installs under `~/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/scripts/estate_survey.py`
-(a sibling clone at `../tableau-fabric-skills/skills/tableau-migration/scripts/` also works; see
-`scripts/harvest_estate_assets.py`'s `engine_scripts_dir()` for the resolution order).
+installs under `~/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/scripts/estate_survey.py`.
+**That installed plugin is the ONE canonical engine** (see the section below); ask
+`python scripts/engine_source.py` for the path rather than typing it, and never point a step at a
+second copy.
 
 **Three things about that invocation will bite you, all measured:** `--server` is required (there is
 no default); `--json` takes a **PATH**, not a bare flag; and — the one that wastes an afternoon —
@@ -370,13 +373,38 @@ fidelity, the engine's for conversion) over every asset and writes `<out>/parse-
 `parse-sweep.json` — an estate-wide failure distribution, and exactly the evidence an upstream
 feature request needs instead of an anecdote.
 
-**Check the engine version before you trust a run against it.** `run_estate.py` resolves an engine
-whose version is *not* pinned by this repo, so it can move underneath a migration with no diff here.
-Measured 2026-08-11: the engine went **2.113.0 → 2.126.0 (13 releases) mid-dry-run**, and a defect
-report drafted against the older tree described behaviour that had already been replaced — the second
-retraction from that same cause. Record the resolved engine path **and its `VERSION`** in the run log,
-and run `preflight.ps1 -CheckUpstream` at session start, which is the only check that asks "has the
-world moved" rather than "is what I have good enough".
+**The conversion engine has exactly ONE source: the installed plugin.** `tableau-fabric-skills@tableau-collection`,
+at `~/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/`. Not a sibling clone, not
+a checkout in `~/vscode-projects`, not "whichever one a script finds first". Every step resolves it
+through **`scripts/engine_source.py`**, which **raises rather than falling back** — because a silent
+fallback is exactly what issue #107 was.
+
+Why that is a rule and not a preference: measured 2026-08-12, this machine had the engine installed
+**twice at different versions** — the plugin at 2.113.0 and a sibling clone at 2.126.0 — and
+different steps of one pipeline resolved different trees. They are not equivalent. On the same
+workbook, 2.113.0 emitted four deprecated Bing `shapeMap` visuals, turned a pie-on-map into a plain
+`pieChart` with the geography discarded, and **emitted no visual at all** for the density map;
+2.126.0 emitted `azureMap` throughout, with a heat-map layer. Nothing in the run output said which
+one had run.
+
+What now enforces it:
+
+| mechanism | what it does |
+|---|---|
+| `scripts/engine_source.py` | the single resolver. `engine_root()` returns the plugin or **raises**; `resolve_engine()` refuses a non-plugin `--engine` unless `--allow-noncanonical-engine` is passed |
+| `engine-output-receipt.json` | every bundle records `engine.root`, `engine.version` and `engine.canonical` — so an artifact answers *"what built me?"* on its own, months later, without the machine that built it |
+| `preflight.ps1` | **critical** checks: the plugin is installed (and prints its `VERSION`), and **no alternative engine tree exists anywhere it could be resolved from**. A second copy is a MISS, not a warning |
+| `preflight.ps1 -CheckUpstream` | advisory: compares the installed engine `VERSION` against upstream `main`. Being behind is not an error — the timing rule still decides when acting on it is safe |
+
+Keeping it current: `copilot plugin update tableau-fabric-skills@tableau-collection`, **between
+sessions** (a running Copilot session file-locks the plugin directory). Mid-session, only a *content*
+refresh is possible — `python scripts/sync_engine_plugin.py --source <checkout>` — and it refuses a
+downgrade, because walking the canonical engine backwards is how you would turn a cleanup into the
+regression above. Never upgrade the engine mid-migration.
+
+Historic cost of not having this: **three** retracted or nearly-retracted defect reports. The engine
+went 2.60.0 → 2.72.0 unnoticed; then 2.113.0 → 2.126.0 (13 releases) *mid-dry-run*; then 2.113.0 →
+2.126.0 → upstream 2.135.0 with two copies live at once. Each was caught only by a manual `git fetch`.
 
 **Where does the output go?** Be honest about this rather than promising: **local PBIP is the only
 supported target today.** There is no publish step in this repo — `pbi-deployer` is phase 2 and does

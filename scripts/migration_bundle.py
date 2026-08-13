@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from connection_target import FLAT_FILE, LIVE_SOURCE, powerbi_target
+from engine_source import engine_provenance
 
 ENGINE_RECEIPT = "engine-output-receipt.json"
 ENGINE_OUTPUT_DIRS = frozenset({"pbip", "semantic_models", "data"})
@@ -275,11 +276,18 @@ def engine_artifact_records(bundle_dir: Path) -> list[dict[str, Any]]:
     return records
 
 
-def write_engine_receipt(bundle_dir: Path) -> Path:
-    """Write the exact engine-output receipt consumed by `credential_gate.py verify`."""
+def write_engine_receipt(bundle_dir: Path, engine: Path | None = None) -> Path:
+    """Write the exact engine-output receipt consumed by `credential_gate.py verify`.
+
+    Also the bundle's answer to *"what built me?"*: `engine` records the resolved engine root, its
+    `VERSION` and whether it was the canonical plugin. Before issue #107 that was a manual note in a
+    run log, so a bundle produced by 2.113.0 (deprecated Bing maps, a dropped worksheet) and one
+    produced by 2.126.0 (azureMap + heat layer) were indistinguishable after the fact.
+    """
     receipt = {
         "version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "engine": engine_provenance(engine),
         "report_sha256": sha256_file(bundle_dir / "report.json") if (bundle_dir / "report.json").is_file() else None,
         "input_manifest_sha256": sha256_file(bundle_dir / "input_manifest.json")
         if (bundle_dir / "input_manifest.json").is_file()

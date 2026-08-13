@@ -55,23 +55,10 @@ for _stream in (sys.stdout, sys.stderr):
     if _stream is not None and _stream.encoding and _stream.encoding.lower() != "utf-8":
         _stream.reconfigure(encoding="utf-8")
 
+from engine_source import EngineNotFoundError, engine_scripts_dir  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import engine_child_env, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("harvest_estate_assets")
-
-ENGINE_SCRIPTS = (
-    Path.home()
-    / ".copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/scripts",
-    REPO_ROOT.parent / "tableau-fabric-skills/skills/tableau-migration/scripts",
-)
-
-
-def engine_scripts_dir() -> Path | None:
-    """The deterministic tier's scripts folder: installed plugin first, then a sibling clone."""
-    for candidate in ENGINE_SCRIPTS:
-        if (candidate / "fetch_tds.py").is_file():
-            return candidate
-    return None
 
 
 def download(kind: str, luid: str, out_file: Path, env: dict[str, str], scripts: Path) -> tuple[bool, str]:
@@ -241,9 +228,11 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    scripts = engine_scripts_dir()
-    if scripts is None:
-        LOG.error("deterministic tier not found; install the tableau-migration plugin or clone it beside this repo")
+    # One resolver, no fallback: the installed plugin is the single canonical engine (issue #107).
+    try:
+        scripts = engine_scripts_dir()
+    except EngineNotFoundError as exc:
+        LOG.error("%s", exc)
         return 1
 
     env = resolve_env(args.env)

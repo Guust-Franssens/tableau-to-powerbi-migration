@@ -3,9 +3,13 @@ purpose: run the deterministic tier over an ESTATE and turn its output into some
          agent tier can consume safely - a real exit code, collision-checked approvals, per-workbook
          handover slices, and a phase-timing record.
 usage:   python scripts/run_estate.py --input <folder-of-.twb/.twbx> --output <bundle-dir>
-                                      [--engine <path-to-tableau-fabric-skills>]
                                       [--approved-dax <file.json>] [--dry-run]
          python scripts/run_estate.py --slice-only --output <existing-bundle-dir>
+
+The engine is NOT a parameter you normally pass. It resolves to the installed
+`tableau-fabric-skills` plugin - the single canonical source (issue #107) - and the resolved path
+and VERSION land in `engine-output-receipt.json` so the bundle can answer "what built me?" on its
+own. `--engine` still exists for a deliberate override and requires `--allow-noncanonical-engine`.
 
 Why this exists, and why it is a SCRIPT rather than an agent step
 ----------------------------------------------------------------
@@ -63,6 +67,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
 from migration_bundle import sha256_file, write_engine_receipt
 
 log = logging.getLogger("run_estate")
@@ -76,6 +81,7 @@ EXIT_OK = 0
 EXIT_ENGINE_FAILED = 1
 EXIT_DOD_FAILED = 3
 EXIT_COLLISION = 4
+EXIT_ENGINE_SOURCE = 5
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
@@ -325,10 +331,10 @@ def print_collisions(collisions: dict[str, list[dict]]) -> None:
     )
 
 
-def write_receipt_phase(out_dir: Path, phases: list[dict]) -> None:
+def write_receipt_phase(out_dir: Path, phases: list[dict], engine: Path | None = None) -> None:
     """Persist the engine-output receipt and record the phase."""
     started = time.monotonic()
-    receipt = write_engine_receipt(out_dir)
+    receipt = write_engine_receipt(out_dir, engine)
     phases.append({"phase": "engine_receipt", "elapsed_sec": round(time.monotonic() - started, 1)})
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
@@ -337,7 +343,7 @@ def write_receipt_phase(out_dir: Path, phases: list[dict]) -> None:
     log.info("ENGINE RECEIPT: %s", receipt)
 
 
-def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict]) -> None:
+def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict], engine: Path | None = None) -> None:
     """Baseline the engine's output: generated-artifact hashes, then the receipt over them.
 
     The order is load-bearing and lives HERE rather than in ``main`` so it cannot be separated by an
@@ -349,19 +355,26 @@ def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict])
         "GENERATED_ARTIFACTS: hashes -> %s",
         write_generated_artifact_manifest(out_dir, report, phases[0]["started_wall"] - 1),
     )
-    write_receipt_phase(out_dir, phases)
+    write_receipt_phase(out_dir, phases, engine)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point."""
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, kept out of ``main`` so the run logic stays readable."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", type=Path, help="folder of .twb/.twbx to migrate")
     parser.add_argument("--output", type=Path, required=True, help="bundle output folder")
     parser.add_argument(
         "--engine",
         type=Path,
-        default=Path.home() / "vscode-projects" / "tableau-fabric-skills",
-        help="path to the tableau-fabric-skills clone",
+        help=(
+            "DELIBERATE OVERRIDE ONLY. Defaults to the installed tableau-fabric-skills plugin, which "
+            "is the single canonical engine (#107); a different path needs --allow-noncanonical-engine"
+        ),
+    )
+    parser.add_argument(
+        "--allow-noncanonical-engine",
+        action="store_true",
+        help="acknowledge a non-plugin --engine; the bundle receipt records the run as non-canonical",
     )
     parser.add_argument("--approved-dax", type=Path, help="landing re-run: {calc name: DAX} JSON")
     parser.add_argument(
@@ -370,7 +383,75 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the engine; re-derive handovers/checks from an existing bundle",
     )
     parser.add_argument("--dry-run", action="store_true", help="report what would run, then stop")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def resolve_run_engine(args: argparse.Namespace) -> tuple[Path | None, int]:
+    """Resolve the engine ONCE, up front, and fail loudly. Returns (engine, exit code).
+
+    ``--slice-only`` re-derives artifacts from a bundle the engine already produced, so it needs no
+    engine and must keep working on a machine where the plugin is not installed.
+    """
+    if args.slice_only:
+        return None, EXIT_OK
+    try:
+        engine = resolve_engine(args.engine, args.allow_noncanonical_engine)
+    except (EngineNotFoundError, NonCanonicalEngineError) as exc:
+        print(f"ESTATE: ENGINE_SOURCE - {exc}", file=sys.stderr)
+        return None, EXIT_ENGINE_SOURCE
+    provenance = engine_provenance(engine)
+    log.info(
+        "ENGINE SOURCE: %s VERSION=%s (%s)",
+        provenance["root"],
+        provenance["version"] or "unknown",
+        "canonical plugin" if provenance["canonical"] else "NON-CANONICAL OVERRIDE",
+    )
+    return engine, EXIT_OK
+
+
+def print_dry_run(args: argparse.Namespace, engine: Path | None) -> None:
+    """Say exactly what would run, including WHICH engine and at what version."""
+    version = engine_provenance(engine)["version"] if engine else None
+    print(f"DRY RUN: engine={engine} version={version or '(n/a)'}")
+    print(f"         input={args.input}  output={args.output}")
+    print(f"         approved-dax={args.approved_dax or '(none)'}")
+
+
+def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list[dict]) -> int:
+    """Run the deterministic engine and record its timing. Returns an exit code; 0 means proceed."""
+    started = time.monotonic()
+    phases.append({"phase": "engine_run", "started_wall": time.time()})
+    code, output = run_engine(engine, args.input, args.output, args.approved_dax)
+    elapsed = time.monotonic() - started
+    phases[-1].update({"elapsed_sec": round(elapsed, 1), "exit_code": code})
+    log.info("ENGINE: exit %d in %.0fs", code, elapsed)
+    if code != 0:
+        print(output[-2000:], file=sys.stderr)
+        print(f"ESTATE: ENGINE_FAILED (exit {code})")
+        return EXIT_ENGINE_FAILED
+    return EXIT_OK
+
+
+def final_verdict(collisions: list, dod_ok: bool, dod_detail: str) -> int:
+    """The verdict the engine's own exit code cannot give us."""
+    if collisions:
+        print_collisions(collisions)
+        return EXIT_COLLISION
+    if not dod_ok:
+        print(
+            f"\nESTATE: DOD_FAILED - {dod_detail}\n"
+            "  The engine exits 0 even on a failed definition of done (deliberate: one bad workbook\n"
+            "  should not fail a batch). This is the exit code it cannot give you. Do not hand this\n"
+            "  bundle downstream until the failing workbook(s) are resolved or explicitly accepted."
+        )
+        return EXIT_DOD_FAILED
+    print("\nESTATE: READY - definition of done is not failed, no approval collisions.")
+    return EXIT_OK
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point."""
+    args = build_parser().parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     phases: list[dict] = []
@@ -379,28 +460,23 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: --input is required unless --slice-only is given", file=sys.stderr)
         return 2
 
+    engine, engine_code = resolve_run_engine(args)
+    if engine_code != EXIT_OK:
+        return engine_code
+
     if args.dry_run:
-        print(f"DRY RUN: engine={args.engine}")
-        print(f"         input={args.input}  output={args.output}")
-        print(f"         approved-dax={args.approved_dax or '(none)'}")
+        print_dry_run(args, engine)
         return EXIT_OK
 
     # --- phase 1: the engine ------------------------------------------------------------------
     if not args.slice_only:
-        started = time.monotonic()
-        phases.append({"phase": "engine_run", "started_wall": time.time()})
-        code, output = run_engine(args.engine, args.input, args.output, args.approved_dax)
-        elapsed = time.monotonic() - started
-        phases[-1].update({"elapsed_sec": round(elapsed, 1), "exit_code": code})
-        log.info("ENGINE: exit %d in %.0fs", code, elapsed)
-        if code != 0:
-            print(output[-2000:], file=sys.stderr)
-            print(f"ESTATE: ENGINE_FAILED (exit {code})")
-            return EXIT_ENGINE_FAILED
+        code = run_engine_phase(args, engine, phases)
+        if code != EXIT_OK:
+            return code
 
     report = read_report(args.output)
     if not args.slice_only:
-        record_engine_output(args.output, report, phases)
+        record_engine_output(args.output, report, phases, engine)
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------
     # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)
@@ -434,21 +510,7 @@ def main(argv: list[str] | None = None) -> int:
     # --- report -------------------------------------------------------------------------------
     print_summary(report, args.output, slices, timings, dod_detail)
 
-    if collisions:
-        print_collisions(collisions)
-        return EXIT_COLLISION
-
-    if not dod_ok:
-        print(
-            f"\nESTATE: DOD_FAILED - {dod_detail}\n"
-            "  The engine exits 0 even on a failed definition of done (deliberate: one bad workbook\n"
-            "  should not fail a batch). This is the exit code it cannot give you. Do not hand this\n"
-            "  bundle downstream until the failing workbook(s) are resolved or explicitly accepted."
-        )
-        return EXIT_DOD_FAILED
-
-    print("\nESTATE: READY - definition of done is not failed, no approval collisions.")
-    return EXIT_OK
+    return final_verdict(collisions, dod_ok, dod_detail)
 
 
 if __name__ == "__main__":

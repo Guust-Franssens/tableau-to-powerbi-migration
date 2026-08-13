@@ -224,7 +224,15 @@ def test_the_generated_manifest_is_written_before_the_engine_receipt(tmp_path: P
     monkeypatch.setattr(run_estate, "run_engine", _fake_engine)
     src = tmp_path / "src"
     src.mkdir()
-    argv = ["--engine", str(tmp_path / "engine"), "--input", str(src), "--output", str(out)]
+    argv = [
+        "--engine",
+        str(tmp_path / "engine"),
+        "--allow-noncanonical-engine",
+        "--input",
+        str(src),
+        "--output",
+        str(out),
+    ]
     assert run_estate.main(argv) == run_estate.EXIT_OK
 
     receipt = json.loads((out / "engine-output-receipt.json").read_text(encoding="utf-8"))
@@ -232,6 +240,65 @@ def test_the_generated_manifest_is_written_before_the_engine_receipt(tmp_path: P
         "the receipt does not describe the bundle main() just produced - "
         "the generated-artifact manifest must be written BEFORE the receipt"
     )
+
+
+# ---------------------------------------------------------------------------
+# One engine, and the bundle says which one (issue #107)
+# ---------------------------------------------------------------------------
+
+
+def test_a_noncanonical_engine_stops_the_run_instead_of_running_it(tmp_path: Path, monkeypatch) -> None:
+    """The estate coordinator must not run whatever tree it is pointed at without being told to.
+
+    Measured 2026-08-12: this script's `--engine` DEFAULT was a sibling clone at 2.126.0 while other
+    steps resolved the plugin at 2.113.0, and the two emit materially different map visuals. Refusing
+    here is what makes "the plugin is the single source" true at the point of execution rather than
+    only in a document.
+    """
+    ran: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", lambda engine, *_: (ran.append(engine), (0, ""))[1])
+
+    src = tmp_path / "src"
+    src.mkdir()
+    argv = ["--engine", str(tmp_path / "elsewhere"), "--input", str(src), "--output", str(tmp_path / "bundle")]
+    assert run_estate.main(argv) == run_estate.EXIT_ENGINE_SOURCE
+    assert not ran, "the engine ran despite being non-canonical and unacknowledged"
+
+
+def test_the_bundle_records_which_engine_built_it(tmp_path: Path, monkeypatch) -> None:
+    """#107's acceptance criterion: the artifact answers "what built me?" without the machine."""
+    engine = tmp_path / "engine"
+    (engine / "skills" / "tableau-migration").mkdir(parents=True)
+    (engine / "skills" / "tableau-migration" / "VERSION").write_text("2.126.0\n", encoding="utf-8")
+
+    out = tmp_path / "bundle"
+
+    def _fake_engine(_engine: Path, _src: Path, dest: Path, _dax: Path | None) -> tuple[int, str]:
+        _write(dest / "report.json", json.dumps(_report()))
+        _write(dest / "input_manifest.json", '{"inputs": []}')
+        return 0, ""
+
+    monkeypatch.setattr(run_estate, "run_engine", _fake_engine)
+    src = tmp_path / "src"
+    src.mkdir()
+    argv = ["--engine", str(engine), "--allow-noncanonical-engine", "--input", str(src), "--output", str(out)]
+    assert run_estate.main(argv) == run_estate.EXIT_OK
+
+    receipt = json.loads((out / "engine-output-receipt.json").read_text(encoding="utf-8"))
+    assert receipt["engine"]["version"] == "2.126.0"
+    assert receipt["engine"]["root"] == str(engine)
+    assert receipt["engine"]["canonical"] is False, "an override must be recorded AS an override"
+
+
+def test_slice_only_needs_no_engine_at_all(tmp_path: Path, monkeypatch) -> None:
+    """Re-deriving handovers from an existing bundle must not require the plugin to be installed."""
+    import engine_source  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", tmp_path / "no-plugin-here")
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report(workbooks=[_workbook("Alpha", "AlphaModel")])))
+    assert run_estate.main(["--slice-only", "--output", str(out)]) == run_estate.EXIT_OK
+    assert (out / "handover" / "Alpha.json").is_file()
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,11 @@ readiness matrix. Session start is the **only safe moment** to change them.
 - It cannot update the **skill bundles** — `copilot plugin update` hits a file lock while any Copilot
   session is running. That lock only blocks renaming the plugin directory, not writing inside it, so a
   *content* refresh needs no restart: `python scripts/sync_installed_skills.py`.
+- It **blocks** if the deterministic conversion engine is installed more than once. The installed
+  `tableau-fabric-skills@tableau-collection` plugin is its **single canonical source**; a sibling
+  clone or any other checkout is a `MISS`, not a warning, because two engine versions silently built
+  one pipeline (issue #107). Delete the extra copy — after confirming it has no uncommitted or
+  unpushed work. `-CheckUpstream` additionally reports when the plugin is behind upstream `main`.
 
 ### When to run which
 
