@@ -302,6 +302,110 @@ def test_slice_only_needs_no_engine_at_all(tmp_path: Path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The empty-model gate: a bundle that passes everything above and holds no data
+# ---------------------------------------------------------------------------
+
+
+def _unlanded_model(out: Path, workbook: str = "global_superstores_db") -> None:
+    """An Import partition over a flat file that was never landed - the measured silent success.
+
+    The path is absolute and belongs to the machine the Tableau workbook was authored on. On the
+    Windows host that produced the measured estate the detector calls that `foreign_path`; on a Linux
+    CI runner the same path is simply `missing_file`. Both block, which is the point: these
+    assertions are about the coordinator's verdict, not about which runner executed them.
+    """
+    tables = out / "pbip" / workbook / "Orders.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True, exist_ok=True)
+    _write(
+        tables / "Orders.tmdl",
+        "table Orders\n\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet\n"
+        '\t\t\t\tSource = Excel.Workbook(File.Contents("/Users/<author>/Datasets/Orders.xlsx"), null, true)\n'
+        "\t\t\tin\n"
+        "\t\t\t\tSource\n",
+    )
+
+
+def _slice_only_argv(out: Path) -> list[str]:
+    return ["--output", str(out), "--slice-only"]
+
+
+def test_an_empty_model_blocks_a_bundle_that_the_definition_of_done_let_through(tmp_path: Path, capsys) -> None:
+    """The exact measured case: `definition_of_done: warn`, report bound, model contains nothing.
+
+    ``warn`` is deliberately allowed through (see the DoD tests above), so before this gate existed
+    this bundle reached the deployer and then a customer. The verdict has to live in the exit code -
+    a printed warning is what the engine already produced, and it was not enough.
+    """
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report(dod_status="warn")))
+    _unlanded_model(out)
+
+    code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_EMPTY_MODEL
+    printed = capsys.readouterr().out
+    assert "global_superstores_db" in printed
+    assert "Orders.xlsx" in printed
+
+
+def test_a_healthy_bundle_still_exits_zero(tmp_path: Path) -> None:
+    """The false-positive control at coordinator level: a landed CSV must not block the estate."""
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report(dod_status="warn")))
+    landed = _write(out / "data" / "Orders" / "Extract.csv", "a,b\n1,2\n")
+    tables = out / "pbip" / "wb" / "Orders.SemanticModel" / "definition" / "tables"
+    _write(
+        tables / "Orders.tmdl",
+        "table Orders\n\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet\n"
+        f'\t\t\t\tSource = Csv.Document(File.Contents("{landed.as_posix()}"))\n'
+        "\t\t\tin\n"
+        "\t\t\t\tSource\n",
+    )
+
+    assert run_estate.main(_slice_only_argv(out)) == run_estate.EXIT_OK
+
+
+def test_the_empty_model_verdict_is_printed_even_when_the_definition_of_done_already_failed(
+    tmp_path: Path, capsys
+) -> None:
+    """Precedence is DoD-first, but the READER must still be told about both.
+
+    A failed DoD returns before the empty-model branch, so if the render were emitted there the
+    quieter defect would be invisible on exactly the runs that have more than one problem. Measured
+    on the 38-workbook estate, that was the actual situation.
+    """
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report(dod_status="failed")))
+    _unlanded_model(out)
+
+    code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_DOD_FAILED
+    assert "EMPTY_MODEL" in capsys.readouterr().out
+
+
+def test_the_empty_model_verdict_is_persisted_for_later_steps(tmp_path: Path) -> None:
+    """The deployer runs in a different process and must not have to re-derive this."""
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report(dod_status="warn")))
+    _unlanded_model(out)
+
+    run_estate.main(_slice_only_argv(out))
+
+    verdict = json.loads((out / "empty-model-check.json").read_text(encoding="utf-8"))
+    assert verdict["status"] == "EMPTY_MODELS"
+    assert verdict["models"][0]["owner"] == "global_superstores_db"
+
+
+# ---------------------------------------------------------------------------
 # Slicing: the estate report must never enter a per-workbook agent's context
 # ---------------------------------------------------------------------------
 

@@ -34,6 +34,13 @@ things a conversation cannot be trusted to remember every time:
 3. **`report.json` is ~14 KB per workbook** (83.4 KB measured for 6). At estate scale that is
    hundreds of KB of mostly-irrelevant context if handed whole to a per-workbook agent.
 
+4. **A model can pass every check above and still contain ZERO ROWS.** An Import partition over a
+   flat file that was never landed opens, validates, binds its report and reports success; the
+   engine notes it in a `pbip_warnings` string and moves on. Measured on a 38-workbook estate, one
+   such workbook came back `definition_of_done: warn` - it would have passed this coordinator's own
+   gate. `check_empty_model.py` is the offline artifact scan that catches it, wired in below as
+   `EXIT_EMPTY_MODEL`.
+
 Deliberately NOT here
 ---------------------
 No migration logic. This never writes TMDL, never writes PBIR, never opens Power BI Desktop. It runs
@@ -67,6 +74,9 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from check_empty_model import REPORT_NAME as EMPTY_MODEL_REPORT
+from check_empty_model import render as render_empty_model
+from check_empty_model import scan as scan_for_empty_models
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
 from migration_bundle import sha256_file, write_engine_receipt
 
@@ -82,6 +92,7 @@ EXIT_ENGINE_FAILED = 1
 EXIT_DOD_FAILED = 3
 EXIT_COLLISION = 4
 EXIT_ENGINE_SOURCE = 5
+EXIT_EMPTY_MODEL = 6
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
@@ -358,6 +369,24 @@ def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict],
     write_receipt_phase(out_dir, phases, engine)
 
 
+def check_empty_models(out_dir: Path) -> dict:
+    """Scan the emitted models for the one failure the engine reports but nothing gates on.
+
+    THE SECOND reason this script exists, and the quieter one. `check_definition_of_done` catches a
+    migration that failed *visibly*. This catches one that succeeded visibly and produced nothing:
+    an Import partition over a flat file that was never landed opens fine, validates fine, deploys
+    fine, and shows a customer an empty report. Measured on a 38-workbook estate: one such model was
+    `definition_of_done: warn`, i.e. it would have passed every gate this coordinator had.
+
+    Offline by construction - no Fabric, no Desktop, no credential - so it runs on every estate, not
+    only the ones where a tenant happens to be reachable. The verdict is also written to
+    ``<bundle>/empty-model-check.json`` so a later deploy step can re-read it without re-deriving it.
+    """
+    report = scan_for_empty_models(out_dir)
+    (out_dir / EMPTY_MODEL_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI surface, kept out of ``main`` so the run logic stays readable."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -432,8 +461,14 @@ def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list
     return EXIT_OK
 
 
-def final_verdict(collisions: list, dod_ok: bool, dod_detail: str) -> int:
-    """The verdict the engine's own exit code cannot give us."""
+def final_verdict(collisions: list, dod_ok: bool, dod_detail: str, empty_models: dict, out_dir: Path) -> int:
+    """The verdict the engine's own exit code cannot give us.
+
+    Precedence is collision > definition of done > empty model. All three refuse the bundle and the
+    earlier ones are the broader signal, so they are what a reader should act on first. Only the
+    exit code is exclusive: the empty-model *text* is printed by the caller before this runs, so a
+    quiet defect is never hidden behind a loud one.
+    """
     if collisions:
         print_collisions(collisions)
         return EXIT_COLLISION
@@ -445,7 +480,16 @@ def final_verdict(collisions: list, dod_ok: bool, dod_detail: str) -> int:
             "  bundle downstream until the failing workbook(s) are resolved or explicitly accepted."
         )
         return EXIT_DOD_FAILED
-    print("\nESTATE: READY - definition of done is not failed, no approval collisions.")
+    if empty_models["status"] != "OK":
+        print(
+            f"\nESTATE: EMPTY_MODEL - {empty_models['models_empty']} of {empty_models['models_scanned']} "
+            "model(s) would open and load NO ROWS\n"
+            "  These passed the definition of done: they built, they bound, they validate. They have\n"
+            "  no data. Nothing else in this pipeline can tell 'migrated' from 'migrated and empty',\n"
+            f"  so this is the exit code that does. Details: {out_dir / EMPTY_MODEL_REPORT}"
+        )
+        return EXIT_EMPTY_MODEL
+    print("\nESTATE: READY - definition of done is not failed, no approval collisions, no empty models.")
     return EXIT_OK
 
 
@@ -496,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     dod_ok, dod_detail = check_definition_of_done(report)
     collisions = find_approval_collisions(report)
+    empty_models = check_empty_models(args.output)
     phases.append({"phase": "adjudicate", "elapsed_sec": round(time.monotonic() - started, 1)})
 
     # --- phase 3: slice -----------------------------------------------------------------------
@@ -510,7 +555,12 @@ def main(argv: list[str] | None = None) -> int:
     # --- report -------------------------------------------------------------------------------
     print_summary(report, args.output, slices, timings, dod_detail)
 
-    return final_verdict(collisions, dod_ok, dod_detail)
+    # Printed BEFORE the verdict, and on a pass as well as a fail: an empty model that ships
+    # alongside a `failed` definition of done is the one most likely to be missed, because the reader
+    # stops at the first blocking verdict.
+    print("\n" + render_empty_model(empty_models))
+
+    return final_verdict(collisions, dod_ok, dod_detail, empty_models, args.output)
 
 
 if __name__ == "__main__":

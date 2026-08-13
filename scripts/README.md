@@ -72,6 +72,7 @@ personas already use. Deleting them would make every persona *longer* — see
 |---|---|
 | `validate_spec.py` | Re-validates `migration-spec.json` after agents append `limitations_encountered`; error paths name the offending entry/field so the append can be fixed in place. |
 | `check_datamodel.py` | Dependency-free semantic-model gate: Power Query M syntax plus low-noise TMDL structural checks that catch Desktop load failures earlier. |
+| `check_empty_model.py` | Offline gate against a model that opens and loads **zero rows**: classifies every emitted TMDL partition and blocks (`run_estate.py` exit 6, `EXIT_EMPTY_MODEL`) on an Import over a flat file that is missing, foreign-path, or empty. Never judges live/DirectQuery, remote imports, calculated tables, or needs-review stubs. |
 | `check_m_syntax.py` | Compatibility shim for the pre-rename model gate; forwards to `check_datamodel.py` until external callers and old migration briefs have moved. |
 | `sync_agent_conventions.py` | Regenerates the shared-conventions block into all four personas; `--check` fails on drift **and prints each persona's size against the 30,000-char cap**. All four currently sit at ~99%, so this is the budget alarm. |
 | `probe_desktop_credential.ps1` | Whether a Desktop credential is already cached (`CREDENTIAL_PRESENT`/`_MISSING`), so agents prompt only when needed. The 1-row data probe outranks it as the gate of record. |
