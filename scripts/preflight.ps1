@@ -15,8 +15,10 @@
   `tableau-fabric-skills` plugin, which is its SINGLE canonical source - a second copy anywhere is a
   hard failure, see issue #107), both skill plugins
   (powerbi-authoring@fabric-collection and powerbi-migration-skills@powerbi-migration-collection),
-  the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, and the npm CLI version
-  matrix. Prints a per-item status (OK / WARN / MISS) with an install hint for anything absent.
+  the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, the npm CLI version matrix,
+  and - when you declare an intended tenant - that the Fabric token this machine mints is actually
+  for THAT tenant. Prints a per-item status (OK / WARN / MISS) with an install hint for anything
+  absent.
 
 .PARAMETER Update
   Session-start only. Upgrades the npm bridge CLIs, but ONLY when they are below the correctness
@@ -36,13 +38,28 @@
   This asks npm for the latest bridge CLIs and GitHub for the conversion engine's upstream VERSION.
   It never upgrades and never fails the run.
 
+.PARAMETER Tenant
+  The Entra tenant id you INTEND to deploy into - the same id you pass to `deploy_estate.py
+  --tenant`. Declaring it turns on the wrong-tenant check (see the "Fabric token tenant" block
+  below); omitting it costs nothing and skips that check, so preflight never pays for `az` on a
+  machine that is only parsing workbooks.
+
+  It can also come from `$env:FABRIC_TENANT_ID`, or `FABRIC_TENANT_ID` in the git-ignored `.env` -
+  which is the right home for a real customer tenant id, because this repository is PUBLIC.
+
+.PARAMETER Subscription
+  Optional subscription id/name passed verbatim to `az account get-access-token --subscription`,
+  so the tenant check can verify the NON-MUTATING fix for a wrong-tenant token before you rely on
+  it. `az account set` fixes the same problem by rewriting the CLI's on-disk profile, which every
+  other process on this machine then inherits.
+
 .NOTES
-  Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 [-Update]
+  Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 [-Update] [-Tenant <id>]
   Exit: 0 if every CRITICAL item is present; 1 if any CRITICAL item is missing.
         RECOMMENDED and OPTIONAL items are surfaced as warnings but do not stop a migration.
 #>
 #Requires -Version 5.1
-param([switch]$Update, [switch]$CheckUpstream)
+param([switch]$Update, [switch]$CheckUpstream, [string]$Tenant, [string]$Subscription)
 
 $ErrorActionPreference = 'SilentlyContinue'
 $copilot = Join-Path $HOME '.copilot'
@@ -101,9 +118,14 @@ Add-Cli 'powerbi-report-author' 'critical' 'npm install -g @microsoft/powerbi-re
 # These CLIs are unpinned GLOBAL installs (the official skill installs them with @latest), so they can
 # change under you without any repo diff. Two distinct thresholds:
 #   * FLOOR      - below this is a CORRECTNESS bug, not a nicety. powerbi-report-author < 0.1.4 returns
-#                  errorCount:0 for PBIR that Desktop cannot open (e.g. report.json missing the
-#                  schema-required `reportVersionAtImport`) -- a stale CLI silently green-lights a
-#                  broken report. `-Update` repairs this, and only this.
+#                  errorCount:0 for PBIR that Desktop cannot open (e.g. a report.json whose
+#                  themeCollection entries are missing the schema-required `reportVersionAtImport` --
+#                  it belongs INSIDE each themeCollection entry, where it is required, and is
+#                  FORBIDDEN at the top level of report.json, which answers "must NOT have additional
+#                  properties". Ground truth:
+#                  examples/shipping-kpis/fabric/ShippingKPIs.Report/definition/report.json)
+#                  -- a stale CLI silently green-lights a broken report.
+#                  `-Update` repairs this, and only this.
 #   * KNOWN-GOOD - the version the agent Gotchas were verified against. ABOVE it is not an error, but
 #                  it does mean version-specific prose may be stale -> WARN, don't "fix" it.
 $cliFloor     = @{ 'powerbi-report-author' = '0.1.4'; 'powerbi-desktop' = '0.1.2' }
@@ -264,7 +286,7 @@ else {
 #     checks above enforce correctness when the installed plugin is present and shadowing the repo.
 #   * powerbi-modeling-mcp: useful authoring accelerator; local PBIP/TMDL edits can still proceed.
 #   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
-#     is enforced by the critical PBI_DESKTOP_PATH pin below.
+#     is pinned by the recommended PBI_DESKTOP_PATH check below.
 # --- MCP servers ---
 $mcp = Read-CopilotJson 'mcp-config.json'
 foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote', 'optional'))) {
@@ -367,10 +389,28 @@ if ($appx) {
 
 # The mismatch-remover. A set PBI_DESKTOP_PATH means the bridge and this script resolve the SAME exe;
 # unset means the bridge is guessing from a version-pinned list and may already be wrong.
+#
+# RECOMMENDED, not critical (#124). It was critical, and that made a machine with the engine, both
+# plugins, both CLIs at known-good versions, Desktop installed, az, uv and ODBC 18 report NOT READY
+# over one unset variable. Two things are wrong with that:
+#   * it is a DESKTOP-only pin, and the estate pipeline (steps 1-6) never opens Desktop -
+#     `run_estate.py`'s own docstring says "never opens Power BI Desktop". Blocking a run on a
+#     dependency that run cannot use is a false blocker, and the operator who proceeded anyway was
+#     right - nothing in the estate pipeline needed it;
+#   * exit 1 means "resolve before migrating", so spending it on an item the operator runbook never
+#     names teaches people to ignore exit 1 - which is the one signal this script has.
+# It stays VISIBLE (a WARN, counted in the summary line) because the failure it prevents is real:
+# Desktop auto-updates and the bridge then cannot find the exe. The phase that actually needs it -
+# report authoring / Desktop verification - is where it must be resolved, and `powerbi-desktop open`
+# fails loudly there rather than silently.
 $pathPinned = [bool]($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH))
-Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'critical' $pathPinned `
-    $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery' }) `
-    $(if ($desktop) { "setx PBI_DESKTOP_PATH `"$desktop`"   (then reopen the shell)" } else { 'install Power BI Desktop first' })
+# The hint must work IN THE SHELL THAT READS IT. `setx` writes the user profile and is inherited only
+# by processes started LATER - and an agent's tool shells inherit the environment of a parent that is
+# already running, so "then reopen the shell" is advice they cannot act on. `$env:` is the fix that
+# takes effect immediately; `setx` is offered second, for persistence, correctly labelled.
+Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
+    $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline' }) `
+    $(if ($desktop) { "THIS shell (takes effect now): `$env:PBI_DESKTOP_PATH = `"$desktop`"   |   persist for NEW shells only (does NOT affect this one): setx PBI_DESKTOP_PATH `"$desktop`"" } else { 'install Power BI Desktop first' })
 
 # --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
 # Opening a model that spans more than one data source raises a modal ("Potential security risk: This
@@ -399,6 +439,115 @@ Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offl
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'
+
+# --- Fabric token TENANT: a token that mints successfully can still be for the WRONG tenant (#124) --
+#
+# Measured 2026-08-13, FOUR times across two independent operators, ~15 minutes each: on a
+# multi-account machine `az account get-access-token` succeeds and hands back a token for whatever
+# tenant the CLI's default context points at. `GET /workspaces/{id}` then answers `WorkspaceNotFound`
+# for a workspace that exists and was just filled with 74 items - a 404 that reads as "your deploy
+# went somewhere else" rather than as an identity problem, and it lands in the phase where you are
+# reassuring a customer. The runbook's whole Fabric-side credential guidance was "the token must
+# mint", which is exactly the thing that was already true.
+#
+# This belongs in preflight rather than in a doc note because it is the class of failure preflight
+# exists for: deterministic, checkable BEFORE any work, and expensive to diagnose afterwards.
+#
+# The TOKEN is the ground truth, not the CLI's profile: `tid` is the tenant the resource will
+# actually see. A JWT's payload is its middle dot-separated segment, base64url-encoded, so .NET
+# decodes it with no new dependency.
+#
+# NEVER print, log or truncate the token itself. Only the decoded `tid` - an identifier, not a
+# secret - reaches the output.
+function Get-JwtTenantId([string]$Token) {
+    # base64url is not base64: it swaps '+/' for '-_' and drops the '=' padding, both of which
+    # [Convert]::FromBase64String rejects. A length of 1 mod 4 cannot be valid base64 at all.
+    if (-not $Token) { return $null }
+    $seg = ($Token -split '\.')[1]
+    if (-not $seg) { return $null }
+    $b64 = $seg.Replace('-', '+').Replace('_', '/')
+    switch ($b64.Length % 4) { 1 { return $null } 2 { $b64 += '==' } 3 { $b64 += '=' } }
+    try { return ((([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))) | ConvertFrom-Json).tid) }
+    catch { return $null }
+}
+
+function Get-DotEnvValue([string]$Key) {
+    # Deliberately the SAME minimal KEY=VALUE parse as scripts/tableau_env.py's load_env (trim, skip
+    # blank/'#', split on the first '='), so a single .env line cannot mean one thing to Python and
+    # another to PowerShell. .env is git-ignored, which is where a real customer tenant id belongs:
+    # this repository is public.
+    $envFile = Join-Path $repoRoot '.env'
+    if (-not (Test-Path $envFile)) { return $null }
+    foreach ($line in (Get-Content $envFile)) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#') -or ($trimmed -notmatch '=')) { continue }
+        $pair = $trimmed -split '=', 2
+        if ($pair[0].Trim() -eq $Key) { return $pair[1].Trim() }
+    }
+    return $null
+}
+
+# Declaration of intent, in the order a caller expects to win: flag > exported env > git-ignored .env.
+# Trimmed because the comparison below is the only thing standing between an operator and a blocked
+# migration: a trailing space in an exported variable is not a wrong tenant, and must not read as one.
+$intendedTenant = @($Tenant, $env:FABRIC_TENANT_ID, (Get-DotEnvValue 'FABRIC_TENANT_ID')) |
+    Where-Object { $_ -and $_.Trim() } | Select-Object -First 1
+if ($intendedTenant) { $intendedTenant = $intendedTenant.Trim() }
+
+# Mirrors deploy_estate.py's FABRIC_RESOURCE. Duplicating a well-known constant is a smaller risk
+# than making this PowerShell bootstrap depend on importing Python (see the engine block above for
+# the case where re-deriving a LIST would have been the real defect); if it ever changed, the deploy
+# would fail loudly on its own.
+$fabricResource = 'https://api.fabric.microsoft.com'
+
+if (-not $intendedTenant) {
+    # No declaration -> no `az` call at all, so an operator who only parses workbooks pays nothing.
+    # Reported as a WARN rather than an OK because the check did not RUN: a skipped check that
+    # renders as passing is the false-green shape this whole script exists to prevent.
+    Add-Check 'Fabric token tenant' 'optional' $false 'no intended tenant declared - not checked' `
+        'Declare the tenant you deploy into and this becomes automatic: -Tenant <id>, $env:FABRIC_TENANT_ID, or FABRIC_TENANT_ID in the git-ignored .env. Same id you pass to deploy_estate.py --tenant. Until then, a WorkspaceNotFound on a workspace you know exists may simply be a token for another tenant.'
+}
+elseif (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    Add-Check 'Fabric token tenant' 'optional' $false "intended $intendedTenant - not verified (az not on PATH)" `
+        'Install the Azure CLI to verify which tenant this machine actually mints Fabric tokens for.'
+}
+else {
+    $azArgs = @('account', 'get-access-token', '--resource', $fabricResource, '-o', 'json')
+    # --subscription scopes ONE call. It is offered here so the fix can be verified with the same
+    # command shape that applies it, rather than by mutating the CLI profile and hoping.
+    if ($Subscription) { $azArgs += @('--subscription', $Subscription) }
+    # $tokenJson holds a BEARER TOKEN. It is never echoed, never added to a Detail, and az's own
+    # stderr is discarded rather than surfaced, so no code path can leak it.
+    $tokenJson = & az @azArgs 2>$null
+    $actualTenant = $null
+    if ($tokenJson) {
+        try { $actualTenant = Get-JwtTenantId ((($tokenJson | Out-String) | ConvertFrom-Json).accessToken) } catch { $actualTenant = $null }
+    }
+    $scoped = if ($Subscription) { " (scoped: --subscription $Subscription)" } else { ' (default az context)' }
+
+    if (-not $actualTenant) {
+        Add-Check 'Fabric token tenant' 'optional' $false "intended $intendedTenant - no Fabric token could be minted or decoded$scoped" `
+            'Run `az login`, then re-run preflight. (Preflight never prints the token - only its decoded `tid` claim.)'
+    }
+    else {
+        $tenantOk = ($actualTenant -eq $intendedTenant)
+        # A mismatch is CRITICAL and a match is a quiet OK. Critical is defensible precisely because
+        # the check is OPT-IN: it can only fire once someone has declared "I intend to deploy into
+        # tenant X", and at that point a token for tenant Y makes every Fabric call answer 404 for
+        # things that exist. Nobody who has not declared a tenant can ever be blocked by it.
+        $exampleSub = $null
+        if (-not $tenantOk) {
+            # Turn the advice into something copy-pasteable: name a subscription this machine can
+            # already see INSIDE the intended tenant. Costs one extra `az` call, on the failure path
+            # only.
+            $exampleSub = (& az account list --all --query "[?tenantId=='$intendedTenant'].id" -o tsv 2>$null | Select-Object -First 1)
+        }
+        $subHint = if ($exampleSub) { "e.g. --subscription $exampleSub" } else { '--subscription <a subscription inside that tenant>' }
+        Add-Check 'Fabric token tenant' $(if ($tenantOk) { 'optional' } else { 'critical' }) $tenantOk `
+            $(if ($tenantOk) { "tid matches intended $intendedTenant$scoped" } else { "WRONG TENANT: token is for $actualTenant, intended $intendedTenant$scoped" }) `
+            "This is an IDENTITY problem, not a missing workspace: Fabric will answer WorkspaceNotFound/EntityNotFound for items that exist. Prefer the non-mutating fix, which scopes a single call: az account get-access-token --resource $fabricResource $subHint (re-run preflight with -Subscription <same> to confirm). ``az account set`` also works but rewrites the CLI profile on disk, so every other process on this machine silently follows you - restore it afterwards if you use it. Note deploy_estate.py --tenant is passed to az verbatim and inherits the same ambiguity (az may resolve a different ACCOUNT against that tenant and answer AADSTS90072)."
+    }
+}
 
 $odbc = (Get-OdbcDriver -ErrorAction SilentlyContinue | Where-Object Name -like '*SQL Server*').Name
 Add-Check 'ODBC Driver 18 (SQL)' 'optional' ($odbc -contains 'ODBC Driver 18 for SQL Server') `
