@@ -83,6 +83,20 @@ _SCHEMA_BASE = "https://developer.microsoft.com/json-schemas/fabric/item/report/
 _PLATFORM_SCHEMA = (
     "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json"
 )
+# `definition.pbir` sits one level ABOVE `definition/`, so it does not share `_SCHEMA_BASE`, and it
+# is NOT optional: omitting it is `PBIR_JSON_FILE_NO_SCHEMA` ("Fabric rejects PBIR definition JSON
+# files without $schema"). Value copied from the committed deliverable
+# `examples/shipping-kpis/fabric/ShippingKPIs.Report/definition.pbir`.
+_PBIR_PROPERTIES_SCHEMA = (
+    "https://developer.microsoft.com/json-schemas/fabric/item/report/definitionProperties/2.0.0/schema.json"
+)
+# `.pbip` / `.pbism` are project-level, not PBIR, so they have their own schema roots again. The
+# `.pbip` one must end in a LITERAL numeric version, never the placeholder `1.x.x`
+# (`.github/skills/powerbi-semantic-model-gotchas/SKILL.md`).
+_PBIP_PROPERTIES_SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/pbip/pbipProperties/1.0.0/schema.json"
+_PBISM_PROPERTIES_SCHEMA = (
+    "https://developer.microsoft.com/json-schemas/fabric/item/semanticModel/definitionProperties/1.0.0/schema.json"
+)
 
 # A "table not found" is a SPEC error, not a reachability one - the connection plainly worked well
 # enough for the server to tell us the object is missing. Classifying it as UNREACHABLE would send a
@@ -128,7 +142,11 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
     indented = "\n".join("\t\t\t\t" + line for line in m_query.split("\n"))
     return {
         f"{name}.pbip": json.dumps(
-            {"version": "1.0", "artifacts": [{"report": {"path": f"{name}.Report"}}]},
+            {
+                "$schema": _PBIP_PROPERTIES_SCHEMA,
+                "version": "1.0",
+                "artifacts": [{"report": {"path": f"{name}.Report"}}],
+            },
             indent=2,
         ),
         f"{name}.SemanticModel/.platform": json.dumps(
@@ -139,7 +157,12 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
             },
             indent=2,
         ),
-        f"{name}.SemanticModel/definition.pbism": json.dumps({"version": "4.0", "settings": {}}, indent=2),
+        # 4.2, matching all 16 shipped examples under `examples/*/fabric/*.SemanticModel/`. 4.0 is
+        # an older project version this repo no longer produces anywhere else.
+        f"{name}.SemanticModel/definition.pbism": json.dumps(
+            {"$schema": _PBISM_PROPERTIES_SCHEMA, "version": "4.2", "settings": {}},
+            indent=2,
+        ),
         f"{name}.SemanticModel/definition/database.tmdl": (
             # 1702, never lower. Measured 2026-08-03 (a real Power BI Desktop crash, "Frown"
             # feedback): TOM refuses to load a model that requests a LOWER compatibilityLevel than
@@ -180,23 +203,37 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
             indent=2,
         ),
         f"{name}.Report/definition.pbir": json.dumps(
-            {"version": "4.0", "datasetReference": {"byPath": {"path": f"../{name}.SemanticModel"}}},
+            {
+                "$schema": _PBIR_PROPERTIES_SCHEMA,
+                "version": "4.0",
+                "datasetReference": {"byPath": {"path": f"../{name}.SemanticModel"}},
+            },
             indent=2,
         ),
         f"{name}.Report/definition/version.json": json.dumps(
             {
                 "$schema": _SCHEMA_BASE + "versionMetadata/1.0.0/schema.json",
-                "version": "4.0",
+                # Three-part and MUST match `^[1-9][0-9]*\.(0|[1-9][0-9]*)\.0$`, so the two-part
+                # "4.0" this used to carry is a schema error, not a variant spelling. This is the
+                # PBIR *definition* version (2.0.0 in every shipped example), which is a different
+                # number from `definition.pbir`'s project `version` above - do not sync them.
+                "version": "2.0.0",
             },
             indent=2,
         ),
         f"{name}.Report/definition/report.json": json.dumps(
             {
                 "$schema": _SCHEMA_BASE + "report/1.0.0/schema.json",
+                # `reportVersionAtImport` is LOCATION-DEPENDENT, and this scaffold is the place the
+                # confusion already cost us once. It is FORBIDDEN here at the top level (`/ must NOT
+                # have additional properties`) and REQUIRED inside each `themeCollection` entry
+                # (`PBIR_THEME_VERSION_AT_IMPORT_MISSING`). The probe registers no theme at all, so
+                # there is no entry to carry it and the correct scaffold has it nowhere. If you ever
+                # add a `baseTheme`/`customTheme` here, that entry must carry its own
+                # `reportVersionAtImport` - see `examples/shipping-kpis/.../definition/report.json`.
                 "themeCollection": {},
                 "layoutOptimization": "None",
                 "resourcePackages": [],
-                "reportVersionAtImport": "5.55",
             },
             indent=2,
         ),
