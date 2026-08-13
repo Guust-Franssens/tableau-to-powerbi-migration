@@ -267,26 +267,48 @@ def parts_for(folder: Path) -> list[dict[str, str]]:
     return out
 
 
+def _conn_value(raw: str) -> str:
+    """Quote a connection-string value the way the product does.
+
+    Ground truth: a report built in Power BI Desktop against a model in our landing zone serialises
+    the Data Source QUOTED - `Data Source="powerbi://...myorg/Tableau Landing Zone"`. Our
+    hand-derived form left it bare, which happens to work for spaces but not for the characters that
+    actually terminate a connection string: an unquoted `;` in a workspace name truncates it, and the
+    binding then fails or points somewhere else entirely.
+
+    OLE DB quoting rules: prefer double quotes; switch to single quotes if the value contains one;
+    if it contains both, double the enclosing quote to escape it.
+    """
+    if '"' not in raw:
+        return f'"{raw}"'
+    if "'" not in raw:
+        return f"'{raw}'"
+    return '"' + raw.replace('"', '""') + '"'
+
+
 def rebind(parts: list[dict[str, str]], workspace_name: str, model_name: str, model_id: str) -> list[dict[str, str]]:
     """Replace a report's byPath dataset reference with a service byConnection one.
 
     See the module docstring: schema 2.0.0 allows ONLY `connectionString` here, so the model's guid
     travels inside it as `semanticModelId`. Anything else is rejected before the item is created.
+
+    The exact string below is the PRODUCT's own serialisation, captured from a report authored in
+    Power BI Desktop against a model this deployer had already landed - not our reconstruction. That
+    is why `access mode=readonly` is present and why the data source is quoted.
     """
+    connection = (
+        f"Data Source={_conn_value(f'powerbi://api.powerbi.com/v1.0/myorg/{workspace_name}')};"
+        f"initial catalog={model_name};"
+        "access mode=readonly;"
+        "integrated security=ClaimsToken;"
+        f"semanticmodelid={model_id}"
+    )
     pbir = {
         "$schema": (
             "https://developer.microsoft.com/json-schemas/fabric/item/report/definitionProperties/2.0.0/schema.json"
         ),
         "version": "4.0",
-        "datasetReference": {
-            "byConnection": {
-                "connectionString": (
-                    f"Data Source=powerbi://api.powerbi.com/v1.0/myorg/{workspace_name};"
-                    f"Initial Catalog={model_name};Integrated Security=ClaimsToken;"
-                    f"semanticModelId={model_id}"
-                )
-            }
-        },
+        "datasetReference": {"byConnection": {"connectionString": connection}},
     }
     payload = base64.b64encode(json.dumps(pbir, indent=2).encode("utf-8")).decode("ascii")
     if not any(part["path"] == "definition.pbir" for part in parts):

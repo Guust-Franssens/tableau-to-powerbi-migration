@@ -77,7 +77,8 @@ def test_the_connection_string_carries_the_model_guid(tmp_path):
     )
     connection = pbir["datasetReference"]["byConnection"]
     assert list(connection) == ["connectionString"], "2.0.0 forbids any other property here"
-    assert "semanticModelId=GUID-1" in connection["connectionString"]
+    # Lowercase, matching the product's own serialisation rather than our earlier reconstruction.
+    assert "semanticmodelid=GUID-1" in connection["connectionString"]
 
 
 def test_rebinding_leaves_every_other_part_untouched(tmp_path):
@@ -1573,3 +1574,42 @@ def test_the_model_tiebreak_does_not_depend_on_directory_listing_order(tmp_path)
 
     assert de._preferred_model(wb, list(paths), []) == wb / "Alpha.SemanticModel"
     assert de._preferred_model(wb, list(reversed(paths)), []) == wb / "Alpha.SemanticModel"
+
+
+def test_the_binding_matches_the_products_own_serialisation(tmp_path):
+    """Ground truth, not reconstruction.
+
+    Captured from `byconnection.Report`, authored in Power BI Desktop against the World_Indicators
+    model this deployer had landed in the real landing zone (guid verified against the workspace).
+    Our hand-derived form differed in two ways: the data source was unquoted, and `access mode` was
+    missing entirely.
+    """
+    parts = [{"path": "definition.pbir", "payload": "e30=", "payloadType": "InlineBase64"}]
+    out = de.rebind(parts, "Tableau Landing Zone", "World_Indicators", "a317a5b3-ebca-4110-ada7-7d9920059109")
+    conn = json.loads(base64.b64decode(out[0]["payload"]))["datasetReference"]["byConnection"]["connectionString"]
+
+    assert conn == (
+        'Data Source="powerbi://api.powerbi.com/v1.0/myorg/Tableau Landing Zone";'
+        "initial catalog=World_Indicators;"
+        "access mode=readonly;"
+        "integrated security=ClaimsToken;"
+        "semanticmodelid=a317a5b3-ebca-4110-ada7-7d9920059109"
+    )
+
+
+def test_a_semicolon_in_a_workspace_name_cannot_truncate_the_connection_string(tmp_path):
+    """A bare `;` ends a connection-string segment: unquoted, the binding silently loses everything
+    after it, including the semanticmodelid that makes the whole recipe work."""
+    parts = [{"path": "definition.pbir", "payload": "e30=", "payloadType": "InlineBase64"}]
+    out = de.rebind(parts, "Sales; Finance", "M", "guid-1")
+    conn = json.loads(base64.b64decode(out[0]["payload"]))["datasetReference"]["byConnection"]["connectionString"]
+
+    assert conn.startswith('Data Source="powerbi://api.powerbi.com/v1.0/myorg/Sales; Finance";')
+    assert "semanticmodelid=guid-1" in conn
+
+
+def test_a_quote_in_a_workspace_name_is_escaped_rather_than_breaking_the_value():
+    """OLE DB quoting: fall back to single quotes, and double the delimiter if both appear."""
+    assert de._conn_value("plain") == '"plain"'
+    assert de._conn_value('has "quote"') == "'has \"quote\"'"
+    assert de._conn_value("both \" and '") == '"both "" and \'"'
