@@ -317,6 +317,86 @@ def test_tracked_hook_configs_do_not_point_at_missing_scripts() -> None:
     assert not missing, "tracked hook config(s) reference missing script(s):\n  " + "\n  ".join(missing)
 
 
+# The newest `visualContainer` schema version that actually RESOLVES, measured 2026-08-13 by direct
+# fetch: 2.10.0 through 2.16.0 all 404, 2.9.0 and below return 200. Raising this constant is a
+# DELIBERATE act that requires re-measuring first:
+#     curl -I https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/<v>/schema.json
+# Deliberately a pinned number rather than a live fetch - the suite is ~1100 offline tests and a
+# network call in CI is its own outage.
+NEWEST_RESOLVING_VISUAL_CONTAINER_SCHEMA = (2, 9, 0)
+
+# Where a schema URL can be *stored* (PBIR artifacts) or *produced* (generators). Markdown is
+# excluded on purpose: the docs exist to WARN about the dead versions, so they must be able to name
+# one (`.github/pbi.kb/visual-cookbook.md` tabulates every 404 version).
+SCHEMA_BEARING_GLOBS = (
+    "*.json",
+    "*.pbir",
+    "*.pbip",
+    "*.pbism",
+    "*.platform",
+    "*.js",
+    "*.mjs",
+    "*.cjs",
+    "*.ts",
+    "*.py",
+    "*.ps1",
+    "*.sh",
+    "*.ipynb",
+)
+
+_VISUAL_CONTAINER_SCHEMA_RE = re.compile(
+    r"json-schemas/fabric/item/report/definition/visualContainer/(\d+)\.(\d+)\.(\d+)/schema\.json"
+)
+
+
+def test_no_committed_file_declares_an_unresolvable_visual_container_schema() -> None:
+    """A dead `$schema` URL does not fail loudly - it silently DISABLES validation.
+
+    `powerbi-report-author validate` cannot fetch a 404 schema, so it skips JSON-schema checking for
+    that visual entirely, still prints `0 error(s)`, and leaves one `PBIR_SCHEMA_UNREACHABLE` warning
+    as the only trace. Measured 2026-08-13 with the identical defect (`"x": "NOT_A_NUMBER"`) in one
+    visual: at the dead `2.11.0` it reports `0 errors, succeededWithWarnings`; at `2.9.0` it reports
+    `1 error, result=failed` (`/position/x must be number`). So a broken encoding ships green.
+
+    Why this is a repo-wide gate and not a one-off cleanup: the same defect has now been fixed three
+    times in the same issue (#131). First the 25 `.github/pbi.kb/visuals/*.visual.json` entries; then
+    776 `visual.json` files under `examples/**`, because the cookbook's own green table routes
+    copiers to the examples instead; then the two committed GENERATORS
+    (`examples/airline-alliance-activity/_work/build.js`,
+    `examples/quadruple-axis-charts/report_build/build_report.mjs`), which re-emitted 198 and 57
+    dead-schema visuals on the next `node build.js` - re-introducing the defect after the artifacts
+    were clean. Fixing an artifact without fixing its generator leaves a live source of regression,
+    so this checks both.
+    """
+    patterns = ["git", "ls-files", "-z", *SCHEMA_BEARING_GLOBS]
+    tracked = subprocess.run(patterns, cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    files = [REPO_ROOT / rel for rel in sorted(filter(None, tracked.split("\0")))]
+    assert files, "no tracked schema-bearing files found - this guard now proves nothing"
+
+    seen = 0
+    dead = []
+    for path in files:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for match in _VISUAL_CONTAINER_SCHEMA_RE.finditer(content):
+            seen += 1
+            version = tuple(int(part) for part in match.groups())
+            if version > NEWEST_RESOLVING_VISUAL_CONTAINER_SCHEMA:
+                rel = path.relative_to(REPO_ROOT).as_posix()
+                dead.append(f"{rel}: {'.'.join(str(part) for part in version)}")
+
+    assert seen, "no visualContainer schema URL found anywhere - the glob list has drifted, so this guard is a no-op"
+    newest = ".".join(str(part) for part in NEWEST_RESOLVING_VISUAL_CONTAINER_SCHEMA)
+    assert not dead, (
+        f"committed file(s) declare a visualContainer schema newer than {newest}, which does not resolve; "
+        "validation is silently SKIPPED for every visual they produce. Fix the value (and the generator "
+        "that emits it, not just its output). If Microsoft has since published a newer schema, re-measure "
+        f"with `curl -I` and raise NEWEST_RESOLVING_VISUAL_CONTAINER_SCHEMA:\n  " + "\n  ".join(sorted(set(dead)))
+    )
+
+
 def test_no_committed_file_leaks_an_absolute_user_path() -> None:
     """`ABSOLUTE_USER_PATH_RE` was only ever unit-tested against a synthetic string - never applied
     to the repo it is meant to protect. This applies it.

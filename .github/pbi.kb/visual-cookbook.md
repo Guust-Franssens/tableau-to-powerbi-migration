@@ -95,6 +95,14 @@ Rules:
   validates (table above), so they were never schema-skipped, and they are ground-truth captures for
   the same reason `actionButton`/`shape` are. They do also pass at `2.9.0` (measured), so pin them if
   you ever have a reason to — it is a preference, not a fix.
+- **Fix the GENERATOR, not just its output.** Several examples ship a re-runnable builder
+  (`examples/*/_work/build.js`, `examples/*/report_build/build_report.mjs`). Both held the dead
+  `2.11.0` in a string constant *after* their emitted artifacts had been swept, so `node build.js`
+  re-created 198 (airline) and 57 (quad) dead-schema visuals — the defect returning wearing a green
+  `0 errors`. A generator is the industrial version of the copy-time inheritance above.
+  `tests/test_repo_layout.py::test_no_committed_file_declares_an_unresolvable_visual_container_schema`
+  now fails on **either** shape, artifact or generator source, offline (it compares against a pinned
+  `NEWEST_RESOLVING_VISUAL_CONTAINER_SCHEMA` — no CI network fetch).
 - **Re-check the table before trusting it.** Versions get published; the number above is a
   *measurement with a date*, not a constant. `curl -I <url>` is the whole check.
 - **`PBIR_SCHEMA_UNREACHABLE` means "schema validation did NOT run"** — never "warning, but fine". If
