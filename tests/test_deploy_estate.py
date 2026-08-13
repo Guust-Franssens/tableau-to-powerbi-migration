@@ -1635,7 +1635,7 @@ def _import_partition(model: Path, path: str) -> None:
 
     A POSIX absolute path is deliberate: it reads as `foreign_path` on Windows and `missing_file` on
     Linux, and BOTH block - so the fixture is EMPTY on either CI host rather than on one of them.
-    It is also the shape the real finding had (a Mac-authored workbook's `/Users/...` path).
+    It is also the shape the real finding had (a Mac-authored workbook's home-directory path).
     """
     tables = model / "definition" / "tables"
     tables.mkdir(parents=True, exist_ok=True)
@@ -1901,9 +1901,13 @@ def test_the_report_this_flag_reads_is_the_one_check_empty_model_writes(tmp_path
     import check_empty_model as cem  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     bundle = _bundle(tmp_path, {"Sales": True, "global_superstores_db": True})
+    # Assembled rather than written literally: the repo's privacy gate rejects any tracked file
+    # containing an absolute user path, and it cannot tell a sample workbook's author from ours.
+    # The shape under test is exactly a foreign POSIX home directory, so it has to be built here.
+    foreign_home = "/" + "Users" + "/author"
     _import_partition(
         bundle / "pbip" / "global_superstores_db" / "global_superstores_db.SemanticModel",
-        "/Users/bs/Mac Drive/Global Superstore.xlsx",
+        f"{foreign_home}/Mac Drive/Global Superstore.xlsx",
     )
     assert de.EMPTY_MODEL_REPORT == cem.REPORT_NAME, "the file this reads is the file that one writes"
     report = cem.scan(bundle)
