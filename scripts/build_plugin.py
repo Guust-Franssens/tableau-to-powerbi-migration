@@ -34,9 +34,16 @@ PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-playbook"
 
 # Only source-tool-agnostic bundles ship. `sentinel-probe` is a diagnostic, and anything
 # Tableau-specific belongs in the migration repo's personas, not in a reusable plugin.
+#
+# `pbip-model-refresh` is HELD BACK at v0.3.0. Its persist path validates `cache.abf` as a CFBF/OLE2
+# container, which the format is not — measured against three real caches in `examples/`, the check
+# rejects every one, so AMO persistence cannot succeed. Four review rounds of hardening around that
+# wrong premise added a lock and a commit-detection fingerprint that introduced two further ways to
+# leave a project unopenable. It ships again once the persist path is simplified (see the tracking
+# issue), not before: a bundle whose headline feature cannot work is worse than an absent one,
+# because the gotcha bundles' cross-references at least fail loudly.
 SHIPPED_SKILLS = (
     "powerbi-ai-readiness",
-    "pbip-model-refresh",
     "powerbi-report-gotchas",
     "powerbi-semantic-model-gotchas",
 )
