@@ -14,7 +14,7 @@
   Verifies: Python + the parser's Python deps, the deterministic conversion engine (the installed
   `tableau-fabric-skills` plugin, which is its SINGLE canonical source - a second copy anywhere is a
   hard failure, see issue #107), both skill plugins
-  (powerbi-authoring@fabric-collection and powerbi-playbook@powerbi-playbook-collection),
+  (powerbi-authoring@fabric-collection and powerbi-migration-skills@powerbi-migration-collection),
   the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, and the npm CLI version
   matrix. Prints a per-item status (OK / WARN / MISS) with an install hint for anything absent.
 
@@ -188,90 +188,79 @@ else {
 }
 
 # --- Skill plugins ---
-# Both are REQUIRED for the agents to work as written: `powerbi-authoring` supplies the planning/
-# design/authoring/semantic-model skills the builder personas chain, and `powerbi-playbook`
-# republishes this repo's own two bundles so a subagent can invoke them BY NAME. Measured 2026-07-31:
-# a custom subagent does get a `skill` tool and CAN invoke both plugin and repo-local skills - so a
-# missing plugin is a real capability loss, not a cosmetic one.
-$cfg = Read-CopilotJson 'config.json'
-$migrationPlugin = $null
-foreach ($p in @(
-        @{ name = 'powerbi-authoring'; market = 'fabric-collection'; tier = 'critical'
-            hint = 'In Copilot: /plugin -> add marketplace microsoft/skills-for-fabric -> enable powerbi-authoring. See AGENTS.md.' },
-        @{ name = 'powerbi-playbook'; market = 'powerbi-playbook-collection'; tier = 'recommended'
-            hint = 'In Copilot: /plugin -> add marketplace Guust-Franssens/powerbi-playbook -> enable powerbi-playbook. See AGENTS.md.' }
-    )) {
-    $plugin = $null
-    if ($cfg -and $cfg.installedPlugins) {
-        $plugin = $cfg.installedPlugins | Where-Object { $_.name -eq $p.name -and $_.marketplace -eq $p.market } | Select-Object -First 1
-    }
-    $pluginOk = $plugin -and (Test-Path $plugin.cache_path)
-    Add-Check "plugin: $($p.name)@$($p.market)" $p.tier ([bool]$pluginOk) `
-        $(if ($pluginOk) { "v$($plugin.version)" } else { 'not installed/enabled' }) $p.hint
-    if ($pluginOk -and $p.name -eq 'powerbi-playbook') { $migrationPlugin = $plugin }
-}
-
-# --- Skill-bundle drift (the plugin copy SHADOWS .github/skills/ for a subagent) ---
-# Measured 2026-07-31: a subagent invoking `powerbi-ai-readiness` by name loaded the PLUGIN copy under
-# ~/.copilot/installed-plugins, NOT the repo copy - even with the repo copy present and the cwd inside
-# this repo. So editing .github/skills/ without re-publishing serves subagents stale guidance, and
-# nothing in the skill registry or the tool output flags the divergence. This check is the only thing
-# that would catch it.
+# `powerbi-authoring` is still checked by configured plugin identity, because it supplies the official
+# planning/design/authoring/semantic-model skills the builder personas chain.
 #
-# It checks BOTH failure shapes, because they are different mistakes:
-#   MISSING - a bundle listed in build_plugin.py's SHIPPED_SKILLS that is not in the installed plugin
-#             (you added or published a bundle but never re-installed; a pairwise hash check alone is
-#             blind to this, since there is nothing to pair with).
-#   STALE   - a bundle present in both whose bytes differ (you edited the repo copy without publishing).
-# Bundles deliberately NOT shipped (e.g. sentinel-probe) are absent from SHIPPED_SKILLS and so ignored.
-if ($migrationPlugin) {
-    $buildScript = Join-Path $repoRoot 'scripts\build_plugin.py'
-    $shipped = @()
-    if (Test-Path $buildScript) {
-        $src = Get-Content $buildScript -Raw
-        if ($src -match '(?s)SHIPPED_SKILLS\s*=\s*\((.*?)\)') {
-            $shipped = [regex]::Matches($Matches[1], '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
-        }
-    }
+# This repo's reusable Power BI bundles are different: their marketplace/plugin name has changed once,
+# and a hard-coded name let the installed copy drift silently. Discover that plugin by content instead:
+# scan ~/.copilot/installed-plugins/*/*/skills for the bundle names emitted by build_plugin.py. Exactly
+# one discovered install is acceptable; more than one is a critical shadowing hazard.
+$cfg = Read-CopilotJson 'config.json'
+$p = @{ name = 'powerbi-authoring'; market = 'fabric-collection'; tier = 'critical'
+       hint = 'In Copilot: /plugin -> add marketplace microsoft/skills-for-fabric -> enable powerbi-authoring. See AGENTS.md.' }
+$plugin = $null
+if ($cfg -and $cfg.installedPlugins) {
+    $plugin = $cfg.installedPlugins | Where-Object { $_.name -eq $p.name -and $_.marketplace -eq $p.market } | Select-Object -First 1
+}
+$pluginOk = $plugin -and (Test-Path $plugin.cache_path)
+Add-Check "plugin: $($p.name)@$($p.market)" $p.tier ([bool]$pluginOk) `
+    $(if ($pluginOk) { "v$($plugin.version)" } else { 'not installed/enabled' }) $p.hint
+
+$skillPlugin = $null
+$skillRaw = $null
+if ($py) { $skillRaw = & python (Join-Path $repoRoot 'scripts\skill_plugin_source.py') --json 2>$null }
+try { $skillPlugin = (($skillRaw | Out-String) | ConvertFrom-Json) } catch { $skillPlugin = $null }
+
+if (-not $skillPlugin) {
+    Add-Check 'plugin: reusable Power BI skill bundles' 'recommended' $false `
+        'not verified (skill_plugin_source.py did not report)' `
+        'Run python scripts\skill_plugin_source.py --json. Without this plugin, repo-local skills may still work here, but subagents in other repos cannot invoke the bundles by name.'
+}
+elseif ($skillPlugin.status -eq 'multiple') {
+    Add-Check 'plugin: reusable Power BI skill bundles' 'critical' $false `
+        $skillPlugin.detail `
+        'Two installed copies of the same skill create an ambiguous shadowing order. Remove the duplicate before trusting skill output.'
+}
+elseif ($skillPlugin.status -eq 'missing') {
+    # Deliberately recommended, not critical: with NO installed copy, this repo's local .github/skills
+    # bundles remain available in this checkout. That is a capability/distribution gap for other repos,
+    # not the measured false-green bug. STALE remains critical below because it silently executes code
+    # from a different tree than the repo being inspected.
+    Add-Check "plugin: $($skillPlugin.identity)" 'recommended' $false `
+        'not installed/enabled' `
+        $skillPlugin.install_hint
+}
+else {
+    Add-Check "plugin: $($skillPlugin.identity)" 'recommended' $true `
+        $skillPlugin.plugin_root `
+        'Discovered by scanning installed-plugins for this repo''s shipped skill bundles.'
+
     $missing = @()
     $drift = @()
-    foreach ($name in $shipped) {
+    foreach ($name in @($skillPlugin.shipped_skills)) {
         $mine = Join-Path $repoRoot ".github\skills\$name\SKILL.md"
-        $theirs = Join-Path $migrationPlugin.cache_path "skills\$name\SKILL.md"
+        $theirs = Join-Path $skillPlugin.skills_dir "$name\SKILL.md"
         if (-not (Test-Path $theirs)) { $missing += $name; continue }
         if ((Test-Path $mine) -and ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash)) { $drift += $name }
     }
-    # TIERING MATTERS. A 'recommended' check must not produce the same exit as a missing 'critical'
-    # dependency: preflight is step 0 for every migration, and agents stop on a non-zero exit. These
-    # bundle checks are not advisory, though: AGENTS.md documents both NOT INSTALLED and STALE as
-    # blockers, because a stale installed bundle means a subagent executes different code than the
-    # repo shows, which already invalidated one measurement in this repo.
-    #
-    # The two shapes are still split because they mean different repairs:
-    #   NOT INSTALLED -> a shipped bundle absent locally is a real capability
-    #                    loss: the agent cannot invoke that skill by name at all.
-    #   STALE         -> this was 'optional' until 2026-08-01, on the theory
-    #                    that an older revision is "a degradation, not a correctness break". That is
-    #                    FALSE, and it cost a whole experiment. The plugin copy SHADOWS .github/skills,
-    #                    so a stale bundle means the agent silently executes DIFFERENT CODE than the
-    #                    repo shows - with no diff to notice. Measured: refresh_pbip_model.py had just
-    #                    gained an XMLA CommandTimeout in the repo; the plugin copy had none, the agent
-    #                    ran the copy without it, and the resulting timing was used to "prove" a
-    #                    conclusion about behaviour the executed code did not even contain. Keep this
-    #                    warning visible and actionable, but do not encode a warning tier as exit 1.
-    $detail = if ($missing.Count) { "NOT INSTALLED: $($missing -join ', ')" } else { "$($shipped.Count) bundle(s) present" }
+
+    # Severity decision (2026-08-13): a completely missing plugin is warning-only in this repo because
+    # there is no installed copy shadowing local .github/skills. But once an installed plugin exists,
+    # partial or stale content is critical: subagents resolve the plugin copy first, so they silently run
+    # bytes that differ from the repo and can invalidate measurements.
+    $detail = if ($missing.Count) { "NOT INSTALLED in discovered plugin: $($missing -join ', ')" } else { "$(@($skillPlugin.shipped_skills).Count) bundle(s) present" }
     Add-Check 'skill bundles installed' 'critical' ($missing.Count -eq 0) $detail `
-        'copilot plugin install powerbi-playbook@powerbi-playbook-collection (BETWEEN sessions - a running Copilot session file-locks the plugin dir).'
+        'Refresh the installed copy in place: python scripts\sync_installed_skills.py. If the bundle is new, install/update the plugin BETWEEN sessions.'
 
     Add-Check 'skill bundles match published plugin' 'critical' ($drift.Count -eq 0) `
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
-        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of powerbi-playbook>, commit+push. Do not trust a measurement taken against a stale bundle.'
+        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.'
 }
 
 # Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
 # depends on it, even when the dependency only fails later at handoff/validation time. Audited
 # 2026-08-10 under that exit semantics:
-#   * powerbi-playbook plugin: repo-local skills still load in this repo; the critical bundle
+#   * powerbi-migration-skills plugin: repo-local skills still load in this repo; the critical bundle
 #     checks above enforce correctness when the installed plugin is present and shadowing the repo.
 #   * powerbi-modeling-mcp: useful authoring accelerator; local PBIP/TMDL edits can still proceed.
 #   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
