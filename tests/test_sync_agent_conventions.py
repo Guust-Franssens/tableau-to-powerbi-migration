@@ -148,6 +148,54 @@ def test_an_unknown_directory_still_fails(repo) -> None:
     assert any("`output` is not a bundle directory" in p for p in sac.check_bundle_paths(None))
 
 
+@pytest.mark.parametrize(
+    ("cited", "offender"),
+    [
+        ("<bundle>/out/reports/", "out"),
+        ("<bundle>/out.d/reports/", "out.d"),
+        ("<bundle>/out.old/pbip/", "out.old"),
+        ("<bundle>/v2.0/reports/", "v2.0"),
+    ],
+)
+def test_a_dotted_non_final_segment_is_a_directory_claim(repo, cited: str, offender: str) -> None:
+    """Reviewer's probes. The first three passed (exit 0) when a dot ANYWHERE exempted the path.
+
+    The regex captures only the first segment, so `out.d` looked like a filename and the layout claim
+    behind it - `/reports/` - went unchecked. A file citation is the LAST segment with no trailing
+    separator; a dot on a non-final segment proves nothing.
+    """
+    write_persona, _ = repo
+    write_persona(f"The engine writes `{cited}`.")
+    problems = sac.check_bundle_paths(None)
+    assert len(problems) == 1
+    assert f"`{offender}` is not a bundle directory" in problems[0]
+
+
+def test_an_extensionless_final_token_is_treated_as_a_directory(repo) -> None:
+    """DECIDED, not accidental: `<bundle>/LICENSE` FAILS.
+
+    A dot is required on top of last-segment, so a dot-free final token is checked. The conservative
+    side: `<bundle>/out` (the #123 defect written without a trailing slash) reads identically, and no
+    bundle-root artifact observed on a real 38-workbook bundle is extensionless. Cost of this choice is
+    one loud, trivially fixable false positive; cost of the other is a silent hole where the original
+    defect lives.
+    """
+    write_persona, _ = repo
+    write_persona("See `<bundle>/LICENSE` for terms.")
+    problems = sac.check_bundle_paths(None)
+    assert len(problems) == 1
+    assert "`LICENSE` is not a bundle directory" in problems[0]
+
+
+def test_a_trailing_slash_alone_is_still_a_directory_claim(repo) -> None:
+    """`<bundle>/reports/` has no further segment but is not a file - the trailing `/` decides."""
+    write_persona, _ = repo
+    write_persona("Engine truth is `<bundle>/reports/`, never edited.")
+    assert sac.check_bundle_paths(None) == []
+    write_persona("Engine truth is `<bundle>/rreports/`, never edited.")
+    assert any("`rreports` is not a bundle directory" in p for p in sac.check_bundle_paths(None))
+
+
 # ---------------------------------------------------------------------------
 # --bundle: resolve real locations, tolerate what a legitimate bundle omits.
 # ---------------------------------------------------------------------------

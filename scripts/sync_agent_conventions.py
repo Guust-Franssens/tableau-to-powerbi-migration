@@ -45,6 +45,7 @@ import logging
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "AGENTS.md"
@@ -70,23 +71,54 @@ PROMPT_CHAR_LIMIT = 30_000
 BUNDLE_DIRS = frozenset({"pbip", "reports", "semantic_models", "handover", "data"})
 
 # ``<bundle>/pbip/`` or the brace form ``<bundle>/{pbip,reports,...}`` as written in prose/tables.
-_BUNDLE_PATH = re.compile(r"<bundle>/(\{[^}`]*\}|[A-Za-z0-9_.\-]+)")
+# Group 2 captures the separator that FOLLOWS the segment, and carries the whole discrimination below:
+# without it the matcher sees only the first segment and cannot tell a filename from a directory.
+_BUNDLE_PATH = re.compile(r"<bundle>/(\{[^}`]*\}|[A-Za-z0-9_.\-]+)(/?)")
+
+VOCABULARY, DIRECTORY, FILE = "vocabulary", "directory", "file"
 
 
-def _is_file_citation(name: str) -> bool:
-    """True for a bundle-ROOT FILE (`summary.md`, `report.json`), which is not a layout claim.
+class Citation(NamedTuple):
+    """One `<bundle>/...` occurrence, classified by SHAPE - see `_classify_citation`."""
 
-    The directory rule below must not fire on one. Measured: widening the scan to persona bodies made
-    the perfectly correct sentence *"read `<bundle>/summary.md` first"* fail CI with "`summary.md` is
-    not a bundle directory ... there is no `out/` level" - a message that invents a trailing slash on a
-    filename and then blames an unrelated defect. `docs/operator-runbook.md` already writes 6 distinct
-    files that way, so the cheapest way to appease the gate would have been to delete the citation: a
-    gate that trains people to write worse docs is worse than no gate.
+    origin: str
+    raw: str
+    kind: str
 
-    A dot is the discriminator because no bundle directory has one (`BUNDLE_DIRS` is the whole set) and
-    every bundle-root artifact does.
+
+def _classify_citation(token: str, follower: str) -> str:
+    """Classify one `<bundle>/<token><follower>` occurrence. `follower` is `/` iff a segment follows.
+
+    A bundle-ROOT FILE citation (`<bundle>/summary.md`) is not a layout claim and the directory rule
+    must not fire on one: widening the scan to persona bodies made the perfectly correct sentence
+    *"read `<bundle>/summary.md` first"* fail CI with "`summary.md` is not a bundle directory ... there
+    is no `out/` level" - a message that invents a trailing slash on a filename and then blames an
+    unrelated defect. `docs/operator-runbook.md` already writes 6 distinct files that way, so the
+    cheapest way to appease the gate would have been to delete the citation: a gate that trains people
+    to write worse docs is worse than no gate.
+
+    **A dot alone is NOT the discriminator, and believing it was moved the failure boundary rather than
+    removing it** (measured 2026-08-14 on the fix's own first draft): the regex captures only the FIRST
+    segment, so `<bundle>/out.d/reports/`, `<bundle>/out.old/pbip/` and `<bundle>/v2.0/reports/` all
+    exempted themselves and the layout claim behind them went unchecked - exit 0, silently. The premise
+    "no bundle directory has a dot" is true of `BUNDLE_DIRS` and irrelevant, because this check exists
+    to catch directories that are *not* in `BUNDLE_DIRS`, which is exactly where a dot is unconstrained.
+
+    The real signal is whether anything FOLLOWS the segment. A file citation is the LAST segment with no
+    trailing separator; anything with a further segment - or a trailing `/` like `<bundle>/reports/` - is
+    a directory claim whatever it is spelled like.
+
+    A dot is still *required* on top of that, so a dot-free final token (`<bundle>/out`, `<bundle>/LICENSE`)
+    is treated as a directory claim and checked. That is deliberate and it is the conservative side: the
+    #123 defect reads exactly like a bare final token in prose, and no bundle-root artifact observed on a
+    real bundle is extensionless. The cost is one loud, trivially fixable false positive on a hypothetical
+    extensionless file; the alternative cost is a silent hole where the original defect lives.
     """
-    return "." in name
+    if token.startswith("{"):
+        return VOCABULARY
+    if follower:
+        return DIRECTORY
+    return FILE if "." in token else DIRECTORY
 
 
 PREAMBLE = (
@@ -186,8 +218,8 @@ def prompt_size(path: Path) -> int:
         return len(handle.read())
 
 
-def documented_bundle_paths() -> dict[str, list[tuple[str, str]]]:
-    """Bundle sub-paths named in the personas, mapped to (source, raw text) pairs that named them.
+def documented_bundle_paths() -> dict[str, list[Citation]]:
+    """Bundle sub-paths named in the personas, mapped to the classified occurrences that named them.
 
     Scope is the canonical block **and every persona file in full**, not just the block: the block was
     the only thing scanned when this check was written, so the identical wrong path in a persona's own
@@ -198,18 +230,19 @@ def documented_bundle_paths() -> dict[str, list[tuple[str, str]]]:
     sentence that explains the rule. That is a real blind spot, not an oversight - a wrong path in
     AGENTS.md prose is caught only by the personas it is copied into.
     """
-    found: dict[str, list[tuple[str, str]]] = {}
+    found: dict[str, list[Citation]] = {}
     sources: list[tuple[str, str]] = [("the shared-conventions block", canonical_block())]
     sources += [
         (str(p.relative_to(REPO_ROOT)), p.read_text(encoding="utf-8")) for p in sorted(AGENTS_DIR.glob("*.agent.md"))
     ]
     for origin, text in sources:
         for match in _BUNDLE_PATH.finditer(text):
-            token = match.group(1)
-            names = token.strip("{}").split(",") if token.startswith("{") else [token]
+            token, follower = match.group(1), match.group(2)
+            kind = _classify_citation(token, follower)
+            names = token.strip("{}").split(",") if kind == VOCABULARY else [token]
             for name in (n.strip() for n in names):
                 if name:
-                    found.setdefault(name, []).append((origin, match.group(0)))
+                    found.setdefault(name, []).append(Citation(origin, match.group(0), kind))
     return found
 
 
@@ -227,19 +260,20 @@ def check_bundle_paths(bundle: Path | None) -> list[str]:
     correct document with a legitimate bundle.
 
     Bundle-root FILES (`<bundle>/summary.md`) are citations, not layout claims, so the directory rule
-    skips them - see `_is_file_citation`. Their absence under `--bundle` is a WARNING, never a failure:
-    several are written conditionally (`empty-model-check.json`, `deploy-journal.jsonl` and
-    `deploy-estate-id.txt` are all absent from a real completed bundle), so demanding them would
-    reproduce, one layer down, exactly the false rejection this exemption removes.
+    skips them - see `_classify_citation`. Their absence under `--bundle` is a WARNING, never a failure: several
+    are written conditionally (`empty-model-check.json`, `deploy-journal.jsonl` and `deploy-estate-id.txt`
+    are all absent from a real completed bundle), so demanding them would reproduce, one layer down,
+    exactly the false rejection this exemption removes.
     """
     problems = []
     documented = documented_bundle_paths()
     for name, occurrences in sorted(documented.items()):
-        if name not in BUNDLE_DIRS and not _is_file_citation(name):
-            origin, raw = occurrences[0]
+        claims = [c for c in occurrences if c.kind != FILE]
+        if name not in BUNDLE_DIRS and claims:
             problems.append(
-                f"{origin} documents `{raw}/`, but `{name}` is not a bundle directory. "
-                f"A bundle is <bundle>/{{{','.join(sorted(BUNDLE_DIRS))}}} - there is no `out/` level."
+                f"{claims[0].origin} documents `<bundle>/{name}/` (as `{claims[0].raw}`), but `{name}` "
+                f"is not a bundle directory. A bundle is "
+                f"<bundle>/{{{','.join(sorted(BUNDLE_DIRS))}}} - there is no `out/` level."
             )
     if bundle is None:
         return problems
@@ -248,10 +282,10 @@ def check_bundle_paths(bundle: Path | None) -> list[str]:
         return problems + [f"--bundle {bundle} is not a directory"]
     actual = {p.name for p in bundle.iterdir() if p.is_dir()}
     for name, occurrences in sorted(documented.items()):
-        as_location = [origin for origin, raw in occurrences if not raw.endswith("}")]
+        as_location = [c.origin for c in occurrences if c.kind != VOCABULARY]
         if not as_location:
             continue
-        if _is_file_citation(name):
+        if all(c.kind == FILE for c in occurrences):
             if not (bundle / name).exists():
                 log.warning(
                     "  %s cites `<bundle>/%s`, absent from %s (may be written conditionally)",
