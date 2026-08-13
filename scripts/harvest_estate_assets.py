@@ -4,6 +4,15 @@ purpose: download every workbook and published datasource on a Tableau site, the
          from which upstream feature requests can be written with evidence instead of anecdote.
 usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--limit N]
                                                  [--skip-download] [--workbooks-only]
+                                                 [--allow-unignored-out]
+
+Where the output goes
+---------------------
+`--out` is `_sweep` by convention (`.gitignore`: `/_sweep*/`; `_harvest*` belongs to the OTHER
+harvester, `harvest_tableau_public.py`). Anything under `--out` is a real customer's workbooks and
+their names, and THIS REPO IS PUBLIC, so when the target sits inside a git work tree this script
+refuses to start unless git already ignores it -- see `unignored_output_paths` below. A target
+outside any work tree is fine and runs unguarded.
 
 Why this exists
 ---------------
@@ -59,6 +68,110 @@ from engine_source import EngineNotFoundError, engine_scripts_dir  # noqa: E402 
 from tableau_env import engine_child_env, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("harvest_estate_assets")
+
+# The FILES this script writes under `--out`, probed as files on purpose. Two reasons:
+#   * a directory-only rule (`/_sweep*/`, or a hand-written `_myout/assets/`) is applied by
+#     `git check-ignore` only to a path it knows is a directory, and a not-yet-created `--out` is
+#     not - so probing `assets` as a bare name reports a false "not ignored" for exactly the rule
+#     shape people write. A file path underneath makes every parent a directory by construction.
+#   * it is the honest question: these are the paths a `git add -A` would stage.
+# `assets/` holds the downloaded workbooks/datasources; the sweep files record every asset's NAME
+# and LUID even under `--skip-download`, so all of them are checked, not just the downloads.
+OUTPUT_ARTIFACTS = (
+    "assets/harvested-workbook.twbx",
+    "assets/harvested-datasource.tdsx",
+    "parse-sweep.json",
+    "parse-sweep.md",
+)
+
+
+class OutputPathNotIgnoredError(RuntimeError):
+    """`--out` is inside a git work tree that would commit it, or git cannot prove otherwise."""
+
+
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
+    """Run git in `cwd`. Returns None when git itself could not be run at all."""
+    try:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _existing_ancestor(path: Path) -> Path | None:
+    """Nearest existing directory at or above `path` - git needs a real directory to run in."""
+    return next((p for p in (path, *path.parents) if p.is_dir()), None)
+
+
+def unignored_output_paths(out: Path) -> list[Path]:
+    """Which artifacts under `out` git would offer to commit. Empty list means safe to write.
+
+    Two measured details decide this implementation, and getting either wrong yields a guard that
+    silently always passes - worse than no guard, because it also reassures:
+
+    * **Ask about paths INSIDE `out`, never `out` itself.** `/_sweep*/` is a directory-only pattern,
+      and `git check-ignore` applies such a pattern only to a path it knows is a directory - which,
+      for an `--out` that does not exist yet, it does not (measured: `_assessment-x` -> exit 1,
+      `_assessment-x/assets/f.twbx` -> exit 0, same rule, same repo). A trailing component makes the
+      parent a directory by construction, so the rule applies without creating anything on disk.
+    * **NEVER append a trailing slash to work around that.** On git 2.55.0.windows.3,
+      `git check-ignore -- 'zzz_not_ignored/'` exits 0 reporting an EMPTY matched pattern: with a
+      trailing slash EVERY path looks ignored.
+
+    Raises `OutputPathNotIgnoredError` when git is present but cannot answer, or is absent while a
+    `.git` checkout is in scope: an unprovable path is treated as unsafe, never as safe.
+    """
+    out = out.expanduser().resolve()
+    anchor = _existing_ancestor(out)
+    if anchor is None:  # pragma: no cover - a drive/filesystem root always exists
+        return []
+
+    inside = _git(["rev-parse", "--is-inside-work-tree"], anchor)
+    if inside is None:
+        # git being un-runnable is not evidence that no repository is here, so look for the checkout
+        # directly rather than letting a missing binary quietly disable the guard.
+        if any((parent / ".git").exists() for parent in (anchor, *anchor.parents)):
+            raise OutputPathNotIgnoredError(
+                f"cannot run git, but {out} is inside a .git checkout, so it cannot be proven ignored"
+            )
+        return []
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return []  # outside any work tree: nothing here can be committed by accident
+
+    unignored: list[Path] = []
+    for artifact in OUTPUT_ARTIFACTS:
+        target = out / artifact
+        probe = _git(["check-ignore", "-q", "--", str(target)], anchor)
+        # 0 = ignored, 1 = not ignored, anything else (128, or no git) = no answer, so do not guess.
+        if probe is None or probe.returncode not in (0, 1):
+            detail = "git could not be run" if probe is None else (probe.stderr.strip() or f"exit {probe.returncode}")
+            raise OutputPathNotIgnoredError(f"could not ask git whether {target} is ignored: {detail}")
+        if probe.returncode == 1:
+            unignored.append(target)
+    return unignored
+
+
+def refuse_unignored_output(out: Path, allow_unignored: bool) -> bool:
+    """True when the run must STOP before downloading anything. Logs the reason either way."""
+    try:
+        unignored = unignored_output_paths(out)
+    except OutputPathNotIgnoredError as exc:
+        message = str(exc)
+    else:
+        if not unignored:
+            return False
+        message = (
+            f"git does not ignore {', '.join(str(p) for p in unignored)}. This run downloads a real "
+            "site's .twbx/.tdsx and records every workbook name, and this repo is PUBLIC, so a "
+            "`git add -A` would stage customer content (issue #125). Fix: use the ignored convention "
+            "`--out _sweep` (any `_sweep*` variant works, e.g. `_sweep-2026-08-13`), point --out "
+            "outside the checkout, or add a rule to .gitignore."
+        )
+    if allow_unignored:
+        LOG.warning("--allow-unignored-out: proceeding anyway, but %s", message)
+        return False
+    LOG.error("REFUSING to harvest into %s: %s", out, message)
+    LOG.error("Nothing was downloaded. Pass --allow-unignored-out to override this deliberately.")
+    return True
 
 
 def download(kind: str, luid: str, out_file: Path, env: dict[str, str], scripts: Path) -> tuple[bool, str]:
@@ -217,17 +330,26 @@ def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-man
 
 
 def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one linear sweep
-    """Harvest and sweep. Exit 1 only when nothing could be assessed at all."""
+    """Harvest and sweep. Exit 2 when `--out` is committable, 1 when nothing could be assessed."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", required=True, type=Path, help="output directory (should be git-ignored)")
+    ap.add_argument("--out", required=True, type=Path, help="output directory (must be git-ignored, see below)")
     ap.add_argument("--env", type=Path, default=REPO_ROOT / ".env")
     ap.add_argument("--db", type=Path, help="assess_estate.py estate.db to take LUIDs from")
     ap.add_argument("--limit", type=int, help="stop after N assets (for a quick pass)")
     ap.add_argument("--skip-download", action="store_true", help="reuse whatever is already in --out/assets")
     ap.add_argument("--workbooks-only", action="store_true", help="skip published datasources; sweep workbooks only")
+    ap.add_argument(
+        "--allow-unignored-out",
+        action="store_true",
+        help="write to --out even when git does not ignore it (escape hatch; logs a warning instead)",
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # Before the engine, the .env, the database and above all the download: a customer's workbooks
+    # must never land somewhere this PUBLIC repo would commit them (issue #125).
+    if refuse_unignored_output(args.out, args.allow_unignored_out):
+        return 2
     # One resolver, no fallback: the installed plugin is the single canonical engine (issue #107).
     try:
         scripts = engine_scripts_dir()
