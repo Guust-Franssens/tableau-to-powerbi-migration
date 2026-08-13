@@ -4,16 +4,22 @@ purpose: robust LOCAL data-source preflight for a migrated model open in Power B
          against the loaded model. A returned row proves, in one shot, that credentials are present, the
          source is reachable, and the M/partition is valid - the real gate before building the report.
 usage:   python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py
-             [--pid <pbidesktop-pid>] [--table "<table>"] [--port <n>]
+             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--port <n>]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/probe_desktop_query.py` in this repo is a forwarding shim.)
 
 If --port is omitted, the port is discovered from the msmdsrv process owned by (a child of) the given
 Desktop pid. That scoping is STRICT: a named pid never falls back to another instance's msmdsrv, it
 retries briefly (msmdsrv binds its port a moment after Desktop starts) and then fails. With no --pid
-the single running msmdsrv is used, and more than one is an error rather than a coin flip. If --table
-is omitted, the first non-hidden table is probed.
-Emits a final line: PREFLIGHT: DATA_OK (rows returned) / PREFLIGHT: NO_DATA / PREFLIGHT: ERROR <msg>.
+the single running msmdsrv is used, and more than one is an error rather than a coin flip.
+
+Name one canary table per distinct live source with --tables: every named source is probed and an
+all-non-zero result earns the model-level PREFLIGHT: DATA_OK. If NO table is named, only the first
+queryable table is probed and the verdict is downgraded to PREFLIGHT: TABLE_OK '<table>' - a static
+parameter/CSV table can return rows while a live source never loaded, so one arbitrary table can
+never certify the model.
+Emits a final line: PREFLIGHT: DATA_OK (all canaries returned rows) / PREFLIGHT: TABLE_OK '<table>'
+(implicit single-table probe only) / PREFLIGHT: NO_DATA / PREFLIGHT: ERROR <msg>.
 
 Windows-only: queries the Desktop's local AS via ADOMD.NET (pythonnet). This is the sanctioned
 Windows-API exception to the "committed scripts default to .py/.sh" rule.
@@ -182,33 +188,61 @@ def first_table(conn) -> str:
     return names[0]
 
 
-def probe(port: int, table: str | None) -> int:
-    """Run EVALUATE TOPN(1, <table>) against localhost:<port>; return process exit code."""
+def _probe_one(port: int, conn, table: str) -> int:
+    """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
+    dax = f"EVALUATE TOPN(1, '{table}')"
+    cmd = conn.CreateCommand()
+    cmd.CommandText = dax
+    reader = cmd.ExecuteReader()
+    cols = [reader.GetName(i) for i in range(reader.FieldCount)]
+    rows = 0
+    first_values: list[str] = []
+    while reader.Read():
+        rows += 1
+        if rows == 1:
+            first_values = [str(reader.GetValue(i)) for i in range(reader.FieldCount)]
+    reader.Close()
+    print(f"port={port}  table='{table}'  dax={dax}")
+    print(f"  columns ({len(cols)}): {cols[:8]}")
+    if rows:
+        print(f"  row: {first_values[:8]}")
+    return rows
+
+
+def probe(port: int, tables: list[str] | None) -> int:
+    """Probe each canary table with a 1-row read against localhost:<port>; return a process exit code.
+
+    With explicit `tables` (one canary per distinct live source) an all-non-zero result earns the
+    model-level ``PREFLIGHT: DATA_OK``. With NO table named, only the first queryable table is
+    probed and the verdict is ``PREFLIGHT: TABLE_OK '<table>'`` - a single arbitrary table is not a
+    model-level guarantee, because a static parameter/CSV table can return rows while a live source
+    never loaded (see the powerbi-semantic-model-gotchas rule: prove a REAL read per live source).
+    """
     adomd_connection = _load_adomd()
     conn = adomd_connection(f"Data Source=localhost:{port}")
     conn.Open()
     try:
-        target = table or first_table(conn)
-        dax = f"EVALUATE TOPN(1, '{target}')"
-        cmd = conn.CreateCommand()
-        cmd.CommandText = dax
-        reader = cmd.ExecuteReader()
-        cols = [reader.GetName(i) for i in range(reader.FieldCount)]
-        rows = 0
-        first_values: list[str] = []
-        while reader.Read():
-            rows += 1
-            if rows == 1:
-                first_values = [str(reader.GetValue(i)) for i in range(reader.FieldCount)]
-        reader.Close()
-        print(f"port={port}  table='{target}'  dax={dax}")
-        print(f"columns ({len(cols)}): {cols[:8]}")
-        if rows:
-            print(f"row: {first_values[:8]}")
-            print("PREFLIGHT: DATA_OK")
+        implicit = not tables
+        targets = list(tables) if tables else [first_table(conn)]
+        results = [(target, _probe_one(port, conn, target)) for target in targets]
+        empty = [target for target, rows in results if rows <= 0]
+        if empty:
+            print(
+                f"PREFLIGHT: NO_DATA (0 rows from: {', '.join(empty)} - source empty, "
+                "credential missing, or refresh failed)"
+            )
+            return 1
+        if implicit:
+            only = results[0][0]
+            print(f"PREFLIGHT: TABLE_OK '{only}'")
+            print(
+                f"  note: single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
+                "parameter/CSV table can return rows while a live source never loaded. Pass --tables "
+                "<one canary per live source> to certify every source."
+            )
             return 0
-        print("PREFLIGHT: NO_DATA (query ran but returned 0 rows - source empty or refresh failed)")
-        return 1
+        print("PREFLIGHT: DATA_OK")
+        return 0
     finally:
         conn.Close()
 
@@ -222,13 +256,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Power BI Desktop process id - required when several instances are open "
         "(`powerbi-desktop status` maps pid -> open file)",
     )
-    parser.add_argument("--table", help="Table to probe (default: first queryable table)")
+    parser.add_argument("--table", help="Single canary table (legacy alias for --tables with one name)")
+    parser.add_argument(
+        "--tables",
+        nargs="*",
+        help="Canary tables to probe, one per distinct live source. With none, only the first "
+        "queryable table is probed and the verdict is downgraded to name that single table",
+    )
     parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
     args = parser.parse_args(argv)
 
+    # --tables (plural, the canary set) wins; --table stays as a one-name alias for old callers.
+    tables = list(args.tables) if args.tables else ([args.table] if args.table else None)
     port = args.port or discover_port(args.pid)
     try:
-        return probe(port, args.table)
+        return probe(port, tables)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"PREFLIGHT: ERROR {type(exc).__name__}: {exc}")
         return 2

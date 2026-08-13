@@ -7,7 +7,7 @@ silently widen to "any msmdsrv on the machine" whenever the pid-scoped lookup ca
 most likely because Desktop was up before its msmdsrv had bound a port - and then took the first
 result. That writes a SIBLING migration's model into this migration's own correct `cache.abf`, and
 every existing check still passes: `image_save` can only see that the file exists, is non-empty and
-was newly written, and `row_count` queries that same wrong port, so both signals agree and both are
+was newly written, and `row_counts` queries that same wrong port, so both signals agree and both are
 wrong. `cache.abf` is gitignored, so nothing downstream catches it either.
 
 So these tests lock in the two defences: never widen a named pid (and never pick between ambiguous
@@ -247,13 +247,34 @@ def test_auto_date_tables_on_disk_do_not_look_like_a_stranger(monkeypatch, tmp_p
     assert ok, message
 
 
-def test_same_model_accepts_the_model_that_owns_the_cache(monkeypatch, tmp_path: Path) -> None:
-    """Extra tables in the engine are normal (auto date tables, in-memory edits); missing ones are not."""
+def test_same_model_accepts_an_exact_case_insensitive_match(monkeypatch, tmp_path: Path) -> None:
+    """The model that OWNS the cache matches the TMDL table-for-table (case-insensitively).
+
+    An exactly-matching set - names differing only by case (`orders` vs `Orders`) - is the one thing
+    that earns "confirmed". This is the legitimate flow the fail-closed gate must NOT block.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders", "Date Table"])
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"orders", "date table"})
+    ok, message = same_model(52001, cache)
+    assert ok, message
+    assert "exact match" in message
+
+
+def test_same_model_refuses_a_superset_schema(monkeypatch, tmp_path: Path) -> None:
+    """A sibling holding ALL your tables PLUS more is a different model, not a lagging TMDL.
+
+    This test used to assert the opposite (`test_same_model_accepts_the_model_that_owns_the_cache`
+    expected ok=True and "more not in TMDL"). That fail-open subset match is the exact #114 hole: the
+    check only required the TMDL tables to be PRESENT in the engine, so a richer sibling passed and
+    was reported "confirmed". Concurrent Desktop instances are supported, so that sibling is
+    reachable, not hypothetical - and once its model is confirmed, its rows get written into this
+    project's cache.abf. An exact match now refuses it.
+    """
     cache = _model_folder(tmp_path, "MyMigration", ["Orders", "Date Table"])
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"orders", "Date Table", "Extra"})
     ok, message = same_model(52001, cache)
-    assert ok, message
-    assert "more not in TMDL" in message, "TMDL that lags the engine is worth reporting, not refusing"
+    assert not ok
+    assert "Extra" in message, "the extra live table must be named as the reason for refusal"
 
 
 def test_same_model_refuses_a_siblings_model(monkeypatch, tmp_path: Path) -> None:
@@ -265,16 +286,22 @@ def test_same_model_refuses_a_siblings_model(monkeypatch, tmp_path: Path) -> Non
     assert "Orders" in message and "MyMigration.SemanticModel" in message
 
 
-def test_same_model_says_so_when_it_cannot_verify(monkeypatch, tmp_path: Path) -> None:
-    """No model folder / no TMDL is 'unknown', not 'wrong' - it must not block a legitimate save."""
+def test_same_model_fails_closed_when_it_cannot_verify(monkeypatch, tmp_path: Path) -> None:
+    """'Cannot verify' must FAIL CLOSED, because this gate guards a write into a project.
+
+    No model folder resolved, or no TMDL tables to fingerprint, is 'unknown' - and unknown is not
+    'fine'. This test used to assert the opposite (ok=True + "unverified"): a hiccup that left the
+    destination unresolved let the write straight through. That fail-open path is #114; both shapes
+    now return False.
+    """
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Whatever"})
     ok, message = same_model(52001, None)
-    assert ok and "unverified" in message
+    assert not ok and "UNVERIFIED" in message.upper()
 
     empty = tmp_path / "Empty.SemanticModel" / ".pbi" / "cache.abf"
     empty.parent.mkdir(parents=True)
     ok, message = same_model(52001, empty)
-    assert ok and "unverified" in message
+    assert not ok and "UNVERIFIED" in message.upper()
 
 
 def _stub_bridge(monkeypatch, instances: list[dict]) -> None:
@@ -309,7 +336,7 @@ def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_p
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
-    for never in ("refresh", "image_save", "save", "row_count"):
+    for never in ("refresh", "image_save", "save", "row_counts"):
         monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
 
     assert refresh_pbip_model.main(["--pid", "111"]) == 2
@@ -319,28 +346,29 @@ def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_p
 def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_path: Path, capsys) -> None:
     """The gate must not cry wolf: the normal single-migration flow has to stay green.
 
-    Passes `--save` explicitly: persisting became opt-in on 2026-08-04 (a present `cache.abf` makes
-    the PBIP unopenable), so this exercises the save path deliberately rather than by default.
+    Passes explicit `--tables Orders` (both the refresh scope and the canary set, so an all-non-zero
+    result earns the model-level DATA_OK - #115) and a legacy `--save` (now an accepted no-op, since
+    persisting is the default - #113), proving both still work and still persist.
     """
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None, align_compat: bool = False):
-        # Signature mirrors the real image_save, including the compatibility-level guard arguments
-        # added 2026-08-07. A stub that lags the real signature raises TypeError, which main()
-        # swallows into the UI-save fallback - so this test would go green against a broken call.
-        del port, model_dir, align_compat
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        # Signature mirrors the real image_save EXACTLY. A stub that lags it raises TypeError, which
+        # main() swallows into the UI-save fallback - so a drifted stub would go green against a
+        # broken call.
+        del port, model_dir
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(b"cache")
         return True, "persisted"
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
 
-    assert refresh_pbip_model.main(["--pid", "111", "--save"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "--save"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.read_bytes() == b"cache"
@@ -364,11 +392,11 @@ def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, 
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
     monkeypatch.setattr(refresh_pbip_model, "image_save", _explode("image_save must not run"))
     monkeypatch.setattr(refresh_pbip_model, "save", _explode("save must not run"))
 
-    assert refresh_pbip_model.main(["--pid", "111", "--no-save"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "--no-save"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK" in out
     assert "PERSISTED" not in out
@@ -388,7 +416,7 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (42, "Orders"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
 
     def fake_image_save(port: int, cache_path: Path, model_dir=None):
         del port, model_dir
@@ -399,7 +427,7 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
     monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run"))
 
-    assert refresh_pbip_model.main(["--pid", "111"]) == 0
+    assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
     assert cache.exists(), "a default refresh must persist cache.abf"
@@ -430,7 +458,7 @@ def test_compatibility_alignment_declares_generated_edit(tmp_path: Path) -> None
     class FakeDatabase:
         CompatibilityLevel = 1702
 
-    note = refresh_pbip_model._align_compatibility(FakeDatabase(), model_dir)
+    note = refresh_pbip_model._align_compatibility(model_dir, int(FakeDatabase.CompatibilityLevel))
 
     declarations = json.loads((tmp_path / "_build" / "generated-edit-declarations.json").read_text(encoding="utf-8"))
     declaration = declarations["declarations"][0]
@@ -464,35 +492,199 @@ def test_a_timeout_does_not_assert_a_credential_modal(monkeypatch, tmp_path: Pat
     assert "CAUSE UNKNOWN" in out
     assert "THIS NEEDS A HUMAN" not in out, "a timeout heuristic must not emit a stop-word instruction"
     assert "probe_desktop_credential" in out, "it must name the arbiter that settles the cause"
+    # #118: the arbiter it names must actually ship in the bundle, and the message must print its
+    # bundled absolute path - a runtime instruction to run a file that is not here breaks the
+    # bundle's self-containment claim.
+    arbiter = refresh_pbip_model.CREDENTIAL_PROBE
+    assert str(arbiter) in out, "the timeout must print the arbiter's absolute, bundled path"
+    assert arbiter.is_file(), "the named arbiter must actually ship in the bundle"
+    assert arbiter.parent == SKILL_ROOT / "scripts", "the arbiter must live inside this skill's scripts/"
 
 
-def test_persisting_uses_the_exact_cache_path_the_gate_verified(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Re-deriving the destination after the gate means writing somewhere never verified.
+def test_an_unresolved_destination_fails_closed_not_into_a_blind_write(monkeypatch, tmp_path: Path, capsys) -> None:
+    """An unresolved destination must fail CLOSED at the gate, before any write - and be resolved once.
 
-    `cache_file` is a Desktop Bridge round trip, and `_bridge_status` returns `{}` on any non-JSON
-    output - so a hiccup at gate time (path `None`, "identity unverified", gate passes as a no-op)
-    followed by a successful call afterwards would have persisted an unchecked model. The write must
-    never reach a path the gate did not see.
+    `cache_file` is a Desktop Bridge round trip and returns None when the pid maps to no single model
+    (an ambiguous `.SemanticModel` folder, or a bridge hiccup). This test used to assert that the run
+    then proceeded to a `NOT_PERSISTED` exit 1 - i.e. the fail-OPEN gate let a None destination
+    through as "unverified -> fine". Under #114 the gate fails closed: None aborts with WRONG_MODEL
+    (exit 2) and refresh/save/image_save never run. `cache_file` is also resolved EXACTLY once -
+    re-deriving it after the gate would verify one path and write another.
     """
+    calls: list[int] = []
+
+    def fake_cache_file(pid: int) -> None:
+        calls.append(pid)
+        return None
+
     written: list[Path] = []
 
-    def _record(port: int, path: Path) -> tuple[bool, str]:
-        written.append(path)
+    def _record(port: int, cache_path: Path, model_dir=None) -> tuple[bool, str]:
+        written.append(cache_path)
         return True, "saved via ImageSave"
 
-    resolved = [None, _model_folder(tmp_path, "MyMigration", ["Orders"])]
-    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda pid: resolved.pop(0) if resolved else None)
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", fake_cache_file)
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_count", lambda port: (7, "Orders"))
-    monkeypatch.setattr(refresh_pbip_model, "save", lambda pid: (True, "saved via UI"))
+    monkeypatch.setattr(refresh_pbip_model, "refresh", _explode("refresh must not run on an unverified destination"))
+    monkeypatch.setattr(refresh_pbip_model, "save", _explode("save must not run"))
     monkeypatch.setattr(refresh_pbip_model, "image_save", _record)
 
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--save"])
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    assert exit_code == 2
+    assert "REFRESH: WRONG_MODEL" in capsys.readouterr().out
     assert written == []
+    assert calls == [111], "cache_file must be resolved exactly once, not re-derived after the gate"
+
+
+def _project_with_two_models(root: Path, bypath: str | None) -> Path:
+    """Two `.SemanticModel` folders, a `.pbip` and its report; `bypath` is the pbir binding (or None).
+
+    Returns the `.pbip` path. With `bypath` None the report carries no binding, so nothing resolves
+    the ambiguity and `cache_file` must refuse to guess rather than grab an arbitrary sibling.
+    """
+    for name in ("Bound", "Other"):
+        tables = root / f"{name}.SemanticModel" / "definition" / "tables"
+        tables.mkdir(parents=True)
+        (tables / "T.tmdl").write_text("table 'T'\n\n\tcolumn X\n", encoding="utf-8")
+    report = root / "Proj.Report"
+    report.mkdir(parents=True)
+    dataset_ref = {"byPath": {"path": bypath}} if bypath else {}
+    (report / "definition.pbir").write_text(
+        json.dumps({"version": "1.0", "datasetReference": dataset_ref}), encoding="utf-8"
+    )
+    pbip = root / "Proj.pbip"
+    pbip.write_text(
+        json.dumps({"version": "1.0", "artifacts": [{"report": {"path": "Proj.Report"}}]}), encoding="utf-8"
+    )
+    return pbip
+
+
+def test_cache_file_resolves_the_bound_model_when_several_exist(monkeypatch, tmp_path: Path) -> None:
+    """With several `.SemanticModel` folders, the destination comes from the `.pbip` BINDING.
+
+    The old code fell back to `models[0]` (first sorted), silently binding the run to an arbitrary
+    sibling - exactly the wrong-instance write this skill exists to prevent. The `.pbip` -> report ->
+    `definition.pbir` `byPath` chain names the real owner, and `cache_file` must follow it.
+    """
+    pbip = _project_with_two_models(tmp_path, "../Bound.SemanticModel")
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
+    resolved = refresh_pbip_model.cache_file(111)
+    assert resolved == tmp_path / "Bound.SemanticModel" / ".pbi" / "cache.abf"
+
+
+def test_cache_file_refuses_to_guess_when_the_binding_is_ambiguous(monkeypatch, tmp_path: Path) -> None:
+    """No name match and no resolvable binding => None, so the identity gate fails closed.
+
+    `Bound` sorts before `Other`, so the old `models[0]` fallback would have returned `Bound` here
+    with no evidence it is the right one. Returning None is what makes the downstream gate refuse.
+    """
+    pbip = _project_with_two_models(tmp_path, None)
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(pbip)}])
+    assert refresh_pbip_model.cache_file(111) is None
+
+
+def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path: Path, capsys) -> None:
+    """`--port` must EQUAL the pid-derived port, or the run aborts before touching anything.
+
+    A `--port` pointing at another instance is the wrong-instance write in one argument: the
+    destination is resolved from the pid, so a stray port reads (and, via ImageSave, persists) a
+    sibling's model into this project's own correct cache.abf. #114 closes it by refusing any
+    mismatch up front - the identity probe, refresh, row count and save must never run.
+    """
+    _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    for never in ("same_model", "refresh", "image_save", "save", "row_counts"):
+        monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--port", "59999"])
+    out = capsys.readouterr().out
+    assert exit_code == 2
+    assert "59999" in out and "52001" in out, "the error must name both the given and the discovered port"
+    assert "does not match" in out
+
+
+def test_a_matching_port_is_accepted(monkeypatch, tmp_path: Path, capsys) -> None:
+    """An explicit `--port` that EQUALS the pid-derived port is fine - the guard blocks only mismatch."""
+    _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 5)], False))
+
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        del port, model_dir
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cache")
+        return True, "persisted"
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "--port", "52001"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "REFRESH: DATA_OK + PERSISTED" in out
+
+
+def test_an_implicit_probe_downgrades_to_table_ok_but_still_persists(monkeypatch, tmp_path: Path, capsys) -> None:
+    """No `--tables`: only the first queryable table is probed, so the verdict names that one table.
+
+    A model-level `DATA_OK` from an implicit single-table probe is the #115 defect: a static
+    parameter/CSV table (here 'Parameters') can return rows while every live source failed to load.
+    The verdict must be `TABLE_OK 'Parameters'`, never `DATA_OK`. Persistence is a separate axis and
+    is unaffected.
+    """
+    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Parameters", 1)], True))
+
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        del port, model_dir
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cache")
+        return True, "persisted"
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "REFRESH: TABLE_OK 'Parameters'" in out
+    assert "REFRESH: DATA_OK" not in out, "an implicit single-table probe must never claim a model-level DATA_OK"
+    assert cache.exists(), "the downgrade is about the VERDICT, not about suppressing persistence"
+
+
+def test_an_empty_canary_reports_no_data_naming_the_table(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A named canary returning 0 rows is a source that never loaded - NO_DATA, naming the table.
+
+    With explicit canaries, EVERY named source must return rows; one empty table (a live source whose
+    credential failed) is the exact failure #115 wants surfaced, not averaged away by the others.
+    """
+    _model_folder(tmp_path, "MyMigration", ["Orders"])
+    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Orders"})
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42), ("Live", 0)], False))
+
+    def fake_image_save(port: int, cache_path: Path, model_dir=None):
+        del port, model_dir
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(b"cache")
+        return True, "persisted"
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "Live"])
+    out = capsys.readouterr().out
     assert exit_code == 1
-    assert "NOT_PERSISTED" in capsys.readouterr().out
+    assert "REFRESH: NO_DATA" in out
+    assert "Live" in out, "the empty canary must be named"
 
 
 def _explode(name: str):

@@ -2,7 +2,7 @@
 purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--save]
+             [--pid <pbidesktop-pid>] [--tables "A" "B"] [--no-save]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -63,13 +63,15 @@ then save. Anything that rewrites TMDL afterwards - including the host repo's sa
 Binding to the right instance (parallel batches)
 ------------------------------------------------
 The destination is resolved from the pid (`cache_file`), but the DATA comes from whatever Analysis
-Services instance answers on `port`. If those two ever disagree - one bad `--port`, or a widened
-port lookup - this writes a **sibling migration's model into your own correct `cache.abf`**, and
-nothing catches it: `image_save` can only check that the file exists, is non-empty and is newly
-written, and `row_count` queries that same wrong port, so both signals agree and both are wrong.
-Hence `same_model()` runs FIRST, before the refresh: it compares the connected model's tables with
-the TMDL that owns the destination cache, and a mismatch aborts with `REFRESH: WRONG_MODEL`. File
-metadata fundamentally cannot tell you whose rows are in the blob; only the model's own contents can.
+Services instance answers on `port`. If those two ever disagree - a widened port lookup, or a
+`--port` pointed at another instance - this would write a **sibling migration's model into your own
+correct `cache.abf`**, and file metadata could not catch it: `image_save` can only check that the
+file exists, is non-empty and is newly written, and `row_counts` queries that same wrong port, so
+both signals agree and both are wrong. Two defences run BEFORE the refresh: `--port`, if given, must
+equal the port derived from the pid (a mismatch aborts, so it can never bypass pid-based discovery),
+and `same_model()` compares the connected model's tables with the TMDL that owns the destination
+cache and aborts on any difference with `REFRESH: WRONG_MODEL`. File metadata fundamentally cannot
+tell you whose rows are in the blob; only the model's own contents can.
 """
 
 from __future__ import annotations
@@ -120,6 +122,11 @@ REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
 TABLE_DECL_RE = re.compile(r"^table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
+
+# The credential arbiter that settles a refresh TIMEOUT (slow source vs. sign-in modal). Resolved
+# relative to THIS file so the runtime recovery instruction always points at the copy that ships
+# INSIDE the bundle - it must not name a path that only exists in the host repo (issue #118).
+CREDENTIAL_PROBE = Path(__file__).resolve().parent / "probe_desktop_credential.ps1"
 
 
 def _catalog_id(conn) -> str:
@@ -370,7 +377,7 @@ def align_declared_compatibility(path: Path, level: int) -> None:
     path.write_text(new_text, encoding="utf-8", newline="")
 
 
-def _align_compatibility(database, model_dir: Path | None) -> str | None:
+def _align_compatibility(model_dir: Path | None, live_level: int) -> str | None:
     """Make ``database.tmdl`` declare the level the live database is actually running at.
 
     Returns a note describing the change, or ``None`` when nothing needed doing.
@@ -381,10 +388,13 @@ def _align_compatibility(database, model_dir: Path | None) -> str | None:
     (measured: `1604 -> 1606` written at the same timestamp as `cache.abf`). An earlier version made
     it opt-in behind `--align-compat`; that was ceremony rather than safety, since the only response
     to the refusal is to re-run with the flag.
+
+    The edit is written eagerly, but the caller (:func:`_persist_image`) treats it as **provisional**:
+    it snapshots the files this can touch first and rolls them back if the ImageSave that follows
+    fails, so a mid-failure never leaves ``database.tmdl`` bumped for a cache that was not written.
     """
     if model_dir is None:
         return None
-    live_level = int(database.CompatibilityLevel)
     declared, declared_path = read_declared_compatibility(model_dir)
     if declared is None or declared == live_level:
         return None
@@ -403,6 +413,80 @@ def _align_compatibility(database, model_dir: Path | None) -> str | None:
     return f"aligned {declared_path.name} {declared} -> {live_level} (Desktop runs the model at {live_level})"
 
 
+def _compat_rollback_paths(model_dir: Path | None) -> list[Path]:
+    """The files an alignment can touch, so a failed persist can restore them exactly.
+
+    Two files: ``database.tmdl`` (its declared level) and the generated-edit declaration ledger
+    (``_build/generated-edit-declarations.json``). Rolling the level back without also dropping the
+    declaration would leave a record of a change that did not stick.
+    """
+    if model_dir is None:
+        return []
+    paths = [model_dir / "definition" / "database.tmdl"]
+    bundle = _bundle_root_for(model_dir)
+    if bundle is not None:
+        paths.append(bundle / GENERATED_EDIT_DECLARATIONS)
+    return paths
+
+
+def _staged_image_write(cache_path: Path, write_image) -> bool:
+    """Write the cache to a staging file and swap it in atomically. Returns True on a real write.
+
+    ``FileMode.Create`` on the live ``cache.abf`` truncates a good cache the instant the write
+    begins, so an ImageSave that then fails half way leaves the project WORSE than before -- no
+    fresh cache and no old one either. Staging to ``cache.abf.tmp`` and only ``os.replace``-ing it
+    over the original once it exists and is non-empty means a failed or partial write cannot destroy
+    an existing good cache.
+
+    Success is judged by the staged FILE, never by the absence of an exception: the AMO client
+    raises "The server sent an unrecognizable response" *while writing correctly*, so ``write_image``
+    is allowed to raise, and a raise with a non-empty staging file still counts as a write.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    staging = cache_path.with_name(cache_path.name + ".tmp")
+    if staging.exists():
+        staging.unlink()
+    try:
+        write_image(staging)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        # The write is judged by the file below, not by whether the call raised.
+        del exc
+    if staging.exists() and staging.stat().st_size > 0:
+        os.replace(staging, cache_path)
+        return True
+    if staging.exists():
+        staging.unlink()
+    return False
+
+
+def _persist_image(cache_path: Path, model_dir: Path | None, live_level: int, write_image) -> tuple[bool, str]:
+    """Align compat, stage the cache write, swap atomically, and roll compat back if the write fails.
+
+    Pure-Python (no .NET), so the atomic-write and rollback guarantees are unit-testable without a
+    live Analysis Services instance. ``write_image(staging_path)`` performs the actual engine write.
+    """
+    rollback_paths = _compat_rollback_paths(model_dir)
+    snapshot = {path: (path.read_bytes() if path.exists() else None) for path in rollback_paths}
+
+    aligned = _align_compatibility(model_dir, live_level)
+    if aligned:
+        print(f"  save   : {aligned}")
+
+    if _staged_image_write(cache_path, write_image):
+        size_kb = cache_path.stat().st_size / 1024
+        return True, f"persisted via AMO ImageSave ({size_kb:.1f} KB, compatibilityLevel {live_level})"
+
+    # The write did not land: undo the (provisional) compatibility alignment so a failed persist
+    # cannot leave database.tmdl declaring a level that was never actually written to a cache.
+    for path, original in snapshot.items():
+        if original is None:
+            if path.exists():
+                path.unlink()
+        elif path.read_bytes() != original:
+            path.write_bytes(original)
+    return False, "ImageSave did not produce a cache file (compatibility alignment rolled back)"
+
+
 def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
     """Persist the in-memory model to ``<Name>.SemanticModel/.pbi/cache.abf`` via AMO ``ImageSave``.
 
@@ -417,44 +501,38 @@ def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
 
     ⚠️ **Saving therefore EDITS the deployable artifact.** ``database.tmdl`` is part of what gets
     deployed, and this raises its declared level. If a downstream target cannot accept the higher
-    level, do not pass ``--save`` -- the default (refresh in memory, persist nothing) exists exactly
-    for the validate-then-deploy path, and leaves the project byte-identical.
+    level, pass ``--no-save`` -- refresh-in-memory-persist-nothing exists exactly for the
+    validate-then-deploy path, and leaves the project byte-identical.
 
-    Note the client throws "The server sent an unrecognizable response" while writing correctly, so
-    success is judged by the FILE (exists, non-empty, newly written), never by the absence of an
-    exception.
+    The write is **staged and swapped atomically** and the compatibility alignment is **rolled back
+    on failure** (see :func:`_persist_image` / :func:`_staged_image_write`), so a mid-failure can
+    neither destroy an existing good cache nor leave ``database.tmdl`` bumped for a cache that was
+    never written. Note the client throws "The server sent an unrecognizable response" while writing
+    correctly, so success is judged by the FILE, never by the absence of an exception.
     """
     server_type = _load_amo()
     from System.IO import FileAccess, FileMode, FileStream  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    before = cache_path.stat().st_mtime if cache_path.exists() else 0.0
 
     server = server_type()
     server.Connect(f"Data Source=localhost:{port}")
     try:
         database = server.Databases[0]
         live_level = int(database.CompatibilityLevel)
-        aligned = _align_compatibility(database, model_dir)
-        if aligned:
-            print(f"  save   : {aligned}")
 
-        stream = FileStream(str(cache_path), FileMode.Create, FileAccess.Write)
-        try:
-            server.ImageSave(database.ID, stream)
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            # Expected: the response parser trips even on a successful write. Fall through to the
-            # file check, which is the real evidence.
-            del exc
-        finally:
-            stream.Close()
+        def write_image(staging: Path) -> None:
+            stream = FileStream(str(staging), FileMode.Create, FileAccess.Write)
+            try:
+                server.ImageSave(database.ID, stream)
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                # Expected: the response parser trips even on a successful write. The staged-file
+                # check in _staged_image_write is the real evidence.
+                del exc
+            finally:
+                stream.Close()
+
+        return _persist_image(cache_path, model_dir, live_level, write_image)
     finally:
         server.Disconnect()
-
-    if cache_path.exists() and cache_path.stat().st_size > 0 and cache_path.stat().st_mtime > before:
-        size_kb = cache_path.stat().st_size / 1024
-        return True, f"persisted via AMO ImageSave ({size_kb:.1f} KB, compatibilityLevel {live_level})"
-    return False, "ImageSave did not produce a cache file"
 
 
 def save(pid: int) -> tuple[bool, str]:
@@ -513,11 +591,58 @@ Write-Output 'NO_INVOKABLE_SAVE'; exit 1
     )
 
 
+def _model_from_pbip_binding(pbip: Path, models: list[Path]) -> Path | None:
+    """The `.SemanticModel` a `.pbip` actually binds to, read from the binding, not guessed.
+
+    A `.pbip` names its report; the report's `definition.pbir` names the model by a relative
+    `datasetReference.byPath.path`. Following that chain identifies the owning model even when a
+    folder holds several `.SemanticModel` directories. Returns None when the binding cannot be read
+    unambiguously - the caller then fails closed rather than guessing `models[0]`.
+    """
+    report_dirs: list[Path] = []
+    try:
+        pbip_data = json.loads(pbip.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        pbip_data = None
+    if isinstance(pbip_data, dict):
+        for artifact in pbip_data.get("artifacts", []) or []:
+            report = artifact.get("report") if isinstance(artifact, dict) else None
+            rel = report.get("path") if isinstance(report, dict) else None
+            if rel:
+                report_dirs.append(pbip.parent / rel)
+    if not report_dirs:
+        report_dirs = [pbir.parent for pbir in pbip.parent.glob("*.Report")]
+
+    matches: set[Path] = set()
+    model_by_resolved = {model.resolve(): model for model in models}
+    for report_dir in report_dirs:
+        pbir = report_dir / "definition.pbir"
+        try:
+            data = json.loads(pbir.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        by_path = (((data.get("datasetReference") or {}).get("byPath")) or {}).get("path")
+        if not by_path:
+            continue
+        target = (pbir.parent / by_path).resolve()
+        if target in model_by_resolved:
+            matches.add(target)
+    if len(matches) == 1:
+        return model_by_resolved[matches.pop()]
+    return None
+
+
 def cache_file(pid: int) -> Path | None:
     """Where `<Name>.SemanticModel/.pbi/cache.abf` belongs for the model this instance has open.
 
     Resolves the DESTINATION, not an existing file: on a first build there is no cache yet, and
     globbing for one returned None and silently sent the save down the UI-Automation fallback.
+
+    When a folder holds several `.SemanticModel` directories the model is resolved from the PBIP
+    BINDING (the `.pbip` -> report -> `definition.pbir` `byPath` chain), then by an exact name match,
+    and otherwise this returns None so the identity gate fails closed. The old `models[0]` fallback
+    silently bound the run to an arbitrary sibling model - exactly the wrong-instance write this
+    skill exists to prevent.
     """
     inst = _instance(pid)
     if inst is None or not inst.get("currentFilePath"):
@@ -526,10 +651,18 @@ def cache_file(pid: int) -> Path | None:
     models = sorted(pbip.parent.glob("*.SemanticModel"))
     if not models:
         return None
-    # Prefer the model matching the .pbip name when a folder holds several.
+    if len(models) == 1:
+        return models[0] / ".pbi" / "cache.abf"
     stem = pbip.stem.lower()
-    chosen = next((m for m in models if m.stem.lower() == stem), models[0])
-    return chosen / ".pbi" / "cache.abf"
+    by_name = [model for model in models if model.stem.lower() == stem]
+    if len(by_name) == 1:
+        return by_name[0] / ".pbi" / "cache.abf"
+    bound = _model_from_pbip_binding(pbip, models)
+    if bound is not None:
+        return bound / ".pbi" / "cache.abf"
+    # Ambiguous, and no binding resolved it: refuse to guess. Returning None makes the identity gate
+    # fail closed rather than persist into whichever sibling happened to sort first.
+    return None
 
 
 def tmdl_tables(model_dir: Path) -> set[str]:
@@ -537,8 +670,8 @@ def tmdl_tables(model_dir: Path) -> set[str]:
 
     `utf-8-sig` and the auto date-table filter both matter to the *gate*, not just to tidiness:
     Desktop writes TMDL with a BOM, and a BOM immediately followed by the declaration would make
-    `^table` miss every file - leaving an empty fingerprint, which `same_model` reports as
-    "unverified" and lets through. Auto date tables are serialized into `tables/` when auto
+    `^table` miss every file - leaving an empty fingerprint, which `same_model` treats as
+    unverifiable and (now) REFUSES. Auto date tables are serialized into `tables/` when auto
     date/time is (or ever was) on, and they are filtered out of the live side, so leaving them here
     would make every such model look like a stranger.
     """
@@ -570,50 +703,70 @@ def same_model(port: int, cache_path: Path | None) -> tuple[bool, str]:
     (file exists, non-empty, mtime advanced, row count) agrees with it, because they all read the
     same wrong source. Comparing the model's own tables is what breaks that self-consistency.
 
-    Extra tables in the engine are fine (a field parameter added in-memory, or anything the caller
-    has not exported yet) and are only reported, since TMDL that lags the engine is worth knowing
-    about. A TMDL table MISSING from the engine is not: either this is a different model, or the
-    definition on disk changed after Desktop opened it - and Desktop discards a cache that is older
-    than the definition, so persisting then would be pointless anyway.
+    **Fails CLOSED.** Whenever identity cannot be established - no model folder resolved, or no TMDL
+    tables to fingerprint - this returns False, because "I could not verify" and "it is fine" are
+    not the same answer, and this gate guards a write into another migration's project. It used to
+    return True ("unverified") in both cases and let the write through.
+
+    **The fingerprint is EXACT, not a subset.** The connected model's tables must equal the TMDL's,
+    table-for-table. The previous check only required the TMDL tables to be PRESENT in the engine,
+    so a sibling with a SUPERSET schema (all your tables plus more) passed and was reported
+    "confirmed" - the precise hole this closes. Concurrent Desktop instances are supported, so that
+    sibling is reachable, not theoretical. Extra live tables now abort with WRONG_MODEL: a properly
+    exported model (finish TMDL edits, then refresh, then save) has no engine-only tables once the
+    auto date-table scaffolding is filtered from both sides.
     """
     if cache_path is None:
-        return True, "identity unverified (no model folder resolved for this pid)"
+        return False, "identity UNVERIFIED (no model folder resolved for this pid) - refusing (fail closed)"
     model_dir = cache_path.parent.parent
     on_disk = tmdl_tables(model_dir)
     if not on_disk:
-        return True, f"identity unverified (no TMDL tables under {model_dir / 'definition'})"
-    live = {name.casefold() for name in _live_tables(port)}
-    missing = sorted(name for name in on_disk if name.casefold() not in live)
-    if missing:
         return False, (
-            f"port {port} does NOT serve {model_dir.name}: {len(missing)}/{len(on_disk)} of its TMDL "
-            f"tables are absent from the connected model (e.g. {missing[:3]})"
+            f"identity UNVERIFIED (no TMDL tables under {model_dir / 'definition'}) - refusing (fail closed)"
         )
-    extra = len(live) - len(on_disk)
-    note = f", engine has {extra} more not in TMDL" if extra > 0 else ""
-    return True, f"{model_dir.name} confirmed on port {port} ({len(on_disk)} TMDL table(s) present{note})"
+    live_names = _live_tables(port)
+    live = {name.casefold() for name in live_names}
+    on_disk_fold = {name.casefold() for name in on_disk}
+    missing = sorted(name for name in on_disk if name.casefold() not in live)
+    extra = sorted(name for name in live_names if name.casefold() not in on_disk_fold)
+    if missing or extra:
+        return False, (
+            f"port {port} does NOT serve {model_dir.name}: "
+            f"{len(missing)} TMDL table(s) absent from the connected model (e.g. {missing[:3]}), "
+            f"{len(extra)} connected table(s) not in the TMDL (e.g. {extra[:3]}) - "
+            "an exact table-for-table match is required"
+        )
+    return True, f"{model_dir.name} confirmed on port {port} ({len(on_disk)} table(s), exact match)"
 
 
-def row_count(port: int) -> tuple[int, str]:
-    """Rows in the first queryable table - the gate of record.
+def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int]], bool]:
+    """Row counts per canary table - the gate of record. Returns (results, implicit).
 
     A refresh that "succeeded" but returns no rows is not a refresh; only data proves the source was
-    reachable, the credential worked and the M was valid.
+    reachable, the credential worked and the M was valid. With explicit `tables` (one canary per
+    distinct source), every source is asserted, so an all-non-zero result justifies a model-level
+    verdict. With no tables the first queryable table is probed and ``implicit`` is True - that is a
+    single-table probe, NOT a model-level guarantee: a static parameter/CSV table can return rows
+    while a live source never loaded. The caller downgrades the verdict wording accordingly.
     """
     adomd_connection = _load_adomd()
     conn = adomd_connection(f"Data Source=localhost:{port}")
     conn.Open()
     try:
-        table = first_table(conn)
-        cmd = conn.CreateCommand()
-        cmd.CommandText = f"EVALUATE ROW(\"n\", COUNTROWS('{table}'))"
-        reader = cmd.ExecuteReader()
-        rows = 0
-        while reader.Read():
-            value = reader.GetValue(0)
-            rows = int(value) if value is not None else 0
-        reader.Close()
-        return rows, table
+        implicit = not tables
+        targets = list(tables) if tables else [first_table(conn)]
+        results: list[tuple[str, int]] = []
+        for table in targets:
+            cmd = conn.CreateCommand()
+            cmd.CommandText = f"EVALUATE ROW(\"n\", COUNTROWS('{table}'))"
+            reader = cmd.ExecuteReader()
+            rows = 0
+            while reader.Read():
+                value = reader.GetValue(0)
+                rows = int(value) if value is not None else 0
+            reader.Close()
+            results.append((table, rows))
+        return results, implicit
     finally:
         conn.Close()
 
@@ -653,8 +806,8 @@ def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Na
                 "        do NOT simply wait longer.\n"
                 "    (b) BLOCKED: Desktop is showing a data-source sign-in modal no automation\n"
                 "        can fill. Retrying cannot dismiss it; a human must sign in once.\n"
-                "  SETTLE IT - run the arbiter, do not guess:\n"
-                f"    powershell -File scripts/probe_desktop_credential.ps1 -DesktopPid {pid}\n"
+                "  SETTLE IT - run the arbiter that ships beside this script, do not guess:\n"
+                f"    powershell -File {CREDENTIAL_PROBE} -DesktopPid {pid}\n"
                 "  A one-row probe bundle narrows this, but does NOT settle it: a probe limited to a\n"
                 "  single row is fast once the source is WARM, yet measured 2026-08-05 a 1-row probe\n"
                 "  against a SUSPENDED Snowflake warehouse took 167 s (vs 21 s against an already\n"
@@ -735,8 +888,8 @@ def _identity_gate(port: int, cache_path: Path | None) -> bool:
     return ok
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: refresh, save, and prove data is really there."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """The CLI parser, built in one place so a test can assert the documented default matches it."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--pid",
@@ -744,8 +897,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Power BI Desktop process id - required when several instances are open "
         "(`powerbi-desktop status` maps pid -> open file)",
     )
-    parser.add_argument("--port", type=int, help="Local AS port (default: auto-discover)")
-    parser.add_argument("--tables", nargs="*", help="Tables to refresh (default: whole database)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="Local AS port. Derived from --pid; if given it MUST equal the pid-discovered port "
+        "(a mismatch aborts - it cannot silently point the write at another instance)",
+    )
+    parser.add_argument(
+        "--tables",
+        nargs="*",
+        help="Tables to refresh AND the canary set to verify (default: whole database). Name one "
+        "table per distinct live source to earn a model-level DATA_OK; with none, only the first "
+        "queryable table is probed and the verdict is downgraded to name that single table",
+    )
     parser.add_argument(
         "--save",
         action="store_true",
@@ -766,34 +930,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    pid = _resolve_pid(args.pid)
-    if pid is None:
-        return 2
 
-    port = args.port or discover_port(pid)
-    # Resolved ONCE: the path that gets verified must be the path that gets written, and every
-    # re-derivation is another Desktop Bridge round trip that can come back empty.
-    cache = cache_file(pid)
-    before_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
+def _emit_data_verdict(
+    cache: Path | None,
+    before_stamp: float,
+    args: argparse.Namespace,
+    results: list[tuple[str, int]],
+    implicit: bool,
+) -> int:
+    """Print the data/cache lines and the machine-readable verdict; return the process exit code.
 
-    # Gate everything on identity: refreshing, row-counting or persisting a sibling's model is a
-    # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
-    if not _identity_gate(port, cache):
-        return 2
-
-    if not args.verify_only:
-        outcome = _refresh_and_save(pid, port, cache, args)
-        if outcome is not None:
-            return outcome
-
-    rows, table = row_count(port)
-
+    Split out of `main()` so the mutating path (identity gate + refresh + persist) and the reporting
+    path stay individually simple.
+    """
     after_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
     persisted = cache is not None and after_stamp > before_stamp
 
-    print(f"  data   : {rows} row(s) in '{table}'")
+    for table, rows in results:
+        print(f"  data   : {rows} row(s) in '{table}'")
     # Say what HAPPENED, not where a file would go. Printing the path alone reads as "written" -
     # it misled a reader on 2026-08-05 into believing a probe run had persisted a 1-row cache.
     # For a probe that distinction matters twice over: a persisted 1-row `cache.abf` is a trap, and
@@ -810,15 +966,69 @@ def main(argv: list[str] | None = None) -> int:
         # sent me looking in the wrong place for ten minutes; the real one is on the 'save' line.
         print("  cache  : not persisted (the write did not land - see 'save' above)")
 
-    if rows <= 0:
-        print("REFRESH: NO_DATA (refresh ran but the table is empty - check the source and credentials)")
+    empty = [table for table, rows in results if rows <= 0]
+    if empty:
+        print(f"REFRESH: NO_DATA (empty: {', '.join(empty)} - check the source and credentials)")
         return 1
     wanted_save = not args.no_save and not args.verify_only
     if wanted_save and not persisted:
         print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
         return 1
-    print("REFRESH: DATA_OK" + (" + PERSISTED" if wanted_save else ""))
+    suffix = " + PERSISTED" if wanted_save else ""
+    if implicit:
+        # No canaries were named, so only the first queryable table was probed. That is NOT a
+        # model-level guarantee (a static parameter/CSV table can pass while a live source never
+        # loaded), so the verdict names the single table actually probed instead of claiming DATA_OK.
+        only = results[0][0]
+        print(f"REFRESH: TABLE_OK '{only}'{suffix}")
+        print(
+            f"  note   : single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
+            "parameter/CSV table can return rows while a live source never loaded. Pass "
+            "--tables <one canary per live source> to certify every source (this mirrors the "
+            "powerbi-semantic-model-gotchas rule: prove a REAL read per live source)."
+        )
+        return 0
+    print(f"REFRESH: DATA_OK{suffix}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: refresh, save, and prove data is really there."""
+    args = _build_arg_parser().parse_args(argv)
+
+    pid = _resolve_pid(args.pid)
+    if pid is None:
+        return 2
+
+    # The port is DERIVED from the pid. A stray --port must never bypass that on this mutating path:
+    # the destination cache is resolved from the pid, so a --port pointing at another instance would
+    # read (and, via ImageSave, persist) a sibling's model into this project's own correct cache.abf.
+    discovered = discover_port(pid)
+    if args.port is not None and args.port != discovered:
+        print(
+            f"REFRESH: ERROR --port {args.port} does not match the port {discovered} discovered from "
+            f"pid {pid} - refusing to read or write across instances (drop --port; it is derived from --pid)"
+        )
+        return 2
+    port = discovered
+
+    # Resolved ONCE: the path that gets verified must be the path that gets written, and every
+    # re-derivation is another Desktop Bridge round trip that can come back empty.
+    cache = cache_file(pid)
+    before_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
+
+    # Gate everything on identity: refreshing, row-counting or persisting a sibling's model is a
+    # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
+    if not _identity_gate(port, cache):
+        return 2
+
+    if not args.verify_only:
+        outcome = _refresh_and_save(pid, port, cache, args)
+        if outcome is not None:
+            return outcome
+
+    results, implicit = row_counts(port, args.tables)
+    return _emit_data_verdict(cache, before_stamp, args, results, implicit)
 
 
 if __name__ == "__main__":
