@@ -25,6 +25,12 @@ purpose: discover the Tableau dependency graph BEFORE migrating anything, so a T
            dropped - losing a real dependency is the failure this whole script guards against) and
            labelled 'metadata-api', so an operator can see which source produced which claim.
 
+           COMPLETENESS: a survey also reports on ITSELF - `degraded`, `listing_errors`,
+           per-workbook `dependencies_unknown`. Every one of those means it did not see the whole
+           estate, so its silence about a data source is not evidence either. Such a survey still
+           CONTRIBUTES every edge it did see (that only ever adds dependencies, which is the safe
+           direction); what it cannot do is license the word "abandoned".
+
          The dedup key it prints is the SAME key `scripts/parse_tableau.py` stamps on a parsed
          workbook (`data_sources[].published_datasource.key`), so server-side lineage and locally
          parsed workbooks line up.
@@ -131,6 +137,22 @@ class SurveyDatasource:
     luid: str | None = None
     project: str | None = None
     consumers: set[str] = field(default_factory=set)
+    projects: set[str] = field(default_factory=set)
+    luids: set[str] = field(default_factory=set)
+
+    def observe(self, luid: str | None, project: str | None) -> None:
+        """Record one sighting of this data source; the survey names it once per consumer."""
+        if luid:
+            self.luids.add(luid)
+            self.luid = self.luid or luid
+        if project:
+            self.projects.add(project)
+            self.project = self.project or project
+
+    @property
+    def ambiguous(self) -> bool:
+        """True when this ONE key covers several data sources that merely share a name."""
+        return len(self.projects) > 1 or len(self.luids) > 1
 
 
 @dataclass(frozen=True)
@@ -138,9 +160,10 @@ class Survey:
     """The REST-derived dependency graph from `estate_survey.py --json`.
 
     This is GROUND TRUTH for whether a dependency exists: it was read from each workbook's own
-    connections. `gaps` records the ways this particular survey is nevertheless incomplete (a
-    workbook whose connections could not be read, a dependency that resolved to no data source).
-    An incomplete survey may still ADD edges, but it must not be used to claim a data source is
+    connections. `gaps` records the ways this particular survey is nevertheless incomplete (it
+    reports itself DEGRADED, a site listing failed so workbooks are missing from it entirely, a
+    workbook's connections could not be read, a dependency resolved to no data source). An
+    incomplete survey may still ADD edges, but it must not be used to claim a data source is
     unused, because the edge proving otherwise may be exactly the one it failed to read.
     """
 
@@ -156,12 +179,19 @@ class Survey:
         """True when nothing stopped this survey from seeing the whole estate."""
         return not self.gaps
 
-    def match(self, luid: str | None, name: str | None) -> str | None:
-        """Resolve a Metadata-API data source to this survey's key: LUID first, then name."""
+    def match(self, luid: str | None, name: str | None) -> tuple[str | None, str | None]:
+        """Resolve a Metadata-API data source to this survey's key -> (key, how it was matched).
+
+        LUID first because it is an identity; NAME only as a fallback, because it is not. The
+        fallback is load-bearing rather than decorative: `estate_survey.py::resolve_dependency`
+        emits `luid: ""` for any dependency it could not resolve to exactly one data source, so on a
+        real site the name path is what carries those edges. HOW the match was made is returned with
+        it so the caller can flag a name match that landed on more than one data source.
+        """
         if luid and luid in self.by_luid:
-            return self.by_luid[luid]
+            return self.by_luid[luid], "luid"
         key = _norm(name)
-        return key if key in self.datasources else None
+        return (key, "name") if key in self.datasources else (None, None)
 
     def consumers(self, key: str) -> list[str]:
         """Every workbook the survey saw binding to this data source, by display name."""
@@ -171,18 +201,95 @@ class Survey:
         return sorted((self.workbook_names.get(w, w) for w in entry.consumers), key=str.lower)
 
 
-def _survey_gaps(data: dict[str, Any], unresolved_deps: int) -> tuple[str, ...]:
-    """Describe every reason this survey's view of the estate is incomplete."""
+def _summary(data: dict[str, Any]) -> dict[str, Any]:
+    """The survey's own summary block, or an empty one."""
+    summary = data.get("summary")
+    return summary if isinstance(summary, dict) else {}
+
+
+def _count(*values: Any) -> int:
+    """The largest of several counts of the SAME failure, ignoring anything that is not a count.
+
+    `estate_survey.py` records one failure in more than one place (`connection_read_errors`, the
+    per-workbook `dependencies_unknown` flag, `summary.dependencies_unknown`). Taking the max
+    reports it ONCE, while still catching a survey that carries only one of the three - which is
+    exactly what `build_survey()` produces when it is called directly, without `survey_site()`'s
+    error bookkeeping.
+    """
+    counts = [len(v) if isinstance(v, list) else v for v in values]
+    return max((c for c in counts if isinstance(c, int) and not isinstance(c, bool)), default=0)
+
+
+def _flag_gaps(data: dict[str, Any]) -> list[str]:
+    """Read the survey's OWN verdict on itself: `degraded`.
+
+    `survey_site()` sets `degraded = bool(errors or listing_errors)` and documents it as "this
+    survey did NOT see the whole estate, so its 'no dependency' answers are not evidence of
+    independence". That is the single flag every consumer is told to trust, so it is read first and
+    honoured on its own - never re-derived from the error lists, which is how a NEW failure class
+    added upstream would silently stop counting.
+
+    Its ABSENCE is a gap too. A survey with no flag cannot show it saw the whole estate, and the
+    only claim gated on completeness here is the strongest one this tool makes ("may be abandoned").
+    """
+    declared = data.get("degraded", _summary(data).get("degraded"))
+    if declared is None:
+        return [
+            "the survey carries no 'degraded' flag, so it cannot show it saw the whole estate "
+            "(re-run estate_survey.py to produce one)"
+        ]
+    return ["the survey reports itself DEGRADED (estate_survey.py's own flag)"] if declared else []
+
+
+def _visibility_gaps(data: dict[str, Any]) -> list[str]:
+    """Every way this survey failed to SEE part of the estate."""
     gaps: list[str] = []
-    read_errors = data.get("connection_read_errors") or []
-    if read_errors:
-        gaps.append(f"{len(read_errors)} workbook connection(s) could not be read")
-    declared_unresolved = data.get("unresolved_dependencies") or []
+    summary = _summary(data)
+    workbooks = data.get("workbooks") or []
+
+    listing = _count(data.get("listing_errors"), summary.get("listing_errors"))
+    if listing:
+        gaps.append(
+            f"{listing} site listing(s) failed - workbooks or data sources are MISSING from this survey entirely"
+        )
+    unread = _count(
+        data.get("connection_read_errors"),
+        summary.get("connection_read_errors"),
+        summary.get("dependencies_unknown"),
+        sum(1 for wb in workbooks if isinstance(wb, dict) and wb.get("dependencies_unknown")),
+    )
+    if unread:
+        gaps.append(f"{unread} workbook connection(s) could not be read")
+    if not workbooks:
+        gaps.append("the survey lists no workbooks at all, so it observed no consumer edge")
+    total = summary.get("workbooks_total")
+    if isinstance(total, int) and total > len(workbooks):
+        gaps.append(f"the survey lists {len(workbooks)} of the {total} workbook(s) it counted")
+    return gaps
+
+
+def _resolution_gaps(data: dict[str, Any], unresolved_deps: int) -> list[str]:
+    """Every dependency the survey saw but could not tie to a published data source."""
+    gaps: list[str] = []
+    declared_unresolved = _count(data.get("unresolved_dependencies"), _summary(data).get("unresolved_dependencies"))
     if declared_unresolved:
-        gaps.append(f"{len(declared_unresolved)} declared dependency(ies) resolved to no data source")
+        gaps.append(f"{declared_unresolved} declared dependency(ies) resolved to no data source")
     if unresolved_deps:
         gaps.append(f"{unresolved_deps} dependency(ies) did not resolve to a published data source")
-    return tuple(gaps)
+    return gaps
+
+
+def _survey_gaps(data: dict[str, Any], unresolved_deps: int) -> tuple[str, ...]:
+    """Describe every reason this survey's view of the estate is incomplete.
+
+    Read EVERY signal `estate_survey.py` publishes about its own completeness, not the subset that
+    happens to be convenient. Reading only `connection_read_errors` + `unresolved_dependencies` let
+    a survey with `degraded: true` and a failed site listing - i.e. one with whole workbooks missing
+    - report `complete`, which re-armed issue #126's wrong claim with MORE authority than the
+    original ("Both the Metadata API and the survey found no consumer"). The missing workbook is
+    precisely the consumer that would have disproved it.
+    """
+    return tuple(_flag_gaps(data) + _visibility_gaps(data) + _resolution_gaps(data, unresolved_deps))
 
 
 def _read_survey_edges(
@@ -209,8 +316,7 @@ def _read_survey_edges(
                 continue
             entry = datasources.setdefault(_norm(name), SurveyDatasource(name=name))
             entry.consumers.add(_norm(wb_display))
-            entry.luid = entry.luid or dep.get("luid")
-            entry.project = entry.project or dep.get("project")
+            entry.observe(dep.get("luid"), dep.get("project"))
             if dep.get("status") and dep.get("status") != "resolved":
                 unresolved += 1
     return unresolved
@@ -246,8 +352,7 @@ def load_survey(path: Path) -> Survey:
         if not name:
             continue
         entry = datasources.setdefault(_norm(name), SurveyDatasource(name=name))
-        entry.luid = entry.luid or required.get("luid")
-        entry.project = entry.project or required.get("project")
+        entry.observe(required.get("luid"), required.get("project"))
 
     declared = sum(len(wb.get("published_dependencies") or []) for wb in workbooks)
     if declared and not any(ds.consumers for ds in datasources.values()):
@@ -343,6 +448,7 @@ def _entry(
     source: dict[str, Any],
     metadata_workbooks: list[str],
     survey_workbooks: list[str] | None,
+    matched_via: str | None = None,
 ) -> dict[str, Any]:
     """Build one plan row, merging both sources' edges and recording where each edge came from.
 
@@ -379,7 +485,33 @@ def _entry(
         "metadata_only": sorted((seen[k] for k in metadata_keys - survey_keys), key=str.lower),
         "evidence": evidence,
         "known_to_survey": survey_workbooks is not None,
+        "matched_via": matched_via,
+        "name_collision": [],
     }
+
+
+def _flag_name_collisions(by_key: dict[str, list[dict[str, Any]]], survey: Survey) -> None:
+    """Mark every plan row whose survey edges were attached by NAME to more than one data source.
+
+    A name is not an identity - two data sources called 'Sales' in different projects normalise to
+    one survey key, so the survey's consumers get attributed to BOTH. That merge is kept rather than
+    refused, and the direction is the reason: attaching a consumer to one data source too many
+    over-migrates (recoverable, and the order still holds because both are sequenced ahead of it),
+    while refusing the match would orphan a real consumer and rebuild it as an empty report - the
+    failure this whole script exists to prevent. `estate_survey.py::resolve_dependency` refuses the
+    same ambiguity and is right to: it is deciding an IDENTITY. This is only deciding an ORDER.
+
+    What is not acceptable is doing it silently, so every affected row is flagged and printed. The
+    edges are usable; the per-project attribution is not.
+    """
+    for key, rows in by_key.items():
+        entry = survey.datasources.get(key)
+        survey_projects = sorted(entry.projects) if entry and entry.ambiguous else []
+        if len(rows) < 2 and not survey_projects:
+            continue
+        projects = sorted({str(row["project"]) for row in rows} | set(survey_projects))
+        for row in rows:
+            row["name_collision"] = projects
 
 
 def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | None = None) -> list[dict[str, Any]]:
@@ -395,13 +527,11 @@ def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | No
     to, which is the empty-report failure this script exists to prevent.
     """
     plan: list[dict[str, Any]] = []
-    matched: set[str] = set()
+    by_key: dict[str, list[dict[str, Any]]] = {}
     for datasource in datasources:
         name = datasource.get("name") or ""
         downstream = [w.get("name") or "?" for w in datasource.get("downstreamWorkbooks") or []]
-        survey_key = survey.match(datasource.get("luid"), name) if survey else None
-        if survey_key:
-            matched.add(survey_key)
+        survey_key, matched_via = survey.match(datasource.get("luid"), name) if survey else (None, None)
         source = {
             "name": name,
             "luid": datasource.get("luid"),
@@ -409,14 +539,18 @@ def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | No
             "has_extracts": datasource.get("hasExtracts"),
         }
         survey_workbooks = survey.consumers(survey_key) if survey and survey_key is not None else None
-        plan.append(_entry(site, source, downstream, survey_workbooks))
+        entry = _entry(site, source, downstream, survey_workbooks, matched_via)
+        plan.append(entry)
+        if survey_key:
+            by_key.setdefault(survey_key, []).append(entry)
 
     if survey:
-        for key, entry in survey.datasources.items():
-            if key in matched:
+        for key, seen in survey.datasources.items():
+            if key in by_key:
                 continue
-            source = {"name": entry.name, "luid": entry.luid, "project": entry.project, "has_extracts": None}
-            plan.append(_entry(site, source, [], survey.consumers(key)))
+            source = {"name": seen.name, "luid": seen.luid, "project": seen.project, "has_extracts": None}
+            plan.append(_entry(site, source, [], survey.consumers(key), "survey-only"))
+        _flag_name_collisions(by_key, survey)
 
     return sorted(plan, key=lambda p: (-p["downstream_count"], (p["name"] or "").lower()))
 
@@ -440,7 +574,11 @@ def build_order(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for workbook in entry["downstream_workbooks"]:
             requires.setdefault(workbook, []).append(entry["name"])
     for workbook in sorted(requires, key=lambda w: (min(rank.get(d, 0) for d in requires[w]), w.lower())):
-        order.append({"kind": "workbook", "name": workbook, "luid": None, "requires": sorted(requires[workbook])})
+        # De-duplicated because two data sources that merely SHARE a name are indistinguishable in a
+        # list of names: printing "after: Sales, Sales" states nothing the reader can act on. Both
+        # rows still appear in the data source half of the order, so the guarantee is unaffected;
+        # the collision itself is reported separately rather than smuggled in as a repeat.
+        order.append({"kind": "workbook", "name": workbook, "luid": None, "requires": sorted(set(requires[workbook]))})
     return order
 
 
@@ -546,6 +684,31 @@ def _print_disagreements(plan: list[dict[str, Any]], survey: Survey | None) -> N
             )
 
 
+def _print_name_collisions(plan: list[dict[str, Any]]) -> None:
+    """Name every data source whose survey edges were attached on a shared NAME, not an identity.
+
+    Silence here would be the same mistake as the "abandoned" claim in a different place: a merge
+    the operator cannot see is a merge they cannot check. The edges are kept (see
+    `_flag_name_collisions`); what is withheld is the confident per-project attribution.
+    """
+    collided = [entry for entry in plan if entry["name_collision"]]
+    if not collided:
+        return
+    log.info("\nNAME COLLISION - a name is not an identity, so this attribution is UNCONFIRMED:")
+    for entry in collided:
+        log.info(
+            "  - %r exists in %d project(s) (%s); the survey's %d consumer edge(s) are attributed to "
+            "EVERY one of them.",
+            entry["name"],
+            len(entry["name_collision"]),
+            ", ".join(entry["name_collision"]),
+            entry["survey_count"],
+        )
+    log.info("      Over-migrating a shared name is recoverable and keeps the order valid; refusing the")
+    log.info("      match would orphan a real consumer, which is not. Disambiguate by LUID (re-run the")
+    log.info("      survey so its dependencies resolve) before quoting per-project usage.")
+
+
 def _print_phase2(order: list[dict[str, Any]]) -> None:
     """Print the workbook half of the sequence, each with the data sources it must follow."""
     log.info("\nPHASE 2 - migrate each workbook to a REPORT bound to the model built in phase 1.")
@@ -621,6 +784,7 @@ def print_plan(plan: list[dict[str, Any]], survey: Survey | None = None) -> None
     _print_header(plan, survey)
     _print_phase1(plan)
     _print_disagreements(plan, survey)
+    _print_name_collisions(plan)
     _print_phase2(build_order(plan))
     _print_orphans(plan, survey)
 
