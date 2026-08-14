@@ -279,7 +279,7 @@ def inspect_credential_modal(
     ]
     if minimized:
         return CredentialDetection(
-            unknown_reason="Power BI Desktop owner window is minimized; owned credential dialogs are hidden",
+            unknown_reason="Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration",
             windows=windows,
         )
     return CredentialDetection(windows=windows)
@@ -333,12 +333,14 @@ def source_hint_from_model(model_dir: Path | None) -> str | None:
 def print_refresh_banner(pid: int, timeout_sec: int, grace_sec: int | float) -> None:
     """Print the no-dialog, self-bounded refresh warning before the wait starts.
 
-    Deliberately does NOT name the verdict tokens it may later print. This banner is emitted on the
-    HEALTHY no-dialog path and is captured verbatim by ``probe_live_source``'s classifier; naming
-    ``CREDENTIAL_MISSING`` / ``BLOCKED_BY_DIALOG`` here (or even the bare word "credential") made the
-    reassuring message classify a successful refresh as ``NO_CREDENTIAL`` (issue #153). The classifier
-    now matches verdict LINES structurally, but keeping control tokens out of free prose is the
-    belt-and-braces half of that fix - so a future helpful edit cannot re-arm the landmine.
+    Deliberately does NOT name the verdict tokens it may later print, and interpolates NO caller-supplied
+    text - so unlike :func:`print_refresh_unknown_banner`, this banner's marker-free guarantee is total
+    and self-contained. This banner is emitted on the HEALTHY no-dialog path and is captured verbatim by
+    ``probe_live_source``'s classifier; naming ``CREDENTIAL_MISSING`` / ``BLOCKED_BY_DIALOG`` here (or
+    even the bare word "credential") made the reassuring message classify a successful refresh as
+    ``NO_CREDENTIAL`` (issue #153). The classifier now matches verdict LINES structurally, but keeping
+    control tokens out of free prose is the belt-and-braces half of that fix - so a future helpful edit
+    cannot re-arm the landmine.
     """
     total = timeout_sec + grace_sec
     print(
@@ -353,10 +355,13 @@ def print_refresh_banner(pid: int, timeout_sec: int, grace_sec: int | float) -> 
 def print_refresh_unknown_banner(pid: int, timeout_sec: int, grace_sec: int | float, reason: str) -> None:
     """Print the bounded-refresh warning when the t=0 modal check is indeterminate.
 
-    Same rule as :func:`print_refresh_banner`: no control tokens - and not the bare word "credential" -
-    in prose the classifier scans (issue #153). The prefix reads "Blocking-dialog check ... UNKNOWN"
-    rather than the old "Credential dialog check", so a non-``DATA_OK`` refresh through this path is not
-    mislabelled ``NO_CREDENTIAL`` by ``CREDENTIAL_MARKERS``' free-text "credential" marker.
+    This banner's OWN static prose names no control tokens and not the bare word "credential" - but it
+    interpolates ``reason``, a caller-supplied string from ``inspect_credential_modal`` that the
+    classifier scans along with everything else. So the marker-free guarantee for the UNKNOWN path is
+    owned by the DETECTOR, not by this banner alone: the minimized-owner ``unknown_reason`` was reworded
+    off the word "credential" (a ``CREDENTIAL_MARKER``) for exactly this reason (issue #153) - otherwise
+    a slow/timeout refresh here was mislabelled ``NO_CREDENTIAL``. The prefix reads "Blocking-dialog
+    check ... UNKNOWN" rather than the old "Credential dialog check" as the belt-and-braces static half.
     """
     total = timeout_sec + grace_sec
     print(

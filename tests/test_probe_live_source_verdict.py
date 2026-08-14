@@ -11,6 +11,7 @@ Two seams are pinned here:
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import subprocess
 import sys
@@ -187,38 +188,94 @@ def test_wrong_table_tables_ok_does_not_clear_the_gate(monkeypatch: pytest.Monke
     assert exit_code == 1 and verdict != "DATA_OK"
 
 
-@pytest.mark.parametrize(
-    ("banner_func", "args", "sanity_substr"),
-    [
-        pytest.param("print_refresh_banner", (111, 180, 60), "No blocking dialog", id="healthy-no-dialog"),
-        pytest.param(
-            "print_refresh_unknown_banner",
-            (111, 180, 60, "owner window is minimized"),
-            "UNKNOWN",
-            id="indeterminate-unknown",
-        ),
-    ],
-)
-def test_refresh_banners_do_not_classify_as_no_credential(banner_func: str, args: tuple, sanity_substr: str) -> None:
-    """#153: NEITHER refresh banner may fabricate a credential stop from its own reassuring prose.
+def _refresh_banner_funcs(credential_modal) -> dict:
+    """Discover every pre-wait refresh banner by naming convention (``print_refresh_*banner``).
 
-    Both banners are printed on non-failure paths and captured verbatim by the classifier.
-    ``print_refresh_banner`` is the healthy no-dialog path; ``print_refresh_unknown_banner`` is the
-    minimized-owner UNKNOWN path (issue #154) and was a SECOND instance of the same self-poisoning
-    defect. Parametrized over BOTH on purpose rather than hard-coding one string: a third banner that
-    reintroduces a sentinel token in prose is caught the moment it is added to this list.
+    Introspection, NOT a hand-list: a newly-added banner is covered the instant it lands, with no edit
+    here. ``print_refresh_heartbeat`` is intentionally excluded (it is not a ``*banner``).
+    """
+    return {
+        name: obj
+        for name, obj in vars(credential_modal).items()
+        if callable(obj) and name.startswith("print_refresh_") and name.endswith("banner")
+    }
+
+
+def _detector_unknown_reasons(credential_modal) -> list[str]:
+    """The REAL ``unknown_reason`` strings the detector emits, harvested by driving each UNKNOWN branch.
+
+    Derived from the detector, never hand-written - that is the #152/#153 lesson: a fixture the
+    production code cannot actually produce hides the very defect the test exists to catch. The old
+    #153 banner test hand-wrote ``reason='owner window is minimized'``; the string the detector really
+    emits contained the word 'credential' and self-classified as ``NO_CREDENTIAL``.
+    """
+
+    def _enumeration_raises(_pid: int):
+        raise credential_modal.Win32EnumerationError("boom")
+
+    minimized_main = credential_modal.DesktopWindow(
+        title="Report",
+        class_name=credential_modal.DESKTOP_MAIN_CLASS_PREFIX + ".app.0",
+        width=1200,
+        height=800,
+        minimized=True,
+    )
+    scenarios = (_enumeration_raises, lambda _pid: [minimized_main])
+
+    reasons: list[str] = []
+    for enumerate_windows in scenarios:
+        reason = credential_modal.inspect_credential_modal(111, enumerate_windows=enumerate_windows).unknown_reason
+        assert reason, "scenario failed to drive the detector into an UNKNOWN state"
+        reasons.append(reason)
+
+    # Backstop for 'catches a newly-added reason without editing a list': if inspect_credential_modal
+    # grows a THIRD unknown_reason branch, this trips so whoever adds it also adds a driver scenario.
+    branches = inspect.getsource(credential_modal.inspect_credential_modal).count("unknown_reason=")
+    assert branches == len(reasons), (
+        f"detector emits {branches} unknown_reason branch(es) but this harness exercised {len(reasons)}; "
+        "add a driver scenario in _detector_unknown_reasons so #153 stays covered."
+    )
+    return reasons
+
+
+def test_no_refresh_banner_and_detector_reason_classifies_as_no_credential() -> None:
+    """#153 (structural): NO refresh banner may fabricate a credential stop from its own prose - for ANY
+    ``unknown_reason`` the detector can actually emit.
+
+    Both inputs are DISCOVERED, not enumerated: the banner set from the module by naming convention, and
+    the reason set from the real detector. That is what makes this catch (a) a newly-added banner and
+    (b) a newly-added reason without anyone editing a parametrize list - the exact blind-spot class that
+    let hand-written fixtures stay green while the seam was broken. The concrete bug this pins: the
+    minimized-owner reason literally read '... owned credential dialogs are hidden'; while that word was
+    ``credential`` (a ``CREDENTIAL_MARKER``), a slow/timeout refresh through the UNKNOWN path was
+    mislabelled ``NO_CREDENTIAL`` and sent an operator to re-enter credentials for a merely-slow
+    warehouse. ``print_refresh_unknown_banner`` interpolates that reason, so the banner's own static
+    prose being clean was NOT enough - the fix is at the detector, and this test reads it from there.
     """
     probe_live_source = _import_probe_live_source()
     _, _, credential_modal = _import_skill_modules()
 
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        getattr(credential_modal, banner_func)(*args)
-    banner = buffer.getvalue()
+    banners = _refresh_banner_funcs(credential_modal)
+    reasons = _detector_unknown_reasons(credential_modal)
+    assert len(banners) >= 2, f"expected to discover both refresh banners; got {sorted(banners)}"
+    assert len(reasons) >= 2, f"expected >=2 real unknown_reason strings; got {reasons}"
 
-    assert sanity_substr in banner, f"sanity: {banner_func} should render {sanity_substr!r}; got {banner!r}"
-    verdict, _ = probe_live_source._classify_failure(banner, network_fault_observed=False)
-    assert verdict != "NO_CREDENTIAL", f"{banner_func} must not fabricate a credential stop; got {verdict}: {banner!r}"
+    base = (63824, 300, 30)
+    failures: list[tuple[str, tuple, str]] = []
+    for name, banner in sorted(banners.items()):
+        takes_reason = "reason" in inspect.signature(banner).parameters
+        arg_sets = [(*base, reason) for reason in reasons] if takes_reason else [base]
+        for args in arg_sets:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                banner(*args)
+            text = buffer.getvalue()
+            verdict, _ = probe_live_source._classify_failure(text, network_fault_observed=False)
+            if verdict == "NO_CREDENTIAL":
+                failures.append((name, args[3:], text))
+    assert not failures, "banner(s) fabricated a credential stop from their own prose: " + "; ".join(
+        f"{name}{extra}: {text!r}" for name, extra, text in failures
+    )
 
 
 def test_free_text_credential_marker_without_a_verdict_line_still_stops() -> None:

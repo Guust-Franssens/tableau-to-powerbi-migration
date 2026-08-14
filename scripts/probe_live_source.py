@@ -495,6 +495,13 @@ def _has_data_ok_verdict(text: str, table: str) -> bool:
         if match.group("token") == "DATA_OK":
             return True
         # TABLE_OK / TABLES_OK name one or more single-quoted tables; the probed table must be one.
+        # Known limitation (reviewed 2026-08-14, intentionally NOT fixed here): a table name containing
+        # a literal apostrophe (e.g. "O'Brien Sales") is emitted UNESCAPED by ``_verdict``, so this
+        # findall recovers the wrong tokens and ``table in named`` is False. It FAILS SAFE - it can only
+        # ever keep the gate SHUT, never lift it wrongly - and a false lift is unreachable in the
+        # single-table probe flow (the probe asks for exactly the table it names). The ambiguity
+        # originates in the emitter's non-escaping, and the #115 scoping here is verified-correct, so the
+        # matcher is left untouched rather than risk regressing it for a fail-safe, unreachable edge.
         named = re.findall(r"'([^']*)'", match.group("rest") or "")
         if table in named:
             return True
