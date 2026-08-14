@@ -279,7 +279,9 @@ def inspect_credential_modal(
     ]
     if minimized:
         return CredentialDetection(
-            unknown_reason="Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration",
+            unknown_reason=(
+                "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"
+            ),
             windows=windows,
         )
     return CredentialDetection(windows=windows)
