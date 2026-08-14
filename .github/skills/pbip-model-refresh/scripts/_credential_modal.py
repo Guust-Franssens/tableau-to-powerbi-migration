@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SIGNATURE_PATH = Path(__file__).resolve().with_name("credential_modal_signature.regex")
-POLL_SECONDS = 5.0
 CONNECTOR_SOURCE_RE = re.compile(
     r"\b(?P<kind>Sql\.Database|Snowflake\.Databases|Databricks\.[A-Za-z]+|Odbc\.DataSource|Web\.Contents)\s*\("
     r"\s*(?:\"(?P<double>[^\"]+)\"|'(?P<single>[^']+)')?",
@@ -285,13 +284,6 @@ def inspect_credential_modal(
             windows=windows,
         )
     return CredentialDetection(windows=windows)
-
-
-def detect_credential_modal(
-    pid: int, enumerate_windows: WindowEnumerator = enumerate_pid_windows
-) -> CredentialModal | None:
-    """Detect a currently visible credential modal for ``pid``."""
-    return inspect_credential_modal(pid, enumerate_windows).modal
 
 
 def describe_modal(modal: CredentialModal, source_hint: str | None = None) -> str:

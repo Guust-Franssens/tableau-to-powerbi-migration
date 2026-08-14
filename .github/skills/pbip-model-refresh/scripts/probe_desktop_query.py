@@ -354,11 +354,6 @@ def probe(port: int, tables: list[str] | None, emit=print) -> int:
         conn.Close()
 
 
-def _credential_missing(pid: int) -> CredentialModal | None:
-    """Return an already-open credential modal for ``pid``, if Desktop is blocked on one."""
-    return _credential_state(pid).modal
-
-
 def _credential_state(pid: int) -> CredentialDetection:
     """Return the credential-modal inspection state for ``pid``."""
     if os.name != "nt":
