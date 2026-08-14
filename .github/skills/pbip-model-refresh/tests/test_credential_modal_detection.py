@@ -286,7 +286,7 @@ def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, ca
         refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
 
     out = capsys.readouterr().out
-    assert "Credential dialog check on PID 111 is UNKNOWN" in out
+    assert "Blocking-dialog check on PID 111 is UNKNOWN" in out
     assert "No blocking dialog on PID 111" not in out
     parked.set()
 

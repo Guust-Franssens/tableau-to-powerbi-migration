@@ -331,25 +331,39 @@ def source_hint_from_model(model_dir: Path | None) -> str | None:
 
 
 def print_refresh_banner(pid: int, timeout_sec: int, grace_sec: int | float) -> None:
-    """Print the no-dialog, self-bounded refresh warning before the wait starts."""
+    """Print the no-dialog, self-bounded refresh warning before the wait starts.
+
+    Deliberately does NOT name the verdict tokens it may later print. This banner is emitted on the
+    HEALTHY no-dialog path and is captured verbatim by ``probe_live_source``'s classifier; naming
+    ``CREDENTIAL_MISSING`` / ``BLOCKED_BY_DIALOG`` here (or even the bare word "credential") made the
+    reassuring message classify a successful refresh as ``NO_CREDENTIAL`` (issue #153). The classifier
+    now matches verdict LINES structurally, but keeping control tokens out of free prose is the
+    belt-and-braces half of that fix - so a future helpful edit cannot re-arm the landmine.
+    """
     total = timeout_sec + grace_sec
     print(
         f"No blocking dialog on PID {pid}. Refreshing, bounded at {timeout_sec}s XMLA + "
         f"{grace_sec}s grace ({total}s total); a long wait here is expected for a serverless cold start. "
-        "DO NOT kill this process - at the deadline it re-checks and reports CREDENTIAL_MISSING, "
-        "BLOCKED_BY_DIALOG, or SLOW_SOURCE. Killing it early yields NO verdict.",
+        "DO NOT kill this process - at the deadline it re-checks and prints one final machine-readable "
+        "verdict line. Killing it early yields NO verdict.",
         flush=True,
     )
 
 
 def print_refresh_unknown_banner(pid: int, timeout_sec: int, grace_sec: int | float, reason: str) -> None:
-    """Print the bounded-refresh warning when the t=0 modal check is indeterminate."""
+    """Print the bounded-refresh warning when the t=0 modal check is indeterminate.
+
+    Same rule as :func:`print_refresh_banner`: no control tokens - and not the bare word "credential" -
+    in prose the classifier scans (issue #153). The prefix reads "Blocking-dialog check ... UNKNOWN"
+    rather than the old "Credential dialog check", so a non-``DATA_OK`` refresh through this path is not
+    mislabelled ``NO_CREDENTIAL`` by ``CREDENTIAL_MARKERS``' free-text "credential" marker.
+    """
     total = timeout_sec + grace_sec
     print(
-        f"Credential dialog check on PID {pid} is UNKNOWN ({reason}). Refreshing, bounded at "
+        f"Blocking-dialog check on PID {pid} is UNKNOWN ({reason}). Refreshing, bounded at "
         f"{timeout_sec}s XMLA + {grace_sec}s grace ({total}s total); a minimized owner can hide owned "
         "dialogs from enumeration. DO NOT kill this process - at the deadline it re-checks with the "
-        "dialog arbiter and reports CREDENTIAL_MISSING, BLOCKED_BY_DIALOG, or SLOW_SOURCE. Killing it early "
+        "dialog arbiter and prints one final machine-readable verdict line. Killing it early "
         "yields NO verdict.",
         flush=True,
     )
