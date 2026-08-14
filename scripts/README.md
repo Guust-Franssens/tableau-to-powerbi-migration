@@ -67,6 +67,10 @@ personas already use. Deleting them would make every persona *longer* — see
 | `set_ai_instructions.py` | `.github/skills/powerbi-ai-readiness/` — stamp `CustomInstructions`, force `qnaEnabled` |
 | `check_ai_readiness.py` | `.github/skills/powerbi-ai-readiness/` — audit description coverage + enumerated domains |
 
+For bridge/Desktop smoke tests, use a PBIP whose model has a persisted `.pbi/cache.abf`. A reference
+bundle that points at a live SQL Server unavailable in this tenant will always stop at the credential
+dialog and can make a healthy bridge look broken.
+
 ## Gates (CI and agent Definition of Done)
 
 | Script | What it enforces |

@@ -108,12 +108,25 @@ stay byte-identical.
 > anyway. If a model legitimately needs longer, refresh less with `--tables`. Never emit a
 > "this needs a human" stop from an unverified timeout - that phrasing names the one blocker an
 > agent must not retry, so a false positive turns a slow refresh into a permanent dead end.
+>
+> ⚠️ **Bridge errors that look technical can be a blocking Desktop dialog.** The pair
+> `powerbi-desktop status` -> **"Host is not ready to accept operations"** and
+> `powerbi-desktop screenshot` -> **"Print metadata is not available"** was measured on an otherwise
+> healthy Desktop/bridge when a data-source dialog was already open. Some connector dialogs expose no
+> readable text, so the fast check reports either `CREDENTIAL_MISSING` (signature text matched) or
+> `BLOCKED_BY_DIALOG` (visible non-main dialog, text unreadable/non-credential). In both cases a
+> human must look at Desktop before the run proceeds. Check this first before suspecting the bridge or
+> filing an upstream defect.
 
 Read-only preflight (proves credentials + source reachability without changing anything):
 
 ```
 python scripts/probe_desktop_query.py [--pid <pbidesktop-pid>] [--canaries "A" "B"]
 ```
+
+Use a model with a persisted `.pbi/cache.abf` for Desktop/bridge smoke tests. A PBIP whose live SQL
+Server source does not exist in the current tenant will always open behind a credential dialog and is
+a bad unattended smoke-test fixture, no matter how well the bridge itself is working.
 
 **Name one canary table per distinct live source** with `--canaries`. A model-level `DATA_OK` is only
 emitted when *every* named canary returns rows; with **no** table named, only the first queryable

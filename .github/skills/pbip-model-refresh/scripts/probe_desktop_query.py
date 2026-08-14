@@ -31,13 +31,23 @@ from __future__ import annotations
 
 import argparse
 import glob
+import inspect
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import NoReturn
+
+from _credential_modal import (
+    CredentialDetection,
+    CredentialModal,
+    describe_blocking_dialog,
+    describe_modal,
+    inspect_credential_modal,
+)
 
 # ADOMD.NET assembly shipped in the nuget cache (netcore build). Resolved at import time.
 _ADOMD_PKG = "microsoft.analysisservices.adomdclient.netcore*"
@@ -48,6 +58,7 @@ _ADOMD_GLOBS = [str(Path.home() / ".nuget/packages" / _ADOMD_PKG / "**" / _ADOMD
 # short retry - but a bounded one, because a miss must end in a loud failure, never a fallback.
 PORT_DISCOVERY_ATTEMPTS = 6
 PORT_DISCOVERY_INTERVAL_SECONDS = 2
+PREFLIGHT_CREDENTIAL_POLL_SECONDS = 5.0
 
 # Power BI's auto date/time scaffolding. Present in the engine, and serialized into a PBIP's
 # `definition/tables/` too when auto date/time is (or ever was) on - so a comparison of the two
@@ -284,7 +295,7 @@ def measure_names(conn) -> set[tuple[str, str]]:
     return pairs
 
 
-def _probe_one(port: int, conn, table: str) -> int:
+def _probe_one(port: int, conn, table: str, emit=print) -> int:
     """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
     dax = f"EVALUATE TOPN(1, '{table}')"
     cmd = conn.CreateCommand()
@@ -298,14 +309,14 @@ def _probe_one(port: int, conn, table: str) -> int:
         if rows == 1:
             first_values = [str(reader.GetValue(i)) for i in range(reader.FieldCount)]
     reader.Close()
-    print(f"port={port}  table='{table}'  dax={dax}")
-    print(f"  columns ({len(cols)}): {cols[:8]}")
+    emit(f"port={port}  table='{table}'  dax={dax}")
+    emit(f"  columns ({len(cols)}): {cols[:8]}")
     if rows:
-        print(f"  row: {first_values[:8]}")
+        emit(f"  row: {first_values[:8]}")
     return rows
 
 
-def probe(port: int, tables: list[str] | None) -> int:
+def probe(port: int, tables: list[str] | None, emit=print) -> int:
     """Probe each canary table with a 1-row read against localhost:<port>; return a process exit code.
 
     With an explicit canary set (one per distinct live source) an all-non-zero result earns the
@@ -320,27 +331,109 @@ def probe(port: int, tables: list[str] | None) -> int:
     try:
         implicit = not tables
         targets = list(tables) if tables else [first_table(conn)]
-        results = [(target, _probe_one(port, conn, target)) for target in targets]
+        results = [(target, _probe_one(port, conn, target, emit)) for target in targets]
         empty = [target for target, rows in results if rows <= 0]
         if empty:
-            print(
+            emit(
                 f"PREFLIGHT: NO_DATA (0 rows from: {', '.join(empty)} - source empty, "
                 "credential missing, or refresh failed)"
             )
             return 1
         if implicit:
             only = results[0][0]
-            print(f"PREFLIGHT: TABLE_OK '{only}'")
-            print(
+            emit(f"PREFLIGHT: TABLE_OK '{only}'")
+            emit(
                 f"  note: single-table probe of '{only}' only - NOT a model-level DATA_OK. A static "
                 "parameter/CSV table can return rows while a live source never loaded. Pass --canaries "
                 "<one per live source> to certify every source."
             )
             return 0
-        print("PREFLIGHT: DATA_OK")
+        emit("PREFLIGHT: DATA_OK")
         return 0
     finally:
         conn.Close()
+
+
+def _credential_missing(pid: int) -> CredentialModal | None:
+    """Return an already-open credential modal for ``pid``, if Desktop is blocked on one."""
+    return _credential_state(pid).modal
+
+
+def _credential_state(pid: int) -> CredentialDetection:
+    """Return the credential-modal inspection state for ``pid``."""
+    if os.name != "nt":
+        return CredentialDetection()
+    return inspect_credential_modal(pid)
+
+
+def _emit_credential_missing(pid: int, modal: CredentialModal) -> None:
+    """Print the distinct credential verdict."""
+    print(f"PREFLIGHT: CREDENTIAL_MISSING pid={pid}; {describe_modal(modal)}")
+
+
+def _emit_blocked_by_dialog(pid: int, dialog) -> None:
+    """Print the distinct generic blocking-dialog verdict."""
+    print(f"PREFLIGHT: BLOCKED_BY_DIALOG pid={pid}; {describe_blocking_dialog(dialog)}")
+
+
+def _emit_credential_unknown(pid: int, reason: str) -> None:
+    """Print an indeterminate credential-check verdict."""
+    print(f"PREFLIGHT: UNKNOWN pid={pid}; credential dialog check indeterminate: {reason}")
+
+
+def _probe_with_credential_poll(  # pylint: disable=too-many-return-statements
+    pid: int | None, port: int, tables: list[str] | None
+) -> int:
+    """Run ``probe`` while polling for a late credential dialog owned by ``pid``."""
+    if pid is None:
+        return probe(port, tables)
+
+    early = _credential_state(pid)
+    if early.modal is not None:
+        _emit_credential_missing(pid, early.modal)
+        return 1
+    if early.blocking_dialog is not None:
+        _emit_blocked_by_dialog(pid, early.blocking_dialog)
+        return 1
+    if early.unknown_reason:
+        _emit_credential_unknown(pid, early.unknown_reason)
+        return 3
+
+    result: dict[str, int | BaseException] = {}
+    captured: list[str] = []
+
+    def run_probe() -> None:
+        try:
+            if "emit" in inspect.signature(probe).parameters:
+                result["outcome"] = probe(port, tables, captured.append)
+            else:
+                result["outcome"] = probe(port, tables)
+        except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            result["outcome"] = exc
+
+    worker = threading.Thread(target=run_probe, name="desktop-query-probe", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(PREFLIGHT_CREDENTIAL_POLL_SECONDS)
+        state = _credential_state(pid)
+        if state.modal is not None:
+            _emit_credential_missing(pid, state.modal)
+            return 1
+        if state.blocking_dialog is not None:
+            _emit_blocked_by_dialog(pid, state.blocking_dialog)
+            return 1
+        if state.unknown_reason:
+            _emit_credential_unknown(pid, state.unknown_reason)
+            return 3
+
+    outcome = result.get("outcome")
+    if isinstance(outcome, BaseException):
+        raise outcome
+    if outcome is None:  # pragma: no cover - defensive; the worker always records something
+        raise RuntimeError("probe worker returned no result")
+    for line in captured:
+        print(line)
+    return outcome
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -371,9 +464,20 @@ def main(argv: list[str] | None = None) -> int:
     # Preference order: --canaries (the name that means the same thing in both scripts), then
     # --tables (plural), then --table as a one-name alias for old callers.
     tables = list(args.canaries or args.tables or ([args.table] if args.table else [])) or None
+    if args.pid is not None:
+        early = _credential_state(args.pid)
+        if early.modal is not None:
+            _emit_credential_missing(args.pid, early.modal)
+            return 1
+        if early.blocking_dialog is not None:
+            _emit_blocked_by_dialog(args.pid, early.blocking_dialog)
+            return 1
+        if early.unknown_reason:
+            _emit_credential_unknown(args.pid, early.unknown_reason)
+            return 3
     port = args.port or discover_port(args.pid)
     try:
-        return probe(port, tables)
+        return _probe_with_credential_poll(args.pid, port, tables)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"PREFLIGHT: ERROR {type(exc).__name__}: {exc}")
         return 2

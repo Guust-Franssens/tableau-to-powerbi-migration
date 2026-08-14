@@ -415,6 +415,8 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
         return "BAD_TABLE", text
     if any(marker in low for marker in ACCESS_DENIED_MARKERS):
         return "ACCESS_DENIED", text
+    if "blocked_by_dialog" in low:
+        return "NO_CREDENTIAL", text
     if any(marker in low for marker in CREDENTIAL_MARKERS):
         return "NO_CREDENTIAL", text
     return (
@@ -422,6 +424,18 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
         "unclassified refresh failure: the probe ran, but the error did not match a credential, "
         "bad-table, or observed network fault signature. Do not report it as UNREACHABLE. Raw: " + raw,
     )
+
+
+def _has_data_ok_verdict(text: str) -> bool:
+    """True only when a machine-readable verdict line is exactly DATA_OK.
+
+    This deliberately ignores incidental text containing ``DATA_OK``. A credential-blocked
+    ``probe_desktop_query`` run once returned ``CREDENTIAL_MISSING`` while a background worker printed
+    a late ``DATA_OK``-looking string afterwards; substring matching over the whole transcript would
+    falsely clear the credential gate.
+    """
+    verdict_re = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+DATA_OK(?:\s|$)")
+    return any(verdict_re.match(line) for line in text.splitlines())
 
 
 def _npx(args: list[str], timeout: int) -> tuple[int, str]:
@@ -698,7 +712,7 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
 
     log.info("refresh finished in %.0fs", time.monotonic() - started)
     text = (refresh.stdout + refresh.stderr).strip()
-    if "DATA_OK" in text:
+    if _has_data_ok_verdict(text):
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
         return 0, "DATA_OK"
     verdict, detail = _classify_failure(text, network_fault_observed=network_fault_observed)
