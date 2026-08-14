@@ -128,3 +128,34 @@ def test_probe_timeout_is_derived_from_child_not_retyped() -> None:
     # The parent must reuse the child's own objects, not a private copy that could diverge.
     assert probe_live_source.REFRESH_TIMEOUT_SECONDS == child.REFRESH_TIMEOUT_SECONDS
     assert probe_live_source.REFRESH_WALL_CLOCK_GRACE_SECONDS == child.REFRESH_WALL_CLOCK_GRACE_SECONDS
+
+
+def test_probe_timeout_default_threads_all_the_way_to_run_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#156 (the WIRING, not just the constant): the derived default must be the value that actually
+    reaches the refresh subprocess.
+
+    The two tests above pin the constant and its derivation, but neither observes what ``main()`` hands
+    to ``run_probe`` -> ``subprocess.run(..., timeout=timeout_sec)``. Reverting only the argparse default
+    to 180 (leaving PROBE_TIMEOUT_SECONDS=390) restores the exact inversion #156 exists to prevent while
+    both constant tests stay green. This drives ``main()`` with ``run_probe`` captured, so it fails the
+    moment the default drifts off the constant. No live Desktop or real bundle: ``run_probe`` is replaced
+    and an existing empty directory satisfies the path-exists guard.
+    """
+    probe_live_source = _import_probe_live_source()
+    captured: dict[str, int] = {}
+
+    def _capture(_bundle: Path, _source_index: int | None, timeout_sec: int, _keep: bool) -> int:
+        captured["timeout_sec"] = timeout_sec
+        return 0
+
+    monkeypatch.setattr(probe_live_source, "run_probe", _capture)
+    rc = probe_live_source.main(["--bundle", str(tmp_path)])
+
+    assert rc == 0
+    assert captured["timeout_sec"] == probe_live_source.PROBE_TIMEOUT_SECONDS, (
+        f"main() handed run_probe timeout_sec={captured.get('timeout_sec')}, but the derived default is "
+        f"{probe_live_source.PROBE_TIMEOUT_SECONDS}; the argparse default has drifted off the constant, so the "
+        "child would be SIGKILLed before its own deadline can fire (issue #156 inversion)."
+    )
