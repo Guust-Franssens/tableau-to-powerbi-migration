@@ -171,7 +171,7 @@ if ($blocker) {
 }
 foreach ($w in $windows) {
   if ($w.Minimized -and $w.ClassName.StartsWith('WindowsForms10.Window.8')) {
-    Write-Output "Power BI Desktop owner window is minimized; owned credential dialogs are hidden"
+    Write-Output "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"
     Write-Output "VERDICT: UNKNOWN"
     exit 3
   }
