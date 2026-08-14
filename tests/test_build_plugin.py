@@ -94,6 +94,25 @@ def test_the_diagnostic_probe_skill_is_never_published() -> None:
     assert "sentinel-probe" not in build_plugin.SHIPPED_SKILLS
 
 
+def test_the_publish_target_matches_the_plugin_name() -> None:
+    """The three identity constants must agree, and must be the post-rename ones.
+
+    v0.3.0 renamed the marketplace to `powerbi-playbook` and the GitHub repo with it. A branch cut
+    BEFORE that rename then merged cleanly and silently reverted all three constants (#144 landing
+    after #134), because a stale base carrying the old values is not a textual conflict. Master would
+    then have republished under the dead name, over a repo that no longer answers to it.
+
+    Consistency alone would not have caught it — the revert changed all three together — so this
+    pins the identity itself. If the plugin is ever legitimately renamed again, update this test in
+    the same commit; that is the point, the rename should not be silent.
+    """
+    assert build_plugin.PLUGIN_NAME == "powerbi-playbook"
+    assert build_plugin.MARKETPLACE_NAME == "powerbi-playbook-collection"
+    assert build_plugin.PUBLISH_REPO.endswith(f"/{build_plugin.PLUGIN_NAME}"), (
+        f"publish target {build_plugin.PUBLISH_REPO} does not match plugin name {build_plugin.PLUGIN_NAME}"
+    )
+
+
 def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
     """The README table and plugin description must not promise a bundle that is not in the release.
 

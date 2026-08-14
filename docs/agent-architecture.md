@@ -361,12 +361,14 @@ back in a persona.
    were extracted from the personas. Note `copilot plugin install` fails with `Access is denied`
    while a Copilot session is running, so installs are a **between-sessions** step.)
 
-   ⚠️ **Every transcript in this section is quoted verbatim as measured, and the measured plugin
-   identity is still the live one:** `powerbi-migration-skills@powerbi-migration-collection` from
-   repo `Guust-Franssens/powerbi-migration-skills`. A later local rename to
-   `powerbi-playbook@powerbi-playbook-collection` was documented in this repo but never became the
-   installed/published plugin on this machine; the tooling now discovers the installed copy by bundled
-   skill content instead of trusting either name.
+   ⚠️ **Every transcript in this section is quoted verbatim as measured, so it carries the plugin's
+   FORMER identity:** `powerbi-migration-skills@powerbi-migration-collection` from repo
+   `Guust-Franssens/powerbi-migration-skills`. As of v0.3.0 the published plugin is
+   **`powerbi-playbook@powerbi-playbook-collection`** from `Guust-Franssens/powerbi-playbook` — the
+   GitHub repo was renamed (the old path 301-redirects) and the marketplace re-published. The names
+   below are left as recorded rather than rewritten: silently re-labelling a measurement stops it
+   being evidence. The tooling additionally discovers the installed copy by bundled skill content
+   rather than trusting either name, so a consumer mid-rename resolves correctly either way.
 
    **The full loop is proven repeatable, not a one-off (2026-08-01).** After v0.2.0 was published and
    installed between sessions, a `pbi-report-builder` subagent in a fresh process invoked **both** new

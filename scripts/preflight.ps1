@@ -14,7 +14,7 @@
   Verifies: Python + the parser's Python deps, the deterministic conversion engine (the installed
   `tableau-fabric-skills` plugin, which is its SINGLE canonical source - a second copy anywhere is a
   hard failure, see issue #107), both skill plugins
-  (powerbi-authoring@fabric-collection and powerbi-migration-skills@powerbi-migration-collection),
+  (powerbi-authoring@fabric-collection and powerbi-playbook@powerbi-playbook-collection),
   the MCP servers, Power BI Desktop + its Bridge CLI, npx, the .NET SDK, the npm CLI version matrix,
   and - when you declare an intended tenant - that the Fabric token this machine mints is actually
   for THAT tenant. Prints a per-item status (OK / WARN / MISS) with an install hint for anything
@@ -301,7 +301,7 @@ else {
 # Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
 # depends on it, even when the dependency only fails later at handoff/validation time. Audited
 # 2026-08-10 under that exit semantics:
-#   * powerbi-migration-skills plugin: repo-local skills still load in this repo; the critical bundle
+#   * powerbi-playbook plugin: repo-local skills still load in this repo; the critical bundle
 #     checks above enforce correctness when the installed plugin is present and shadowing the repo.
 #   * powerbi-modeling-mcp: useful authoring accelerator; local PBIP/TMDL edits can still proceed.
 #   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
