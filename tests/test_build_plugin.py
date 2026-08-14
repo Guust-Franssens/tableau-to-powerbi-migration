@@ -152,10 +152,17 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
     build was green because the *files* were correct and only the prose lied.
 
     Note the description never contains the skill's NAME - it sells the capability in prose - so
-    checking for the folder name catches the README and nothing else. The distinctive-identifier
-    check below is what actually covers the description: `ImageSave` and `cache.abf` appear in the
+    checking for the folder name catches the README table and nothing else. The distinctive-identifier
+    check below is what actually covers the marketing copy: `ImageSave` and `cache.abf` appear in the
     withheld bundle's own frontmatter and in no shipped one, so their presence in the marketplace
     copy is exactly the lie. (Verified failing against the v0.3.0 text.)
+
+    ⚠️ **Its reach is identifiers, not plain English.** The v0.3.0 README opened with "persisting a
+    refreshed local PBIP", which names the withheld capability in ordinary words carrying no
+    camelCase or dotted token - measured, this check returns `[]` for that sentence. Detecting that
+    class reliably needs a human reading the summary paragraph, so treat this as a floor, not a
+    guarantee: it catches the copy-paste of technical terms, which is the common failure, and it
+    will not catch a fluent English claim.
     """
     readme = (built / "README.md").read_text(encoding="utf-8")
     manifest = json.loads((built / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
@@ -177,8 +184,9 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
     for name in withheld:
         assert name not in readme, f"{name} is NOT shipped but the README still advertises it"
         exclusive = identifiers(frontmatter(name)) - shipped_terms
-        leaked = sorted(term for term in exclusive if term in description)
-        assert not leaked, f"{name} is NOT shipped, but the plugin description still sells it via {leaked}"
+        for surface, text in (("plugin description", description), ("README", readme)):
+            leaked = sorted(term for term in exclusive if term in text)
+            assert not leaked, f"{name} is NOT shipped, but the {surface} still sells it via {leaked}"
 
 
 def test_rebuilding_preserves_a_git_clone(tmp_path: Path) -> None:

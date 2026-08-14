@@ -70,13 +70,14 @@ KEYWORDS = [
     "fabric",
 ]
 
-README = """# Power BI migration skills
+README = """# Power BI Playbook
 
-Reusable GitHub Copilot CLI skills for getting a **Power BI semantic model** production-ready:
-making it answer natural-language questions correctly, and persisting a refreshed local PBIP.
+Reusable skills for **GitHub Copilot CLI** and **Claude Code** that get a Power BI semantic model
+production-ready: making it answer natural-language questions correctly, and avoiding the PBIR and
+TMDL defects that pass every validator and then break at open, refresh or render.
 
-Both skills are **source-tool agnostic** — the input is already a Power BI model — so they apply
-equally to a Tableau, Qlik or Cognos migration.
+Every skill is **source-tool agnostic** — the input is already a Power BI model — so they apply
+equally to a Tableau, Qlik or Cognos migration, and to greenfield Power BI work.
 
 ## Install
 
@@ -104,6 +105,16 @@ Skill "<name>" not found. Available skills: ...
 
 Plugin-provided skills *are* registered, so an agent persona can reference them **by name** instead
 of reading a file path. That is the entire reason this marketplace exists.
+
+## Client support
+
+Both clients read the root `.claude-plugin/marketplace.json` as the catalogue. Claude Code
+*additionally* requires this plugin's own `plugins/{plugin}/.claude-plugin/plugin.json`, which is
+what it uses to recognise, version and update the plugin.
+
+That asymmetry is worth knowing if you fork this: omit the per-plugin manifest and `marketplace add`
+still succeeds in both clients while `plugin install` succeeds only in Copilot CLI — a plugin half
+its audience cannot install, with nothing in the build output to show for it.
 
 ## Source
 
