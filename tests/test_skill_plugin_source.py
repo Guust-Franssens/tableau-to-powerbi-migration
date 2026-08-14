@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import build_plugin  # noqa: E402
 from build_plugin import SHIPPED_SKILLS  # noqa: E402
 from skill_plugin_source import PLUGIN_ROOT_ENV, discover_skill_plugin  # noqa: E402
 
@@ -51,13 +52,19 @@ def test_multiple_installs_fail_loudly_and_name_both_paths(tmp_path: Path) -> No
 
 
 def test_no_install_returns_actionable_install_hint(tmp_path: Path) -> None:
-    """No installed copy is reported clearly without mutating the plugin directory."""
+    """No installed copy is reported clearly without mutating the plugin directory.
+
+    The identity is read from `build_plugin` rather than spelled out here. This test previously
+    hard-coded `powerbi-migration-skills@powerbi-migration-collection`, which is the name the plugin
+    was published under before v0.3.0 - so it pinned a dead install command in a hint whose whole job
+    is to be copy-pasteable.
+    """
     result = discover_skill_plugin(installed_plugins_root=tmp_path, env={})
 
     assert result.status == "missing"
     assert not result.ok
     assert "copilot plugin install" in result.install_hint
-    assert "powerbi-migration-skills@powerbi-migration-collection" in result.install_hint
+    assert f"{build_plugin.PLUGIN_NAME}@{build_plugin.MARKETPLACE_NAME}" in result.install_hint
 
 
 def test_explicit_override_is_honoured_even_when_scan_would_be_ambiguous(tmp_path: Path) -> None:

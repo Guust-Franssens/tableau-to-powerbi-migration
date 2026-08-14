@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Kill every Copilot CLI process, then re-install the powerbi-migration-skills plugin.
+    Kill every Copilot CLI process, then re-install the powerbi-playbook plugin.
 
 .DESCRIPTION
     `copilot plugin install` fails with "Access is denied. (os error 5)" while ANY Copilot CLI
@@ -33,7 +33,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$plugin = 'powerbi-migration-skills@powerbi-migration-collection'
+$plugin = 'powerbi-playbook@powerbi-playbook-collection'
 
 function Write-Step { param($m) Write-Host "`n== $m" -ForegroundColor Cyan }
 
@@ -110,7 +110,7 @@ if (-not $copilot) {
 # happily reinstalls the same old commit and reports success. Measured: `marketplace update` does NOT
 # need the lock and works mid-session, only `plugin update` does - so if you are ever stuck, that
 # first call is safe to run from anywhere.
-& $copilot plugin marketplace update powerbi-migration-collection 2>&1 | Out-Host
+& $copilot plugin marketplace update powerbi-playbook-collection 2>&1 | Out-Host
 & $copilot plugin update $plugin 2>&1 | Out-Host
 
 if ($LASTEXITCODE -ne 0) {
