@@ -1160,7 +1160,9 @@ def main(argv: list[str] | None = None) -> int:
         "--source-index", type=int, default=None, help="probe only this source (default: all live sources)"
     )
     # Renamed from --timeout-sec (issue #156): this bounds ONLY the refresh phase, not the whole probe.
-    # `open` (240s) and `_wait_for_catalog` (240s) run before it, so the worst-case wall clock is ~660s;
+    # `open` (240s) and `_wait_for_catalog` (240s) both run before it, so the worst-case wall clock is
+    # 240 + 240 + PROBE_TIMEOUT_SECONDS = ~870s. Spelled as a sum on purpose: the previous "~660s" was
+    # computed against the old 180s refresh default and was already stale in the commit that shipped it.
     # a flag named --timeout-sec read like a total budget it never was. --timeout-sec is kept as a
     # deprecated alias so existing callers keep working; a warning below nudges them to the new name.
     parser.add_argument(
