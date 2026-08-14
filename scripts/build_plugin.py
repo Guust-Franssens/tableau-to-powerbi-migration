@@ -128,11 +128,11 @@ def shipped_skill_dirs() -> list[Path]:
 
 
 def marketplace_manifest() -> dict:
-    """The `.claude-plugin/marketplace.json` contract Copilot CLI reads."""
+    """The root `.claude-plugin/marketplace.json` — the catalogue both clients read to find plugins."""
     return {
         "name": MARKETPLACE_NAME,
         "metadata": {
-            "description": "Reusable Power BI semantic-model skills for GitHub Copilot CLI",
+            "description": "Reusable Power BI semantic-model skills for GitHub Copilot CLI and Claude Code",
             "version": VERSION,
         },
         "owner": {"name": "Guust Franssens"},
@@ -149,6 +149,31 @@ def marketplace_manifest() -> dict:
                 "license": "MIT",
             }
         ],
+    }
+
+
+def plugin_manifest() -> dict:
+    """The per-plugin `plugins/<name>/.claude-plugin/plugin.json`.
+
+    **Claude Code requires this and Copilot CLI does not** - which is exactly why it was missing.
+    The root marketplace.json is the catalogue; this is the plugin's own identity, and Claude Code
+    uses it to recognise, version and update the plugin. Publishing without it yields a marketplace
+    that adds cleanly in both clients and a plugin that only one of them can install, with nothing in
+    the build output hinting at the difference.
+
+    Shape follows the published `claude-code-plugin-manifest` schema, and mirrors
+    `microsoft/skills-for-fabric`, which ships the same pair and works in both clients.
+    """
+    return {
+        "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+        "name": PLUGIN_NAME,
+        "description": PLUGIN_DESCRIPTION,
+        "version": VERSION,
+        "license": "MIT",
+        "repository": PUBLISH_REPO,
+        "keywords": KEYWORDS,
+        "skills": [f"./skills/{name}" for name in SHIPPED_SKILLS],
+        "agents": [],
     }
 
 
@@ -221,6 +246,10 @@ def build(out: Path) -> None:
     (manifest_dir / "marketplace.json").write_text(
         json.dumps(marketplace_manifest(), indent=2) + "\n", encoding="utf-8"
     )
+
+    plugin_manifest_dir = out / "plugins" / PLUGIN_NAME / ".claude-plugin"
+    plugin_manifest_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_manifest_dir / "plugin.json").write_text(json.dumps(plugin_manifest(), indent=2) + "\n", encoding="utf-8")
 
     slug = PUBLISH_REPO.rsplit("github.com/", 1)[-1]
     (out / "README.md").write_text(

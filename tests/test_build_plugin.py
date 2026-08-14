@@ -94,6 +94,35 @@ def test_the_diagnostic_probe_skill_is_never_published() -> None:
     assert "sentinel-probe" not in build_plugin.SHIPPED_SKILLS
 
 
+def test_the_plugin_carries_its_own_manifest_for_claude_code(built: Path) -> None:
+    """Claude Code needs `plugins/<name>/.claude-plugin/plugin.json`; Copilot CLI does not.
+
+    That asymmetry is the whole hazard. The root marketplace.json is the *catalogue*, and both
+    clients read it - so a marketplace missing the per-plugin manifest still `marketplace add`s
+    cleanly in both, installs fine in Copilot CLI, and simply is not recognised by Claude Code.
+    v0.3.0 shipped exactly that way. Nothing in the build output differed, because from Copilot's
+    point of view nothing was wrong.
+
+    `microsoft/skills-for-fabric` ships both files per plugin, which is the working reference.
+    """
+    manifest_path = built / "plugins" / build_plugin.PLUGIN_NAME / ".claude-plugin" / "plugin.json"
+    assert manifest_path.is_file(), "Claude Code will not recognise a plugin without its own plugin.json"
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["name"] == build_plugin.PLUGIN_NAME
+    assert manifest["version"] == build_plugin.VERSION
+
+    # The skill paths are relative to the plugin directory, so they must resolve from there.
+    for entry in manifest["skills"]:
+        resolved = (manifest_path.parent.parent / entry).resolve()
+        assert (resolved / "SKILL.md").is_file(), f"{entry} does not resolve to a skill from the plugin root"
+
+    catalogue = json.loads((built / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    assert manifest["skills"] == catalogue["plugins"][0]["skills"], (
+        "the plugin manifest and the marketplace catalogue disagree about which skills ship"
+    )
+
+
 def test_the_publish_target_matches_the_plugin_name() -> None:
     """The three identity constants must agree, and must be the post-rename ones.
 
