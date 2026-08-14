@@ -9,6 +9,7 @@ though the artifact itself is gitignored.
 from __future__ import annotations
 
 import json
+import re
 import stat
 import sys
 from pathlib import Path
@@ -91,6 +92,45 @@ def test_no_build_artifacts_are_published(built: Path) -> None:
 def test_the_diagnostic_probe_skill_is_never_published() -> None:
     """`sentinel-probe` is a context-visibility experiment, not something a consumer should install."""
     assert "sentinel-probe" not in build_plugin.SHIPPED_SKILLS
+
+
+def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
+    """The README table and plugin description must not promise a bundle that is not in the release.
+
+    Both are hand-written prose in `build_plugin.py`, so they drift the moment `SHIPPED_SKILLS`
+    changes. v0.3.0 published with a description still advertising "persist a refreshed local PBIP
+    ... via AMO ImageSave" for `pbip-model-refresh`, which that release had deliberately held back -
+    a marketplace listing selling a capability the plugin did not contain. Nothing caught it; the
+    build was green because the *files* were correct and only the prose lied.
+
+    Note the description never contains the skill's NAME - it sells the capability in prose - so
+    checking for the folder name catches the README and nothing else. The distinctive-identifier
+    check below is what actually covers the description: `ImageSave` and `cache.abf` appear in the
+    withheld bundle's own frontmatter and in no shipped one, so their presence in the marketplace
+    copy is exactly the lie. (Verified failing against the v0.3.0 text.)
+    """
+    readme = (built / "README.md").read_text(encoding="utf-8")
+    manifest = json.loads((built / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    description = manifest["plugins"][0]["description"]
+
+    for name in build_plugin.SHIPPED_SKILLS:
+        assert name in readme, f"{name} ships but the README does not mention it"
+
+    def identifiers(text: str) -> set[str]:
+        """Technical tokens a marketing sentence would only carry if it meant that specific feature."""
+        return set(re.findall(r"\b[A-Za-z]+\.[a-z]{2,}\b|\b[a-z]+[A-Z][A-Za-z]+\b", text))
+
+    def frontmatter(skill: str) -> str:
+        return (build_plugin.SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8")[:1500]
+
+    shipped_terms = {term for name in build_plugin.SHIPPED_SKILLS for term in identifiers(frontmatter(name))}
+    withheld = {p.name for p in build_plugin.SKILLS_DIR.iterdir() if p.is_dir()} - set(build_plugin.SHIPPED_SKILLS)
+
+    for name in withheld:
+        assert name not in readme, f"{name} is NOT shipped but the README still advertises it"
+        exclusive = identifiers(frontmatter(name)) - shipped_terms
+        leaked = sorted(term for term in exclusive if term in description)
+        assert not leaked, f"{name} is NOT shipped, but the plugin description still sells it via {leaked}"
 
 
 def test_rebuilding_preserves_a_git_clone(tmp_path: Path) -> None:

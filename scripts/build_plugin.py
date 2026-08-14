@@ -33,21 +33,28 @@ PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-migration-skills"
 
 # Only source-tool-agnostic bundles ship. `sentinel-probe` is a diagnostic, and anything
 # Tableau-specific belongs in the migration repo's personas, not in a reusable plugin.
+#
+# `pbip-model-refresh` is HELD BACK at v0.3.0. Its persist path validates `cache.abf` as a CFBF/OLE2
+# container, which the format is not — measured against three real caches in `examples/`, the check
+# rejects every one, so AMO persistence cannot succeed. Four review rounds of hardening around that
+# wrong premise added a lock and a commit-detection fingerprint that introduced two further ways to
+# leave a project unopenable. It ships again once the persist path is simplified (see the tracking
+# issue), not before: a bundle whose headline feature cannot work is worse than an absent one,
+# because the gotcha bundles' cross-references at least fail loudly.
 SHIPPED_SKILLS = (
     "powerbi-ai-readiness",
-    "pbip-model-refresh",
     "powerbi-report-gotchas",
     "powerbi-semantic-model-gotchas",
 )
 
 PLUGIN_DESCRIPTION = (
-    "Reusable Power BI skills: make a semantic model AI-ready, persist a refreshed local PBIP, and "
-    "avoid the PBIR and TMDL defects that pass validation but break at open, refresh or render. "
-    "Covers descriptions, enumerated domains, model-level AI instructions (CustomInstructions) and "
-    "the qnaEnabled switch that silently voids them; refreshing a PBIP in Power BI Desktop and "
-    "saving it headlessly to cache.abf via AMO ImageSave; and two hard-won gotcha catalogues for "
-    "report authoring and semantic modelling. Source-tool agnostic - the input is "
-    "already a Power BI model - so it applies to Tableau, Qlik and Cognos migrations alike."
+    "Reusable Power BI skills: make a semantic model AI-ready, and avoid the PBIR and TMDL defects "
+    "that pass validation but break at open, refresh or render. Covers descriptions, enumerated "
+    "domains, model-level AI instructions (CustomInstructions) and the qnaEnabled switch that "
+    "silently voids them; plus two hard-won gotcha catalogues for report authoring and semantic "
+    "modelling, each entry paid for by a real debugging cycle on a real migration. Source-tool "
+    "agnostic - the input is already a Power BI model - so it applies to Tableau, Qlik and Cognos "
+    "migrations alike."
 )
 
 KEYWORDS = [
@@ -83,7 +90,8 @@ equally to a Tableau, Qlik or Cognos migration.
 | Skill | Use it for |
 |---|---|
 | `powerbi-ai-readiness` | Descriptions, enumerated categorical domains, model-level AI instructions (`CustomInstructions`), and the `qnaEnabled` switch that silently voids all of it |
-| `pbip-model-refresh` | Refreshing a local PBIP/TMDL model in Power BI Desktop and persisting it to `.pbi/cache.abf` headlessly via AMO `ImageSave`, with strict pid binding |
+| `powerbi-report-gotchas` | PBIR authoring and Desktop verification: defects that pass `validate` but render wrong, conditional-formatting encodings, azureMap/scatter/matrix recipes |
+| `powerbi-semantic-model-gotchas` | TMDL and DAX pitfalls that crash Desktop on open, fail to bind, or throw only at query time - each one paid for by a real debugging cycle |
 
 ## Why a plugin and not a repo-local skill
 
