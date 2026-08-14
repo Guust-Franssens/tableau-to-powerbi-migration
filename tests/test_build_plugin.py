@@ -94,6 +94,35 @@ def test_the_diagnostic_probe_skill_is_never_published() -> None:
     assert "sentinel-probe" not in build_plugin.SHIPPED_SKILLS
 
 
+def test_the_plugin_carries_its_own_manifest_for_claude_code(built: Path) -> None:
+    """Claude Code needs `plugins/<name>/.claude-plugin/plugin.json`; Copilot CLI does not.
+
+    That asymmetry is the whole hazard. The root marketplace.json is the *catalogue*, and both
+    clients read it - so a marketplace missing the per-plugin manifest still `marketplace add`s
+    cleanly in both, installs fine in Copilot CLI, and simply is not recognised by Claude Code.
+    v0.3.0 shipped exactly that way. Nothing in the build output differed, because from Copilot's
+    point of view nothing was wrong.
+
+    `microsoft/skills-for-fabric` ships both files per plugin, which is the working reference.
+    """
+    manifest_path = built / "plugins" / build_plugin.PLUGIN_NAME / ".claude-plugin" / "plugin.json"
+    assert manifest_path.is_file(), "Claude Code will not recognise a plugin without its own plugin.json"
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["name"] == build_plugin.PLUGIN_NAME
+    assert manifest["version"] == build_plugin.VERSION
+
+    # The skill paths are relative to the plugin directory, so they must resolve from there.
+    for entry in manifest["skills"]:
+        resolved = (manifest_path.parent.parent / entry).resolve()
+        assert (resolved / "SKILL.md").is_file(), f"{entry} does not resolve to a skill from the plugin root"
+
+    catalogue = json.loads((built / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    assert manifest["skills"] == catalogue["plugins"][0]["skills"], (
+        "the plugin manifest and the marketplace catalogue disagree about which skills ship"
+    )
+
+
 def test_the_publish_target_matches_the_plugin_name() -> None:
     """The three identity constants must agree, and must be the post-rename ones.
 
@@ -123,10 +152,17 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
     build was green because the *files* were correct and only the prose lied.
 
     Note the description never contains the skill's NAME - it sells the capability in prose - so
-    checking for the folder name catches the README and nothing else. The distinctive-identifier
-    check below is what actually covers the description: `ImageSave` and `cache.abf` appear in the
+    checking for the folder name catches the README table and nothing else. The distinctive-identifier
+    check below is what actually covers the marketing copy: `ImageSave` and `cache.abf` appear in the
     withheld bundle's own frontmatter and in no shipped one, so their presence in the marketplace
     copy is exactly the lie. (Verified failing against the v0.3.0 text.)
+
+    ⚠️ **Its reach is identifiers, not plain English.** The v0.3.0 README opened with "persisting a
+    refreshed local PBIP", which names the withheld capability in ordinary words carrying no
+    camelCase or dotted token - measured, this check returns `[]` for that sentence. Detecting that
+    class reliably needs a human reading the summary paragraph, so treat this as a floor, not a
+    guarantee: it catches the copy-paste of technical terms, which is the common failure, and it
+    will not catch a fluent English claim.
     """
     readme = (built / "README.md").read_text(encoding="utf-8")
     manifest = json.loads((built / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
@@ -148,8 +184,9 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
     for name in withheld:
         assert name not in readme, f"{name} is NOT shipped but the README still advertises it"
         exclusive = identifiers(frontmatter(name)) - shipped_terms
-        leaked = sorted(term for term in exclusive if term in description)
-        assert not leaked, f"{name} is NOT shipped, but the plugin description still sells it via {leaked}"
+        for surface, text in (("plugin description", description), ("README", readme)):
+            leaked = sorted(term for term in exclusive if term in text)
+            assert not leaked, f"{name} is NOT shipped, but the {surface} still sells it via {leaked}"
 
 
 def test_rebuilding_preserves_a_git_clone(tmp_path: Path) -> None:
