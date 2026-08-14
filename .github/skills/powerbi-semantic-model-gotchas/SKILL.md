@@ -402,6 +402,13 @@ Cheapest honest probe: author a **canary** — one table, one live partition, `T
 open it in Desktop, refresh, require a row. If it returns data, build for real; if it does not, you
 have your answer in seconds. Cap at **~2 minutes or 3 attempts**, then stop and ask.
 
+⚠️ **Before blaming the Desktop Bridge, look for a blocking Desktop dialog.** Measured bridge symptoms
+for an already-open data-source dialog are `status` reporting **"Host is not ready to accept
+operations"** and `screenshot` reporting **"Print metadata is not available"**. That combination is
+not enough evidence for a bridge regression; run the bundled refresh/query probes, which check for
+visible non-main dialogs at t=0 and keep polling while the source wakes up. Text-readable credential
+prompts report `CREDENTIAL_MISSING`; unreadable/non-credential dialogs report `BLOCKED_BY_DIALOG`.
+
 **Independent confirmation is available and worth taking.** For a serverless warehouse, `STOPPED` with
 `num_active_sessions = 0` proves no query ever arrived, regardless of what any log claims. Prefer
 evidence from the *source system* over the absence of an error on your side.

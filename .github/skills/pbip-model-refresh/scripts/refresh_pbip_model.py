@@ -76,8 +76,11 @@ tell you whose rows are in the blob; only the model's own contents can.
 
 from __future__ import annotations
 
+# pylint: disable=too-many-lines
+
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -133,6 +136,19 @@ from _verdict import (  # noqa: F401  # pylint: disable=unused-import
     _canary_tables,
     _emit_data_verdict,
 )
+from _credential_modal import (
+    CredentialDetection,
+    CredentialMissingError,
+    CredentialModal,
+    DialogBlockedError,
+    describe_blocking_dialog,
+    describe_modal,
+    inspect_credential_modal,
+    join_with_credential_poll,
+    print_refresh_banner,
+    print_refresh_unknown_banner,
+    source_hint_from_model,
+)
 
 SAVE_SETTLE_SECONDS = 3
 SAVE_TIMEOUT_SECONDS = 120
@@ -162,6 +178,8 @@ REFRESH_TIMEOUT_SECONDS = 300
 # wall-clock abort. The outer bound only exists to catch the case XMLA provably cannot interrupt:
 # a mashup engine parked on a sign-in modal in another process.
 REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
+REFRESH_CREDENTIAL_POLL_SECONDS = 5.0
+REFRESH_HEARTBEAT_SECONDS = 30.0
 
 # A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
 # only when it needs to be (spaces, punctuation), so both forms have to be accepted.
@@ -181,6 +199,36 @@ GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json
 CREDENTIAL_PROBE = Path(__file__).resolve().parent / "probe_desktop_credential.ps1"
 
 
+def _credential_missing(pid: int) -> CredentialModal | None:
+    """Return an already-open credential modal for ``pid``, if Desktop is blocked on one."""
+    return _credential_state(pid).modal
+
+
+def _credential_state(pid: int) -> CredentialDetection:
+    """Return the credential-modal inspection state for ``pid``."""
+    if os.name != "nt":
+        return CredentialDetection()
+    return inspect_credential_modal(pid)
+
+
+def _raise_if_blocked(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
+    """Raise the appropriate exception when ``state`` contains a blocking dialog."""
+    if state.modal is not None:
+        raise CredentialMissingError(pid, state.modal, source_hint)
+    if state.blocking_dialog is not None:
+        raise DialogBlockedError(pid, state.blocking_dialog)
+
+
+def _emit_credential_missing(pid: int, modal: CredentialModal, source_hint: str | None = None) -> None:
+    """Print the distinct credential verdict."""
+    print(f"REFRESH: CREDENTIAL_MISSING pid={pid}; {describe_modal(modal, source_hint)}")
+
+
+def _emit_blocked_by_dialog(pid: int, dialog) -> None:
+    """Print the distinct generic blocking-dialog verdict."""
+    print(f"REFRESH: BLOCKED_BY_DIALOG pid={pid}; {describe_blocking_dialog(dialog)}")
+
+
 def _catalog_id(conn) -> str:
     """The database GUID a TMSL command must name, read from the server's own catalog DMV."""
     cmd = conn.CreateCommand()
@@ -194,7 +242,15 @@ def _catalog_id(conn) -> str:
         reader.Close()
 
 
-def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIMEOUT_SECONDS) -> tuple[bool, str]:
+# pylint: disable=too-many-statements
+def refresh(
+    port: int,
+    tables: list[str] | None,
+    timeout_sec: int = REFRESH_TIMEOUT_SECONDS,
+    *,
+    desktop_pid: int | None = None,
+    source_hint: str | None = None,
+) -> tuple[bool, str]:
     """Send a TMSL refresh over XMLA. Returns (ok, message).
 
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
@@ -231,6 +287,16 @@ def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIME
     as STALE.
     """
     result: dict[str, tuple[bool, str] | BaseException] = {}
+    total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
+    if desktop_pid is not None:
+        state = _credential_state(desktop_pid)
+        _raise_if_blocked(desktop_pid, state, source_hint)
+        if state.unknown_reason:
+            print_refresh_unknown_banner(
+                desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
+            )
+        else:
+            print_refresh_banner(desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS)
 
     def _run() -> None:
         conn = None
@@ -263,10 +329,23 @@ def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIME
 
     worker = threading.Thread(target=_run, name="xmla-refresh", daemon=True)
     worker.start()
-    worker.join(timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS)
+    if desktop_pid is None:
+        worker.join(total_timeout)
+    else:
+        join_with_credential_poll(
+            worker,
+            pid=desktop_pid,
+            total_timeout=total_timeout,
+            heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
+            poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
+            source_hint=source_hint,
+            detector=_credential_state,
+        )
     if worker.is_alive():
+        if desktop_pid is not None:
+            _raise_if_blocked(desktop_pid, _credential_state(desktop_pid), source_hint)
         raise TimeoutError(
-            f"refresh did not return within {timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS}s "
+            f"refresh did not return within {total_timeout}s "
             f"(XMLA CommandTimeout was {timeout_sec}s and did not fire, which is the signature of a "
             f"mashup engine parked on a sign-in modal rather than a slow query)"
         )
@@ -277,6 +356,9 @@ def refresh(port: int, tables: list[str] | None, timeout_sec: int = REFRESH_TIME
     if outcome is None:  # pragma: no cover - defensive; the worker always records something
         raise RuntimeError("refresh worker returned no result")
     return outcome
+
+
+# pylint: enable=too-many-statements
 
 
 def _bridge_status() -> dict:
@@ -972,16 +1054,34 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
         conn.Close()
 
 
-def _refresh_and_save(pid: int, port: int, cache: Path | None, args: argparse.Namespace) -> int | None:
+def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches
+    pid: int, port: int, cache: Path | None, args: argparse.Namespace
+) -> int | None:
     """Run the refresh and (unless suppressed) persist it. Returns an exit code, or None to continue.
 
     `cache` is passed in rather than re-derived: `cache_file` is another Desktop Bridge round trip,
     and the bridge returning nothing (or something else) after the identity gate has run would mean
     writing to a destination that was never verified.
     """
+    source_hint = source_hint_from_model(cache.parent.parent if cache else None)
     try:
-        ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
+        if "desktop_pid" in inspect.signature(refresh).parameters:
+            ok, message = refresh(
+                port,
+                args.tables,
+                REFRESH_TIMEOUT_SECONDS,
+                desktop_pid=pid,
+                source_hint=source_hint,
+            )
+        else:
+            ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        if isinstance(exc, CredentialMissingError):
+            _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+            return 1
+        if isinstance(exc, DialogBlockedError):
+            _emit_blocked_by_dialog(exc.pid, exc.dialog)
+            return 1
         text = f"{type(exc).__name__}: {exc}"
         # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
         # the credential one ("THIS NEEDS A HUMAN. Do not retry"), which is the single most expensive
@@ -1156,13 +1256,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements
     """CLI entry point: refresh, save, and prove data is really there."""
     args = _build_arg_parser().parse_args(argv)
 
     pid = _resolve_pid(args.pid)
     if pid is None:
         return 2
+
+    # Resolve the destination before touching XMLA so a t=0 credential modal can be reported with the
+    # source hint from the model files, and before any query is issued against a blocked Desktop.
+    cache = cache_file(pid)
+    source_hint = source_hint_from_model(cache.parent.parent if cache else None)
+    credential_state = _credential_state(pid)
+    if credential_state.modal is not None:
+        _emit_credential_missing(pid, credential_state.modal, source_hint)
+        return 1
+    if credential_state.blocking_dialog is not None:
+        _emit_blocked_by_dialog(pid, credential_state.blocking_dialog)
+        return 1
+    if credential_state.unknown_reason:
+        print(f"  credential-check: UNKNOWN ({credential_state.unknown_reason})")
 
     # The port is DERIVED from the pid. A stray --port must never bypass that on this mutating path:
     # the destination cache is resolved from the pid, so a --port pointing at another instance would
@@ -1176,9 +1290,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     port = discovered
 
-    # Resolved ONCE: the path that gets verified must be the path that gets written, and every
-    # re-derivation is another Desktop Bridge round trip that can come back empty.
-    cache = cache_file(pid)
     before_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
 
     # Gate everything on identity: refreshing, row-counting or persisting a sibling's model is a

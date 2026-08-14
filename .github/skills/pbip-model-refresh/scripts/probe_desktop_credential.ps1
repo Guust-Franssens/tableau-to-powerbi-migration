@@ -47,27 +47,108 @@ param(
 )
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase
+Add-Type @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class Win32CredentialWindows {
+  public sealed class WindowInfo {
+    public IntPtr Hwnd;
+    public string Title = "";
+    public string ClassName = "";
+    public int Width;
+    public int Height;
+    public bool Minimized;
+    public List<string> Texts = new List<string>();
+  }
+
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int count);
+  [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+  private static string Text(IntPtr hWnd) {
+    int length = GetWindowTextLength(hWnd);
+    if (length <= 0) { return ""; }
+    var builder = new StringBuilder(length + 1);
+    GetWindowText(hWnd, builder, builder.Capacity);
+    return builder.ToString();
+  }
+
+  private static string ClassNameOf(IntPtr hWnd) {
+    var builder = new StringBuilder(256);
+    GetClassName(hWnd, builder, builder.Capacity);
+    return builder.ToString();
+  }
+
+  public static List<WindowInfo> GetPidWindows(int pid) {
+    var windows = new List<WindowInfo>();
+    EnumWindows(delegate (IntPtr hWnd, IntPtr lParam) {
+      uint ownerPid;
+      GetWindowThreadProcessId(hWnd, out ownerPid);
+      if (ownerPid != (uint)pid || !IsWindowVisible(hWnd)) { return true; }
+      RECT rect;
+      GetWindowRect(hWnd, out rect);
+      var info = new WindowInfo {
+        Hwnd = hWnd,
+        Title = Text(hWnd),
+        ClassName = ClassNameOf(hWnd),
+        Width = Math.Max(0, rect.Right - rect.Left),
+        Height = Math.Max(0, rect.Bottom - rect.Top),
+        Minimized = IsIconic(hWnd)
+      };
+      if (!String.IsNullOrEmpty(info.Title)) { info.Texts.Add(info.Title); }
+      EnumChildWindows(hWnd, delegate (IntPtr child, IntPtr childParam) {
+        string text = Text(child);
+        if (!String.IsNullOrEmpty(text)) { info.Texts.Add(text); }
+        return true;
+      }, IntPtr.Zero);
+      windows.Add(info);
+      return true;
+    }, IntPtr.Zero);
+    return windows;
+  }
+}
+"@
 
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $DesktopPid)
 
 # Connector credential-dialog signature text (covers Databricks / SQL / Snowflake / generic OAuth).
-$sig = 'You aren.t signed in|Personal Access Token|Databricks Client Credentials|specify how to connect|Account Key|Enter your credentials|Please specify how to connect'
+# Shared with the Python t=0/poll detector so the fast path and this arbiter cannot drift.
+$sig = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'credential_modal_signature.regex') -Raw
 
 function Get-PidWindows {
-  # EVERY top-level window of the target process, not just the first. A credential modal is its own
-  # top-level window (a sibling of the main Desktop window, not a child), so scanning only the first
-  # would miss it - and the whole point of this arbiter is to catch that modal.
-  return $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
+  # EVERY visible top-level/owned window of the target process, not UIA RootElement children. A
+  # Power BI credential modal is an owned window; UIA root-child discovery misses it.
+  return [Win32CredentialWindows]::GetPidWindows($DesktopPid)
 }
 
 function Test-CredentialModal {
   foreach ($w in Get-PidWindows) {
-    $desc = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-    foreach ($d in $desc) {
-      $n = $d.Current.Name
+    foreach ($n in $w.Texts) {
       if ($n -and $n -match $sig) { return $n }
     }
+  }
+  return $null
+}
+
+function Test-BlockingDialog {
+  foreach ($w in Get-PidWindows) {
+    if ($w.ClassName.StartsWith('WindowsForms10.Window.8')) { continue }
+    if ($w.Width -lt 100 -or $w.Height -lt 100) { continue }
+    return $w
   }
   return $null
 }
@@ -82,11 +163,24 @@ if ($hit) {
   Write-Output "VERDICT: CREDENTIAL_MISSING"
   exit 1
 }
+$blocker = Test-BlockingDialog
+if ($blocker) {
+  Write-Output ("blocking dialog already open: class={0} size={1}x{2}" -f $blocker.ClassName, $blocker.Width, $blocker.Height)
+  Write-Output "VERDICT: BLOCKED_BY_DIALOG"
+  exit 1
+}
+foreach ($w in $windows) {
+  if ($w.Minimized -and $w.ClassName.StartsWith('WindowsForms10.Window.8')) {
+    Write-Output "Power BI Desktop owner window is minimized; owned credential dialogs are hidden"
+    Write-Output "VERDICT: UNKNOWN"
+    exit 3
+  }
+}
 
 # 2. Otherwise trigger a refresh and watch for the modal (generous timeout for warehouse cold-start).
 # Search every top-level window for an invokable 'Refresh', not just the first.
 $invoked = $false
-foreach ($w in $windows) {
+foreach ($w in $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) {
   $all = $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
   foreach ($e in $all) {
     if ($e.Current.Name -eq 'Refresh' -and (($e.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName }) -match 'Invoke')) {
@@ -112,6 +206,12 @@ while ((Get-Date) -lt $deadline) {
   if ($hit) {
     Write-Output ("credential modal detected: '{0}'" -f $hit.Substring(0, [Math]::Min(80, $hit.Length)))
     Write-Output "VERDICT: CREDENTIAL_MISSING"
+    exit 1
+  }
+  $blocker = Test-BlockingDialog
+  if ($blocker) {
+    Write-Output ("blocking dialog detected: class={0} size={1}x{2}" -f $blocker.ClassName, $blocker.Width, $blocker.Height)
+    Write-Output "VERDICT: BLOCKED_BY_DIALOG"
     exit 1
   }
 }

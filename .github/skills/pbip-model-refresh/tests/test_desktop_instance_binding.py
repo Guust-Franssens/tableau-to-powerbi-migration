@@ -1180,9 +1180,9 @@ def test_credential_arbiter_enumerates_all_windows_and_fails_closed() -> None:
     """The credential arbiter (#118) must not fail OPEN, and must inspect EVERY window for the pid.
 
     It became "the arbiter" the timeout message points at, so a fail-open answer is worse than none
-    (round-2 major 5). The script needs live UIAutomation + Desktop to execute, so these two fixes are
-    pinned structurally: it must enumerate all top-level windows (`Get-PidWindows`/`FindAll`, not the
-    old single-window `FindFirst`), and when no Refresh control was ever invoked it must report
+    (round-2 major 5). The script needs live Desktop to execute, so these two fixes are
+    pinned structurally: it must enumerate all top-level/owned windows with Win32 `EnumWindows`, not
+    UIA root children, and when no Refresh control was ever invoked it must report
     UNKNOWN rather than asserting a credential is present.
 
     The not-invoked verdict is checked INSIDE the `if (-not $invoked) { ... }` block, not anywhere in
@@ -1192,7 +1192,7 @@ def test_credential_arbiter_enumerates_all_windows_and_fails_closed() -> None:
     """
     text = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
     assert "Get-PidWindows" in text, "must enumerate windows via the all-windows helper"
-    assert "FindAll" in text, "must use FindAll (every top-level window)"
+    assert "EnumWindows" in text, "must use Win32 EnumWindows for discovery (UIA root children miss owned dialogs)"
     assert "FindFirst" not in text, "the single-window FindFirst scan was the fail-open enumeration bug"
 
     block_match = re.search(r"if \(-not \$invoked\)\s*\{(.*?)\}", text, re.DOTALL)
