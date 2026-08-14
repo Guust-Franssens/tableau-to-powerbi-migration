@@ -1162,17 +1162,13 @@ def main(argv: list[str] | None = None) -> int:
     # Renamed from --timeout-sec (issue #156): this bounds ONLY the refresh phase, not the whole probe;
     # a flag named --timeout-sec read like a total budget it never was. --timeout-sec is kept as a
     # deprecated alias so existing callers keep working; a warning below nudges them to the new name.
-    #
-    # `open` (240s cap, plus a pid-resolution poll on top) and `_wait_for_catalog` (240s) both run
-    # before it, so ONE open->catalog->refresh attempt costs at least 240 + 240 + PROBE_TIMEOUT_SECONDS
-    # = ~870s. Spelled as a sum on purpose: the previous "~660s" was computed against the old 180s
-    # refresh default and was already stale in the commit that shipped it.
-    #
-    # ~870s is a per-ATTEMPT figure, not a probe-wide ceiling: `_probe_one` re-runs the whole sequence
-    # per table on the BAD_TABLE fallback, and `run_probe` re-runs it per live source, so the
-    # probe-wide worst case is ~870s x (tables attempted across all live sources). Do not size a
-    # supervising timeout from this sum - measure wall clock (same floor-not-a-total caveat as
-    # docs/operator-runbook.md's note on phase-timings.json).
+    # `open` (240s cap + a pid-resolution poll) and `_wait_for_catalog` (240s) both run before it, so
+    # ONE open->catalog->refresh attempt costs at least 240 + 240 + PROBE_TIMEOUT_SECONDS = ~870s.
+    # Spelled as a sum because the previous "~660s" was computed against the old 180s refresh default
+    # and was already stale in the commit that shipped it. ~870s is PER ATTEMPT, not a probe-wide
+    # ceiling: `_probe_one` repeats the sequence per table on the BAD_TABLE fallback and `run_probe`
+    # repeats it per live source, so the true worst case is ~870s x (tables attempted across all live
+    # sources). Do not size a supervising timeout from this sum - measure wall clock.
     parser.add_argument(
         "--refresh-timeout-sec",
         "--timeout-sec",
