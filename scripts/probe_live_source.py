@@ -3,7 +3,7 @@ purpose: prove a live data source is actually reachable FROM POWER BI, by buildi
          probe model, refreshing it, and requiring a real row back.
 usage:   python scripts/probe_live_source.py --spec <migration-spec.json> [--source-index 0]
          python scripts/probe_live_source.py --bundle <engine-output-dir> [--source-index 0]
-                                             [--timeout-sec 180] [--keep]
+                                             [--refresh-timeout-sec 390] [--keep]
 
 Why this exists
 ---------------
@@ -74,6 +74,37 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("probe_live_source")
 
 SKILL_SCRIPTS = Path(__file__).parent.parent / ".github" / "skills" / "pbip-model-refresh" / "scripts"
+
+# The parent's supervising timeout is DERIVED from the child's own budget, never a second hand-picked
+# number that can silently invert against it (issue #156). We import the child's constants rather than
+# retype them so the two files cannot drift apart: a change to the child's ceiling moves the parent's
+# bound with it, by construction. `SKILL_SCRIPTS` must lead sys.path so the child's siblings
+# (`probe_desktop_query`, `_credential_modal`, ...) resolve to the real skill copies, not the
+# forwarding shims in this `scripts/` dir. The clr/ADOMD load is lazy inside the child, so this import
+# is cheap (~0.1s) and needs no Power BI Desktop.
+sys.path.insert(0, str(SKILL_SCRIPTS))
+# pylint cannot see the runtime sys.path.insert above (it does not execute the module), so it reports
+# no-name-in-module for these; the import is proven at runtime by the probe-timeout regression tests.
+from refresh_pbip_model import (  # noqa: E402  # pylint: disable=wrong-import-position,no-name-in-module
+    REFRESH_TIMEOUT_SECONDS,
+    REFRESH_WALL_CLOCK_GRACE_SECONDS,
+)
+
+# How far the parent (the backstop to the child's backstop) must outlast the child before SIGKILLing
+# it. The ordering is the whole point: the child's own deadline path yields a FAR better verdict than
+# a generic SIGKILL - at its ceiling it re-checks for a credential modal and, failing that, raises a
+# TimeoutError naming the diagnostic signature ("XMLA CommandTimeout was Ns and did not fire ... a
+# mashup engine parked on a sign-in modal rather than a slow query"). Kill the child before its
+# ceiling (the old default=180 did, by 150s) and that classification is dead code from the probe
+# path; the parent just substitutes a generic ERROR/UNREACHABLE. So the parent MUST fire last.
+PROBE_KILL_MARGIN_SECONDS = 60
+# Total refresh-phase budget the parent grants the child = child's XMLA ceiling (300s) + its outer
+# wall-clock grace (30s) + our margin (60s) = 390s. This also clears the measured cold-start floor:
+# a SUSPENDED Snowflake warehouse auto-resuming on a 1-row probe returned DATA_OK in 167s (warm
+# Databricks: 21-28s). Warehouse auto-resume dominates, not row count, so "a 1-row probe is fast by
+# construction" is false - the old 180s default sat only 13s (7.8%) above that cold success and would
+# report a healthy-but-cold source as a failure. 390s is comfortably clear of it.
+PROBE_TIMEOUT_SECONDS = REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS + PROBE_KILL_MARGIN_SECONDS
 
 # A credential block does not surface as a clean "auth failed". Measured: the mashup engine raises
 # the credential exception and then crashes posting it back over the named pipe, so the client sees
@@ -1053,14 +1084,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--source-index", type=int, default=None, help="probe only this source (default: all live sources)"
     )
-    parser.add_argument("--timeout-sec", type=int, default=180)
+    # Renamed from --timeout-sec (issue #156): this bounds ONLY the refresh phase, not the whole probe.
+    # `open` (240s) and `_wait_for_catalog` (240s) run before it, so the worst-case wall clock is ~660s;
+    # a flag named --timeout-sec read like a total budget it never was. --timeout-sec is kept as a
+    # deprecated alias so existing callers keep working; a warning below nudges them to the new name.
+    parser.add_argument(
+        "--refresh-timeout-sec",
+        "--timeout-sec",
+        dest="refresh_timeout_sec",
+        type=int,
+        default=PROBE_TIMEOUT_SECONDS,
+        help=(
+            f"seconds to allow the XMLA refresh before SIGKILLing the child (default {PROBE_TIMEOUT_SECONDS}, "
+            "derived from the child's own ceiling so it always outlasts it). Bounds the refresh phase only, "
+            "not model load/open. --timeout-sec is a deprecated alias."
+        ),
+    )
     parser.add_argument("--keep", action="store_true", help="leave Desktop open for inspection")
     args = parser.parse_args(argv)
+    if any(a == "--timeout-sec" or a.startswith("--timeout-sec=") for a in (sys.argv[1:] if argv is None else argv)):
+        log.warning("--timeout-sec is a deprecated alias for --refresh-timeout-sec; please update callers.")
     bundle_path = args.spec or args.bundle
     if not bundle_path.exists():
         log.error("PROBE: ERROR no such spec or bundle: %s", bundle_path)
         return 1
-    return run_probe(bundle_path, args.source_index, args.timeout_sec, args.keep)
+    return run_probe(bundle_path, args.source_index, args.refresh_timeout_sec, args.keep)
 
 
 if __name__ == "__main__":
