@@ -327,6 +327,21 @@ Before adding lines to a long module, check its length
 against the cap; if you land within a few lines of it, buy the headroom back rather than leaving the
 landmine for the next author.
 
+**But shaving is only one of three moves, and often the worst — there is a sanctioned waiver, and
+three modules already use it.** `# pylint: disable=too-many-lines` is carried today by
+`scripts/parse_tableau.py` (1709), `scripts/deploy_estate.py` (1903) and
+`.github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py` (1305). So on hitting C0302 choose
+deliberately between **shave** (fine for a handful of lines), **split** (best when a genuinely
+cohesive seam exists — extracting the pure verdict-line matchers out of `probe_live_source.py` is a
+worked example) and
+**waive**. Waiving is a legitimate engineering answer when the module is one coherent procedure whose
+length is documented knowledge rather than sprawl; `parse_tableau.py`'s header argues exactly that,
+names the real fix it is deferring, and `deploy_estate.py` cites it as precedent. **A waiver MUST
+carry a one-line reason immediately above it** — a bare pragma is indistinguishable from a deadline
+hack, and one of the three has none. Know all three options *before* spending a cycle shaving:
+`probe_live_source.py` hit the cap three times in two days, and paid in CI failures and a module
+split, while a 1903-line neighbour passed on one comment line.
+
 So the ritual that actually predicts CI is `ruff format` → `ruff check --fix` → **`pylint` (all three
 roots)** → the targeted tests. Every step of that is load-bearing: skipping `pylint` hides `C0301` and
 `C0302`, and running it on only one root hides anything living in a skill bundle.
