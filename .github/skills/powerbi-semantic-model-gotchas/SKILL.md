@@ -7,10 +7,10 @@ description: Hard-won Power BI semantic-model gotchas - TMDL hand-authoring pitf
 
 Every entry below cost a real debugging cycle on a real migration.
 
-**The rule that generates most of this file:** structural validation is **necessary, not sufficient**.
-`TmdlSerializer.DeserializeDatabaseFromFolder` is the same parser Power BI Desktop uses, and it still
-passes models that crash on open, silently fail to bind, or throw only at query time. Every section
-below is a defect class that survived a clean parse.
+**The rule that generates most of this file:** structural validation is **necessary, not sufficient** —
+a green gate proves shape, never rows. `TmdlSerializer.DeserializeDatabaseFromFolder` is the same parser
+Power BI Desktop uses, and it still passes models that crash on open, silently fail to bind, or throw
+only at query time. Every section below is a defect class that survived a clean parse.
 
 > **Scope note:** the mechanisms here are pure Power BI (TMDL, DAX, Tabular, the modeling MCP), so this
 > folder ports to a Qlik or Cognos migration unchanged. Entries that name a source-tool idiom
@@ -197,11 +197,14 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 
 **Table calculations & compat level:**
 - **Prefer the `ALLEXCEPT`/`FILTER`/`EARLIER` form for table calcs at compat 1606** so the DAX validates
-  offline; the window-function alternatives (`OFFSET`/`INDEX`/`WINDOW`) need compat **1702+ and a live
-  Desktop** to author/verify, so don't ship them when you can't ground-truth them. Verified patterns:
+  offline; `OFFSET`/`INDEX`/`WINDOW` also evaluate at compat **1606** (measured on a model declaring
+  1604, Desktop running 1606: `WINDOW(1, ABS, 0, REL, ORDERBY(...))` returned correct values). Use them
+  only when you can ground-truth them. Verified patterns:
   `LOOKUP(agg,FIRST()/LAST())` → per-partition MIN/MAX-date helper calc column; `INDEX()` →
   `CALCULATE(COUNTROWS(t),FILTER(ALLEXCEPT(t,[part]),t[order]<=EARLIER(t[order])))`; `IF MIN(Date)=LOOKUP(MIN(Date),LAST())`
   → an is-last-row guard. See `docs/tableau-dax-translation-guide.md` §5–6.
+- **AMO `ImageSave` raises `compatibilityLevel` from 1604 to Desktop's 1606.** This is an unavoidable
+  persist side effect: align `database.tmdl` to the live level before shipping its cache.
 - **Ground-truth EACH table calc two independent ways in Python** (Tableau semantics via sorted-partition
   `.iloc`/`cumcount`, and a literal DAX-mechanics replica via boolean masks over the raw table) and assert
   equality per probe row — two independent codings agreeing is far stronger than restating one formula.
@@ -605,11 +608,13 @@ script so the bundle can be rebuilt. Post-fix the model matched the source **exa
 Do **not** reach for an OS-level `Set-Culture`: that is an account-wide change outside the repo's
 scope (§3) — and it is unnecessary, because the CSV path is locale-proof by construction.
 
-**Always ground-truth a file-based extract against the file itself.** Read the source directly
-(`xlrd` for BIFF8 — it decodes stored cell types natively and correctly) and compare a handful of
-totals plus min/max dates. `EVALUATE TOPN(1, …)` returning a row proves binding, **not** values; here
-the very first probe row already showed `Order_Date = None` and it would have been easy to dismiss as
-a formatting artifact of the probe's printer.
+**After the first full refresh, assert every import table's row count against its source/oracle.** Run
+`python scripts/refresh_pbip_model.py --pid <pid> --canaries Orders Customers` (name every import
+table) and compare each emitted `data : N row(s)` to the source count (for example, 9,994 for the
+Orders extract). A green
+`EMPTY-MODEL CHECK`, `openability_selfcheck`, or `probe_bundle --check-only` proves neither that M can
+read the partition nor that rows landed; `EVALUATE ROW("n", COUNTROWS('Orders'))` is the equivalent
+direct assertion. Then compare totals and min/max dates against the file itself (`xlrd` for BIFF8).
 
 **This is machine-wide, so check your siblings.** All four bundles on this machine read the same
 `.xls` the same way, so all four carry the same corruption. Report it to the orchestrator rather than

@@ -113,13 +113,11 @@ PBIR files yourself.
    ```
    `-Update` belongs to *session start* only (`AGENTS.md` → "Session start"). Upgrading the bridge CLIs
    mid-migration would swap the validator underneath a half-built report. If preflight reports a CLI
-   **below the correctness floor**, stop and tell the user to re-run session start with `-Update`
-   rather than upgrading mid-flow yourself.
+   **below the correctness floor**, stop and tell the user to re-run session start with `-Update`.
    It verifies the whole toolchain — Python + parser deps, **both skill plugins**, the MCP servers,
    Power BI Desktop + Bridge CLI, `npx`, the .NET SDK, the CLI version matrix, and whether the
    published skill bundles still match `.github/skills/`. If it exits non-zero, **stop and surface the
    missing items with the printed install hints** — do not migrate against a half-configured machine.
-   Proceed only once it reports "Ready to migrate."
 1. **Read the brief, then confirm inputs.** The *dispatcher* — the top-level session, per `AGENTS.md`
    — decides **what** gets migrated and hands you one unit of work plus
    `migrations/workbooks/<name>/migration-brief.md`: scope, **autonomy** (`guided` / `standard` /
@@ -154,10 +152,9 @@ PBIR files yourself.
    `migration-spec.json` (parser path) or the engine bundle (`report.json` + `handover/`). If the
    parser path already has `migration-spec.json`, use it and **do not re-parse** without asking (that
    overwrites appended limitations). If the deterministic tier produced `report.json` + `handover/`,
-   that bundle is the
-   contract; pass `--bundle <bundle-dir>` to gate tools. Do not hand-build a fake `migrations/` tree or
-   fabricate a spec to satisfy a tool; what can't be resolved goes in the active contract's
-   limitations/worklist, never silently dropped.
+   that bundle is the contract; pass `--bundle <bundle-dir>` to gate tools. Do not hand-build a fake
+   `migrations/` tree or fabricate a spec to satisfy a tool; what can't be resolved goes in the active
+   contract's limitations/worklist, never silently dropped.
 4. **Triage before building anything.** From `migration-spec.json` (parser path) or the handover slice
    (engine path), summarize high/medium/low limitations. Flag LOD/table-calc/DAX gaps, extract
    materialization decisions, unresolved shelf references, and Tableau Groups before building.
@@ -215,26 +212,26 @@ PBIR files yourself.
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work
    queue), the emitted model path, the active contract (parser specs carry table-calc addressing in
    `worksheets[].encodings`; engine bundles may require handover/context), and the validator's
-   model-side findings. Its job is to prove the model
-   loads, author the residual DAX, enrich for AI, and hand back **refreshed and saved**.
+   model-side findings. Its job is to prove the model loads, author the residual DAX, enrich for AI,
+   and hand back **refreshed and saved**.
    - It must land approvals through `--approved-dax`, never by hand-editing `_Measures.tmdl`.
    - **The landing re-run is a BARRIER**: it deletes and recreates the whole bundle, so it must
      happen before any report work begins. Do not run report and model fixes concurrently against one
      bundle.
 9. **Delegate to `pbi-report-builder`** — only AFTER step 8's landing re-run has finished, because
    that re-run recreates the `.Report` folder and would destroy its work. **Spec+handoff gates (both
-   exit 0):** `python scripts/validate_spec.py <spec>`;
-   `python scripts/check_migration_progress.py --bundle <bundle> --handoff`. Exit 1 means
+   exit 0):** `python scripts/validate_spec.py <spec>`; `python scripts/check_migration_progress.py
+   --bundle <bundle> --handoff`. Exit 1 means
    a model has no `cache.abf`, or one **older** than its TMDL — the report builder would open an
    EMPTY model and trigger its own refresh (minutes, plus a credential prompt on a live source).
    Measured: a cache written at 22:22 against a Desktop opened at 22:19 did exactly that, and a stale
    cache is worse than none because *something* loads so nothing looks wrong. Send it back to step 8.
-   Give it: the handover
-   slice, the validator's classification from step 7, the model location, and the reference bundle.
-   Its edits must land as re-runnable `_build/fix_*.py` scripts, not bundle-only edits.
+   Give it: the handover slice, the validator's classification from step 7, the model location, and
+   the reference bundle. Its edits must land as re-runnable `_build/fix_*.py` scripts run through
+   `python scripts/declare_generated_edit.py` (one `--target` per run, from the engine baseline), not
+   bundle-only or undeclared edits.
 10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. First
-   rerun `python scripts/validate_spec.py <spec>`; block on failure. Name
-   the mode explicitly; it is a different job from step 7's triage. It sees the artifacts, the
+   rerun `python scripts/validate_spec.py <spec>`; block on failure. It sees the artifacts, the
    reference bundle and the triage classifications, but **not the builders' rationale** — and it is
    told the classifications are **claims to verify, not settled facts**, including the ones an earlier
    instance of itself produced. A reviewer given the reasoning tends to accept it. Prefer a
@@ -327,7 +324,8 @@ poll) → `PROGRESSING` leave it alone · `THINKING` file output is not decisive
 same baseline and liveness context · `STALLED` **ask it what it is blocked on** (a follow-up message),
 do **not** kill a slow-but-productive run · `SILENT` it finished, died, or is waiting on a human. The
 baseline is mandatory so setup files are not credited. Before sign-off:
-`python scripts/check_migration_progress.py --bundle <b> --tamper`; drift blocks
+`python scripts/check_migration_progress.py --bundle <b> --tamper`; drift blocks (`UNDECLARED` routes
+back to the builder that wrote it — see step 9)
 
 **Invoke `pbi-migration-validator` with only ground-truth artifacts, never the build
 subagents' own reasoning or self-reported success** — its value depends on

@@ -122,12 +122,8 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
    **ConnectFolder** on the `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**.
    This is **read-only inspection**, so it does not violate layer ownership — you still never edit
    TMDL; anything needing a model change goes back to `pbi-semantic-builder`.
-5. **`powerbi-report-author` CLI previews** — `preview-visuals` / `preview-pages` / `preview-filters`
-   / `preview-themes` summarise the whole report as structured JSON. Use them to self-check your own
-   output (especially filter placement) instead of re-reading every `visual.json`.
-
-Do not skip straight to authoring — these three skills are explicitly designed as a chained handoff
-(planning → design → authoring), each with its own scope boundary; follow that boundary.
+5. **`powerbi-report-author` CLI previews** — `preview-visuals|pages|filters|themes` summarise the
+   whole report as JSON; self-check your own output (especially filter placement) with them.
 
 ## What you receive — a report that already EXISTS
 
@@ -137,7 +133,7 @@ report tells you where. Read these first, in this order:
 
 | source | what it gives you |
 |---|---|
-| `handover/<workbook>.json` → `workbook.viz_fidelity[]` | one entry per worksheet: `worksheet`, `visual_type`, `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`), `reason`, `additional_reasons[]`. The `reason` is precise, e.g. *"reference/target/trend line(s) deferred (Tier-2 analytics): sum of Profit -> the rebuilt visual shows the value without the target/trend overlay"* |
+| `handover/<workbook>.json` → `workbook.viz_fidelity[]` | one entry per worksheet: `worksheet`, `visual_type`, `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`), `reason`, `additional_reasons[]` |
 | `estate.pending_gates[]` | which gates must be OFFERED (e.g. `dashboard_audit`) — offer, never self-approve |
 | `migration-spec.json` | source intent the engine's input format cannot carry: `dashboards[].zones` (layout tree), `worksheets[].encodings`, `manual_sort`, `measure_names_values_pivot`, filter `note`s |
 | `migrations/<name>/reference/` | the Tableau screenshots — the only thing that can adjudicate *look and feel* |
@@ -165,6 +161,33 @@ every `visual.json`). Three properties make it a patch rather than an edit:
 
 Worth actually doing once per migration: re-run the engine, re-run your scripts, confirm you land on
 the same report. If you cannot, you do not have a patch — you have an edit.
+
+⚠️ **A `_build/` script is only half of it — DECLARE the edit, or sign-off blocks.** Every file under
+a `*.Report` folder is hash-baselined by the engine run, and the orchestrator's pre-sign-off
+`check_migration_progress.py --bundle <b> --tamper` exits **1** on any that changed without a matching
+declaration. `scripts/declare_generated_edit.py` is the **only** thing that writes one: it runs your
+script for you and records the before/after hashes into `_build/generated-edit-declarations.json`.
+
+```bash
+python scripts/declare_generated_edit.py --bundle <b> \
+  --target pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json \
+  --script <b>/_build/fix_axis_title.py \
+  -- --only pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json
+# DECLARE: RECORDED pbip/.../visual.json -> <b>/_build/generated-edit-declarations.json
+```
+
+Measured — each of these leaves the gate RED while looking like it worked:
+
+- **One `--target` per run.** A second run of an idempotent script prints `DECLARE: NO_CHANGE` and
+  records nothing, so a whole-tree emitter leaves every file but one UNDECLARED. Give the script an
+  `--only <bundle-relative path>` scope argument, pass it after `--`, and run the wrapper per target.
+- **Never hand-edit first.** The wrapper hashes the target *before* running your script and the gate
+  only accepts a declaration whose baseline is the engine's hash, so a retro-declaration is never
+  accepted. Restore the target by re-running the engine — `reports/` is a **different file**, not a
+  copy of `pbip/` (gotchas §3).
+- **Declare last.** Touching the target again afterwards invalidates its declaration.
+
+Self-check before reporting done: `--tamper` must exit 0 (`DECLARED_DRIFT` passes, `DRIFT` does not).
 
 ### Visual encoding — only when you must change an encoding
 
@@ -220,13 +243,11 @@ it is slow, and `validate` will not catch a wrong encoding.
 
 1. Confirm the capability exists via Microsoft Learn + `catalog describe` / `formatting
    describe-object` / `formatting search`.
-2. If it exists but the JSON is uncertain, **give the human click-by-click Desktop instructions**
-   (ask in your normal reply — there is no `ask_user` tool): the visual to add, the fields per well,
-   the Format-pane toggles. Then **read the resulting `visual.json` as ground truth**. One human
-   round-trip beats many blind render cycles — this is exactly how the Azure Maps choropleth encoding
-   was captured, after a research subagent found zero public PBIR examples of it.
-3. Save it to the cookbook as 🟢 render-verified, with the dated citation, so the next migration
-   copies it instead of repeating the round-trip.
+2. If the JSON is still uncertain, **give the human click-by-click Desktop instructions** (ask in your
+   normal reply — there is no `ask_user` tool): visual, fields per well, Format-pane toggles. Then
+   **read the resulting `visual.json` as ground truth**. One round-trip beats many blind render
+   cycles — it is how the Azure Maps choropleth encoding was captured.
+3. Save it to the cookbook as 🟢 render-verified with the dated citation.
 
 ## Workflow
 
@@ -282,12 +303,9 @@ initial build and every later fix pass:
    `pages/pages.json`; no two visuals overlap; every table/matrix `Values` well is free of the
    single-active-field-with-inactive-siblings pattern (`powerbi-report-gotchas` §4); and
    `definition.pbir`'s model reference is correct.
-   **Model reference:** it may legitimately point **outside** this migration folder when the model is
-   shared across workbooks (a Tableau *published* data source migrates once into
-   `migrations/datasources/<ds-slug>/`). A relative cross-tree `byPath` like
-   `"../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"` is verified to resolve in Desktop
-   — do **not** "fix" it by copying the `.SemanticModel` folder in beside your report. Cloud
-   equivalent: `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`.
+   **Model reference:** a cross-tree `byPath` into a shared `datasources/<ds-slug>/` model is correct,
+   not a defect to "fix" by copying the model in beside your report (`powerbi-report-gotchas` §3);
+   cloud equivalent `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`.
 3. **Only after structural validation passes**, do the visual/numeric Desktop screenshot review.
 4. **A clean Bridge/MCP response is NOT proof the report renders error-free.** Errors *inside*
    Desktop's own rendering (a visual error glyph, a card failing to evaluate, a refresh banner) are not
@@ -296,13 +314,11 @@ initial build and every later fix pass:
 
 ## Iterating on an existing report — still go through the skill chain
 
-**When fixing a bug in an already-built report, re-invoke this subagent (or at minimum re-follow the
-`powerbi-report-authoring` skill's "Task: Edit an existing report" workflow) instead of making a
-one-off direct edit** — even for a trivial-looking one-line fix. Its pre-development discovery step and
-post-development validation checklist exist precisely to catch the side effects a quick direct edit
-misses. This was the single biggest process gap in an earlier session: 5+ checkpoints of real bug-fixing
-happened as ad hoc PBIR/MCP edits, so none of the validation, anti-pattern or design-consistency
-guardrails ran against any of the fixes.
+**When fixing a bug in an already-built report, re-follow the `powerbi-report-authoring` skill's
+"Task: Edit an existing report" workflow instead of making a one-off direct edit** — even for a
+trivial-looking one-liner. Measured: 5+ checkpoints of ad hoc PBIR/MCP edits ran none of the
+validation, anti-pattern or design-consistency guardrails, which is exactly what that skill's
+discovery + post-development checklist exists to catch.
 
 ## Definition of Done
 
@@ -311,9 +327,9 @@ crashing" is necessary but not sufficient:
 
 1. **The `powerbi-report-gotchas` skill was read this session**, before the first visual was authored.
    Several items below are one-line summaries of entries that only make sense in full.
-2. **Every change lives in a `_build/fix_*.py` that is semantic, scoped and idempotent** — verified by
-   actually re-running the engine and then the scripts, not asserted. Anything else is discarded by
-   the next landing re-run.
+2. **Every change lives in a `_build/fix_*.py` that is semantic, scoped and idempotent, and was run
+   through `declare_generated_edit.py`** — verified by actually re-running the engine and then the
+   scripts, and by `--tamper` exiting 0. Anything else is discarded by the next landing re-run.
 3. **Every visual you touched was routed to you by the validator**, not chosen off the raw
    `viz_fidelity` list. A `reason` can describe a deferral that must *not* be reversed.
 4. **The whole-page gestalt was compared against the reference** — per-visual checks structurally
