@@ -11,6 +11,7 @@ wolf on good models gets ignored, which is worse than not having one.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -324,6 +325,34 @@ def test_full_datamodel_gate_has_no_false_positive_on_valid_model(tmp_path: Path
     assert tmdl_scanned == 1
 
 
+def _xls_backed_model(
+    root: Path, *, magic: bytes, navigation: str, typed: str | None, filename: str = "Orders.xls"
+) -> Path:
+    """A one-partition model reading `root/<filename>`, whose first four bytes are ``magic``."""
+    source = root / filename
+    source.write_bytes(magic + b"payload")
+    tables = root / "Model.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True)
+    steps = [
+        f'Source = Excel.Workbook(File.Contents("{source.as_posix()}"), null, true)',
+        f"Orders = {navigation}",
+    ]
+    if typed is not None:
+        steps.append(f"Typed = {typed}")
+    body = (",\n" + "\t" * 4).join(steps)
+    (tables / "Orders.tmdl").write_text(
+        "table Orders\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource = let\n"
+        f"\t\t\t\t{body}\n"
+        "\t\t\tin\n"
+        f"\t\t\t\t{'Typed' if typed is not None else 'Orders'}\n",
+        encoding="utf-8",
+    )
+    return root / "Model.SemanticModel"
+
+
 def test_biff8_xls_requires_name_navigation_and_explicit_culture(tmp_path: Path) -> None:
     """A structural pass cannot hide the legacy-reader refresh and locale defects."""
     source = tmp_path / "Orders.xls"
@@ -374,6 +403,77 @@ def test_biff8_xls_with_name_navigation_and_culture_is_clean(tmp_path: Path) -> 
         encoding="utf-8",
     )
     assert check_model(tmp_path / "Good.SemanticModel") == []
+
+
+def test_biff8_gate_ignores_a_non_biff8_file_named_xls(tmp_path: Path) -> None:
+    """Detecting the legacy reader by EXTENSION is the exact failure the magic-byte read prevents.
+
+    Identical defective M to the firing case above; only the source file's first bytes differ (a
+    modern workbook named `.xls`). That file is read by the provider whose navigation table really
+    does have `Item`/`Kind` columns, so a finding here would be a false positive on correct M.
+    """
+    model = _xls_backed_model(
+        tmp_path,
+        magic=b"PK\x03\x04",
+        navigation='Source{[Item="Orders", Kind="Sheet"]}[Data]',
+        typed='Table.TransformColumnTypes(Orders, {{"Sales", type number}})',
+    )
+    assert check_model(model) == []
+
+
+def test_biff8_xls_without_a_type_step_is_not_a_culture_finding(tmp_path: Path) -> None:
+    """The engine emits `Typed` only when it has type pairs, so no conversion is a real output shape.
+
+    "Type conversion must pass an explicit culture" cannot be acted on when the partition contains no
+    conversion at all, and there is no locale-dependent parse to get wrong.
+    """
+    model = _xls_backed_model(
+        tmp_path, magic=b"\xd0\xcf\x11\xe0", navigation='Source{[Name="Orders"]}[Data]', typed=None
+    )
+    assert check_model(model) == []
+
+
+def test_biff8_xls_with_a_literal_null_culture_is_a_finding(tmp_path: Path) -> None:
+    """An explicit `null` culture IS the defect - it selects the ambient locale of the build host."""
+    model = _xls_backed_model(
+        tmp_path,
+        magic=b"\xd0\xcf\x11\xe0",
+        navigation='Source{[Name="Orders"]}[Data]',
+        typed='Table.TransformColumnTypes(Orders, {{"Sales", type number}}, null)',
+    )
+    assert {finding.kind for finding in check_model(model)} == {"BIFF8_XLS_CULTURE"}
+
+
+def test_biff8_gate_is_scoped_to_the_xls_suffix_on_purpose(tmp_path: Path) -> None:
+    """A deliberate MISS, pinned so it stays deliberate rather than accidental.
+
+    BIFF8 bytes carrying a modern suffix are not flagged: the module's stated scope is that a false
+    positive is worse than a miss, and the `.xls` pre-filter is what keeps any other OLE2/CFB file
+    (a `.doc`, a `.msg`) out of a finding that would give it Excel-navigation advice. Widening this
+    to magic-only is a defensible future change - it just must be a measured one, not a silent one.
+    """
+    model = _xls_backed_model(
+        tmp_path,
+        magic=b"\xd0\xcf\x11\xe0",
+        navigation='Source{[Item="Orders", Kind="Sheet"]}[Data]',
+        typed='Table.TransformColumnTypes(Orders, {{"Sales", type number}})',
+        filename="Orders.xlsx",
+    )
+    assert check_model(model) == []
+
+
+def test_biff8_gate_reaches_the_cli_exit_code(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The wiring, not just the helper: `check_datamodel.py <path>` must exit 1 and name the kind."""
+    _xls_backed_model(
+        tmp_path,
+        magic=b"\xd0\xcf\x11\xe0",
+        navigation='Source{[Item="Orders", Kind="Sheet"]}[Data]',
+        typed='Table.TransformColumnTypes(Orders, {{"Sales", type number}})',
+    )
+    with caplog.at_level(logging.ERROR):
+        assert main([str(tmp_path)]) == 1
+    assert "BIFF8_XLS_NAVIGATION_KEY" in caplog.text
+    assert "BIFF8_XLS_CULTURE" in caplog.text
 
 
 def test_tmdl_has_no_false_positives_across_the_committed_corpus() -> None:

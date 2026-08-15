@@ -263,8 +263,10 @@ infinity/errors and corrupts the overall average. The guard is load-bearing, not
 ## 6. Table calculations [seen, Tale-of-100 — 9 real table calcs, all ground-truthed]
 
 Prefer forms that validate at **compat 1606** (so they can be ground-truthed offline). The window
-functions `OFFSET`/`INDEX`/`WINDOW` need compat **1702+ and a live Desktop** — don't ship them when
-you can't verify them.
+functions `OFFSET`/`INDEX`/`WINDOW` **also evaluate at 1606** — measured on models declaring 1604 and
+run by Desktop at 1606, `WINDOW(1, ABS, 0, REL, ORDERBY(…))` returns correct values, so the older
+"1702+" folklore is too conservative (see §6b-bis). They do still need a **live Desktop** to verify,
+so don't ship them when you can't ground-truth them.
 
 | Tableau | DAX equivalent (offline-verifiable) |
 |---|---|

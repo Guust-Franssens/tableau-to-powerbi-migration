@@ -7,10 +7,10 @@ description: Hard-won Power BI semantic-model gotchas - TMDL hand-authoring pitf
 
 Every entry below cost a real debugging cycle on a real migration.
 
-**The rule that generates most of this file:** a green gate proves shape, never rows.
-`TmdlSerializer.DeserializeDatabaseFromFolder` is the same parser Power BI Desktop uses, and it still
-passes models that crash on open, silently fail to bind, or throw only at query time. Every section below
-is a defect class that survived a clean parse.
+**The rule that generates most of this file:** structural validation is **necessary, not sufficient** —
+a green gate proves shape, never rows. `TmdlSerializer.DeserializeDatabaseFromFolder` is the same parser
+Power BI Desktop uses, and it still passes models that crash on open, silently fail to bind, or throw
+only at query time. Every section below is a defect class that survived a clean parse.
 
 > **Scope note:** the mechanisms here are pure Power BI (TMDL, DAX, Tabular, the modeling MCP), so this
 > folder ports to a Qlik or Cognos migration unchanged. Entries that name a source-tool idiom
