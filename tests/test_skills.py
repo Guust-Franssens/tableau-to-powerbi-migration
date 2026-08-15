@@ -44,6 +44,8 @@ FORWARDING_SHIMS = {
 # the heading below is the canary, because it is the one no other document would coin by accident.
 SECTION_TEMPLATE_CANARY = "## Business terminology and defaults"
 SECTION_TEMPLATE_HOME = SKILLS_DIR / "powerbi-ai-readiness" / "SKILL.md"
+REPORT_GOTCHAS = SKILLS_DIR / "powerbi-report-gotchas" / "SKILL.md"
+AZURE_MAP_COOKBOOK = REPO_ROOT / ".github" / "pbi.kb" / "visuals" / "azureMap.md"
 
 
 def test_the_skills_directory_is_not_empty() -> None:
@@ -260,3 +262,28 @@ def test_the_ai_instruction_section_template_is_stated_in_exactly_one_place() ->
         f"the AI-instruction section template is restated in {others} - link to "
         f"{SECTION_TEMPLATE_HOME.relative_to(REPO_ROOT).as_posix()} instead of copying it"
     )
+
+
+def test_powerbi_report_gotchas_keep_field_proven_report_defects_visible() -> None:
+    """Regression guard for field-proven doc defects that previously generated broken reports."""
+    text = REPORT_GOTCHAS.read_text(encoding="utf-8")
+    collapsed = " ".join(text.split())
+
+    assert "prefer `defaultStyle 'blank_accessible'`" not in text
+    for needle in [
+        "checks reference **shape**, not reference **target**",
+        "A `lineChart` with a multi-level `Category` silently renders only the TOP level.",
+        "objects.general[0].properties.filter",
+        "Match the source worksheet's basemap before choosing `defaultStyle`.",
+    ]:
+        assert needle in text
+    assert "filterConfig` restricts which items are offered and pre-selects nothing" in collapsed
+
+
+def test_azure_map_cookbook_does_not_recommend_dead_end_filter_or_blank_basemap_defaults() -> None:
+    """The cookbook is copied by agents, so keep measured-negative remedies from creeping back in."""
+    text = AZURE_MAP_COOKBOOK.read_text(encoding="utf-8")
+
+    assert "**Top-N filter**" not in text
+    assert "only after confirming the source genuinely has no basemap" in text
+    assert "same 3 of 10" in text

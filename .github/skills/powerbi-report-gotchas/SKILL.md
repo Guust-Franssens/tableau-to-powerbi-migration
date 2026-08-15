@@ -11,7 +11,9 @@ you*, not by visual type.
 **The one rule that generates most of this file:** `powerbi-report-author validate` is **necessary, not
 sufficient**. It passes structurally-valid-but-wrong encodings, and it **silently skips all JSON-schema
 checks** when it cannot fetch the visualContainer schema (`PBIR_SCHEMA_UNREACHABLE` — it still prints
-"0 errors"). Only a live Desktop render catches the class of bug in §1.
+"0 errors"). It checks reference **shape**, not reference **target**; a well-formed `(entity, property)`
+pair, filter payload, or hierarchy can still point at the wrong thing or render at the wrong grain.
+Only a live Desktop render catches the class of bug in §1.
 
 **Treat `PBIR_SCHEMA_UNREACHABLE` as "schema validation did NOT run."** The declared `2.11.0` schema
 404s; `2.9.0` is the newest published. Confirm instead with a Desktop open-test (a schema violation
@@ -62,6 +64,15 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   Vocabulary is **type-dependent**: `labelOverflow` is columnChart-only, `maximumOffset`/`minimumOffset`
   are lineChart-only, `labelDensity`/`show`/`color`/`labelPosition` exist on both — so a script that
   flips a visual's type must also swap the label property set (see §3).
+- **A `lineChart` with a multi-level `Category` silently renders only the TOP level.** 🟢
+  render-verified (cold run S18, Desktop 2.157.627.0): binding ordered `Date[Year]` + `Date[Month]`
+  categories turned **48 monthly marks into 4 yearly points** on an axis still scaled for 48, while
+  `validate` returned 0 errors / 0 warnings and the same two-level binding was correct on a
+  `columnChart`. Fix: bind **one continuous column** at the desired grain (for example month start) and
+  set `objects.categoryAxis[0].properties.axisType = 'Scalar'`. Cross-layer trap: a semantic-model
+  wave that "improves" a report from one date column to a Year→Month hierarchy is harmless on bars and
+  silently destructive on line charts, so the report owner must re-render every line chart after that
+  model-side rebinding.
 - **A measure used as a visual-level filter at a FINER grain than it evaluates silently zeroes the
   visual.** A scatter carrying a `Region Filter` measure at Sub-Category grain has
   `SELECTEDVALUE('…'[Region])` blank, so the filter is false for every point → empty visual. When the
@@ -76,6 +87,12 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   "every slicer has a default" rule (§8) *without any diagnostic*. Fix: use `mode = 'Dropdown'`; the
   **identical** `general.filter` payload then renders the right value, proving the filter encoding was
   never the problem. Treat `'Single'` as unsafe for what-if/numeric parameter controls.
+- **A slicer's pre-selection lives in `objects.general[0].properties.filter`, not top-level
+  `filterConfig`.** 🟢 render-verified (cold run S19, Desktop 2.157.627.0): a `filterConfig`-only
+  Categorical `In [10L]` rendered **All**; the byte-identical payload moved to `general.filter`
+  rendered **10**. On a slicer, `filterConfig` restricts which items are offered and pre-selects
+  nothing, so engine-emitted defaults there are inert. The filter `name` must be unique report-wide,
+  and an `Int64` literal needs the `L` suffix (`10L`), or the default can fail without a schema error.
 - **A textbox that mixes a large title run and a small descriptor run in ONE paragraph wraps and
   clips.** 🟢 render-verified. Desktop wraps the second run onto a new line, cuts it off at the box
   bottom, and draws a stray vertical overflow mark at the right edge — `validate` says 0 errors. Fix:
@@ -196,7 +213,8 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
 
 - **Visual-level filter = a top-level `filterConfig` key in `visual.json` (sibling to `visual`, NOT
   nested under it)**, `type:"Categorical"`, `Version:2` `In`-condition. Nesting it under `visual` is
-  silently ignored.
+  silently ignored. **Do not use this as a slicer default** — slicer pre-selection is
+  `objects.general[0].properties.filter` (see §1).
 - **Stacked bar = `barChart` visualType (not `clusteredBarChart`); the first Y projection stacks from
   0.** Per-series colours via `dataPoint[]` with `selector.metadata = <queryRef>` (queryRef, not
   nativeQueryRef).
@@ -313,12 +331,16 @@ and shrinks the lower-48 to a dot), plus a fixed `zoom` + `centerLatitude/Longit
 viewport (512px vector tiles): continental US fills a **384px**-wide map at **`zoom ≈ 2.0`** (a
 700–940px map uses ≈2.9). `blank` style + `autoZoom` rendered empty/tiny — avoid.
 
-**For source-tool fidelity, prefer `defaultStyle 'blank_accessible'`** with `showStylePicker: false`,
-`showNavigationControls: false` and a light `polygonStrokeColor` — a clean white canvas with soft
-borders, matching a source tool that draws no basemap, zoom buttons or style picker. ⚠️ Reported by
-the deterministic engine's maintainer (`Yarbrdab000/tableau-fabric-skills#106`, 2026-08-10, Desktop
-2.157.627.0); **not independently reproduced here**. Note this is a *different value* from plain
-`'blank'`, which rendered empty/tiny above.
+**Match the source worksheet's basemap before choosing `defaultStyle`.** 🟥 render-verified negative
+(cold run S20): applying the old "prefer `blank_accessible`" advice to 9 map visuals produced **9
+blank-basemap maps** — marks floating on white — because those source worksheets did draw real
+basemaps. For Tableau specifically, check the worksheet basemap first; use `grayscale_light`, `night`,
+`satellite` or another real style when the source has one, and reserve `blank_accessible` (with
+`showStylePicker: false`, `showNavigationControls: false`, light `polygonStrokeColor`) for a source
+that genuinely draws no basemap. ⚠️ The original `blank_accessible` observation is still honestly
+attributed to the deterministic engine's maintainer (`Yarbrdab000/tableau-fabric-skills#106`,
+2026-08-10, Desktop 2.157.627.0) and **not independently reproduced here**; note it is a different
+value from plain `'blank'`, which rendered empty/tiny above.
 
 **⚠️ `shapeMap` renders NOTHING — a blank rectangle** (same source, same session, a US-state
 choropleth shaded by `Sum(Profit)`; `powerbi-report-author validate` returns 0 errors for it). That
@@ -475,10 +497,11 @@ shelves, tooltips and manual sorts.
 - **Don't silently drop unresolved shelf references** (`UNRESOLVED:…` ids in
   `limitations_encountered`) — surface them as "this visual may be missing a field" rather than
   building an incomplete visual without comment.
-- **Set a sensible default on every filter-driving slicer before calling the report done.** A slicer
-  with no default selection makes every bound visual render an aggregate-across-all-rows value on first
-  load (in one workbook: an aggregate across 906 cities) — which reads as "broken" even though the DAX
-  and binding are correct. Pick a default matching the reference screenshot, and confirm visually.
+- **Set a sensible default on every filter-driving slicer via
+  `objects.general[0].properties.filter` before calling the report done.** A top-level `filterConfig`
+  only limits the offered items and still renders **All** on first load (see §1). Pick a default
+  matching the reference screenshot, use report-wide-unique filter names and typed literals (`10L` for
+  Int64), then confirm visually.
 
 ## 9. Keeping the visual mapping current (research per idiom, not per instance)
 To keep visual choices up to date without re-researching 30 visuals on every dashboard, research **per
