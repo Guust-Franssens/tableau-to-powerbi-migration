@@ -273,11 +273,19 @@ def test_powerbi_report_gotchas_keep_field_proven_report_defects_visible() -> No
     for needle in [
         "checks reference **shape**, not reference **target**",
         "A `lineChart` with a multi-level `Category` silently renders only the TOP level.",
-        "objects.general[0].properties.filter",
         "Match the source worksheet's basemap before choosing `defaultStyle`.",
     ]:
         assert needle in text
     assert "filterConfig` restricts which items are offered and pre-selects nothing" in collapsed
+
+    # Defect 3's point is that section 1 and section 8 must AGREE on where a slicer default lives, so
+    # a half-regression has to fail too: one assertion per section, keyed on that section's own
+    # wording. A bare `in` check on the shared path cannot see a one-sided break - section 3 has it too.
+    for section, needle in [
+        ("section 1", "A slicer's pre-selection lives in `objects.general[0].properties.filter`"),
+        ("section 8", "via `objects.general[0].properties.filter`, never a top-level `filterConfig`"),
+    ]:
+        assert needle in collapsed, f"{section} no longer states where a slicer default lives"
 
 
 def test_azure_map_cookbook_does_not_recommend_dead_end_filter_or_blank_basemap_defaults() -> None:
