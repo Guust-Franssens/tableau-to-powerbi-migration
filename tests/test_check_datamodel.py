@@ -324,6 +324,58 @@ def test_full_datamodel_gate_has_no_false_positive_on_valid_model(tmp_path: Path
     assert tmdl_scanned == 1
 
 
+def test_biff8_xls_requires_name_navigation_and_explicit_culture(tmp_path: Path) -> None:
+    """A structural pass cannot hide the legacy-reader refresh and locale defects."""
+    source = tmp_path / "Orders.xls"
+    source.write_bytes(b"\xd0\xcf\x11\xe0" + b"BIFF8")
+    definition = tmp_path / "Bad.SemanticModel" / "definition"
+    definition.mkdir(parents=True)
+    (definition / "expressions.tmdl").write_text(
+        f'expression SourceFolder = "{tmp_path.as_posix()}" meta [IsParameterQuery=true, Type="Text"]\n',
+        encoding="utf-8",
+    )
+    tables = definition / "tables"
+    tables.mkdir()
+    (tables / "Orders.tmdl").write_text(
+        "table Orders\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource = let\n"
+        '\t\t\t\tSource = Excel.Workbook(File.Contents(SourceFolder & "/Orders.xls"), null, true),\n'
+        '\t\t\t\t// Source{[Name="Orders"]}[Data] is not executable navigation,\n'
+        '\t\t\t\tNote = "use Source{[Name=""Orders""]}[Data]" is also not navigation,\n'
+        '\t\t\t\tOrders = Source{[Item="Orders", Kind="Sheet"]}[Data],\n'
+        '\t\t\t\tTyped = Table.TransformColumnTypes(Orders, {{"Sales", type number}}, '
+        '[MissingField=if "Culture=en-BE" <> "" then MissingField.Ignore else MissingField.Error])\n'
+        "\t\t\tin\n"
+        "\t\t\t\tTyped\n",
+        encoding="utf-8",
+    )
+    kinds = {finding.kind for finding in check_model(tmp_path / "Bad.SemanticModel")}
+    assert {"BIFF8_XLS_NAVIGATION_KEY", "BIFF8_XLS_CULTURE"} <= kinds
+
+
+def test_biff8_xls_with_name_navigation_and_culture_is_clean(tmp_path: Path) -> None:
+    """The narrow gate accepts the proven legacy-reader form."""
+    source = tmp_path / "Orders.xls"
+    source.write_bytes(b"\xd0\xcf\x11\xe0" + b"BIFF8")
+    tables = tmp_path / "Good.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "Orders.tmdl").write_text(
+        "table Orders\n"
+        "\tpartition Orders = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource = let\n"
+        f'\t\t\t\tSource = Excel.Workbook(File.Contents("{source.as_posix()}"), null, true),\n'
+        '\t\t\t\tOrders = Source{[Name="Orders"]}[Data],\n'
+        '\t\t\t\tTyped = Table.TransformColumnTypes(Orders, {{"Sales", type number}}, "en-BE")\n'
+        "\t\t\tin\n"
+        "\t\t\t\tTyped\n",
+        encoding="utf-8",
+    )
+    assert check_model(tmp_path / "Good.SemanticModel") == []
+
+
 def test_tmdl_has_no_false_positives_across_the_committed_corpus() -> None:
     """The real examples are the false-positive regression suite for the TMDL checks."""
     offenders = {}
