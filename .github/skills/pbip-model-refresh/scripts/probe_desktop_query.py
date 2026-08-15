@@ -386,29 +386,34 @@ def _emit_desktop_unready(pid: int, reason: str) -> None:
     print(f"PREFLIGHT: DESKTOP_UNREADY pid={pid}; {reason}")
 
 
-def _probe_with_credential_poll(  # pylint: disable=too-many-return-statements
-    pid: int | None, port: int, tables: list[str] | None
-) -> int:
+def _credential_verdict(pid: int, state: CredentialDetection) -> int | None:
+    """Emit and return a terminal inspection verdict, or None when probing may continue."""
+    if state.modal is not None:
+        _emit_credential_missing(pid, state.modal)
+        return 1
+    if state.blocking_dialog is not None:
+        _emit_blocked_by_dialog(pid, state.blocking_dialog)
+        return 1
+    if state.process_gone is not None:
+        _emit_desktop_gone(pid, state.process_gone)
+        return 2
+    if state.desktop_unready is not None:
+        _emit_desktop_unready(pid, state.desktop_unready)
+        return 2
+    if state.unknown_reason:
+        _emit_credential_unknown(pid, state.unknown_reason)
+        return 3
+    return None
+
+
+def _probe_with_credential_poll(pid: int | None, port: int, tables: list[str] | None) -> int:
     """Run ``probe`` while polling for a late credential dialog owned by ``pid``."""
     if pid is None:
         return probe(port, tables)
 
-    early = _credential_state(pid)
-    if early.modal is not None:
-        _emit_credential_missing(pid, early.modal)
-        return 1
-    if early.blocking_dialog is not None:
-        _emit_blocked_by_dialog(pid, early.blocking_dialog)
-        return 1
-    if early.process_gone is not None:
-        _emit_desktop_gone(pid, early.process_gone)
-        return 2
-    if early.desktop_unready is not None:
-        _emit_desktop_unready(pid, early.desktop_unready)
-        return 2
-    if early.unknown_reason:
-        _emit_credential_unknown(pid, early.unknown_reason)
-        return 3
+    early_verdict = _credential_verdict(pid, _credential_state(pid))
+    if early_verdict is not None:
+        return early_verdict
 
     result: dict[str, int | BaseException] = {}
     captured: list[str] = []
@@ -426,22 +431,9 @@ def _probe_with_credential_poll(  # pylint: disable=too-many-return-statements
     worker.start()
     while worker.is_alive():
         worker.join(PREFLIGHT_CREDENTIAL_POLL_SECONDS)
-        state = _credential_state(pid)
-        if state.modal is not None:
-            _emit_credential_missing(pid, state.modal)
-            return 1
-        if state.blocking_dialog is not None:
-            _emit_blocked_by_dialog(pid, state.blocking_dialog)
-            return 1
-        if state.process_gone is not None:
-            _emit_desktop_gone(pid, state.process_gone)
-            return 2
-        if state.desktop_unready is not None:
-            _emit_desktop_unready(pid, state.desktop_unready)
-            return 2
-        if state.unknown_reason:
-            _emit_credential_unknown(pid, state.unknown_reason)
-            return 3
+        verdict = _credential_verdict(pid, _credential_state(pid))
+        if verdict is not None:
+            return verdict
 
     outcome = result.get("outcome")
     if isinstance(outcome, BaseException):
@@ -482,22 +474,9 @@ def main(argv: list[str] | None = None) -> int:
     # --tables (plural), then --table as a one-name alias for old callers.
     tables = list(args.canaries or args.tables or ([args.table] if args.table else [])) or None
     if args.pid is not None:
-        early = _credential_state(args.pid)
-        if early.modal is not None:
-            _emit_credential_missing(args.pid, early.modal)
-            return 1
-        if early.blocking_dialog is not None:
-            _emit_blocked_by_dialog(args.pid, early.blocking_dialog)
-            return 1
-        if early.process_gone is not None:
-            _emit_desktop_gone(args.pid, early.process_gone)
-            return 2
-        if early.desktop_unready is not None:
-            _emit_desktop_unready(args.pid, early.desktop_unready)
-            return 2
-        if early.unknown_reason:
-            _emit_credential_unknown(args.pid, early.unknown_reason)
-            return 3
+        early_verdict = _credential_verdict(args.pid, _credential_state(args.pid))
+        if early_verdict is not None:
+            return early_verdict
     port = args.port or discover_port(args.pid)
     try:
         return _probe_with_credential_poll(args.pid, port, tables)

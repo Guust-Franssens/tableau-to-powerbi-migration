@@ -338,13 +338,11 @@ def refresh(
     """
     result: dict[str, tuple[bool, str] | BaseException] = {}
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
-    initial_unknown = None
-    initial_desktop_unready = None
+    initial_state = None
     if desktop_pid is not None:
         state = _credential_state(desktop_pid)
         _raise_if_blocked(desktop_pid, state, source_hint)
-        initial_unknown = state.unknown_reason
-        initial_desktop_unready = state.desktop_unready
+        initial_state = state
         if state.unknown_reason:
             print_refresh_unknown_banner(
                 desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
@@ -394,8 +392,7 @@ def refresh(
             poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
             source_hint=source_hint,
             detector=_credential_state,
-            initial_unknown=initial_unknown,
-            initial_desktop_unready=initial_desktop_unready,
+            initial_state=initial_state,
         )
     if worker.is_alive():
         if desktop_pid is not None:

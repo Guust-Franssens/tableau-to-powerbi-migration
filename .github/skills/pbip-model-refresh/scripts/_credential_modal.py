@@ -480,6 +480,16 @@ def print_indeterminate_state_notice(pid: int, reason: str) -> None:
     )
 
 
+def _raise_detection(pid: int, state: CredentialDetection, source_hint: str | None) -> None:
+    """Raise for a visible block or definitive local Desktop failure."""
+    if state.modal is not None:
+        raise CredentialMissingError(pid, state.modal, source_hint)
+    if state.blocking_dialog is not None:
+        raise DialogBlockedError(pid, state.blocking_dialog)
+    if state.process_gone is not None:
+        raise DesktopGoneError(pid, state.process_gone)
+
+
 # pylint: disable=too-many-arguments
 def join_with_credential_poll(
     worker,
@@ -490,8 +500,7 @@ def join_with_credential_poll(
     poll_seconds: float,
     source_hint: str | None = None,
     detector: Callable[[int], CredentialDetection] = inspect_credential_modal,
-    initial_unknown: str | None = None,
-    initial_desktop_unready: str | None = None,
+    initial_state: CredentialDetection | None = None,
 ) -> bool:
     """Wait for ``worker`` while polling for a late credential dialog.
 
@@ -522,8 +531,8 @@ def join_with_credential_poll(
     """
     started = time.monotonic()
     next_heartbeat = heartbeat_seconds
-    latched_unknown = initial_unknown
-    latched_desktop_unready = initial_desktop_unready
+    latched_unknown = initial_state.unknown_reason if initial_state else None
+    latched_desktop_unready = initial_state.desktop_unready if initial_state else None
     while worker.is_alive():
         elapsed = time.monotonic() - started
         remaining = max(0.0, total_timeout - elapsed)
@@ -532,12 +541,7 @@ def join_with_credential_poll(
         worker.join(min(remaining, poll_seconds, max(0.0, next_heartbeat - elapsed)))
         elapsed = time.monotonic() - started
         state = detector(pid)
-        if state.modal is not None:
-            raise CredentialMissingError(pid, state.modal, source_hint)
-        if state.blocking_dialog is not None:
-            raise DialogBlockedError(pid, state.blocking_dialog)
-        if state.process_gone is not None:
-            raise DesktopGoneError(pid, state.process_gone)
+        _raise_detection(pid, state, source_hint)
         if state.desktop_unready and latched_desktop_unready is None:
             latched_desktop_unready = state.desktop_unready
         if state.unknown_reason and latched_unknown is None:
@@ -548,12 +552,7 @@ def join_with_credential_poll(
             next_heartbeat += heartbeat_seconds
     if worker.is_alive():
         state = detector(pid)
-        if state.modal is not None:
-            raise CredentialMissingError(pid, state.modal, source_hint)
-        if state.blocking_dialog is not None:
-            raise DialogBlockedError(pid, state.blocking_dialog)
-        if state.process_gone is not None:
-            raise DesktopGoneError(pid, state.process_gone)
+        _raise_detection(pid, state, source_hint)
         latched_desktop_unready = latched_desktop_unready or state.desktop_unready
         if latched_desktop_unready is not None:
             raise DesktopUnreadyError(pid, latched_desktop_unready)
