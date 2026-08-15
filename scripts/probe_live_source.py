@@ -173,8 +173,9 @@ ACCESS_DENIED_MARKERS = (
     "not authorized",
 )
 
-# The verdict-LINE matchers (DATA_OK / credential-stop / DESKTOP_GONE families) and their regexes
-# live in `_verdict_lines.py` (imported above), extracted to keep this module under the line ceiling.
+# The verdict-LINE matchers (DATA_OK / credential-stop / DESKTOP_GONE / DESKTOP_UNREADY families) and
+# their regexes live in `_verdict_lines.py` (imported above), extracted to keep this module under the
+# line ceiling.
 
 
 def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, str]:

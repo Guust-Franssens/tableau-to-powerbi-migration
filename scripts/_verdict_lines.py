@@ -46,6 +46,11 @@ CREDENTIAL_STOP_VERDICT_RE = re.compile(
 # a fact about the warehouse. It is deliberately NOT in the credential-stop family (no human sign-in
 # will fix a dead process); the classifier maps it to ERROR, never UNREACHABLE or NO_CREDENTIAL.
 DESKTOP_GONE_VERDICT_RE = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+DESKTOP_GONE\b")
+# Desktop-unready family (issue #158), from `refresh_pbip_model._emit_desktop_unready` /
+# `probe_desktop_query._emit_desktop_unready`. The live twin of DESKTOP_GONE: zero enumerated windows
+# while the process is still RUNNING, so Desktop is starting up or wedged and its local state cannot
+# be read. Also a LOCAL failure the classifier maps to ERROR - deliberately outside the credential-stop
+# family, because no human sign-in makes a window-less process produce a window.
 DESKTOP_UNREADY_VERDICT_RE = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+DESKTOP_UNREADY\b")
 
 
@@ -74,7 +79,12 @@ def _has_desktop_gone_verdict(text: str) -> bool:
 
 
 def _has_desktop_unready_verdict(text: str) -> bool:
-    """True when a line is a machine-readable ``DESKTOP_UNREADY`` verdict."""
+    """True when a line is a machine-readable ``DESKTOP_UNREADY`` verdict (issue #158).
+
+    Same structural discipline as its DESKTOP_GONE sibling: matched on the verdict LINE, never on a
+    substring of the transcript, so the detector's marker-free reason prose cannot be mistaken for the
+    verdict itself (issue #153).
+    """
     return any(DESKTOP_UNREADY_VERDICT_RE.match(line) for line in text.splitlines())
 
 

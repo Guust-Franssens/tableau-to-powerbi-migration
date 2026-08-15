@@ -382,7 +382,11 @@ def _emit_desktop_gone(pid: int, reason: str) -> None:
 
 
 def _emit_desktop_unready(pid: int, reason: str) -> None:
-    """Print the local-error verdict for an alive Desktop with no windows."""
+    """Print the local-error verdict for an ALIVE Desktop that owns no window (issue #158).
+
+    The live twin of ``DESKTOP_GONE``, and like it an ERROR-family exit 2 rather than
+    ``UNKNOWN``'s exit 3: a window-less process cannot be settled by a human signing in.
+    """
     print(f"PREFLIGHT: DESKTOP_UNREADY pid={pid}; {reason}")
 
 

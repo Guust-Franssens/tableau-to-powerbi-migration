@@ -164,6 +164,24 @@ def explode(name: str):
     return boom
 
 
+def real_detector_for_zero_windows(*, alive: bool):
+    """A `_credential_state` built from the REAL detector, with the Win32 primitives injected.
+
+    The production `_credential_state` in both entry points opens with
+    ``if os.name != "nt": return CredentialDetection()``, so calling it un-stubbed runs *different code
+    on different platforms*. That is not a reason to leave the classification untested off Windows:
+    `inspect_credential_modal` already takes `enumerate_windows` and `process_is_alive` as parameters,
+    so composing it with fakes here exercises the genuine branch logic - the same code Windows runs -
+    on every platform, and drives it through the real CLI entry point rather than a hand-written
+    `CredentialDetection`.
+    """
+
+    def detect(pid: int) -> CredentialDetection:
+        return inspect_credential_modal(pid, lambda _pid: [], process_is_alive=lambda _pid: alive)
+
+    return detect
+
+
 def model_folder(root: Path, name: str) -> Path:
     """Create a minimal PBIP sibling model and return its cache destination."""
     tables_dir = root / f"{name}.SemanticModel" / "definition" / "tables"
@@ -427,6 +445,33 @@ def test_refresh_latches_unknown_seen_only_by_initial_precheck(monkeypatch, park
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
 
     with pytest.raises(CredentialUnknownError) as excinfo:
+        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
+
+    assert excinfo.value.reason == reason
+    parked.set()
+
+
+def test_refresh_latches_desktop_unready_seen_only_by_initial_precheck(monkeypatch, parked) -> None:
+    """#158's twin of the #154 latch: DESKTOP_UNREADY at t=0 must survive a healthy first poll.
+
+    The untested twin of `test_refresh_latches_unknown_seen_only_by_initial_precheck`. It is reachable
+    only through a direct ``refresh(desktop_pid=...)`` call - `main` terminates at exit 2 before this -
+    but that is exactly why it needs pinning rather than skipping: without the initial-state carry, a
+    t=0-only readiness failure decays into a bare ``TimeoutError``, which the parent classifier reads
+    as a slow source. That wrong-verdict family is the whole reason this change exists, so the fact
+    that the *unknown* half is tested and the *unready* half is not is a coverage hole, not a
+    reachability argument.
+    """
+    reason = harvested_zero_window_alive_reason()
+    states = iter([CredentialDetection(desktop_unready=reason)])
+
+    def initial_unready_then_healthy(_pid: int) -> CredentialDetection:
+        return next(states, CredentialDetection())
+
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", initial_unready_then_healthy)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
+
+    with pytest.raises(DesktopUnreadyError) as excinfo:
         refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
 
     assert excinfo.value.reason == reason
@@ -719,6 +764,32 @@ def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tm
     assert reason in out
 
 
+def test_refresh_main_returns_desktop_unready_from_the_real_detector(monkeypatch, tmp_path: Path, capsys) -> None:
+    """#158: an alive-but-window-less Desktop terminates the mutating CLI, on EVERY platform.
+
+    Composed from the real `inspect_credential_modal` with injected Win32 primitives rather than a
+    hand-built `CredentialDetection`, so the detector's own zero-window/alive branch and the CLI's
+    branch on it are proven as one chain - and proven identically on Linux CI and on Windows, which the
+    un-stubbed `_credential_state` cannot do (its `os.name` guard returns a healthy state off Windows).
+    """
+    model_folder(tmp_path, "MyMigration")
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_bridge_status",
+        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", real_detector_for_zero_windows(alive=True))
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 2, "DESKTOP_UNREADY is a local ERROR-family exit 2, not UNKNOWN's exit 3"
+    assert out.startswith("REFRESH: DESKTOP_UNREADY")
+    assert harvested_zero_window_alive_reason() in out
+    assert "minimiz" not in out.lower(), "a window-less Desktop must never be reported as minimized"
+
+
 def test_refresh_main_latches_unknown_from_its_own_precheck(monkeypatch, tmp_path: Path, capsys) -> None:
     """#154: main's first UNKNOWN survives port and identity work before refresh starts."""
     model_folder(tmp_path, "MyMigration")
@@ -783,6 +854,43 @@ def test_probe_query_main_returns_desktop_gone_before_port_discovery(monkeypatch
     assert exit_code == 2
     assert out.startswith("PREFLIGHT: DESKTOP_GONE")
     assert reason in out
+
+
+def test_probe_query_main_returns_desktop_unready_from_the_real_detector(monkeypatch, capsys) -> None:
+    """#158: the read-only CLI terminates on an alive-but-window-less Desktop, on EVERY platform.
+
+    The read-only twin of the refresh test above, and composed the same way: the real detector with
+    injected Win32 primitives, so Linux CI exercises the branch Windows actually takes.
+    """
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", real_detector_for_zero_windows(alive=True))
+    monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
+
+    exit_code = probe_desktop_query.main(["--pid", "111"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 2
+    assert out.startswith("PREFLIGHT: DESKTOP_UNREADY")
+    assert harvested_zero_window_alive_reason() in out
+
+
+def test_the_two_entry_points_get_an_explicit_desktop_state_baseline() -> None:
+    """`conftest`'s autouse baseline must really be in force on BOTH entry points.
+
+    17 tests drive `main(["--pid", "111", ...])` without naming a Desktop state. If the baseline stops
+    applying they fall back to the production `_credential_state`, whose result is decided by the host
+    OS: a healthy `CredentialDetection()` on Linux, and a real `process_gone` detection on Windows
+    (pid 111 does not exist). Measured 2026-08-15, that split is exactly how 17 Windows-only failures
+    passed green on `ubuntu-latest`.
+
+    Asserting on the RETURNED VALUE could not catch it - off Windows the un-stubbed function also
+    returns a bare `CredentialDetection()`, so a value check is a test that cannot fail on the one
+    platform CI runs. The marker on the stub is checkable on every platform.
+    """
+    for module in (refresh_pbip_model, probe_desktop_query):
+        assert getattr(module._credential_state, "is_test_baseline", False), (
+            f"{module.__name__}._credential_state is not conftest's baseline stub, so un-stubbed tests "
+            "would silently exercise different code on Windows and on Linux"
+        )
 
 
 def test_probe_query_returns_blocked_by_dialog_fast_at_t0(monkeypatch, capsys) -> None:

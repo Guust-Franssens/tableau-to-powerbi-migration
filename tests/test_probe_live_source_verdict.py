@@ -493,7 +493,16 @@ def test_desktop_gone_full_child_transcript_classifies_as_error(monkeypatch: pyt
 
 
 def test_zero_window_alive_emitter_and_parent_classify_as_local_error() -> None:
-    """#158: a live window-less Desktop is not evidence of a credential problem."""
+    """#158: a live window-less Desktop is not evidence of a credential problem.
+
+    The verdict alone cannot carry this test. Measured 2026-08-15 by mutation: deleting the whole
+    ``DESKTOP_UNREADY`` branch from ``_classify_failure`` leaves the verdict byte-identical at
+    ``ERROR``, because the catch-all fallback at the end of the function also returns ``ERROR`` - so a
+    verdict-only assertion is a test that cannot fail, credited as coverage for a regex it never
+    exercises. What actually changes is the DETAIL: the branch's own readiness guidance degrades to
+    *"unclassified refresh failure"*, which sends a reader looking for a source problem that does not
+    exist. Both halves are therefore asserted here, on the exact strings production emits.
+    """
     probe_live_source = _import_probe_live_source()
     refresh_pbip_model, _, credential_modal = _import_skill_modules()
     state = credential_modal.inspect_credential_modal(
@@ -510,7 +519,14 @@ def test_zero_window_alive_emitter_and_parent_classify_as_local_error() -> None:
     assert "REFRESH: DESKTOP_UNREADY" in emitted
     assert "minimiz" not in emitted.lower()
     assert "sign in" not in emitted.lower()
-    assert probe_live_source._classify_failure(emitted, network_fault_observed=False)[0] == "ERROR"
+    verdict, detail = probe_live_source._classify_failure(emitted, network_fault_observed=False)
+    assert verdict == "ERROR"
+    assert "running without any window" in detail
+    assert "could not inspect its local state or query the source" in detail
+    assert "unclassified refresh failure" not in detail, (
+        "the DESKTOP_UNREADY branch was not taken - the catch-all fallback answered instead, which "
+        "returns the same ERROR verdict but names no cause"
+    )
 
 
 def test_credential_stop_precedes_success_when_verdict_lines_contradict(monkeypatch: pytest.MonkeyPatch) -> None:

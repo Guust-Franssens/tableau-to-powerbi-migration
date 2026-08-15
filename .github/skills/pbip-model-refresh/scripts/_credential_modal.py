@@ -349,9 +349,12 @@ def inspect_credential_modal(
         )
     if not windows:
         # A live, working Desktop always owns at least its main window, so ZERO windows is never proof
-        # of health (issue #158). Split it by liveness: an alive-but-window-less process is starting up
-        # or wedged (indeterminate -> latch, like the minimized case), while a gone process exited or
-        # crashed (definitive -> a distinct terminal state that must never be blamed on a slow source).
+        # of health (issue #158). Split it by liveness, into TWO terminal states - neither of which is
+        # the minimized case's latch-and-keep-waiting: an alive-but-window-less process is starting up
+        # or wedged (`desktop_unready` -> DESKTOP_UNREADY, exit 2: its local state is unreadable, so
+        # the source was never tested), while a gone process exited or crashed (`process_gone` ->
+        # DESKTOP_GONE, exit 2). Both are LOCAL failures that must never be blamed on a slow source or
+        # routed to the credential layer. `unknown_reason` is deliberately NOT set for either.
         if process_is_alive(pid):
             return CredentialDetection(
                 desktop_unready=(
@@ -525,9 +528,16 @@ def join_with_credential_poll(
     A ``process_gone`` observation is different: it is TERMINAL, raising :class:`DesktopGoneError`
     immediately (issue #158). Zero enumerated windows plus a confirmed-dead PID is definitive - Desktop
     has exited or crashed, there is nothing left to wait for, and the data source is not implicated -
-    so unlike the latched-and-waited indeterminate case there is no value in running out the clock. It
-    is not latched-but-waited because the liveness check has already removed the only false-positive it
-    could have: an alive-but-window-less startup reads as ``unknown_reason`` (latched), never gone.
+    so unlike the latched-and-waited indeterminate case there is no value in running out the clock.
+
+    ``desktop_unready`` - zero windows while the process is still ALIVE - is the third shape, and sits
+    between the two: it is LATCHED like ``unknown_reason`` (a starting-up Desktop may still produce a
+    window and finish the refresh, so ending early would be a false positive), but at the deadline it
+    surfaces as :class:`DesktopUnreadyError`, a terminal local-error verdict, ahead of the credential
+    family. It is not a credential signal: no human sign-in fixes a window-less process, so routing it
+    to ``CredentialUnknownError`` would send someone to the wrong layer. Both zero-window states are
+    seeded from ``initial_state`` so an observation made only by the caller's t=0 pre-check cannot be
+    lost before the first poll.
     """
     started = time.monotonic()
     next_heartbeat = heartbeat_seconds

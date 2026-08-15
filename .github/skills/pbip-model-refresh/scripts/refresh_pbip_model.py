@@ -256,7 +256,9 @@ def _emit_desktop_gone(pid: int, reason: str) -> None:
     ``DESKTOP_GONE`` is a DEFINITIVE local-environment failure, not a fact about the data source: the
     tracked process enumerated zero windows and is no longer running, so the probe never got to observe
     the source at all. It must never degrade to a slow-source timeout. It is also distinct from
-    ``CREDENTIAL_UNKNOWN`` (process still alive but momentarily window-less - indeterminate, latched).
+    ``DESKTOP_UNREADY`` (zero windows while the process is still ALIVE - starting up or wedged, so it
+    may yet recover) and from ``CREDENTIAL_UNKNOWN`` (a minimized owner window, whose hidden owned
+    dialogs make the credential state indeterminate).
     ``reason`` is the detector's marker-free string and the guidance below is marker-free too, so the
     parent classifier keys on the ``REFRESH: DESKTOP_GONE`` verdict line, never on prose (issue #153).
     """
@@ -270,7 +272,17 @@ def _emit_desktop_gone(pid: int, reason: str) -> None:
 
 
 def _emit_desktop_unready(pid: int, reason: str) -> None:
-    """Print the local-error verdict for an alive Desktop with no windows."""
+    """Print the terminal local-error verdict for an ALIVE Desktop that owns no window (issue #158).
+
+    A live, working Desktop always owns at least its main window, so zero windows plus a live process
+    means it is starting up or wedged: its dialog state cannot be read, and nothing was learned about
+    the data source. It is emitted as its own ``DESKTOP_UNREADY`` verdict, at the ERROR-family exit 2,
+    for two reasons. It is not ``CREDENTIAL_UNKNOWN`` (exit 3), because no human sign-in fixes a
+    window-less process and that verdict would route the run to the credential layer. It is not
+    ``DESKTOP_GONE``, because the process may still recover. ``reason`` is the detector's marker-free
+    string and the guidance below is marker-free too, so the parent classifier keys on the
+    ``REFRESH: DESKTOP_UNREADY`` verdict line, never on prose (issue #153).
+    """
     print(f"REFRESH: DESKTOP_UNREADY pid={pid}; {reason}")
     print(
         "  Power BI Desktop is running but has no window, so this probe cannot inspect its local state.\n"
