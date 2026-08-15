@@ -290,8 +290,10 @@ in `tests/`, and a skill bundle keeps its own suite next to its scripts (`pyproj
 `testpaths` covers both — pytest skips dot-directories by default). **`uv.lock` is deliberately
 gitignored** — see the note in `.gitignore`.
 
-**⚠️ `ruff` alone does NOT predict CI — always run `pylint` too.** CI runs both and they do not
-overlap. This repo's ruff selection is `select = ["E4", "E7", "E9", "F"]`, which **excludes `E501`
+**⚠️ `ruff` alone does NOT predict CI — always run `pylint` too.** CI runs both, and they do not
+*fully* overlap — each enforces gates the other does not. (They do agree on some checks: ruff `F401`
+≈ pylint `W0611`, `F821` ≈ `E0602`. The gate below is one neither of those covers.)
+This repo's ruff selection is `select = ["E4", "E7", "E9", "F"]`, which **excludes `E501`
 (line-too-long)**, while `[tool.pylint.format]` sets `max-line-length = 120`. So a 121-character line
 makes `ruff check` print **"All checks passed!"** and CI then fail with `C0301` — and `ruff format`
 cannot rescue you, because it will not split a long string literal or comment. Measured: PR #155 sat
@@ -305,7 +307,10 @@ two lines (the runtime string stays byte-identical).
 invokes it three times — `scripts`, `.github/skills/pbip-model-refresh/scripts`,
 `.github/skills/powerbi-ai-readiness/scripts`. They are *separate* invocations because
 `scripts/probe_desktop_query.py` is a forwarding shim sharing a module name with the bundled script it
-forwards to, so one combined invocation resolves the import to the shim (measured: 7 × `E0611`). What
+forwards to, so one combined invocation resolves the import to the shim (measured: 7 × `E0611`).
+Strictly, that collision only forces `scripts` and `pbip-model-refresh/scripts` apart;
+`powerbi-ai-readiness/scripts` has no colliding name and is separate by the one-root-per-invocation
+convention. What
 let #155 through is simpler than that mechanism: `pylint scripts` alone passes **10.00/10**, and the
 `C0301` came from the *second* invocation. Lint the root that contains the file you changed, not the
 one you reach for first.
