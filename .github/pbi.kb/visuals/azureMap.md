@@ -100,7 +100,7 @@ Six Tableau map idioms, each with the `azureMap` layer config that **rendered co
 | `Shape` | `bubbleLayer`, fixed radius | `minBubbleRadius == maxRadius` and `sizeByValue: false` → a uniform dot rather than an unasked-for size encoding |
 | dark basemap | `mapControls` | `defaultStyle 'night'` — ✅ renders as a dark basemap |
 | satellite | `mapControls` | `defaultStyle 'satellite'` + **`showLabels: false`** (labels are unreadable over imagery) |
-| source-tool fidelity (no chrome) | `mapControls` | `defaultStyle 'blank_accessible'` + `showStylePicker: false` + `showNavigationControls: false` + light `polygonStrokeColor`. ⚠️ Same source as above; note plain `'blank'` rendered empty/tiny |
+| no source basemap | `mapControls` | `defaultStyle 'blank_accessible'` + `showStylePicker: false` + `showNavigationControls: false` + light `polygonStrokeColor` **only after confirming the source genuinely has no basemap**. 🔴 render-verified (cold run S20): this is the wrong default for Tableau maps with real basemaps — 9/9 rendered marks on a blank canvas. ⚠️ Original `blank_accessible` source as above; not reproduced here. Note plain `'blank'` rendered empty/tiny |
 
 **Verify by counting marks against the source grain, never by checking that it rendered.** Every
 defect below rendered a plausible map with `validate` clean.
@@ -295,8 +295,10 @@ renders *most* of its marks gets signed off.
    this — ⚠️ **inferred, not tested here:** no A/B control was run against a column filter on this
    visual. Run that control before relying on it. **This is a model change — route it, don't make it
    from the report layer.**
-2. **Top-N filter** (`filterConfig` `type: "TopN"`) when the source intent really was "top N by
-   measure" rather than a threshold.
+2. **Do not treat an alternate report-layer filter as the safe escape hatch.** 🔴 render-verified
+   (cold run S20): Categorical `In`, visual-scope advanced-measure, and page-scope advanced-measure
+   filters all validated clean and all dropped the **same 3 of 10** expected marks. A Top-N rewrite is
+   therefore not a remedy unless you have counted the marks and proven this exact visual keeps them.
 3. **Leave the measure filter and document it** — only acceptable if you have counted the marks and
    the count is right.
 

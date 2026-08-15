@@ -11,7 +11,9 @@ you*, not by visual type.
 **The one rule that generates most of this file:** `powerbi-report-author validate` is **necessary, not
 sufficient**. It passes structurally-valid-but-wrong encodings, and it **silently skips all JSON-schema
 checks** when it cannot fetch the visualContainer schema (`PBIR_SCHEMA_UNREACHABLE` — it still prints
-"0 errors"). Only a live Desktop render catches the class of bug in §1.
+"0 errors"). It checks reference **shape**, not reference **target**; a well-formed `(entity, property)`
+pair, filter payload, or hierarchy can still point at the wrong thing or render at the wrong grain.
+Only a live Desktop render catches the class of bug in §1.
 
 **Treat `PBIR_SCHEMA_UNREACHABLE` as "schema validation did NOT run."** The declared `2.11.0` schema
 404s; `2.9.0` is the newest published. Confirm instead with a Desktop open-test (a schema violation
@@ -62,6 +64,14 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   Vocabulary is **type-dependent**: `labelOverflow` is columnChart-only, `maximumOffset`/`minimumOffset`
   are lineChart-only, `labelDensity`/`show`/`color`/`labelPosition` exist on both — so a script that
   flips a visual's type must also swap the label property set (see §3).
+- **A `lineChart` with a multi-level `Category` silently renders only the TOP level.** 🟢 render-verified
+  (cold run S18): binding ordered `Date[Year]` + `Date[Month]` categories turned **48 monthly marks
+  into 4 yearly points** on an axis still scaled for 48, while `validate` returned 0 errors / 0 warnings
+  and the same two-level binding was correct on a `columnChart`. Fix: bind **one continuous column** at
+  the desired grain (for example month start) with `objects.categoryAxis[0].properties.axisType = 'Scalar'`.
+  Cross-layer trap: a semantic-model wave that "improves" a report from one date column to a Year→Month
+  hierarchy is harmless on bars and silently destructive on line charts, so the report owner must
+  re-render every line chart after that model-side rebinding.
 - **A measure used as a visual-level filter at a FINER grain than it evaluates silently zeroes the
   visual.** A scatter carrying a `Region Filter` measure at Sub-Category grain has
   `SELECTEDVALUE('…'[Region])` blank, so the filter is false for every point → empty visual. When the
@@ -70,12 +80,19 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   field-parameter table's columns didn't materialize — a **semantic-model** bug (`sourceColumn` needs
   brackets, `[Value1]`). Suspect this first for FP-bound visuals; it is not a report-layer fix.
 - **`slicer` + `data.mode = 'Single'` on a NUMERIC column silently ignores its
-  `objects.general.filter` default.** 🟢 render-verified. Desktop draws a bare text input showing the
-  column's **minimum**, not the pre-selected value — so two what-if slicers intended to load at `10`
-  and `25.0` loaded at `1` and `0.0` while `validate` reported 0 errors. This breaks the
+  `objects.general[0].properties.filter` default.** 🟢 render-verified. Desktop draws a bare text input
+  showing the column's **minimum**, not the pre-selected value — so two what-if slicers intended to load
+  at `10` and `25.0` loaded at `1` and `0.0` while `validate` reported 0 errors. This breaks the
   "every slicer has a default" rule (§8) *without any diagnostic*. Fix: use `mode = 'Dropdown'`; the
   **identical** `general.filter` payload then renders the right value, proving the filter encoding was
   never the problem. Treat `'Single'` as unsafe for what-if/numeric parameter controls.
+- **A slicer's pre-selection lives in `objects.general[0].properties.filter`, not top-level
+  `filterConfig`.** 🟢 render-verified (cold run S19): a `filterConfig`-only Categorical `In [10L]`
+  rendered **All**; the byte-identical payload moved to `general.filter` rendered **10**. On a slicer,
+  `filterConfig` restricts which items are offered and pre-selects nothing, so engine-emitted defaults
+  there are inert. The filter `name` must be unique report-wide — a duplicate is a `validate`
+  **warning** (`PBIR_FILTER_NAME_DUPLICATE_GLOBAL`, verified in CLI 0.1.4 `dist/index.js`), so an
+  `errorCount`-only gate misses it — and an `Int64` literal needs the `L` suffix (`10L`).
 - **A textbox that mixes a large title run and a small descriptor run in ONE paragraph wraps and
   clips.** 🟢 render-verified. Desktop wraps the second run onto a new line, cuts it off at the box
   bottom, and draws a stray vertical overflow mark at the right edge — `validate` says 0 errors. Fix:
@@ -138,17 +155,17 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   REMOVEFILTERS('Orders'[Category]))` reads `Orders`, but is *defined* on a `_Measures` table — so
   `{"Measure":{"Expression":{"SourceRef":{"Entity":"Orders"}},"Property":"Sales (w/o Category)"}}` is
   wrong, and `"_Measures"` is right (`queryRef` follows: `_Measures.Sales (w/o Category)`). `validate`
-  returns **0 errors / 0 warnings** on the broken form — it checks that a reference is well-formed, not
-  that the `(entity, property)` pair exists in the model — and the failure is
-  `'Orders'[Sales (w/o Category)]` → *"Column … in table 'Orders' cannot be found or may not be used"*
-  only at query time. **A measure reference has TWO sites that must agree**: the projection *and* the
-  `filterConfig` `From` clause (`{"Name":"f","Entity":…}`); the previous pass fixed neither and shipped.
-  Two traps worth naming: (a) a **dedicated measures table is the common convention**, so on any model
-  with one, the fact-table entity is wrong for *every* measure — if your codegen has a single `ENTITY`
-  constant, columns and measures must not share it; (b) **verifying the measure's semantics in DAX is
-  not verifying the reference** — the previous pass ran `'_Measures'[…]` (correct) while the PBIR
-  encoded `'Orders'[…]` (wrong), and the green DAX result was read as proof. Prove the **exact
-  entity/property path the PBIR encodes**, and keep a negative control: the wrong path must *error*.
+  returns **0 errors / 0 warnings** on the broken form (shape, not target — the header rule), and the
+  failure is `'Orders'[Sales (w/o Category)]` → *"Column … in table 'Orders' cannot be found or may not
+  be used"* only at query time. **A measure reference has TWO sites that must agree**: the projection
+  *and* the `filterConfig` `From` clause (`{"Name":"f","Entity":…}`); the previous pass fixed neither
+  and shipped. Two traps worth naming: (a) a **dedicated measures table is the common convention**, so
+  on any model with one, the fact-table entity is wrong for *every* measure — if your codegen has a
+  single `ENTITY` constant, columns and measures must not share it; (b) **verifying the measure's
+  semantics in DAX is not verifying the reference** — the previous pass ran `'_Measures'[…]` (correct)
+  while the PBIR encoded `'Orders'[…]` (wrong), and the green DAX result was read as proof. Prove the
+  **exact entity/property path the PBIR encodes**, and keep a negative control: the wrong path must
+  *error*.
 - **On a visual that cannot render (an unlicensed azureMap, a tooltip-only page), this class of bug is
   undetectable by screenshot** — a wrong measure reference and an environmental blank look identical.
   Fall back to executing the encoded path against the live model.
@@ -196,7 +213,8 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
 
 - **Visual-level filter = a top-level `filterConfig` key in `visual.json` (sibling to `visual`, NOT
   nested under it)**, `type:"Categorical"`, `Version:2` `In`-condition. Nesting it under `visual` is
-  silently ignored.
+  silently ignored. **Do not use this as a slicer default** — slicer pre-selection is
+  `objects.general[0].properties.filter` (see §1).
 - **Stacked bar = `barChart` visualType (not `clusteredBarChart`); the first Y projection stacks from
   0.** Per-series colours via `dataPoint[]` with `selector.metadata = <queryRef>` (queryRef, not
   nativeQueryRef).
@@ -230,16 +248,15 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   a raw value via DAX before choosing `0.00%` (true fraction) vs `0.00"%"` (literal suffix).
 - **`validate` does NOT check that `definition.pbir`'s model reference resolves.** 🟢 verified: a
   `.Report` whose `datasetReference.byPath.path` named a `.SemanticModel` folder that **exists nowhere
-  in the bundle** returned `errorCount: 0`. Validation covers the report definition, not whether the
-  dataset it points at is on disk — so a report that **cannot possibly open** validates clean. Check
-  the path yourself (resolve it relative to the `.Report` folder and confirm a `definition/` inside).
-  Two migration-specific traps make this likely rather than exotic: (a) an engine that emits the report
-  **twice** (a `reports/` deliverable plus a packaged `pbip/`) gives each copy a *different* relative
-  path, and only the one beside the model is right — the copies being byte-identical everywhere else
-  hides it; (b) the model folder is often named after the **data source**, not the workbook, so a
-  workbook-named guess dangles. Deleting a redundant copy is usually the wrong fix if the engine's own
-  manifests declare it as `output_folder` — repoint it instead, and prefer a relative cross-tree
-  `byPath` (`../../pbip/<name>/<Model>.SemanticModel`), which does resolve.
+  in the bundle** returned `errorCount: 0` — shape, not target again, so a report that **cannot
+  possibly open** validates clean. Check the path yourself (resolve it relative to the `.Report` folder
+  and confirm a `definition/` inside). Two migration-specific traps make this likely rather than exotic:
+  (a) an engine that emits the report **twice** (a `reports/` deliverable plus a packaged `pbip/`) gives
+  each copy a *different* relative path, and only the one beside the model is right — the copies being
+  byte-identical everywhere else hides it; (b) the model folder is often named after the **data
+  source**, not the workbook, so a workbook-named guess dangles. Deleting a redundant copy is usually
+  the wrong fix if the engine's own manifests declare it as `output_folder` — repoint it instead, and
+  prefer a relative cross-tree `byPath` (`../../pbip/<name>/<Model>.SemanticModel`), which does resolve.
 
 ## 4. Crosstabs and tables — a recurring fragility class
 
@@ -313,12 +330,15 @@ and shrinks the lower-48 to a dot), plus a fixed `zoom` + `centerLatitude/Longit
 viewport (512px vector tiles): continental US fills a **384px**-wide map at **`zoom ≈ 2.0`** (a
 700–940px map uses ≈2.9). `blank` style + `autoZoom` rendered empty/tiny — avoid.
 
-**For source-tool fidelity, prefer `defaultStyle 'blank_accessible'`** with `showStylePicker: false`,
-`showNavigationControls: false` and a light `polygonStrokeColor` — a clean white canvas with soft
-borders, matching a source tool that draws no basemap, zoom buttons or style picker. ⚠️ Reported by
-the deterministic engine's maintainer (`Yarbrdab000/tableau-fabric-skills#106`, 2026-08-10, Desktop
-2.157.627.0); **not independently reproduced here**. Note this is a *different value* from plain
-`'blank'`, which rendered empty/tiny above.
+**Match the source worksheet's basemap before choosing `defaultStyle`.** 🔴 render-verified (cold run
+S20): applying the old "prefer `blank_accessible`" advice to 9 map visuals produced **9 blank-basemap
+maps** — marks floating on white — because those source worksheets did draw real basemaps. For Tableau
+specifically, read the worksheet basemap first; use `grayscale_light`, `night`, `satellite` or another
+real style when the source has one, and reserve `blank_accessible` (with `showStylePicker: false`,
+`showNavigationControls: false`, light `polygonStrokeColor`) for a source that genuinely draws none.
+⚠️ The original `blank_accessible` advice is the deterministic engine maintainer's
+(`Yarbrdab000/tableau-fabric-skills#106`, 2026-08-10, Desktop 2.157.627.0) and **not independently
+reproduced here**; note it is a different value from plain `'blank'`, which rendered empty/tiny above.
 
 **⚠️ `shapeMap` renders NOTHING — a blank rectangle** (same source, same session, a US-state
 choropleth shaded by `Sum(Profit)`; `powerbi-report-author validate` returns 0 errors for it). That
@@ -475,10 +495,11 @@ shelves, tooltips and manual sorts.
 - **Don't silently drop unresolved shelf references** (`UNRESOLVED:…` ids in
   `limitations_encountered`) — surface them as "this visual may be missing a field" rather than
   building an incomplete visual without comment.
-- **Set a sensible default on every filter-driving slicer before calling the report done.** A slicer
-  with no default selection makes every bound visual render an aggregate-across-all-rows value on first
-  load (in one workbook: an aggregate across 906 cities) — which reads as "broken" even though the DAX
-  and binding are correct. Pick a default matching the reference screenshot, and confirm visually.
+- **Set a sensible default on every filter-driving slicer, via `objects.general[0].properties.filter`,
+  never a top-level `filterConfig`, which pre-selects nothing (§1).** Without an *effective* default
+  every bound visual renders an aggregate-across-all-rows value on first load (in one workbook: an
+  aggregate across 906 cities) — which reads as "broken" even though the DAX and binding are correct.
+  Pick a default matching the reference screenshot, and confirm visually.
 
 ## 9. Keeping the visual mapping current (research per idiom, not per instance)
 To keep visual choices up to date without re-researching 30 visuals on every dashboard, research **per
