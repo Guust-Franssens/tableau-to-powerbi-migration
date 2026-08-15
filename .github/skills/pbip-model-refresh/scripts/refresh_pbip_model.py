@@ -142,6 +142,7 @@ from _credential_modal import (
     CredentialModal,
     CredentialUnknownError,
     DesktopGoneError,
+    DesktopUnreadyError,
     DialogBlockedError,
     describe_blocking_dialog,
     describe_modal,
@@ -268,6 +269,16 @@ def _emit_desktop_gone(pid: int, reason: str) -> None:
     )
 
 
+def _emit_desktop_unready(pid: int, reason: str) -> None:
+    """Print the local-error verdict for an alive Desktop with no windows."""
+    print(f"REFRESH: DESKTOP_UNREADY pid={pid}; {reason}")
+    print(
+        "  Power BI Desktop is running but has no window, so this probe cannot inspect its local state.\n"
+        "  Wait for Desktop to finish starting, or restart it if it is wedged, then re-run the probe.\n"
+        "  The data source was not tested; do not report this as a source or sign-in problem."
+    )
+
+
 def _catalog_id(conn) -> str:
     """The database GUID a TMSL command must name, read from the server's own catalog DMV."""
     cmd = conn.CreateCommand()
@@ -327,9 +338,13 @@ def refresh(
     """
     result: dict[str, tuple[bool, str] | BaseException] = {}
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
+    initial_unknown = None
+    initial_desktop_unready = None
     if desktop_pid is not None:
         state = _credential_state(desktop_pid)
         _raise_if_blocked(desktop_pid, state, source_hint)
+        initial_unknown = state.unknown_reason
+        initial_desktop_unready = state.desktop_unready
         if state.unknown_reason:
             print_refresh_unknown_banner(
                 desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
@@ -379,6 +394,8 @@ def refresh(
             poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
             source_hint=source_hint,
             detector=_credential_state,
+            initial_unknown=initial_unknown,
+            initial_desktop_unready=initial_desktop_unready,
         )
     if worker.is_alive():
         if desktop_pid is not None:
@@ -1127,6 +1144,9 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         if isinstance(exc, DesktopGoneError):
             _emit_desktop_gone(exc.pid, exc.reason)
             return 2
+        if isinstance(exc, DesktopUnreadyError):
+            _emit_desktop_unready(exc.pid, exc.reason)
+            return 2
         text = f"{type(exc).__name__}: {exc}"
         # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
         # the credential one ("THIS NEEDS A HUMAN. Do not retry"), which is the single most expensive
@@ -1320,6 +1340,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     if credential_state.blocking_dialog is not None:
         _emit_blocked_by_dialog(pid, credential_state.blocking_dialog)
         return 1
+    if credential_state.process_gone is not None:
+        _emit_desktop_gone(pid, credential_state.process_gone)
+        return 2
+    if credential_state.desktop_unready is not None:
+        _emit_desktop_unready(pid, credential_state.desktop_unready)
+        return 2
     if credential_state.unknown_reason:
         print(f"  credential-check: UNKNOWN ({credential_state.unknown_reason})")
 

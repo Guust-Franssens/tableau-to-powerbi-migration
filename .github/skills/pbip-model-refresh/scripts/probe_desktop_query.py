@@ -376,6 +376,16 @@ def _emit_credential_unknown(pid: int, reason: str) -> None:
     print(f"PREFLIGHT: UNKNOWN pid={pid}; credential dialog check indeterminate: {reason}")
 
 
+def _emit_desktop_gone(pid: int, reason: str) -> None:
+    """Print the terminal local-error verdict for a dead Desktop."""
+    print(f"PREFLIGHT: DESKTOP_GONE pid={pid}; {reason}")
+
+
+def _emit_desktop_unready(pid: int, reason: str) -> None:
+    """Print the local-error verdict for an alive Desktop with no windows."""
+    print(f"PREFLIGHT: DESKTOP_UNREADY pid={pid}; {reason}")
+
+
 def _probe_with_credential_poll(  # pylint: disable=too-many-return-statements
     pid: int | None, port: int, tables: list[str] | None
 ) -> int:
@@ -390,6 +400,12 @@ def _probe_with_credential_poll(  # pylint: disable=too-many-return-statements
     if early.blocking_dialog is not None:
         _emit_blocked_by_dialog(pid, early.blocking_dialog)
         return 1
+    if early.process_gone is not None:
+        _emit_desktop_gone(pid, early.process_gone)
+        return 2
+    if early.desktop_unready is not None:
+        _emit_desktop_unready(pid, early.desktop_unready)
+        return 2
     if early.unknown_reason:
         _emit_credential_unknown(pid, early.unknown_reason)
         return 3
@@ -417,6 +433,12 @@ def _probe_with_credential_poll(  # pylint: disable=too-many-return-statements
         if state.blocking_dialog is not None:
             _emit_blocked_by_dialog(pid, state.blocking_dialog)
             return 1
+        if state.process_gone is not None:
+            _emit_desktop_gone(pid, state.process_gone)
+            return 2
+        if state.desktop_unready is not None:
+            _emit_desktop_unready(pid, state.desktop_unready)
+            return 2
         if state.unknown_reason:
             _emit_credential_unknown(pid, state.unknown_reason)
             return 3
@@ -467,6 +489,12 @@ def main(argv: list[str] | None = None) -> int:
         if early.blocking_dialog is not None:
             _emit_blocked_by_dialog(args.pid, early.blocking_dialog)
             return 1
+        if early.process_gone is not None:
+            _emit_desktop_gone(args.pid, early.process_gone)
+            return 2
+        if early.desktop_unready is not None:
+            _emit_desktop_unready(args.pid, early.desktop_unready)
+            return 2
         if early.unknown_reason:
             _emit_credential_unknown(args.pid, early.unknown_reason)
             return 3

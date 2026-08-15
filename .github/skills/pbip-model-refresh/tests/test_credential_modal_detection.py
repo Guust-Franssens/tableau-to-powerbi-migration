@@ -22,6 +22,7 @@ from _credential_modal import (
     CredentialModal,
     CredentialUnknownError,
     DesktopGoneError,
+    DesktopUnreadyError,
     DialogBlockedError,
     DesktopWindow,
     _enumerate_pid_windows_with_count,
@@ -131,14 +132,14 @@ def harvested_minimized_reason() -> str:
 
 
 def harvested_zero_window_alive_reason() -> str:
-    """The REAL zero-window-but-alive ``unknown_reason``, harvested from the detector (issue #158).
+    """The REAL zero-window-but-alive readiness reason, harvested from the detector (issue #158).
 
     Never hand-written: the same #153 blind-spot discipline as the minimized reason - the latch tests
     must assert the exact string ``inspect_credential_modal`` really produces when enumeration returns
     an empty list while the process is still alive.
     """
-    reason = inspect_credential_modal(999, lambda _pid: [], process_is_alive=lambda _pid: True).unknown_reason
-    assert reason is not None, "detector did not report the zero-window alive UNKNOWN reason"
+    reason = inspect_credential_modal(999, lambda _pid: [], process_is_alive=lambda _pid: True).desktop_unready
+    assert reason is not None, "detector did not report the zero-window alive DESKTOP_UNREADY reason"
     return reason
 
 
@@ -258,22 +259,22 @@ def test_minimized_owner_reports_unknown_not_no_dialog() -> None:
     assert "minimized" in state.unknown_reason
 
 
-def test_zero_windows_alive_reports_unknown_not_no_dialog() -> None:
-    """#158: an empty enumeration while the process is ALIVE is indeterminate, not healthy.
+def test_zero_windows_alive_reports_desktop_unready_not_no_dialog() -> None:
+    """#158: an empty enumeration while the process is ALIVE is a local readiness failure, not healthy.
 
     A live Desktop always owns at least its main window, so zero windows is never proof of health. When
-    the process is still running (starting up or wedged) the detector must report UNKNOWN - which the
-    poll loop latches, exactly like the minimized case - and must NOT set ``process_gone`` (the process
-    is not gone) nor a modal/blocking dialog.
+    the process is still running (starting up or wedged) the detector must report ``desktop_unready``
+    and must NOT set ``process_gone`` (the process is not gone) nor a modal/blocking dialog.
     """
     state = inspect_credential_modal(111, lambda _pid: [], process_is_alive=lambda _pid: True)
 
     assert state.modal is None
     assert state.blocking_dialog is None
     assert state.process_gone is None
-    assert state.unknown_reason is not None
-    assert "no windows" in state.unknown_reason
-    assert state.unknown_reason == harvested_zero_window_alive_reason()
+    assert state.unknown_reason is None
+    assert state.desktop_unready is not None
+    assert "no windows" in state.desktop_unready
+    assert state.desktop_unready == harvested_zero_window_alive_reason()
 
 
 def test_zero_windows_dead_reports_process_gone_not_no_dialog() -> None:
@@ -411,6 +412,24 @@ def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, ca
     out = capsys.readouterr().out
     assert "Blocking-dialog check on PID 111 is UNKNOWN" in out
     assert "No blocking dialog on PID 111" not in out
+    parked.set()
+
+
+def test_refresh_latches_unknown_seen_only_by_initial_precheck(monkeypatch, parked) -> None:
+    """#154: UNKNOWN at t=0 cannot disappear before the first poll."""
+    reason = harvested_minimized_reason()
+    states = iter([CredentialDetection(unknown_reason=reason)])
+
+    def initial_unknown_then_healthy(_pid: int) -> CredentialDetection:
+        return next(states, CredentialDetection())
+
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", initial_unknown_then_healthy)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
+
+    with pytest.raises(CredentialUnknownError) as excinfo:
+        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
+
+    assert excinfo.value.reason == reason
     parked.set()
 
 
@@ -577,20 +596,20 @@ def test_poll_loop_raises_desktop_gone_when_process_dead(monkeypatch) -> None:
     assert enumerator.calls == 1, "process_gone is terminal - the loop must raise on the first poll, not wait"
 
 
-def test_poll_loop_latches_unknown_when_process_alive_zero_windows(monkeypatch) -> None:
-    """#158: an alive-but-window-less Desktop is indeterminate and LATCHES, like the minimized case.
+def test_poll_loop_latches_desktop_unready_when_process_alive_zero_windows(monkeypatch) -> None:
+    """#158: an alive-but-window-less Desktop latches as a local readiness failure.
 
     Empty enumeration with the process still alive is a startup/wedged state, not a crash: the loop must
     keep waiting (a startup that grows a window and finishes is never overridden), latch the UNKNOWN
-    observation, and raise :class:`CredentialUnknownError` at the deadline - never ``process_gone`` and
-    never a bare timeout. This is what keeps a working startup from being mislabelled a dead process.
+    observation, and raise :class:`DesktopUnreadyError` at the deadline - never ``process_gone``,
+    credential UNKNOWN, or a bare timeout.
     """
     clock = _FakeClock()
     monkeypatch.setattr(_credential_modal, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
     enumerator = _ScriptedEnumerator([[]])
 
-    with pytest.raises(CredentialUnknownError) as excinfo:
+    with pytest.raises(DesktopUnreadyError) as excinfo:
         join_with_credential_poll(
             worker,
             pid=111,
@@ -676,6 +695,30 @@ def test_refresh_main_returns_credential_missing_fast_at_t0(monkeypatch, tmp_pat
     assert "Sql.Database(server)" in out
 
 
+def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tmp_path: Path, capsys) -> None:
+    """#158: the real mutating CLI entry point must terminate on a dead Desktop."""
+    model_folder(tmp_path, "MyMigration")
+    reason = harvested_desktop_gone_reason()
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_bridge_status",
+        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
+    )
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_credential_state",
+        lambda _pid: CredentialDetection(process_gone=reason),
+    )
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 2
+    assert out.startswith("REFRESH: DESKTOP_GONE")
+    assert reason in out
+
+
 def test_probe_query_returns_credential_missing_fast_at_t0(monkeypatch, capsys) -> None:
     """probe_desktop_query.main stops before port discovery or DAX when the modal is already open."""
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda _pid: modal_state())
@@ -689,6 +732,24 @@ def test_probe_query_returns_credential_missing_fast_at_t0(monkeypatch, capsys) 
     assert exit_code == 1
     assert elapsed < 0.5, f"t=0 credential verdict waited {elapsed:.3f}s"
     assert "PREFLIGHT: CREDENTIAL_MISSING" in out
+
+
+def test_probe_query_main_returns_desktop_gone_before_port_discovery(monkeypatch, capsys) -> None:
+    """#158: the real read-only CLI entry point must terminate on a dead Desktop."""
+    reason = harvested_desktop_gone_reason()
+    monkeypatch.setattr(
+        probe_desktop_query,
+        "_credential_state",
+        lambda _pid: CredentialDetection(process_gone=reason),
+    )
+    monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
+
+    exit_code = probe_desktop_query.main(["--pid", "111"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 2
+    assert out.startswith("PREFLIGHT: DESKTOP_GONE")
+    assert reason in out
 
 
 def test_probe_query_returns_blocked_by_dialog_fast_at_t0(monkeypatch, capsys) -> None:

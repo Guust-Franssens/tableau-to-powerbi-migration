@@ -72,6 +72,7 @@ from _verdict_lines import (
     _has_credential_stop_verdict,
     _has_data_ok_verdict,
     _has_desktop_gone_verdict,
+    _has_desktop_unready_verdict,
 )
 from migration_bundle import load_bundle
 
@@ -429,6 +430,13 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
             "UNREACHABLE or a connection/credential problem. Re-open the model in Power BI Desktop, "
             "confirm it is running, and re-run the probe. Raw: " + raw,
         )
+    if _has_desktop_unready_verdict(text):
+        return (
+            "ERROR",
+            "Power BI Desktop was running without any window, so the probe could not inspect its "
+            "local state or query the source. Wait for Desktop to finish starting, or restart it if "
+            "it is wedged, then re-run the probe. Raw: " + raw,
+        )
     # Deliberately "identity unverified" alone, NOT "model identity unverified". Measured
     # 2026-08-03 (gpt-5.6-sol, live happy-path run): the real producer text is
     # "model  : identity unverified (no model folder resolved for this pid)" - note the extra
@@ -766,7 +774,13 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
     # reassuring no-dialog banner on stdout even on failure paths (so the text can look OK while the run
     # failed), and a non-zero exit must never be read as success even if a stale OK line is present
     # (issue #152: this used to classify on stdout prose alone and ignore the exit code entirely).
-    if refresh.returncode == 0 and _has_data_ok_verdict(text, table):
+    if (
+        refresh.returncode == 0
+        and not _has_credential_stop_verdict(text)
+        and not _has_desktop_gone_verdict(text)
+        and not _has_desktop_unready_verdict(text)
+        and _has_data_ok_verdict(text, table)
+    ):
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
         return 0, "DATA_OK"
     verdict, detail = _classify_failure(text, network_fault_observed=network_fault_observed)

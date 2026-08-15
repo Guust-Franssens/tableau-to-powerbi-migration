@@ -221,12 +221,10 @@ def _detector_unknown_reasons(credential_modal) -> list[str]:
         minimized=True,
     )
     # (enumerate_windows, process_is_alive) per UNKNOWN branch the detector can emit: enumeration
-    # failed, owner minimized, and (issue #158) zero windows while the process is still alive. The
-    # liveness callable is only consulted by the zero-window branch; the others ignore it.
+    # failed and owner minimized. Zero windows while alive is a distinct local DESKTOP_UNREADY state.
     scenarios = (
         (_enumeration_raises, lambda _pid: True),
         (lambda _pid: [minimized_main], lambda _pid: True),
-        (lambda _pid: [], lambda _pid: True),
     )
 
     reasons: list[str] = []
@@ -396,15 +394,15 @@ def test_credential_unknown_full_child_transcript_classifies_as_no_credential(mo
 
 
 def _harvest_zero_window_alive_reason(credential_modal) -> str:
-    """The REAL zero-window-but-alive ``unknown_reason``, harvested by driving the detector (issue #158).
+    """The REAL zero-window-but-alive readiness reason, harvested from the detector (issue #158).
 
     Same #152/#153 discipline as ``_harvest_minimized_reason``: assert against the exact string the
     detector really emits when enumeration returns an empty list while the process is still alive.
     """
     reason = credential_modal.inspect_credential_modal(
         111, enumerate_windows=lambda _pid: [], process_is_alive=lambda _pid: True
-    ).unknown_reason
-    assert reason, "detector did not report the zero-window alive UNKNOWN reason"
+    ).desktop_unready
+    assert reason, "detector did not report the zero-window alive DESKTOP_UNREADY reason"
     return reason
 
 
@@ -457,7 +455,7 @@ def test_desktop_gone_and_zero_window_detector_strings_are_marker_free() -> None
         + probe_live_source.ACCESS_DENIED_MARKERS
     )
     strings = {
-        "zero_window_alive_unknown_reason": _harvest_zero_window_alive_reason(credential_modal),
+        "zero_window_alive_desktop_unready": _harvest_zero_window_alive_reason(credential_modal),
         "process_gone": _harvest_desktop_gone_reason(credential_modal),
     }
     offenders = {name: [m for m in markers if m in text.lower()] for name, text in strings.items()}
@@ -491,6 +489,43 @@ def test_desktop_gone_full_child_transcript_classifies_as_error(monkeypatch: pyt
     assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (  # noqa: SLF001
         1,
         "ERROR",
+    )
+
+
+def test_zero_window_alive_emitter_and_parent_classify_as_local_error() -> None:
+    """#158: a live window-less Desktop is not evidence of a credential problem."""
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+    state = credential_modal.inspect_credential_modal(
+        111, enumerate_windows=lambda _pid: [], process_is_alive=lambda _pid: True
+    )
+
+    assert state.unknown_reason is None
+    assert state.desktop_unready
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        refresh_pbip_model._emit_desktop_unready(111, state.desktop_unready)
+    emitted = buffer.getvalue()
+
+    assert "REFRESH: DESKTOP_UNREADY" in emitted
+    assert "minimiz" not in emitted.lower()
+    assert "sign in" not in emitted.lower()
+    assert probe_live_source._classify_failure(emitted, network_fault_observed=False)[0] == "ERROR"
+
+
+def test_credential_stop_precedes_success_when_verdict_lines_contradict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A contradictory exit-0 transcript fails closed even though real producers cannot emit it."""
+    probe_live_source = _import_probe_live_source()
+    transcript = "REFRESH: TABLES_OK 'Orders'\nREFRESH: CREDENTIAL_UNKNOWN pid=111; indeterminate"
+    monkeypatch.setattr(
+        probe_live_source.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(args=["refresh"], returncode=0, stdout=transcript, stderr=""),
+    )
+
+    assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (
+        1,
+        "NO_CREDENTIAL",
     )
 
 

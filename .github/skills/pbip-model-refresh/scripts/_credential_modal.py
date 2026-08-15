@@ -70,6 +70,7 @@ class CredentialDetection:
     modal: CredentialModal | None = None
     blocking_dialog: BlockingDialog | None = None
     unknown_reason: str | None = None
+    desktop_unready: str | None = None
     process_gone: str | None = None
     windows: tuple[DesktopWindow, ...] = ()
 
@@ -134,6 +135,15 @@ class DesktopGoneError(RuntimeError):
         self.pid = pid
         self.reason = reason
         super().__init__(f"power bi desktop process {pid} is gone: {reason}")
+
+
+class DesktopUnreadyError(RuntimeError):
+    """Power BI Desktop is alive but has no window, so its local state cannot be inspected."""
+
+    def __init__(self, pid: int, reason: str) -> None:
+        self.pid = pid
+        self.reason = reason
+        super().__init__(f"Power BI Desktop process {pid} is not ready: {reason}")
 
 
 WindowEnumerator = Callable[[int], Iterable[DesktopWindow]]
@@ -344,7 +354,7 @@ def inspect_credential_modal(
         # crashed (definitive -> a distinct terminal state that must never be blamed on a slow source).
         if process_is_alive(pid):
             return CredentialDetection(
-                unknown_reason=(
+                desktop_unready=(
                     "Power BI Desktop enumerated no windows while its process is still running; a "
                     "window-less process is starting up or wedged and its dialog state cannot be read"
                 ),
@@ -480,6 +490,8 @@ def join_with_credential_poll(
     poll_seconds: float,
     source_hint: str | None = None,
     detector: Callable[[int], CredentialDetection] = inspect_credential_modal,
+    initial_unknown: str | None = None,
+    initial_desktop_unready: str | None = None,
 ) -> bool:
     """Wait for ``worker`` while polling for a late credential dialog.
 
@@ -510,7 +522,8 @@ def join_with_credential_poll(
     """
     started = time.monotonic()
     next_heartbeat = heartbeat_seconds
-    latched_unknown: str | None = None
+    latched_unknown = initial_unknown
+    latched_desktop_unready = initial_desktop_unready
     while worker.is_alive():
         elapsed = time.monotonic() - started
         remaining = max(0.0, total_timeout - elapsed)
@@ -525,6 +538,8 @@ def join_with_credential_poll(
             raise DialogBlockedError(pid, state.blocking_dialog)
         if state.process_gone is not None:
             raise DesktopGoneError(pid, state.process_gone)
+        if state.desktop_unready and latched_desktop_unready is None:
+            latched_desktop_unready = state.desktop_unready
         if state.unknown_reason and latched_unknown is None:
             latched_unknown = state.unknown_reason
             print_indeterminate_state_notice(pid, state.unknown_reason)
@@ -539,6 +554,9 @@ def join_with_credential_poll(
             raise DialogBlockedError(pid, state.blocking_dialog)
         if state.process_gone is not None:
             raise DesktopGoneError(pid, state.process_gone)
+        latched_desktop_unready = latched_desktop_unready or state.desktop_unready
+        if latched_desktop_unready is not None:
+            raise DesktopUnreadyError(pid, latched_desktop_unready)
         latched_unknown = latched_unknown or state.unknown_reason
         if latched_unknown is not None:
             raise CredentialUnknownError(pid, latched_unknown)
