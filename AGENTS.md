@@ -294,21 +294,35 @@ gitignored** — see the note in `.gitignore`.
 overlap. This repo's ruff selection is `select = ["E4", "E7", "E9", "F"]`, which **excludes `E501`
 (line-too-long)**, while `[tool.pylint.format]` sets `max-line-length = 120`. So a 121-character line
 makes `ruff check` print **"All checks passed!"** and CI then fail with `C0301` — and `ruff format`
-cannot rescue you, because it will not split a long string literal or comment. Measured: PR #155 sat
-red for hours on exactly this (121/120, exit 16) while the mandated ruff ritual reported clean. Fix
-pattern: wrap the literal in parentheses across two lines (the runtime string stays byte-identical).
+cannot rescue you, because it will not split a long string literal or comment. Measured: PR #157 sat
+red ~1h50m on exactly this — `_credential_modal.py:282`, `C0301: Line too long (121/120)`, score
+9.99/10, [run 31839056611](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/actions/runs/31839056611)
+— while the mandated ruff ritual reported clean. Fix pattern: wrap the literal in parentheses across
+two lines (the runtime string stays byte-identical).
+
+**And `pylint` means all THREE roots, not just `scripts/`.** [`checks.yml`](.github/workflows/checks.yml)
+invokes it three times — `scripts`, `.github/skills/pbip-model-refresh/scripts`,
+`.github/skills/powerbi-ai-readiness/scripts` — deliberately, because `scripts/probe_desktop_query.py`
+is a forwarding shim sharing a module name with the bundled script it forwards to, so a single
+combined invocation resolves the import to the shim (`E0611`). That is exactly how #157 got through:
+`pylint scripts` passed **10.00/10** and the failure came from the *second* invocation. Lint the root
+that contains the file you changed, not the one you think of first.
 
 **`max-module-lines = 1200` is the same trap one level up, and it is worse** — nothing hints at it
 until you cross it. Pylint scores **10.00/10** right up to the boundary, then fails with
 `C0302: Too many lines in module (1202/1200)`, exit 16: a red CI whose message has nothing to do with
-your change. Measured 2026-08-15 by controlled experiment on `scripts/probe_live_source.py`, which a
-**comment-only** PR had left at exactly 1200. Before adding lines to a long module, check its length
+your change. The boundary is `> 1200` — a 1200-line module passes at 10.00/10. Measured 2026-08-15 by
+controlled experiment on `scripts/probe_live_source.py`, which a **comment-only** PR (#159) pushed to
+exactly 1200 at its pre-merge head `97691af`; it was tightened to 1196 before merging, so master
+records 1196 and the near-miss is invisible in its history — squash-merge discards the intermediate
+commit. Cite a measurement against something that survives the merge, or say plainly that it does not.
+Before adding lines to a long module, check its length
 against the cap; if you land within a few lines of it, buy the headroom back rather than leaving the
 landmine for the next author.
 
-So the ritual that actually predicts CI is `ruff format` → `ruff check --fix` → **`pylint`** → the
-targeted tests. Skipping the `pylint` step is the single most common way a green local run turns into
-a red PR in this repo.
+So the ritual that actually predicts CI is `ruff format` → `ruff check --fix` → **`pylint` (all three
+roots)** → the targeted tests. Every step of that is load-bearing: skipping `pylint` hides `C0301` and
+`C0302`, and running it on only one root hides anything living in a skill bundle.
 
 ### 6. Preflight — verify everything above in one command
 
