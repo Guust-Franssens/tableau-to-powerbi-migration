@@ -68,6 +68,12 @@ import time
 import uuid
 from pathlib import Path
 
+from _verdict_lines import (
+    _has_credential_stop_verdict,
+    _has_data_ok_verdict,
+    _has_desktop_gone_verdict,
+    _has_desktop_unready_verdict,
+)
 from migration_bundle import load_bundle
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -167,28 +173,9 @@ ACCESS_DENIED_MARKERS = (
     "not authorized",
 )
 
-# The child (`refresh_pbip_model.py` / `probe_desktop_query.py`) speaks in machine-readable verdict
-# LINES: `REFRESH:`/`PREFLIGHT:`/`PROBE:` followed by a token. These two regexes match those lines
-# structurally so the classifier never mistakes prose that merely NAMES a token (a reassuring banner,
-# a doc excerpt, a late worker log) for the verdict itself. Kept as module constants so the seam
-# tests can import and exercise them directly.
-#
-# Success family, from `_verdict._emit_data_verdict`:
-#   REFRESH: DATA_OK[ + PERSISTED]          model-level (whole-database refresh, canaries had rows)
-#   REFRESH: TABLE_OK '<name>'[ + ...]       implicit single-table probe
-#   REFRESH: TABLES_OK '<name>'[, '<n2>']    a --tables-narrowed refresh (what THIS probe elicits)
-# The trailing `(?:\s+...)?$` keeps the anchoring lesson: `DATA_OK_FROM_WORKER` is NOT `DATA_OK`.
-DATA_OK_VERDICT_RE = re.compile(
-    r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+(?P<token>DATA_OK|TABLE_OK|TABLES_OK)(?:\s+(?P<rest>.*))?$"
-)
-# Credential-stop family, from `_emit_credential_missing` / `_emit_blocked_by_dialog`. Anchored on
-# purpose (issue #153): a banner that lists these tokens in prose must NOT fabricate the verdict.
-# Forward-compat note for issue #154 (a SEPARATE fix, deliberately NOT implemented here): if a
-# latched-UNKNOWN outcome ever earns its own verdict token (e.g. `CREDENTIAL_UNKNOWN`), THIS
-# alternation is the parse point to extend so the structural line-matching keeps recognising it.
-CREDENTIAL_STOP_VERDICT_RE = re.compile(
-    r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+(?:CREDENTIAL_MISSING|BLOCKED_BY_DIALOG)\b"
-)
+# The verdict-LINE matchers (DATA_OK / credential-stop / DESKTOP_GONE / DESKTOP_UNREADY families) and
+# their regexes live in `_verdict_lines.py` (imported above), extracted to keep this module under the
+# line ceiling.
 
 
 def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, str]:
@@ -429,6 +416,28 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
     # pylint: disable=too-many-return-statements
     low = text.lower()
     raw = _error_excerpt(text)
+    # A machine-readable DESKTOP_GONE verdict line (issue #158), checked FIRST because it is the most
+    # definitive signal: Power BI Desktop enumerated zero windows AND its process was gone, so the
+    # probe never reached the source. Like "identity unverified" this is a LOCAL failure - the data
+    # source was never contacted - so it is ERROR, never UNREACHABLE (which would send someone to fix
+    # a server that was never queried) and never NO_CREDENTIAL (no sign-in revives a dead process).
+    # Matched structurally on the verdict line; the detector's reason prose is deliberately marker-free.
+    if _has_desktop_gone_verdict(text):
+        return (
+            "ERROR",
+            "Power BI Desktop exited or crashed before the probe could query the source: it "
+            "enumerated no windows and its process was no longer running, so nothing was learned "
+            "about the data source. This is a LOCAL tooling failure - do not report it as "
+            "UNREACHABLE or a connection/credential problem. Re-open the model in Power BI Desktop, "
+            "confirm it is running, and re-run the probe. Raw: " + raw,
+        )
+    if _has_desktop_unready_verdict(text):
+        return (
+            "ERROR",
+            "Power BI Desktop was running without any window, so the probe could not inspect its "
+            "local state or query the source. Wait for Desktop to finish starting, or restart it if "
+            "it is wedged, then re-run the probe. Raw: " + raw,
+        )
     # Deliberately "identity unverified" alone, NOT "model identity unverified". Measured
     # 2026-08-03 (gpt-5.6-sol, live happy-path run): the real producer text is
     # "model  : identity unverified (no model folder resolved for this pid)" - note the extra
@@ -485,58 +494,6 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
         "unclassified refresh failure: the probe ran, but the error did not match a credential, "
         "bad-table, or observed network fault signature. Do not report it as UNREACHABLE. Raw: " + raw,
     )
-
-
-def _has_credential_stop_verdict(text: str) -> bool:
-    """True when a line is a machine-readable credential-stop verdict.
-
-    ``CREDENTIAL_MISSING`` / ``BLOCKED_BY_DIALOG`` on a ``REFRESH:``/``PREFLIGHT:``/``PROBE:`` verdict
-    line - never a substring of the transcript. Issue #153: the child's own reassuring "no blocking
-    dialog" banner used to name these tokens in prose, and an unanchored scan let that message classify
-    a successful refresh as ``NO_CREDENTIAL``. This is the structural half of the fix; the banner reword
-    (``_credential_modal.print_refresh_banner``) is the belt-and-braces half.
-    """
-    return any(CREDENTIAL_STOP_VERDICT_RE.match(line) for line in text.splitlines())
-
-
-def _has_data_ok_verdict(text: str, table: str) -> bool:
-    """True only when a machine-readable verdict LINE certifies real data for the probed ``table``.
-
-    Accepts the whole success family the child emitter (``_verdict._emit_data_verdict``) can print:
-
-      * ``DATA_OK``            - a model-level verdict (whole-database refresh, canaries returned rows)
-      * ``TABLE_OK '<name>'``  - an implicit single-table probe
-      * ``TABLES_OK '<name>'`` - a ``--tables``-narrowed refresh (what THIS probe ALWAYS elicits, since
-        it always passes ``--tables <table>`` and never ``--canaries``)
-
-    The last point is issue #152: before, this accepted only the literal ``DATA_OK``, which the probe's
-    own argv could never make the child produce - so no source, credential, or config ever lifted the
-    gate. ``TABLE_OK``/``TABLES_OK`` name the table(s) actually verified, so they are SCOPED: they clear
-    the gate only when ``table`` is among the named tables. #115's guarantee is preserved - a verdict
-    naming some OTHER table is a false certificate for this one and must not count.
-
-    Matching is anchored to a verdict line, never a substring. A credential-blocked run once printed
-    ``CREDENTIAL_MISSING`` while a background worker later printed a ``DATA_OK``-looking string; a
-    substring scan would have falsely cleared the gate (see ``test_requires_data_ok_verdict_token``).
-    """
-    for line in text.splitlines():
-        match = DATA_OK_VERDICT_RE.match(line)
-        if match is None:
-            continue
-        if match.group("token") == "DATA_OK":
-            return True
-        # TABLE_OK / TABLES_OK name one or more single-quoted tables; the probed table must be one.
-        # Known limitation (reviewed 2026-08-14, intentionally NOT fixed here): a table name containing
-        # a literal apostrophe (e.g. "O'Brien Sales") is emitted UNESCAPED by ``_verdict``, so this
-        # findall recovers the wrong tokens and ``table in named`` is False. It FAILS SAFE - it can only
-        # ever keep the gate SHUT, never lift it wrongly - and a false lift is unreachable in the
-        # single-table probe flow (the probe asks for exactly the table it names). The ambiguity
-        # originates in the emitter's non-escaping, and the #115 scoping here is verified-correct, so the
-        # matcher is left untouched rather than risk regressing it for a fail-safe, unreachable edge.
-        named = re.findall(r"'([^']*)'", match.group("rest") or "")
-        if table in named:
-            return True
-    return False
 
 
 def _npx(args: list[str], timeout: int) -> tuple[int, str]:
@@ -818,7 +775,13 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
     # reassuring no-dialog banner on stdout even on failure paths (so the text can look OK while the run
     # failed), and a non-zero exit must never be read as success even if a stale OK line is present
     # (issue #152: this used to classify on stdout prose alone and ignore the exit code entirely).
-    if refresh.returncode == 0 and _has_data_ok_verdict(text, table):
+    if (
+        refresh.returncode == 0
+        and not _has_credential_stop_verdict(text)
+        and not _has_desktop_gone_verdict(text)
+        and not _has_desktop_unready_verdict(text)
+        and _has_data_ok_verdict(text, table)
+    ):
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
         return 0, "DATA_OK"
     verdict, detail = _classify_failure(text, network_fault_observed=network_fault_observed)

@@ -16,6 +16,12 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+# Sibling module, resolved once the caller puts this scripts/ dir on sys.path (probe, refresh, and the
+# test conftest all do). Reused rather than reimplemented for issue #158's zero-window liveness split:
+# its bias errs toward "alive" on any ambiguity, so an uncertain Desktop routes to UNKNOWN-latched and
+# never to a false crash - and it is already load-bearing and tested for stale-lock reclaim.
+from _lock import _process_alive
+
 SIGNATURE_PATH = Path(__file__).resolve().with_name("credential_modal_signature.regex")
 CONNECTOR_SOURCE_RE = re.compile(
     r"\b(?P<kind>Sql\.Database|Snowflake\.Databases|Databricks\.[A-Za-z]+|Odbc\.DataSource|Web\.Contents)\s*\("
@@ -64,6 +70,8 @@ class CredentialDetection:
     modal: CredentialModal | None = None
     blocking_dialog: BlockingDialog | None = None
     unknown_reason: str | None = None
+    desktop_unready: str | None = None
+    process_gone: str | None = None
     windows: tuple[DesktopWindow, ...] = ()
 
 
@@ -86,7 +94,60 @@ class DialogBlockedError(RuntimeError):
         super().__init__(describe_blocking_dialog(dialog))
 
 
+class CredentialUnknownError(RuntimeError):
+    """Power BI Desktop's blocking-dialog state stayed indeterminate right up to the deadline.
+
+    Raised by :func:`join_with_credential_poll` when it LATCHED an indeterminate observation - the
+    owner window went iconic, which hides its owned modal dialogs from enumeration - that a later
+    ``none`` could not erase. It is a mandatory THIRD outcome, distinct from a detected block
+    (:class:`CredentialMissingError` / :class:`DialogBlockedError`) and from a healthy deadline:
+    minimizing then restoring the owner destroys the dialog evidence for good (measured 2026-08-14,
+    issue #154), so ``none`` after the fact is indistinguishable from a genuinely healthy Desktop and
+    is NOT proof of health. Reporting a bare timeout here would blame a slow source for what is really
+    an unobservable dialog no automation can fill.
+
+    ``reason`` is the detector's own marker-free string, carried verbatim so the caller's verdict line
+    cannot smuggle a ``CREDENTIAL_MARKER`` into the parent classifier's free-text scan (issue #153).
+    """
+
+    def __init__(self, pid: int, reason: str) -> None:
+        self.pid = pid
+        self.reason = reason
+        super().__init__(f"desktop dialog state indeterminate for pid {pid}: {reason}")
+
+
+class DesktopGoneError(RuntimeError):
+    """Power BI Desktop enumerated ZERO windows AND the process is no longer running (issue #158).
+
+    A live, working Desktop always owns at least its main window, so an empty enumeration is never
+    evidence of health - it means the process has exited, crashed, or (while still starting) has not
+    yet created a window. This class is the DEFINITIVE half of that split: the liveness check in
+    :func:`inspect_credential_modal` has confirmed the process is gone, so there is nothing left to
+    wait for. It is distinct from :class:`CredentialUnknownError` (process still ALIVE but momentarily
+    window-less - indeterminate, latched) and must never be reported as a slow source: the data source
+    is not implicated at all when Desktop itself has died.
+
+    ``reason`` is the detector's own marker-free string, carried verbatim so the caller's verdict line
+    cannot smuggle a ``CREDENTIAL_MARKER`` into the parent classifier's free-text scan (issue #153).
+    """
+
+    def __init__(self, pid: int, reason: str) -> None:
+        self.pid = pid
+        self.reason = reason
+        super().__init__(f"power bi desktop process {pid} is gone: {reason}")
+
+
+class DesktopUnreadyError(RuntimeError):
+    """Power BI Desktop is alive but has no window, so its local state cannot be inspected."""
+
+    def __init__(self, pid: int, reason: str) -> None:
+        self.pid = pid
+        self.reason = reason
+        super().__init__(f"Power BI Desktop process {pid} is not ready: {reason}")
+
+
 WindowEnumerator = Callable[[int], Iterable[DesktopWindow]]
+ProcessLivenessCheck = Callable[[int], bool]
 
 DESKTOP_MAIN_CLASS_PREFIX = "WindowsForms10.Window.8"
 MIN_DIALOG_WIDTH = 100
@@ -259,9 +320,12 @@ def enumerate_pid_windows(pid: int) -> list[DesktopWindow]:
 
 
 def inspect_credential_modal(
-    pid: int, enumerate_windows: WindowEnumerator = enumerate_pid_windows
+    pid: int,
+    enumerate_windows: WindowEnumerator = enumerate_pid_windows,
+    process_is_alive: ProcessLivenessCheck = _process_alive,
 ) -> CredentialDetection:
     """Inspect ``pid`` for a credential modal, preserving indeterminate states."""
+    # pylint: disable=too-many-return-statements
     try:
         windows = tuple(enumerate_windows(pid))
     except Win32EnumerationError as exc:
@@ -280,6 +344,29 @@ def inspect_credential_modal(
         return CredentialDetection(
             unknown_reason=(
                 "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"
+            ),
+            windows=windows,
+        )
+    if not windows:
+        # A live, working Desktop always owns at least its main window, so ZERO windows is never proof
+        # of health (issue #158). Split it by liveness, into TWO terminal states - neither of which is
+        # the minimized case's latch-and-keep-waiting: an alive-but-window-less process is starting up
+        # or wedged (`desktop_unready` -> DESKTOP_UNREADY, exit 2: its local state is unreadable, so
+        # the source was never tested), while a gone process exited or crashed (`process_gone` ->
+        # DESKTOP_GONE, exit 2). Both are LOCAL failures that must never be blamed on a slow source or
+        # routed to the credential layer. `unknown_reason` is deliberately NOT set for either.
+        if process_is_alive(pid):
+            return CredentialDetection(
+                desktop_unready=(
+                    "Power BI Desktop enumerated no windows while its process is still running; a "
+                    "window-less process is starting up or wedged and its dialog state cannot be read"
+                ),
+                windows=windows,
+            )
+        return CredentialDetection(
+            process_gone=(
+                "Power BI Desktop enumerated no windows and its process is no longer running; it "
+                "exited or crashed before any dialog state could be observed"
             ),
             windows=windows,
         )
@@ -373,6 +460,39 @@ def print_refresh_heartbeat(elapsed: float, total: float) -> None:
     print(f"still refreshing, {int(elapsed)}s / {int(total)}s", flush=True)
 
 
+def print_indeterminate_state_notice(pid: int, reason: str) -> None:
+    """Loudly note the first time the wait latches an indeterminate window state (issues #154, #158).
+
+    Two observations land here, and they mean the same thing - the dialog state can no longer be read
+    reliably: the owner window went iconic (minimize -> restore destroys the owned-dialog evidence for
+    good, measured 2026-08-14), or enumeration returned no windows while the process was still alive
+    (starting up or wedged, issue #158). Either way the wait latches it so a later ``none`` cannot pass
+    for health; this notice makes the transition visible in the transcript instead of silent.
+
+    Like every string this module prints into the refresh transcript, it is deliberately MARKER-FREE
+    (no ``CREDENTIAL_MARKER`` token, not even the bare word "credential") and is NOT a ``REFRESH:``
+    verdict line, so the parent classifier cannot mistake it for a verdict (issue #153). ``reason`` is
+    the detector's own marker-free string and carries the specific cause.
+    """
+    print(
+        f"PID {pid} entered an indeterminate window state mid-wait ({reason}); latching this "
+        "observation - a later clear cannot un-see it, because the evidence a blocking dialog would "
+        "leave is no longer readable. This run ends at the deadline with a distinct indeterminate "
+        "verdict, never a slow-source timeout.",
+        flush=True,
+    )
+
+
+def _raise_detection(pid: int, state: CredentialDetection, source_hint: str | None) -> None:
+    """Raise for a visible block or definitive local Desktop failure."""
+    if state.modal is not None:
+        raise CredentialMissingError(pid, state.modal, source_hint)
+    if state.blocking_dialog is not None:
+        raise DialogBlockedError(pid, state.blocking_dialog)
+    if state.process_gone is not None:
+        raise DesktopGoneError(pid, state.process_gone)
+
+
 # pylint: disable=too-many-arguments
 def join_with_credential_poll(
     worker,
@@ -383,14 +503,46 @@ def join_with_credential_poll(
     poll_seconds: float,
     source_hint: str | None = None,
     detector: Callable[[int], CredentialDetection] = inspect_credential_modal,
+    initial_state: CredentialDetection | None = None,
 ) -> bool:
     """Wait for ``worker`` while polling for a late credential dialog.
 
     Returns True when the worker finished before the wall-clock deadline, False when the deadline
-    elapsed. Raises as soon as the shared detector sees a blocking dialog.
+    elapsed with the dialog state observably HEALTHY throughout. Raises immediately when the shared
+    detector sees a credential modal or a blocking dialog.
+
+    Indeterminate (``unknown_reason``) observations are LATCHED, not ignored (issue #154). The owner
+    window going iconic hides its owned modal dialogs from enumeration, and - measured 2026-08-14 -
+    restoring it does NOT bring them back: minimize -> restore destroys the evidence permanently, after
+    which the detector reports ``none``, the SAME state as a genuinely healthy Desktop. A run that ever
+    went indeterminate therefore ends at the deadline with :class:`CredentialUnknownError`, so a later
+    ``none`` can never launder it into a bare timeout that blames a slow source.
+
+    Latch-and-keep-waiting (rather than ending the instant UNKNOWN is first seen) is deliberate and is
+    the false-positive-free choice: a worker that FINISHES clears the wait via ``return True`` below
+    regardless of any latch, so a refresh that completes within the deadline is never overridden - the
+    only run that ever surfaces the latched verdict is one that was going to hit the deadline anyway.
+    Ending early instead would let a single transient enumeration hiccup, or a healthy-but-minimized
+    slow refresh, cut off a run that would have succeeded.
+
+    A ``process_gone`` observation is different: it is TERMINAL, raising :class:`DesktopGoneError`
+    immediately (issue #158). Zero enumerated windows plus a confirmed-dead PID is definitive - Desktop
+    has exited or crashed, there is nothing left to wait for, and the data source is not implicated -
+    so unlike the latched-and-waited indeterminate case there is no value in running out the clock.
+
+    ``desktop_unready`` - zero windows while the process is still ALIVE - is the third shape, and sits
+    between the two: it is LATCHED like ``unknown_reason`` (a starting-up Desktop may still produce a
+    window and finish the refresh, so ending early would be a false positive), but at the deadline it
+    surfaces as :class:`DesktopUnreadyError`, a terminal local-error verdict, ahead of the credential
+    family. It is not a credential signal: no human sign-in fixes a window-less process, so routing it
+    to ``CredentialUnknownError`` would send someone to the wrong layer. Both zero-window states are
+    seeded from ``initial_state`` so an observation made only by the caller's t=0 pre-check cannot be
+    lost before the first poll.
     """
     started = time.monotonic()
     next_heartbeat = heartbeat_seconds
+    latched_unknown = initial_state.unknown_reason if initial_state else None
+    latched_desktop_unready = initial_state.desktop_unready if initial_state else None
     while worker.is_alive():
         elapsed = time.monotonic() - started
         remaining = max(0.0, total_timeout - elapsed)
@@ -399,19 +551,24 @@ def join_with_credential_poll(
         worker.join(min(remaining, poll_seconds, max(0.0, next_heartbeat - elapsed)))
         elapsed = time.monotonic() - started
         state = detector(pid)
-        if state.modal is not None:
-            raise CredentialMissingError(pid, state.modal, source_hint)
-        if state.blocking_dialog is not None:
-            raise DialogBlockedError(pid, state.blocking_dialog)
+        _raise_detection(pid, state, source_hint)
+        if state.desktop_unready and latched_desktop_unready is None:
+            latched_desktop_unready = state.desktop_unready
+        if state.unknown_reason and latched_unknown is None:
+            latched_unknown = state.unknown_reason
+            print_indeterminate_state_notice(pid, state.unknown_reason)
         if elapsed >= next_heartbeat and worker.is_alive():
             print_refresh_heartbeat(elapsed, total_timeout)
             next_heartbeat += heartbeat_seconds
     if worker.is_alive():
         state = detector(pid)
-        if state.modal is not None:
-            raise CredentialMissingError(pid, state.modal, source_hint)
-        if state.blocking_dialog is not None:
-            raise DialogBlockedError(pid, state.blocking_dialog)
+        _raise_detection(pid, state, source_hint)
+        latched_desktop_unready = latched_desktop_unready or state.desktop_unready
+        if latched_desktop_unready is not None:
+            raise DesktopUnreadyError(pid, latched_desktop_unready)
+        latched_unknown = latched_unknown or state.unknown_reason
+        if latched_unknown is not None:
+            raise CredentialUnknownError(pid, latched_unknown)
         return False
     return True
 
