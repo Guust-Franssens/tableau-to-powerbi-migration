@@ -294,19 +294,21 @@ gitignored** — see the note in `.gitignore`.
 overlap. This repo's ruff selection is `select = ["E4", "E7", "E9", "F"]`, which **excludes `E501`
 (line-too-long)**, while `[tool.pylint.format]` sets `max-line-length = 120`. So a 121-character line
 makes `ruff check` print **"All checks passed!"** and CI then fail with `C0301` — and `ruff format`
-cannot rescue you, because it will not split a long string literal or comment. Measured: PR #157 sat
-red ~1h50m on exactly this — `_credential_modal.py:282`, `C0301: Line too long (121/120)`, score
-9.99/10, [run 31839056611](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/actions/runs/31839056611)
+cannot rescue you, because it will not split a long string literal or comment. Measured: PR #155 sat
+red ~1h50m on exactly this — `.github/skills/pbip-model-refresh/scripts/_credential_modal.py:282`,
+`C0301: Line too long (121/120)`, score 9.99/10,
+[run 31839056611](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/actions/runs/31839056611)
 — while the mandated ruff ritual reported clean. Fix pattern: wrap the literal in parentheses across
 two lines (the runtime string stays byte-identical).
 
 **And `pylint` means all THREE roots, not just `scripts/`.** [`checks.yml`](.github/workflows/checks.yml)
 invokes it three times — `scripts`, `.github/skills/pbip-model-refresh/scripts`,
-`.github/skills/powerbi-ai-readiness/scripts` — deliberately, because `scripts/probe_desktop_query.py`
-is a forwarding shim sharing a module name with the bundled script it forwards to, so a single
-combined invocation resolves the import to the shim (`E0611`). That is exactly how #157 got through:
-`pylint scripts` passed **10.00/10** and the failure came from the *second* invocation. Lint the root
-that contains the file you changed, not the one you think of first.
+`.github/skills/powerbi-ai-readiness/scripts`. They are *separate* invocations because
+`scripts/probe_desktop_query.py` is a forwarding shim sharing a module name with the bundled script it
+forwards to, so one combined invocation resolves the import to the shim (measured: 7 × `E0611`). What
+let #155 through is simpler than that mechanism: `pylint scripts` alone passes **10.00/10**, and the
+`C0301` came from the *second* invocation. Lint the root that contains the file you changed, not the
+one you reach for first.
 
 **`max-module-lines = 1200` is the same trap one level up, and it is worse** — nothing hints at it
 until you cross it. Pylint scores **10.00/10** right up to the boundary, then fails with
