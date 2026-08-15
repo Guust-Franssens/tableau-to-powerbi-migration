@@ -292,7 +292,7 @@ def _catalog_id(conn) -> str:
         reader.Close()
 
 
-# pylint: disable=too-many-statements
+# pylint: disable=too-many-arguments,too-many-statements
 def refresh(
     port: int,
     tables: list[str] | None,
@@ -300,6 +300,7 @@ def refresh(
     *,
     desktop_pid: int | None = None,
     source_hint: str | None = None,
+    initial_state: CredentialDetection | None = None,
 ) -> tuple[bool, str]:
     """Send a TMSL refresh over XMLA. Returns (ok, message).
 
@@ -338,9 +339,8 @@ def refresh(
     """
     result: dict[str, tuple[bool, str] | BaseException] = {}
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
-    initial_state = None
     if desktop_pid is not None:
-        state = _credential_state(desktop_pid)
+        state = initial_state or _credential_state(desktop_pid)
         _raise_if_blocked(desktop_pid, state, source_hint)
         initial_state = state
         if state.unknown_reason:
@@ -411,7 +411,7 @@ def refresh(
     return outcome
 
 
-# pylint: enable=too-many-statements
+# pylint: enable=too-many-arguments,too-many-statements
 
 
 def _bridge_status() -> dict:
@@ -1108,7 +1108,11 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
 
 
 def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches
-    pid: int, port: int, cache: Path | None, args: argparse.Namespace
+    pid: int,
+    port: int,
+    cache: Path | None,
+    args: argparse.Namespace,
+    initial_state: CredentialDetection | None = None,
 ) -> int | None:
     """Run the refresh and (unless suppressed) persist it. Returns an exit code, or None to continue.
 
@@ -1118,13 +1122,16 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     """
     source_hint = source_hint_from_model(cache.parent.parent if cache else None)
     try:
-        if "desktop_pid" in inspect.signature(refresh).parameters:
+        parameters = inspect.signature(refresh).parameters
+        if "desktop_pid" in parameters:
+            refresh_kwargs = {"desktop_pid": pid, "source_hint": source_hint}
+            if "initial_state" in parameters:
+                refresh_kwargs["initial_state"] = initial_state
             ok, message = refresh(
                 port,
                 args.tables,
                 REFRESH_TIMEOUT_SECONDS,
-                desktop_pid=pid,
-                source_hint=source_hint,
+                **refresh_kwargs,
             )
         else:
             ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
@@ -1366,7 +1373,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         return 2
 
     if not args.verify_only:
-        outcome = _refresh_and_save(pid, port, cache, args)
+        outcome = _refresh_and_save(pid, port, cache, args, credential_state)
         if outcome is not None:
             return outcome
 

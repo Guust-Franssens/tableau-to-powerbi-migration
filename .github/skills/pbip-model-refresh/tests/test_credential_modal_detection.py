@@ -719,6 +719,39 @@ def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tm
     assert reason in out
 
 
+def test_refresh_main_latches_unknown_from_its_own_precheck(monkeypatch, tmp_path: Path, capsys) -> None:
+    """#154: main's first UNKNOWN survives port and identity work before refresh starts."""
+    model_folder(tmp_path, "MyMigration")
+    reason = harvested_minimized_reason()
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_bridge_status",
+        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
+    )
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_credential_state",
+        lambda _pid: CredentialDetection(unknown_reason=reason),
+    )
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 52001)
+    monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda _port, _cache: True)
+
+    def assert_initial_state(_port, _tables, _timeout, *, desktop_pid, source_hint, initial_state=None):
+        del desktop_pid, source_hint
+        assert initial_state is not None
+        assert initial_state.unknown_reason == reason
+        raise CredentialUnknownError(111, initial_state.unknown_reason)
+
+    monkeypatch.setattr(refresh_pbip_model, "refresh", assert_initial_state)
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 3
+    assert "REFRESH: CREDENTIAL_UNKNOWN" in out
+    assert reason in out
+
+
 def test_probe_query_returns_credential_missing_fast_at_t0(monkeypatch, capsys) -> None:
     """probe_desktop_query.main stops before port discovery or DAX when the modal is already open."""
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda _pid: modal_state())
