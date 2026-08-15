@@ -142,6 +142,7 @@ from _credential_modal import (
     CredentialModal,
     CredentialUnknownError,
     DesktopGoneError,
+    DesktopUnreadyError,
     DialogBlockedError,
     describe_blocking_dialog,
     describe_modal,
@@ -255,7 +256,9 @@ def _emit_desktop_gone(pid: int, reason: str) -> None:
     ``DESKTOP_GONE`` is a DEFINITIVE local-environment failure, not a fact about the data source: the
     tracked process enumerated zero windows and is no longer running, so the probe never got to observe
     the source at all. It must never degrade to a slow-source timeout. It is also distinct from
-    ``CREDENTIAL_UNKNOWN`` (process still alive but momentarily window-less - indeterminate, latched).
+    ``DESKTOP_UNREADY`` (zero windows while the process is still ALIVE - starting up or wedged, so it
+    may yet recover) and from ``CREDENTIAL_UNKNOWN`` (a minimized owner window, whose hidden owned
+    dialogs make the credential state indeterminate).
     ``reason`` is the detector's marker-free string and the guidance below is marker-free too, so the
     parent classifier keys on the ``REFRESH: DESKTOP_GONE`` verdict line, never on prose (issue #153).
     """
@@ -265,6 +268,26 @@ def _emit_desktop_gone(pid: int, reason: str) -> None:
         "  gone, so this probe never reached the data source. Do NOT report this as a slow or broken\n"
         "  source - the source was never contacted. Re-open the model in Power BI Desktop, confirm it\n"
         "  is running, and re-run the probe against the new process id."
+    )
+
+
+def _emit_desktop_unready(pid: int, reason: str) -> None:
+    """Print the terminal local-error verdict for an ALIVE Desktop that owns no window (issue #158).
+
+    A live, working Desktop always owns at least its main window, so zero windows plus a live process
+    means it is starting up or wedged: its dialog state cannot be read, and nothing was learned about
+    the data source. It is emitted as its own ``DESKTOP_UNREADY`` verdict, at the ERROR-family exit 2,
+    for two reasons. It is not ``CREDENTIAL_UNKNOWN`` (exit 3), because no human sign-in fixes a
+    window-less process and that verdict would route the run to the credential layer. It is not
+    ``DESKTOP_GONE``, because the process may still recover. ``reason`` is the detector's marker-free
+    string and the guidance below is marker-free too, so the parent classifier keys on the
+    ``REFRESH: DESKTOP_UNREADY`` verdict line, never on prose (issue #153).
+    """
+    print(f"REFRESH: DESKTOP_UNREADY pid={pid}; {reason}")
+    print(
+        "  Power BI Desktop is running but has no window, so this probe cannot inspect its local state.\n"
+        "  Wait for Desktop to finish starting, or restart it if it is wedged, then re-run the probe.\n"
+        "  The data source was not tested; do not report this as a source or sign-in problem."
     )
 
 
@@ -281,7 +304,7 @@ def _catalog_id(conn) -> str:
         reader.Close()
 
 
-# pylint: disable=too-many-statements
+# pylint: disable=too-many-arguments,too-many-statements
 def refresh(
     port: int,
     tables: list[str] | None,
@@ -289,6 +312,7 @@ def refresh(
     *,
     desktop_pid: int | None = None,
     source_hint: str | None = None,
+    initial_state: CredentialDetection | None = None,
 ) -> tuple[bool, str]:
     """Send a TMSL refresh over XMLA. Returns (ok, message).
 
@@ -328,8 +352,9 @@ def refresh(
     result: dict[str, tuple[bool, str] | BaseException] = {}
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
     if desktop_pid is not None:
-        state = _credential_state(desktop_pid)
+        state = initial_state or _credential_state(desktop_pid)
         _raise_if_blocked(desktop_pid, state, source_hint)
+        initial_state = state
         if state.unknown_reason:
             print_refresh_unknown_banner(
                 desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
@@ -379,6 +404,7 @@ def refresh(
             poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
             source_hint=source_hint,
             detector=_credential_state,
+            initial_state=initial_state,
         )
     if worker.is_alive():
         if desktop_pid is not None:
@@ -397,7 +423,7 @@ def refresh(
     return outcome
 
 
-# pylint: enable=too-many-statements
+# pylint: enable=too-many-arguments,too-many-statements
 
 
 def _bridge_status() -> dict:
@@ -1094,7 +1120,11 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
 
 
 def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches
-    pid: int, port: int, cache: Path | None, args: argparse.Namespace
+    pid: int,
+    port: int,
+    cache: Path | None,
+    args: argparse.Namespace,
+    initial_state: CredentialDetection | None = None,
 ) -> int | None:
     """Run the refresh and (unless suppressed) persist it. Returns an exit code, or None to continue.
 
@@ -1104,13 +1134,16 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     """
     source_hint = source_hint_from_model(cache.parent.parent if cache else None)
     try:
-        if "desktop_pid" in inspect.signature(refresh).parameters:
+        parameters = inspect.signature(refresh).parameters
+        if "desktop_pid" in parameters:
+            refresh_kwargs = {"desktop_pid": pid, "source_hint": source_hint}
+            if "initial_state" in parameters:
+                refresh_kwargs["initial_state"] = initial_state
             ok, message = refresh(
                 port,
                 args.tables,
                 REFRESH_TIMEOUT_SECONDS,
-                desktop_pid=pid,
-                source_hint=source_hint,
+                **refresh_kwargs,
             )
         else:
             ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
@@ -1126,6 +1159,9 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
             return 3
         if isinstance(exc, DesktopGoneError):
             _emit_desktop_gone(exc.pid, exc.reason)
+            return 2
+        if isinstance(exc, DesktopUnreadyError):
+            _emit_desktop_unready(exc.pid, exc.reason)
             return 2
         text = f"{type(exc).__name__}: {exc}"
         # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
@@ -1320,6 +1356,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     if credential_state.blocking_dialog is not None:
         _emit_blocked_by_dialog(pid, credential_state.blocking_dialog)
         return 1
+    if credential_state.process_gone is not None:
+        _emit_desktop_gone(pid, credential_state.process_gone)
+        return 2
+    if credential_state.desktop_unready is not None:
+        _emit_desktop_unready(pid, credential_state.desktop_unready)
+        return 2
     if credential_state.unknown_reason:
         print(f"  credential-check: UNKNOWN ({credential_state.unknown_reason})")
 
@@ -1343,7 +1385,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         return 2
 
     if not args.verify_only:
-        outcome = _refresh_and_save(pid, port, cache, args)
+        outcome = _refresh_and_save(pid, port, cache, args, credential_state)
         if outcome is not None:
             return outcome
 
