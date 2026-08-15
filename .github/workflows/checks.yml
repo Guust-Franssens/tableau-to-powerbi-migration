@@ -37,10 +37,12 @@ jobs:
           uv run ruff check scripts tests .github/skills
 
       - name: Static analysis (pylint)
-        # Two invocations, not one: `scripts/probe_desktop_query.py` is a forwarding shim with the
+        # Three invocations, not one: `scripts/probe_desktop_query.py` is a forwarding shim with the
         # same module name as the bundled script it forwards to, so a single `pylint scripts
         # .github/skills/...` puts both on the path and resolves the import to the shim
-        # (E0611 no-name-in-module). Tests are not held to 10.00/10; the toolkit code is.
+        # (E0611 no-name-in-module). That collision forces `scripts` and pbip-model-refresh/scripts
+        # apart; powerbi-ai-readiness/scripts is separate by the one-root-per-invocation convention.
+        # Tests are not held to 10.00/10; the toolkit code is.
         run: |
           uv run pylint scripts
           uv run pylint .github/skills/pbip-model-refresh/scripts
