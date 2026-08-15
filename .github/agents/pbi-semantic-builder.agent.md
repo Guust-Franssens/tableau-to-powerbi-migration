@@ -205,6 +205,41 @@ enrich it, and hand it over refreshed.
    decision (visual calc vs measure, and why), anything you routed rather than fixed, and new
    `limitations_encountered` entries (`stage: "semantic_build"`); then run `python scripts/validate_spec.py <migration-spec.json>`.
 
+### Declare every TMDL edit you make — the sign-off gate reads hashes, not intent
+
+Every file under a `*.SemanticModel` folder is hash-baselined by the engine run in
+`input_manifest.json`, and the orchestrator runs `python scripts/check_migration_progress.py --bundle
+<b> --tamper` before sign-off: it exits **1** on any generated file that changed without a matching
+declaration. `scripts/declare_generated_edit.py` is the **only** thing that writes one — it runs your
+script for you and records the before/after hashes into `_build/generated-edit-declarations.json`:
+
+```bash
+python scripts/declare_generated_edit.py --bundle <b> \
+  --target pbip/<WB>/<Name>.SemanticModel/definition/cultures/en-US.tmdl \
+  --script <b>/_build/fix_ai_instructions.py -- --only pbip/<WB>/<Name>.SemanticModel/definition/cultures/en-US.tmdl
+# DECLARE: RECORDED pbip/.../en-US.tmdl -> <b>/_build/generated-edit-declarations.json
+```
+
+Only two things are already covered, and neither is the work you do here: `refresh_pbip_model.py`
+self-declares **its own** `database.tmdl` compatibility-level bump, and `.pbi/` cache/autosave
+sidecars are outside the baseline entirely. Everything else you touch — `set_ai_instructions.py`
+writing the culture TMDL, an MCP description write, any `_build/fix_*.py` — is **yours to declare**.
+
+Measured — each of these leaves the gate RED while looking like it worked:
+
+- **One `--target` per run.** A second run of an idempotent script prints `DECLARE: NO_CHANGE` and
+  records nothing, so a script that rewrites N files leaves N-1 UNDECLARED. Give it an `--only
+  <bundle-relative path>` scope argument, pass it after `--`, and run the wrapper once per target.
+- **Never hand-edit first.** The wrapper hashes the target *before* running your script and the gate
+  only accepts a declaration whose baseline is the engine's hash, so retro-declaring an edit you
+  already applied is a `NO_CHANGE` no-op. Restore the file to its baseline, then declare.
+- **Declare as you edit, and edit before the step-8 refresh.** Touching a target again after
+  declaring invalidates that declaration, and a `definition/*.tmdl` write after the refresh also
+  staleness-kills `cache.abf`. Order: declared edits → refresh/save (it self-declares its own
+  `database.tmdl` bump) → `--tamper`.
+
+Self-check before handing over: `--tamper` must exit 0 (`DECLARED_DRIFT` passes, `DRIFT` does not).
+
 ## Prep the model for AI (Copilot readiness) — final build phase
 
 **Read the `powerbi-ai-readiness` skill before starting this phase, and follow it** (invoke it by name,
@@ -314,3 +349,7 @@ throwing an error" is necessary but not sufficient:
    ⚠️ **`PERSISTED` alone does NOT prove the live source loaded** — a partial refresh caches whatever
    tables *did* load (`powerbi-semantic-model-gotchas` §5). For a live source confirm **per-table**:
    `EVALUATE ROW("n", COUNTROWS('<LiveTable>'))` must be non-zero for each.
+12. **Every TMDL edit you made is declared, and `--tamper` exits 0** — see "Declare every TMDL edit
+   you make" above. `refresh_pbip_model.py`'s own `database.tmdl` bump is the *only* self-declaring
+   edit; an undeclared culture, description or fix-script edit blocks the orchestrator's sign-off,
+   and `DECLARE: NO_CHANGE` means nothing was recorded.
