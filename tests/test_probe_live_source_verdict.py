@@ -220,11 +220,20 @@ def _detector_unknown_reasons(credential_modal) -> list[str]:
         height=800,
         minimized=True,
     )
-    scenarios = (_enumeration_raises, lambda _pid: [minimized_main])
+    # (enumerate_windows, process_is_alive) per UNKNOWN branch the detector can emit: enumeration
+    # failed, owner minimized, and (issue #158) zero windows while the process is still alive. The
+    # liveness callable is only consulted by the zero-window branch; the others ignore it.
+    scenarios = (
+        (_enumeration_raises, lambda _pid: True),
+        (lambda _pid: [minimized_main], lambda _pid: True),
+        (lambda _pid: [], lambda _pid: True),
+    )
 
     reasons: list[str] = []
-    for enumerate_windows in scenarios:
-        reason = credential_modal.inspect_credential_modal(111, enumerate_windows=enumerate_windows).unknown_reason
+    for enumerate_windows, process_is_alive in scenarios:
+        reason = credential_modal.inspect_credential_modal(
+            111, enumerate_windows=enumerate_windows, process_is_alive=process_is_alive
+        ).unknown_reason
         assert reason, "scenario failed to drive the detector into an UNKNOWN state"
         reasons.append(reason)
 
@@ -307,6 +316,181 @@ def test_blocked_by_dialog_does_not_clear_gate(monkeypatch: pytest.MonkeyPatch) 
     assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (  # noqa: SLF001
         1,
         "NO_CREDENTIAL",
+    )
+
+
+def _harvest_minimized_reason(credential_modal) -> str:
+    """The REAL minimized-owner ``unknown_reason``, harvested by driving the detector (not hand-written).
+
+    Same #152/#153 discipline as ``_detector_unknown_reasons``: the parent must be tested against the
+    exact string the child emits, so that a reworded reason (or a reason that grows a forbidden marker)
+    is caught here rather than in production.
+    """
+    minimized_main = credential_modal.DesktopWindow(
+        title="Report",
+        class_name=credential_modal.DESKTOP_MAIN_CLASS_PREFIX + ".app.0",
+        width=1200,
+        height=800,
+        minimized=True,
+    )
+    reason = credential_modal.inspect_credential_modal(
+        111, enumerate_windows=lambda _pid: [minimized_main]
+    ).unknown_reason
+    assert reason, "detector did not report the minimized-owner UNKNOWN reason"
+    return reason
+
+
+def test_credential_unknown_verdict_classifies_as_no_credential() -> None:
+    """#154: a latched CREDENTIAL_UNKNOWN is a credential STOP, matched STRUCTURALLY (not by free text).
+
+    The child line is harvested from the real ``refresh_pbip_model._emit_credential_unknown`` with a
+    real detector reason, so the parent is exercised against the exact bytes the child emits. It must
+    both satisfy the anchored verdict-line matcher (``_has_credential_stop_verdict``) and classify as
+    ``NO_CREDENTIAL`` - never ``SLOW_SOURCE``/timeout, which was the #154 defect.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+    reason = _harvest_minimized_reason(credential_modal)
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        refresh_pbip_model._emit_credential_unknown(111, reason)
+    emitted = buffer.getvalue()
+
+    assert "REFRESH: CREDENTIAL_UNKNOWN" in emitted
+    assert probe_live_source._has_credential_stop_verdict(emitted), "must match the anchored verdict line, not prose"
+    verdict, _ = probe_live_source._classify_failure(emitted, network_fault_observed=False)
+    assert verdict == "NO_CREDENTIAL"
+
+
+def test_credential_unknown_full_child_transcript_classifies_as_no_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#154 end-to-end at the parent seam: the child's WHOLE CREDENTIAL_UNKNOWN transcript classifies
+    ``NO_CREDENTIAL``.
+
+    The transcript is assembled from the real child functions the #154 path prints - the t=0 UNKNOWN
+    banner, the iconic-transition notice, and the emit line - so the classifier sees the exact
+    concatenation production produces. This also guards the ordering trap: none of that prose may trip
+    the earlier BAD_TABLE / ACCESS_DENIED branches before the structural credential-stop check runs.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+    reason = _harvest_minimized_reason(credential_modal)
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        credential_modal.print_refresh_unknown_banner(111, 300, 30, reason)
+        credential_modal.print_indeterminate_state_notice(111, reason)
+        refresh_pbip_model._emit_credential_unknown(111, reason)
+    transcript = buffer.getvalue()
+
+    monkeypatch.setattr(
+        probe_live_source.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(args=["refresh"], returncode=3, stdout=transcript, stderr=""),
+    )
+
+    assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (  # noqa: SLF001
+        1,
+        "NO_CREDENTIAL",
+    )
+
+
+def _harvest_zero_window_alive_reason(credential_modal) -> str:
+    """The REAL zero-window-but-alive ``unknown_reason``, harvested by driving the detector (issue #158).
+
+    Same #152/#153 discipline as ``_harvest_minimized_reason``: assert against the exact string the
+    detector really emits when enumeration returns an empty list while the process is still alive.
+    """
+    reason = credential_modal.inspect_credential_modal(
+        111, enumerate_windows=lambda _pid: [], process_is_alive=lambda _pid: True
+    ).unknown_reason
+    assert reason, "detector did not report the zero-window alive UNKNOWN reason"
+    return reason
+
+
+def _harvest_desktop_gone_reason(credential_modal) -> str:
+    """The REAL ``process_gone`` terminal string, harvested by driving the detector (issue #158)."""
+    reason = credential_modal.inspect_credential_modal(
+        111, enumerate_windows=lambda _pid: [], process_is_alive=lambda _pid: False
+    ).process_gone
+    assert reason, "detector did not report the process-gone terminal reason"
+    return reason
+
+
+def test_desktop_gone_verdict_classifies_as_error() -> None:
+    """#158: a DESKTOP_GONE verdict line classifies as ERROR, never UNREACHABLE or a credential stop.
+
+    A dead Desktop is a LOCAL failure - the source was never contacted - so it must be ERROR (the probe
+    could not run), never UNREACHABLE (which would send someone to fix a reachable server) and never
+    NO_CREDENTIAL (no human sign-in revives a dead process). The child line is harvested from the real
+    ``refresh_pbip_model._emit_desktop_gone`` with a real detector reason, so the parent is exercised
+    against the exact bytes the child emits. Matched STRUCTURALLY on the verdict line, not by free text.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+    reason = _harvest_desktop_gone_reason(credential_modal)
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        refresh_pbip_model._emit_desktop_gone(111, reason)
+    emitted = buffer.getvalue()
+
+    assert "REFRESH: DESKTOP_GONE" in emitted
+    assert probe_live_source._has_desktop_gone_verdict(emitted), "must match the anchored verdict line, not prose"
+    verdict, _ = probe_live_source._classify_failure(emitted, network_fault_observed=False)
+    assert verdict == "ERROR"
+
+
+def test_desktop_gone_and_zero_window_detector_strings_are_marker_free() -> None:
+    """#158/#153: the two new detector strings must contain NO classifier marker token.
+
+    Harvested from the real detector (never eyeballed) and tested against the REAL marker tuples the
+    parent scans. A stray marker in either string would let the free-text scan misclassify a dead or
+    window-less Desktop as NO_CREDENTIAL / BAD_TABLE / ACCESS_DENIED instead of its true verdict - that
+    was the #153 failure mode, so it is pinned here against the actual imported tuples.
+    """
+    probe_live_source = _import_probe_live_source()
+    _, _, credential_modal = _import_skill_modules()
+    markers = (
+        probe_live_source.CREDENTIAL_MARKERS
+        + probe_live_source.BAD_TABLE_MARKERS
+        + probe_live_source.ACCESS_DENIED_MARKERS
+    )
+    strings = {
+        "zero_window_alive_unknown_reason": _harvest_zero_window_alive_reason(credential_modal),
+        "process_gone": _harvest_desktop_gone_reason(credential_modal),
+    }
+    offenders = {name: [m for m in markers if m in text.lower()] for name, text in strings.items()}
+    offenders = {name: hits for name, hits in offenders.items() if hits}
+    assert not offenders, f"new detector strings contain classifier markers: {offenders}"
+
+
+def test_desktop_gone_full_child_transcript_classifies_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#158 end-to-end at the parent seam: the child's WHOLE DESKTOP_GONE transcript classifies ERROR.
+
+    The transcript is the real child emitter's whole output (verdict line + marker-free guidance), fed
+    through ``_refresh_and_classify`` with the child's planned exit 2, so the classifier sees the exact
+    concatenation production produces. It must resolve to ``ERROR`` - never UNREACHABLE, and none of the
+    guidance prose may trip the BAD_TABLE / ACCESS_DENIED / credential branches first.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+    reason = _harvest_desktop_gone_reason(credential_modal)
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        refresh_pbip_model._emit_desktop_gone(111, reason)
+    transcript = buffer.getvalue()
+
+    monkeypatch.setattr(
+        probe_live_source.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(args=["refresh"], returncode=2, stdout=transcript, stderr=""),
+    )
+
+    assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (  # noqa: SLF001
+        1,
+        "ERROR",
     )
 
 

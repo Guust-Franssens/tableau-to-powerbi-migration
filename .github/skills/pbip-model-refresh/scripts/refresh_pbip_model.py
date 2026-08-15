@@ -140,6 +140,8 @@ from _credential_modal import (
     CredentialDetection,
     CredentialMissingError,
     CredentialModal,
+    CredentialUnknownError,
+    DesktopGoneError,
     DialogBlockedError,
     describe_blocking_dialog,
     describe_modal,
@@ -207,11 +209,13 @@ def _credential_state(pid: int) -> CredentialDetection:
 
 
 def _raise_if_blocked(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
-    """Raise the appropriate exception when ``state`` contains a blocking dialog."""
+    """Raise the appropriate exception when ``state`` contains a blocking or terminal condition."""
     if state.modal is not None:
         raise CredentialMissingError(pid, state.modal, source_hint)
     if state.blocking_dialog is not None:
         raise DialogBlockedError(pid, state.blocking_dialog)
+    if state.process_gone is not None:
+        raise DesktopGoneError(pid, state.process_gone)
 
 
 def _emit_credential_missing(pid: int, modal: CredentialModal, source_hint: str | None = None) -> None:
@@ -222,6 +226,46 @@ def _emit_credential_missing(pid: int, modal: CredentialModal, source_hint: str 
 def _emit_blocked_by_dialog(pid: int, dialog) -> None:
     """Print the distinct generic blocking-dialog verdict."""
     print(f"REFRESH: BLOCKED_BY_DIALOG pid={pid}; {describe_blocking_dialog(dialog)}")
+
+
+def _emit_credential_unknown(pid: int, reason: str) -> None:
+    """Print the distinct indeterminate verdict for a latched, unrecoverable UNKNOWN (issue #154).
+
+    ``CREDENTIAL_UNKNOWN`` is a THIRD verdict, deliberately not collapsed into ``BLOCKED_BY_DIALOG``
+    (we did not SEE a block) nor into a bare ``TIMEOUT`` (we did not observe a healthy source): the
+    owner window went iconic, hiding its owned modal dialogs, and that evidence provably does not come
+    back. ``reason`` is the detector's marker-free string, and the guidance below is marker-free too,
+    so the classification is carried STRUCTURALLY by the ``REFRESH: CREDENTIAL_UNKNOWN`` verdict line
+    (matched by ``probe_live_source.CREDENTIAL_STOP_VERDICT_RE``), never by prose (issue #153).
+    """
+    print(f"REFRESH: CREDENTIAL_UNKNOWN pid={pid}; {reason}")
+    print(
+        "  This run stayed indeterminate to the deadline: the owner window was iconic at least once,\n"
+        "  which hides its owned modal dialogs from enumeration, and that evidence does not return when\n"
+        "  the window is restored. This is NOT a slow source - do not simply wait or retry longer.\n"
+        "  SETTLE IT - restore the Power BI Desktop window, complete whatever dialog it is showing, and\n"
+        "  run the arbiter that ships beside this script rather than guessing:\n"
+        f'    powershell -File "{CREDENTIAL_PROBE}" -DesktopPid {pid}'
+    )
+
+
+def _emit_desktop_gone(pid: int, reason: str) -> None:
+    """Print the distinct terminal verdict for a Power BI Desktop that has exited/crashed (issue #158).
+
+    ``DESKTOP_GONE`` is a DEFINITIVE local-environment failure, not a fact about the data source: the
+    tracked process enumerated zero windows and is no longer running, so the probe never got to observe
+    the source at all. It must never degrade to a slow-source timeout. It is also distinct from
+    ``CREDENTIAL_UNKNOWN`` (process still alive but momentarily window-less - indeterminate, latched).
+    ``reason`` is the detector's marker-free string and the guidance below is marker-free too, so the
+    parent classifier keys on the ``REFRESH: DESKTOP_GONE`` verdict line, never on prose (issue #153).
+    """
+    print(f"REFRESH: DESKTOP_GONE pid={pid}; {reason}")
+    print(
+        "  Power BI Desktop is no longer running: it enumerated zero windows and the process id is\n"
+        "  gone, so this probe never reached the data source. Do NOT report this as a slow or broken\n"
+        "  source - the source was never contacted. Re-open the model in Power BI Desktop, confirm it\n"
+        "  is running, and re-run the probe against the new process id."
+    )
 
 
 def _catalog_id(conn) -> str:
@@ -1077,6 +1121,12 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         if isinstance(exc, DialogBlockedError):
             _emit_blocked_by_dialog(exc.pid, exc.dialog)
             return 1
+        if isinstance(exc, CredentialUnknownError):
+            _emit_credential_unknown(exc.pid, exc.reason)
+            return 3
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+            return 2
         text = f"{type(exc).__name__}: {exc}"
         # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
         # the credential one ("THIS NEEDS A HUMAN. Do not retry"), which is the single most expensive
