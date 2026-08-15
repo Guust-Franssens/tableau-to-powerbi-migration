@@ -231,8 +231,8 @@ Measured — each of these leaves the gate RED while looking like it worked:
   records nothing, so a script that rewrites N files leaves N-1 UNDECLARED. Give it an `--only
   <bundle-relative path>` scope argument, pass it after `--`, and run the wrapper once per target.
 - **Never hand-edit first.** The wrapper hashes the target *before* running your script and the gate
-  only accepts a declaration whose baseline is the engine's hash, so retro-declaring an edit you
-  already applied is a `NO_CHANGE` no-op. Restore the file to its baseline, then declare.
+  only accepts a declaration whose baseline is the engine's hash, so a retro-declaration is never
+  accepted. Restore the target to its engine baseline first, then declare.
 - **Declare as you edit, and edit before the step-8 refresh.** Touching a target again after
   declaring invalidates that declaration, and a `definition/*.tmdl` write after the refresh also
   staleness-kills `cache.abf`. Order: declared edits → refresh/save (it self-declares its own

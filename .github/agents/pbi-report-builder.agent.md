@@ -171,7 +171,8 @@ script for you and records the before/after hashes into `_build/generated-edit-d
 ```bash
 python scripts/declare_generated_edit.py --bundle <b> \
   --target pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json \
-  --script <b>/_build/fix_axis_title.py -- --only pbip/<WB>/<WB>.Report/.../visual.json
+  --script <b>/_build/fix_axis_title.py \
+  -- --only pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json
 # DECLARE: RECORDED pbip/.../visual.json -> <b>/_build/generated-edit-declarations.json
 ```
 
@@ -181,11 +182,13 @@ Measured — each of these leaves the gate RED while looking like it worked:
   records nothing, so a whole-tree emitter leaves every file but one UNDECLARED. Give the script an
   `--only <bundle-relative path>` scope argument, pass it after `--`, and run the wrapper per target.
 - **Never hand-edit first.** The wrapper hashes the target *before* running your script and the gate
-  only accepts a declaration whose baseline is the engine's hash, so retro-declaring is a
-  `NO_CHANGE` no-op. Restore the file from `<bundle>/reports/`, then declare.
+  only accepts a declaration whose baseline is the engine's hash, so a retro-declaration is never
+  accepted. Restore the target by re-running the engine — `reports/` is a **different file**, not a
+  copy of `pbip/` (gotchas §3).
 - **Declare last.** Touching the target again afterwards invalidates its declaration.
 
 Self-check before reporting done: `--tamper` must exit 0 (`DECLARED_DRIFT` passes, `DRIFT` does not).
+
 ### Visual encoding — only when you must change an encoding
 
 The engine already chose and encoded every visual. Reach for this **only** when repairing one, and
