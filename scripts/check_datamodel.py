@@ -39,6 +39,8 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
   * measure/column name collisions within one table file
   * empty measure expressions
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
+  * legacy BIFF8 `.xls` partitions with a resolvable local source: their navigation key and type
+    conversion culture, which otherwise fail or silently corrupt rows at refresh
 
 A clean result does NOT prove the model opens; it only excludes these structural classes.
 """
@@ -49,9 +51,11 @@ import argparse
 import logging
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+from check_empty_model import eval_m_path, model_parameters
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TREES = ("examples", "migrations/workbooks", "migrations/datasources")
@@ -62,6 +66,17 @@ PAIRS = {"(": ")", "[": "]", "{": "}"}
 CLOSERS = {v: k for k, v in PAIRS.items()}
 _NUMBER_RE = re.compile(r"0[xX][0-9a-fA-F]+|[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
+_BIFF8_MAGIC = b"\xd0\xcf\x11\xe0"
+_FILE_CONTENTS_RE = re.compile(r"File\.Contents\s*\(")
+_TYPE_CONVERSION_RE = re.compile(r"Table\.TransformColumnTypes\s*\(")
+_EXCEL_ASSIGNMENT_RE = re.compile(r'(?m)^\s*(?P<name>#"[^"]+"|[A-Za-z_]\w*)\s*=\s*Excel\.Workbook\s*\(')
+_BIFF8_NAVIGATION_DETAIL = "BIFF8 .xls navigation must use a Name= key (not Item=/Kind=)"
+# The culture is the minimum fix, not the recommended one: pinning one bakes the build host's locale
+# into the artifact, so name the locale-proof escape hatch the same gotcha section prescribes.
+_BIFF8_CULTURE_DETAIL = (
+    "BIFF8 .xls type conversion must pass an explicit culture; better, take the legacy reader out of "
+    "the path - re-land the sheet as an invariant CSV and read it with Csv.Document"
+)
 
 # Keywords that legitimately introduce or continue an expression, so an identifier following one of
 # them is NOT a missing separator (e.g. `type text`, `each Foo`, `otherwise null`).
@@ -681,6 +696,179 @@ def _model_dirs(target: Path) -> list[Path]:
     return sorted(target.glob("**/*.SemanticModel"))
 
 
+def _call_arguments(text: str, start: int) -> list[str]:
+    """Top-level arguments in a call whose opening parenthesis ends at ``start``."""
+    depth, index, in_string, argument_start = 1, start, False, start
+    arguments: list[str] = []
+    while index < len(text) and depth:
+        char = text[index]
+        if in_string:
+            if char == '"' and text[index : index + 2] == '""':
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 1:
+            arguments.append(text[argument_start:index])
+            argument_start = index + 1
+        if depth == 0:
+            arguments.append(text[argument_start:index])
+        index += 1
+    return arguments if depth == 0 else []
+
+
+def _m_code(text: str) -> str:
+    """Remove M comments without mistaking their contents for live navigation expressions."""
+    out: list[str] = []
+    index, in_string = 0, False
+    while index < len(text):
+        char, next_char = text[index], text[index + 1 : index + 2]
+        if in_string:
+            out.append(char)
+            if char == '"' and next_char == '"':
+                out.append(next_char)
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+        elif char == '"':
+            out.append(char)
+            in_string = True
+        elif char == "/" and next_char == "/":
+            end = text.find("\n", index)
+            end = len(text) if end == -1 else end
+            out.extend(" " for _ in text[index:end])
+            index = end
+            continue
+        elif char == "/" and next_char == "*":
+            end = text.find("*/", index + 2)
+            end = len(text) if end == -1 else end + 2
+            out.extend(char if char == "\n" else " " for char in text[index:end])
+            index = end
+            continue
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _m_code_without_strings(text: str) -> str:
+    """Mask string literals while preserving `#"quoted identifiers"` and source offsets."""
+    out = list(text)
+    index = 0
+    while index < len(text):
+        if text[index] != '"':
+            index += 1
+            continue
+        start = index
+        index += 1
+        while index < len(text):
+            if text[index] == '"' and text[index : index + 2] == '""':
+                index += 2
+                continue
+            if text[index] == '"':
+                index += 1
+                break
+            index += 1
+        if start and text[start - 1] == "#":
+            continue
+        for position in range(start, index):
+            if out[position] != "\n":
+                out[position] = " "
+    return "".join(out)
+
+
+def _is_biff8_xls(source: Path) -> bool:
+    """True only when a `.xls` really is a legacy BIFF8/OLE2 workbook, decided by its magic bytes.
+
+    The suffix alone is deliberately not enough, and that is the whole point of the gate: an `.xlsx`
+    (or a CSV) merely *named* `.xls` is read by a different provider whose navigation table does have
+    `Item`/`Kind` columns, so flagging it would be a false positive on correct M.
+    """
+    if source.suffix.lower() != ".xls":
+        return False
+    try:
+        with source.open("rb") as handle:
+            return handle.read(4) == _BIFF8_MAGIC
+    except OSError:
+        return False
+
+
+def _navigation_key(executable_code: str, assignments: list[re.Match[str]], before: int) -> str | None:
+    """The record key of the `<binding>{[...]}[Data]` navigation off the workbook bound before ``before``."""
+    assignment = next((item for item in reversed(assignments) if item.end() <= before), None)
+    name = assignment.group("name") if assignment else ""
+    identifier = re.escape(name) if name.startswith('#"') else rf'(?<![A-Za-z0-9_"]){re.escape(name)}(?![A-Za-z0-9_"])'
+    navigation = re.search(rf"{identifier}\s*\{{\s*\[(?P<key>[^\]]*)\]\s*\}}\s*\[\s*Data\s*\]", executable_code)
+    return navigation.group("key") if navigation else None
+
+
+def _lacks_explicit_culture(arguments: list[str]) -> bool:
+    """A type conversion needs a non-null culture, including inside an options record.
+
+    A literal `null` is NOT "explicit": it selects the ambient locale, which is exactly the silent
+    decimal/date corruption this rule exists to stop.
+    """
+    if len(arguments) < 3 or arguments[2].strip().lower() == "null":
+        return True
+    culture = arguments[2].strip()
+    if not (culture.startswith("[") and culture.endswith("]")):
+        return False
+    match = re.search(r"\bCulture\s*=", _m_code_without_strings(culture))
+    if match is None:
+        return True
+    return re.match(r"null\b", culture[match.end() :].lstrip(), re.IGNORECASE) is not None
+
+
+def _biff8_violations(
+    code: str, executable_code: str, parameters: dict[str, str]
+) -> Iterator[tuple[int, list[tuple[str, str]]]]:
+    """Every legacy BIFF8 binding in one M block, as (offset, broken (kind, detail) rules).
+
+    A partition with NO `Table.TransformColumnTypes` is silent on culture on purpose: the engine emits
+    the typed step only when it has type pairs, and "pass a culture" is unactionable advice about a
+    conversion that does not exist.
+    """
+    assignments = list(_EXCEL_ASSIGNMENT_RE.finditer(executable_code))
+    conversions = [_call_arguments(code, call.end()) for call in _TYPE_CONVERSION_RE.finditer(executable_code)]
+    implicit_culture = any(_lacks_explicit_culture(arguments) for arguments in conversions)
+    for match in _FILE_CONTENTS_RE.finditer(executable_code):
+        arguments = _call_arguments(code, match.end())
+        resolved = eval_m_path(arguments[0], parameters) if arguments else None
+        if resolved is None or not _is_biff8_xls(Path(resolved)):
+            continue
+        broken: list[tuple[str, str]] = []
+        key = _navigation_key(executable_code, assignments, match.start())
+        if key is None or not re.search(r"\bName\s*=", key):
+            broken.append(("BIFF8_XLS_NAVIGATION_KEY", _BIFF8_NAVIGATION_DETAIL))
+        if implicit_culture:
+            broken.append(("BIFF8_XLS_CULTURE", _BIFF8_CULTURE_DETAIL))
+        if broken:
+            yield match.start(), broken
+
+
+def _legacy_xls_findings(
+    path: Path, text: str, offset_line: int, first_col: int, parameters: dict[str, str]
+) -> list[Finding]:
+    """Check the two BIFF8-only M requirements when the referenced local file is available."""
+    code = _m_code(text)
+    findings: list[Finding] = []
+    for start, violations in _biff8_violations(code, _m_code_without_strings(code), parameters):
+        line = offset_line + text.count("\n", 0, start) + 1
+        col = start - text.rfind("\n", 0, start)
+        if line == offset_line + 1:
+            col += first_col
+        snippet = _snippet(text, line - offset_line)
+        findings.extend(Finding(path, line, col, kind, detail, snippet) for kind, detail in violations)
+    return findings
+
+
 def check_model(model_dir: Path) -> list[Finding]:
     """Every M expression in one .SemanticModel."""
     return check_model_counted(model_dir)[0]
@@ -695,12 +883,14 @@ def check_model_counted(model_dir: Path) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
     scanned = 0
     definition = model_dir / "definition"
+    parameters = model_parameters(model_dir)
     files = sorted(definition.glob("expressions.tmdl")) + sorted(definition.glob("tables/*.tmdl"))
     for tmdl in files:
         for block, start_line, first_col in _iter_m_blocks(tmdl):
             if block.strip():
                 scanned += 1
                 findings.extend(_check_expression(tmdl, block, offset_line=start_line - 1, first_col=first_col))
+                findings.extend(_legacy_xls_findings(tmdl, block, start_line - 1, first_col, parameters))
     return findings, scanned
 
 
