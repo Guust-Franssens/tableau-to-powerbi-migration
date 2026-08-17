@@ -547,9 +547,11 @@ function Get-DotEnvValue([string]$Key, [string]$Path) {
     # split on the FIRST '='), plus the deliberate divergence in ConvertFrom-DotEnvValue above.
     # That divergence is the fix, not an accident - the two parsers previously agreed by being wrong
     # in the same way, and "identical to Python" was the argument that kept it.
-    # `scripts/tableau_env.py:load_env` should get the same treatment; it is owned elsewhere, so it
-    # is flagged rather than edited here. Nothing in Python reads FABRIC_TENANT_ID today, so the
-    # divergence is inert until that happens.
+    # `scripts/tableau_env.py:load_env` still reads values the old way; it is owned elsewhere and
+    # nothing asks it for a Fabric key, so that divergence stays inert. The Python reader that is NOT
+    # inert is `deploy_estate.py:_dotenv_value`, which mirrors THIS function on purpose and is pinned
+    # to the same tests/fixtures/dotenv-spellings.env table - measured while it was not: preflight
+    # reported a workspace reachable that the deploy then mangled into a late WorkspaceNotFound.
     # .env is git-ignored, which is where a real customer tenant id belongs: this repository is public.
     if (-not $Path) { $Path = Join-Path $repoRoot '.env' }
     if (-not (Test-Path $Path)) { return $null }
