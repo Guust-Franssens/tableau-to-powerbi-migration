@@ -505,3 +505,71 @@ def test_the_pat_secret_never_reaches_a_persisted_artifact(monkeypatch, no_sleep
     assert "[REDACTED]" in written
     assert (tmp_path / "_assessment" / "report.md").read_text(encoding="utf-8").count(ENV["TABLEAU_PAT_SECRET"]) == 0
     assert no_sleep == []
+
+
+# --- 8. #196: scrub the 200-with-`errors` GraphQL body, and mark degradation in estate.db ---------
+
+
+class _GraphqlLeak(FakeTableau):
+    """A Metadata API that answers 200 but reflects the caller's credential in its ``errors`` array.
+
+    The sibling of the ``Echoing`` gateway above, on the ONE path that returns PARSED JSON straight
+    from ``_request_json`` and so never met the byte scrubber (issue #196). ``data.workbooks`` stays
+    non-empty (inherited from the parent), so the structure failure is SECONDARY and the run exits 0.
+    """
+
+    def _payload(self, url: str) -> dict:
+        payload = super()._payload(url)
+        if "metadata/graphql" in url:
+            payload["errors"] = [{"message": f"upstream rejected credential {ENV['TABLEAU_PAT_SECRET']}"}]
+        return payload
+
+
+def test_a_graphql_200_error_body_is_scrubbed_before_it_is_recorded(monkeypatch, no_sleep):
+    """A 200 with an `errors` array is recorded via ``_record`` WITHOUT travelling through
+    ``_scrub`` - so its text must be scrubbed at the call site, or the PAT lands in the artifacts."""
+    site = _site(_GraphqlLeak(), monkeypatch, max_attempts=1)
+    _data, errors = assess_estate._pass2_structure(site)
+    assert errors and errors[0]["listing"] == "structure"
+    recorded = errors[0]["error"]
+    assert ENV["TABLEAU_PAT_SECRET"] not in recorded
+    assert "[REDACTED]" in recorded
+    assert no_sleep == []
+
+
+def test_estate_db_records_whether_the_run_was_degraded(tmp_path):
+    """`estate.db` is read programmatically by harvest/deploy, which never open `assessment.json`.
+    Before #196 a survived-but-partial DB was byte-identical to a clean one; it must now carry the
+    marker itself - the run-level flags and one row per failed listing."""
+    raw = _raw_fixture([_error("workbooks", assess_estate.PRIMARY)])
+    store = assess_estate.write_store(tmp_path, raw, assess_estate.assemble(raw, 0.99))
+    conn = assess_estate.sqlite3.connect(store)
+    run = conn.execute(
+        "SELECT degraded, degraded_primary, workbooks_total, listing_errors FROM assessment_run"
+    ).fetchone()
+    assert run == (1, 1, 1, 1)
+    rows = conn.execute("SELECT listing, severity, error FROM listing_error").fetchall()
+    assert rows == [("workbooks", assess_estate.PRIMARY, "transport: TimeoutError: timed out")]
+
+
+def test_a_clean_run_marks_the_db_as_NOT_degraded(tmp_path):
+    """The marker must exist on a CLEAN run too, or its absence is ambiguous (clean vs. an old DB
+    written before this table existed). A clean run: flags 0/0, and no `listing_error` rows."""
+    raw = _raw_fixture()
+    store = assess_estate.write_store(tmp_path, raw, assess_estate.assemble(raw, 0.99))
+    conn = assess_estate.sqlite3.connect(store)
+    assert conn.execute("SELECT degraded, degraded_primary FROM assessment_run").fetchone() == (0, 0)
+    assert conn.execute("SELECT count(*) FROM listing_error").fetchone() == (0,)
+
+
+def test_a_graphql_error_body_never_reaches_estate_db(monkeypatch, no_sleep, tmp_path):
+    """End to end, the two blind spots together: the 200-with-`errors` path AND `estate.db`, which
+    the existing secret test covered neither of (it used the HTTPError body and read only JSON/md)."""
+    code = _run_main(monkeypatch, tmp_path, _GraphqlLeak())
+    out = tmp_path / "_assessment"
+    assert code == 0  # workbooks were still returned, so the structure error is SECONDARY
+    assert ENV["TABLEAU_PAT_SECRET"].encode() not in (out / "estate.db").read_bytes()
+    errs = assess_estate.sqlite3.connect(out / "estate.db").execute("SELECT error FROM listing_error").fetchall()
+    assert errs and all(ENV["TABLEAU_PAT_SECRET"] not in row[0] for row in errs)
+    assert any("[REDACTED]" in row[0] for row in errs)
+    assert no_sleep == []

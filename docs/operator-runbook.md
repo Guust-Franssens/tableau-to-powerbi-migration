@@ -424,6 +424,7 @@ kills the run — it is retried within a bound, then recorded. The contract:
 | exit code | `0` clean or secondary-degraded · **`3` a PRIMARY listing is incomplete** · `1` nothing assessed |
 | `report.md` | a `> ⚠️ **DEGRADED**` blockquote (secondary) or a `# ⚠️ DEGRADED` **first heading** (primary) |
 | `assessment.json` | `degraded`, `degraded_primary`, and `listing_errors[]` naming each endpoint, page, attempts and elapsed time |
+| `estate.db` | the `assessment_run` row carries `degraded` / `degraded_primary` and the counts; `listing_error` rows name each failed listing (error text scrubbed). This is the ONLY degradation signal a programmatic consumer (`harvest_estate_assets.py --db`, `deploy_estate.py --estate-db`) sees — neither opens `assessment.json` |
 | the log | one `[WARN]` per failed listing, then one `[ACTION]` line |
 
 A **secondary** failure (subscriptions, alerts, custom views, group membership, flows) only ever
@@ -921,7 +922,7 @@ self-reported success.
 |---|---|
 | **symptom** | the run finishes and `report.md` opens with a `DEGRADED` banner; the process may exit `3` |
 | **cause** | one or more listings could not be read — a timeout, a dropped connection, or a refusal. Before #193 this was a **traceback** that discarded the whole run (three consecutive failures on one customer estate, on `customviews`, `groups/{id}/users`, `customviews`) |
-| **check** | `listing_errors[]` in `assessment.json` names the endpoint, page, attempt count, elapsed seconds, and `transport: true` when no status code ever came back |
+| **check** | `listing_errors[]` in `assessment.json` (or the `listing_error` table in `estate.db`) names the endpoint, page, attempt count, elapsed seconds, and `transport: true` when no status code ever came back |
 | **fix** | `transport: true` and slow (elapsed ≈ the timeout) → raise `--rest-timeout`; `transport: true` and fast → raise `--max-attempts` / `--retry-budget`; status `401`/`403` → a credential or permission problem, which **no retry can fix** |
 
 **Exit `3` is not a crash — it is a refusal to let a partial inventory pass as an estate.** Exit `0`

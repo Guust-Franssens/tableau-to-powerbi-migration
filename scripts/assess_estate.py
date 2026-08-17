@@ -315,6 +315,17 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
         self.errors.append(record)
         return record
 
+    def scrub_text(self, text: str) -> str:
+        """Remove every credential known at this point from a string we ASSEMBLED ourselves.
+
+        ``_scrub`` handles a raw response body (bytes); this handles text built from already-parsed
+        JSON - notably a GraphQL 200 whose ``errors`` array is a dict, not bytes, so it never
+        travelled through ``_scrub`` on its way out of ``_request_json``. Both paths must scrub:
+        both reach ``assessment.json``, ``report.md`` and now ``estate.db``, and a proxy or WAF that
+        echoes the request writes the owner's PAT (or the live session token) into all three.
+        """
+        return redact(text, self._pat[1], self.token or "")
+
     def _scrub(self, payload: bytes) -> str:
         """Decode a response body with every credential known at this point removed.
 
@@ -323,7 +334,7 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
         into two durable artifacts. Scrub at the point of capture (the measured hazard behind
         ``tableau_env.redact``), not at the point of writing.
         """
-        return redact(payload.decode("utf-8", "replace"), self._pat[1], self.token or "")
+        return self.scrub_text(payload.decode("utf-8", "replace"))
 
     def _may_retry(self, kind: str, attempt: int, started: float, delay: float) -> bool:
         """Retry only a TRANSIENT fault, and only inside BOTH bounds.
@@ -602,6 +613,18 @@ CREATE TABLE IF NOT EXISTS permission (
   object_type TEXT, object_luid TEXT, object_name TEXT,
   grantee_type TEXT, grantee_luid TEXT, capability TEXT, mode TEXT);
 CREATE TABLE IF NOT EXISTS flow (luid TEXT PRIMARY KEY, name TEXT, project TEXT);
+-- Run-level completeness, added in #196. Before it, a survived-but-partial run (#193) wrote a DB
+-- BYTE-IDENTICAL to a clean one, so a programmatic consumer (harvest_estate_assets.py --db,
+-- deploy_estate.py --estate-db) that never opens assessment.json could not tell the two apart.
+CREATE TABLE IF NOT EXISTS assessment_run (
+  assessed_at TEXT, degraded INTEGER, degraded_primary INTEGER,
+  workbooks_total INTEGER, listing_errors INTEGER);
+-- One row per listing that could not be read in full. ``error`` is SCRUBBED at the point of capture
+-- (see Site.scrub_text), never here, so this table cannot carry a credential even if the server
+-- echoed one back.
+CREATE TABLE IF NOT EXISTS listing_error (
+  listing TEXT, severity TEXT, status INTEGER, path TEXT, page INTEGER,
+  attempts INTEGER, elapsed_sec REAL, transport INTEGER, error TEXT);
 """
 
 
@@ -710,7 +733,11 @@ def _pass2_structure(site: Site) -> tuple[dict[str, Any], list[dict]]:
         LOG.warning("  [WARN] structure UNREADABLE: %s - every complexity score would be 0", error["error"][:150])
         errors.append({"listing": "structure", "severity": PRIMARY, **error})
     elif payload.get("errors"):
-        detail = f"Metadata API errors: {str(payload['errors'])[:200]}"
+        # ``payload`` is parsed JSON handed straight back by ``_request_json`` on a 200, so unlike
+        # the transport/HTTP paths this text never passed through the byte scrubber. Scrub the
+        # echoed body HERE (#196): a proxy or WAF can reflect the request, and this string is
+        # persisted into assessment.json, report.md and estate.db.
+        detail = f"Metadata API errors: {site.scrub_text(str(payload['errors']))[:200]}"
         severity = SECONDARY if data.get("workbooks") else PRIMARY
         LOG.warning("  [WARN] %s (%s)", detail, severity)
         errors.append({"listing": "structure", "severity": severity, **_record(GRAPHQL_ROOT, 200, detail, 1, started)})
@@ -930,6 +957,47 @@ def _checkpoint(out: Path, inventory: dict[str, list]) -> None:
     LOG.info("  checkpoint: pass-1 inventory persisted to %s", out / "raw")
 
 
+def _write_run_marker(conn: sqlite3.Connection, assembled: dict[str, Any]) -> None:
+    """Stamp the run's completeness into the DB itself.
+
+    A programmatic consumer that never opens ``assessment.json`` (``harvest_estate_assets.py --db``,
+    ``deploy_estate.py --estate-db``) had no way to tell a degraded run from a clean one: since #193
+    the run survives a failed listing and still writes a DB (#196). Additive - existing tables are
+    untouched. ``error`` text is already scrubbed at capture (``Site.scrub_text``), so it is written
+    verbatim and never carries a credential.
+    """
+    summary = assembled.get("summary") or {}
+    errors = assembled.get("listing_errors") or []
+    conn.execute(
+        "INSERT INTO assessment_run VALUES (?,?,?,?,?)",
+        (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            int(bool(assembled.get("degraded"))),
+            int(bool(assembled.get("degraded_primary"))),
+            summary.get("workbooks_total", len(assembled.get("workbooks") or [])),
+            summary.get("listing_errors", len(errors)),
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO listing_error VALUES "
+        "(:listing,:severity,:status,:path,:page,:attempts,:elapsed_sec,:transport,:error)",
+        [
+            {
+                "listing": e.get("listing"),
+                "severity": e.get("severity"),
+                "status": e.get("status"),
+                "path": e.get("path"),
+                "page": e.get("page"),
+                "attempts": e.get("attempts"),
+                "elapsed_sec": e.get("elapsed_sec"),
+                "transport": int(bool(e.get("transport"))),
+                "error": e.get("error"),
+            }
+            for e in errors
+        ],
+    )
+
+
 def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Path:
     """Raw JSON as evidence, SQLite as the query layer.
 
@@ -1034,6 +1102,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
         "INSERT OR REPLACE INTO flow VALUES (?,?,?)",
         [(f["id"], f.get("name"), (f.get("project") or {}).get("name")) for f in raw["flows"]],
     )
+    _write_run_marker(conn, assembled)
     conn.commit()
     conn.close()
     return db_path
