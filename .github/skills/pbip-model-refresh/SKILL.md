@@ -14,8 +14,8 @@ and AMO client libraries under `~/.nuget/packages`, and `npx` for
 
 The ADOMD.NET client is a *separate* nuget package from TOM/AMO, so a machine can have one and not the
 other. If `probe_desktop_query.py` prints `AdomdClient.dll not found in the nuget cache` (and
-`preflight.ps1` WARNs `ADOMD.NET client (live DAX probe)`), restore it — forcing a supported TFM so
-`dotnet add` cannot silently no-op on a net10 default:
+`preflight.ps1` WARNs `ADOMD.NET client (Desktop probe/refresh)`), restore it — forcing a supported TFM
+so `dotnet add` cannot silently no-op on a net10 default:
 `dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1`
 
 ## Available scripts
