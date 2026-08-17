@@ -73,7 +73,7 @@ the best provider *for the requested purpose* and records which it used and why.
 
 | Provider | Typical role | Status |
 |---|---|---|
-| **Server/Cloud REST** (`/views/{id}/image?resolution=high`, `?vf_<field>=<value>` for state) | Canonical when the published view *is* the source and revision/state can be pinned | ❌ specified-only (no Server to test against) |
+| **Server/Cloud REST** (`/views/{id}/image?resolution=high`, `?vf_<field>=<value>` for state) | Canonical when the published view *is* the source and revision/state can be pinned | ⚠️ **transport implemented and live-tested** in [`scripts/capture_tableau_oracle.py`](../scripts/capture_tableau_oracle.py) `--images` (same endpoint, with `401002` re-auth + backoff); **not wired into this provider chain** — no provenance manifest, no state-pinning. See #194 |
 | **Authenticated browser** (Playwright w/ session) | States/actions/extensions REST can't reproduce | ❌ specified-only |
 | **Public Playwright** | Tableau **Public** only, after capture QA | ⚠️ works (this repo's demos); hardening TODO |
 | **Guided manual export from the exact `.twbx`** (Tableau Desktop/Reader) | Extract-only workbooks with no live Server view — can be *validation-grade* | ❌ specified-only (guided prompts) |
@@ -175,12 +175,21 @@ toolkit to migrate real customer dashboards**:
 
 ## Enterprise traps checklist (for the Server/Cloud providers)
 
+> **Several of these are already solved** — in `scripts/capture_tableau_oracle.py`, which talks to the
+> same REST endpoints against a live site. Reuse that code; do not reimplement it. Items below are
+> marked ✅ where it ships a working answer.
+
 - **Negotiate the REST API version** (`/api/<v>/serverinfo`) — don't hardcode; `vizWidth/vizHeight`
   needs newer versions.
-- **Server-side image caching** can serve a stale render after a recent edit; **429s** and Tableau
-  Cloud's ~20 concurrent long-running-export limit need retry/backoff.
-- **Detect disabled image export / missing Read+download permissions** and surface it, don't silently
-  degrade.
+- ✅ **429s / retry-backoff** — `capture_tableau_oracle.py` classifies transient (gateway 5xx, 429,
+  connection reset) vs session-lost (`401002`, re-authenticates) vs credential
+  (`FederatedDataSourceException`, never retried), with exponential backoff + full jitter honouring
+  `Retry-After`, and a retry budget. **Server-side image caching** serving a stale render after a
+  recent edit is still unaddressed.
+- ✅ **Don't silently degrade** — the same script records `reauths`, `retries` and `retry_reasons` per
+  view, on the stated principle that a capture which silently healed itself is indistinguishable from a
+  clean one. Detecting *disabled image export / missing Read+download permissions* specifically is
+  still open.
 - **Record the PAT principal** — RLS can materially change what the reference shows.
 - **Pin** workbook revision + extract-refresh time + `.twbx` SHA-256 so you never compare different data
   snapshots.
@@ -195,9 +204,11 @@ toolkit to migrate real customer dashboards**:
   `pbi-migration-validator.agent.md` Gotchas: `domcontentloaded` + explicit timeouts, dismiss OneTrust,
   fixed viewport, full-page).
 - ⚠️ `scripts/capture_tableau_reference.py`: public-Playwright + embedded-thumbnail + manual providers,
-  manifest writing, fail-closed default, `structural-only` flag; Server-REST + authenticated-browser
-  providers are **stubs** that raise a clear "not implemented — no Server available to test against"
-  error rather than pretending to work.
+  manifest writing, fail-closed default, `structural-only` flag. The Server-REST and
+  authenticated-browser providers are **not wired here** and raise a clear error — but note the
+  Server-REST **transport is already implemented and live-tested** in
+  [`scripts/capture_tableau_oracle.py`](../scripts/capture_tableau_oracle.py) `--images`; only this
+  provider's contract (provenance manifest + state-pinning) is outstanding (#194).
 - ❌ Multi-state capture, numeric-oracle export, API-version negotiation, and the agent-file contract
   edits (builder input contract, orchestrator step-reorder, migration-mode declaration) are the next
   increments.
