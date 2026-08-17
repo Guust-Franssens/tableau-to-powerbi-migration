@@ -472,6 +472,10 @@ Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offl
 # It resolves the EXACT path probe_desktop_query.py globs (probe_desktop_query.py:52-55:
 # Path.home()/.nuget/packages/microsoft.analysisservices.adomdclient.netcore*/**/AdomdClient.dll, NOT
 # $env:NUGET_PACKAGES) so it PREDICTS the probe's own resolution rather than a different cache location.
+# Honouring NUGET_PACKAGES here would be a BUG: dotnet restores into it but the probe never reads it, so
+# preflight would PASS while the probe still failed. (probe's Path.home() and refresh_pbip_model.py:473's
+# os.path.expanduser("~") resolve to the SAME base - both go through os.path.expanduser - so those two
+# cannot disagree; that NEITHER honours NUGET_PACKAGES is a separate cross-file gap - see #203.)
 #
 # Severity: recommended, not critical. ADOMD is used by the pbip-model-refresh skill's live-Desktop
 # steps - BOTH the read-only DAX probe (probe_desktop_query.py) and the refresh + cache.abf persist
