@@ -4,6 +4,7 @@ purpose: download every workbook and published datasource on a Tableau site, the
          from which upstream feature requests can be written with evidence instead of anecdote.
 usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--limit N]
                                                  [--skip-download] [--workbooks-only]
+                                                 [--project NAME] [--project-id LUID]
                                                  [--allow-unignored-out]
 
 Where the output goes
@@ -48,6 +49,8 @@ import subprocess
 import sys
 import time
 import traceback
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -329,12 +332,202 @@ def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-man
     return text
 
 
+def dependency_datasources(con: sqlite3.Connection, workbook_luids: list[str]) -> list[tuple[str, str]]:
+    """The published datasources those workbooks bind to, even when they live in another project.
+
+    LUID first; an edge the survey could not resolve to a LUID falls back to the normalized name and
+    keeps EVERY candidate, because dropping one silently is the "empty report" failure this exists
+    to prevent.
+    """
+    if not workbook_luids:
+        return []
+    return list(
+        con.execute(
+            f"""
+            SELECT DISTINCT datasource.luid, datasource.name
+            FROM datasource
+            JOIN dependency ON dependency.datasource_luid = datasource.luid
+                OR (
+                    COALESCE(dependency.datasource_luid, '') = ''
+                    AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
+                )
+            WHERE dependency.workbook_luid IN ({",".join("?" for _ in workbook_luids)})
+            ORDER BY datasource.name, datasource.luid
+            """,
+            workbook_luids,
+        )
+    )
+
+
+def scoped_todo(
+    con: sqlite3.Connection, project_names: list[str], project_ids: list[str], workbooks_only: bool
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], int, int, int]:
+    """Select everything IN the chosen projects, plus the published sources their edges require.
+
+    Returns `(todo, selected_projects, workbooks, datasources_in_project, datasources_pulled_in)`.
+
+    Both halves are load-bearing and neither substitutes for the other. Following dependency edges
+    OUT of the project is what stops a report rebuilding against a model nobody migrated. Selecting
+    the datasources that simply LIVE in the project is what makes the model-first phase-1 workflow
+    work at all: the issue's own example, `--project "00 - Certified Sources"`, is 3 datasources and
+    0 workbooks, so an edges-only scope selects nothing and exits 1 on `0 asset(s) to sweep`.
+    """
+    if not project_names and not project_ids:
+        todo = []
+        if not workbooks_only:
+            todo.extend(
+                ("datasource", luid, name)
+                for luid, name in con.execute("SELECT luid, name FROM datasource ORDER BY name")
+            )
+        todo.extend(
+            ("workbook", luid, name) for luid, name in con.execute("SELECT luid, name FROM workbook ORDER BY name")
+        )
+        return todo, [], 0, 0, 0
+
+    selected = list(
+        con.execute(
+            f"SELECT luid, name FROM project WHERE name IN ({','.join('?' for _ in project_names) or 'NULL'}) "
+            f"OR luid IN ({','.join('?' for _ in project_ids) or 'NULL'}) ORDER BY name, luid",
+            [*project_names, *project_ids],
+        )
+    )
+    if not selected:
+        raise ValueError("no projects matched --project/--project-id")
+    selected_ids = [row[0] for row in selected]
+    placeholders = ",".join("?" for _ in selected_ids)
+    workbooks = list(
+        con.execute(
+            f"SELECT luid, name FROM workbook WHERE project_luid IN ({placeholders}) ORDER BY name, luid", selected_ids
+        )
+    )
+    in_project: list[tuple[str, str]] = []
+    pulled_in: list[tuple[str, str]] = []
+    if not workbooks_only:
+        in_project = list(
+            con.execute(
+                f"SELECT luid, name FROM datasource WHERE project_luid IN ({placeholders}) ORDER BY name, luid",
+                selected_ids,
+            )
+        )
+        already = {luid for luid, _ in in_project}
+        pulled_in = [row for row in dependency_datasources(con, [row[0] for row in workbooks]) if row[0] not in already]
+    datasources = sorted(in_project + pulled_in, key=lambda row: (row[1], row[0]))
+    todo = [("datasource", luid, name) for luid, name in datasources]
+    todo.extend(("workbook", luid, name) for luid, name in workbooks)
+    return todo, selected, len(workbooks), len(in_project), len(pulled_in)
+
+
+def parse_asset(path: Path, scripts: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run both offline parsers while the main thread starts the next fresh session."""
+    return parse_ours(path), parse_theirs(path, scripts)
+
+
+def safe_component(text: str, limit: int | None = None) -> str:
+    """Filename-safe form of a Tableau name or LUID -- `[A-Za-z0-9-_]` only, so it is glob-literal."""
+    cleaned = "".join(char if char.isalnum() or char in "-_" else "_" for char in text)
+    return cleaned[:limit] if limit is not None else cleaned
+
+
+def asset_path(assets_dir: Path, kind: str, name: str, luid: str) -> Path:
+    """The local filename to download INTO: `<luid>_<name><ext>`; display names are not unique.
+
+    ⚠️ The LUID goes in FRONT on purpose. The engine's `migrate_estate.py::asset_name()` strips a
+    leading canonical-UUID prefix (`_TRANSFER_UUID_PREFIX`, followed by `-`, `_` or a space), so a
+    prefixed file keeps local identity WITHOUT the LUID reaching `bundle/pbip/<stem>/` or
+    `migrations/<slug>/`. A trailing `--<luid>` is not stripped and does reach both -- verified
+    against engine 2.126.0: `strip_transfer_uuid('<uuid>_Meridian_Revenue_by_Region')` ->
+    `'Meridian_Revenue_by_Region'`, while `'Meridian_Revenue_by_Region--<uuid>'` is returned intact.
+    """
+    extension = ".twbx" if kind == "workbook" else ".tdsx"
+    return assets_dir / f"{safe_component(luid)}_{safe_component(name, 60)}{extension}"
+
+
+def landed_files(assets_dir: Path, stem: str) -> list[Path]:
+    """Files that could be this asset's download, PACKAGED form first: a `.twbx` carries data."""
+    found = sorted(assets_dir.glob(f"{stem}.tw*")) + sorted(assets_dir.glob(f"{stem}.td*"))
+    return sorted(found, key=lambda path: (path.suffix.lower() not in (".twbx", ".tdsx"), path.name))
+
+
+def existing_asset(assets_dir: Path, kind: str, name: str, luid: str) -> Path | None:
+    """The file that ACTUALLY landed for this asset, or None. Never assume the requested extension.
+
+    Two fallbacks, both measured, both load-bearing:
+
+    * **extension.** The engine's `fetch_tds.py::save_outputs` writes `<base>.twb`/`<base>.tds`
+      whenever the REST download is not a zip -- across three real full harvests the landed
+      extensions were `{'.tdsx': 17, '.twb': 18, '.twbx': 20}`, i.e. **18 of 38 workbooks (47%)
+      arrive as `.twb` where `.twbx` was requested**. Matching only the requested extension loses
+      them, and the sweep still reports `ours failed 0, his failed 0`, because an asset that never
+      reached a parser is not counted as a failure: silent data loss that reads as a clean run.
+    * **legacy name.** Assets harvested before the LUID prefix are `<name><ext>`. Without this the
+      first run after an upgrade re-downloads the whole estate at one fresh sign-in per asset --
+      the opposite of the resume behaviour this is for. Reuse is only as ambiguous as the run that
+      wrote it (two same-named assets already shared one legacy file); everything downloaded from
+      here on is LUID-unique.
+    """
+    candidates = [asset_path(assets_dir, kind, name, luid)]
+    for stem in (f"{safe_component(luid)}_{safe_component(name, 60)}", safe_component(name, 60)):
+        candidates.extend(landed_files(assets_dir, stem))
+    return next((path for path in candidates if path.exists()), None)
+
+
+def progress(finished: int, total: int, started: float) -> str:
+    """Elapsed, running average and ETA measured on FINISHED assets only.
+
+    The divisor must be what has actually completed, never the loop index: the download loop and the
+    parse drain each count from 1 while `elapsed` keeps accumulating, so `elapsed / index` reported
+    `[1/6] ... elapsed=9s avg=9.1s ETA=46s` on a run with **0 s of work left**, and scaled to ~19
+    hours announced on a 58-asset run. An ETA that big in front of a customer is worse than none.
+    """
+    elapsed = time.perf_counter() - started
+    if finished <= 0:
+        return f"elapsed={elapsed:.0f}s"
+    average = elapsed / finished
+    return f"elapsed={elapsed:.0f}s avg={average:.1f}s ETA={average * max(total - finished, 0):.0f}s"
+
+
+def record_parse(
+    entry: tuple[int, dict[str, Any], Future[tuple[dict[str, Any], dict[str, Any]]]],
+    results: list[dict],
+    total: int,
+    started: float,
+) -> None:
+    """Collect one finished offline parse and log it, so progress interleaves with the downloads."""
+    index, row, future = entry
+    row["ours"], row["theirs"] = future.result()
+    results.append(row)
+    mark = "ok " if row["ours"].get("ok") and row["theirs"].get("ok") else "DIFF"
+    LOG.info(
+        "[%d/%d] %-46s %s ours=%s his=%s %s",
+        index,
+        total,
+        row["name"][:46],
+        mark,
+        "ok" if row["ours"].get("ok") else "FAIL",
+        "ok" if row["theirs"].get("ok") else "FAIL",
+        progress(len(results), total, started),
+    )
+
+
 def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one linear sweep
     """Harvest and sweep. Exit 2 when `--out` is committable, 1 when nothing could be assessed."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, type=Path, help="output directory (must be git-ignored, see below)")
     ap.add_argument("--env", type=Path, default=REPO_ROOT / ".env")
     ap.add_argument("--db", type=Path, help="assess_estate.py estate.db to take LUIDs from")
+    ap.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        help="project name to harvest (repeatable): its workbooks AND datasources, plus any "
+        "datasource those workbooks depend on, wherever it lives",
+    )
+    ap.add_argument(
+        "--project-id",
+        action="append",
+        default=[],
+        help="project LUID to harvest (repeatable); same selection as --project, matched exactly",
+    )
     ap.add_argument("--limit", type=int, help="stop after N assets (for a quick pass)")
     ap.add_argument("--skip-download", action="store_true", help="reuse whatever is already in --out/assets")
     ap.add_argument("--workbooks-only", action="store_true", help="skip published datasources; sweep workbooks only")
@@ -365,13 +558,24 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
 
     db = args.db or (REPO_ROOT / "_assessment" / "estate.db")
     con = sqlite3.connect(db)
-    todo: list[tuple[str, str, str]] = []
-    if not args.workbooks_only:
-        for luid, name in con.execute("SELECT luid, name FROM datasource ORDER BY name"):
-            todo.append(("datasource", luid, name))
-    for luid, name in con.execute("SELECT luid, name FROM workbook ORDER BY name"):
-        todo.append(("workbook", luid, name))
+    try:
+        todo, selected, project_workbooks, project_datasources, pulled_datasources = scoped_todo(
+            con, args.project, args.project_id, args.workbooks_only
+        )
+    except (sqlite3.OperationalError, ValueError) as exc:
+        con.close()
+        LOG.error("%s; run assess_estate.py with --survey again before using project scoping", exc)
+        return 1
     con.close()
+    if selected:
+        LOG.info(
+            "project(s) %s selected: %d workbook(s) and %d datasource(s) in project, plus %d datasource(s) "
+            "pulled in because a selected workbook binds to them",
+            ", ".join(f"'{name}' ({luid})" for luid, name in selected),
+            project_workbooks,
+            project_datasources,
+            pulled_datasources,
+        )
     if args.limit:
         todo = todo[: args.limit]
     LOG.info(
@@ -383,40 +587,41 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
 
     results: list[dict] = []
     started = time.perf_counter()
-    for index, (kind, luid, name) in enumerate(todo, 1):
-        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:60]
-        ext = ".twbx" if kind == "workbook" else ".tdsx"
-        target = assets_dir / f"{safe}{ext}"
-        row: dict[str, Any] = {"name": name, "kind": kind, "luid": luid, "file": str(target)}
+    pending: deque[tuple[int, dict[str, Any], Future[tuple[dict[str, Any], dict[str, Any]]]]] = deque()
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="offline-parse") as parser:
+        for index, (kind, luid, name) in enumerate(todo, 1):
+            target = asset_path(assets_dir, kind, name, luid)
+            row: dict[str, Any] = {"name": name, "kind": kind, "luid": luid, "file": str(target)}
 
-        if not args.skip_download and not target.exists():
-            ok, detail = download(kind, luid, target, env, scripts)
-            if not ok:
-                row["download_error"] = detail
+            # Ask what LANDED, not what was requested, on BOTH sides of the download: before it so an
+            # asset already on disk (any extension, LUID-prefixed or legacy) is not re-fetched at a
+            # fresh sign-in, and after it because the fetcher decides the extension, not us.
+            actual = existing_asset(assets_dir, kind, name, luid)
+            if not args.skip_download and actual is None:
+                ok, detail = download(kind, luid, target, env, scripts)
+                if not ok:
+                    row["download_error"] = detail
+                    results.append(row)
+                    LOG.warning("[%d/%d] %-46s DOWNLOAD FAILED %s", index, len(todo), name[:46], detail[:80])
+                    continue
+                actual = existing_asset(assets_dir, kind, name, luid)
+
+            if actual is None:
+                row["download_error"] = "fetcher reported success but no file landed"
                 results.append(row)
-                LOG.warning("[%d/%d] %-46s DOWNLOAD FAILED %s", index, len(todo), name[:46], detail[:80])
                 continue
+            row["file"] = str(actual)
+            pending.append((index, row, parser.submit(parse_asset, actual, scripts)))
+            LOG.info(
+                "[%d/%d] %-46s downloaded %s", index, len(todo), name[:46], progress(len(results), len(todo), started)
+            )
+            # Drain whatever finished parsing while this asset was downloading, so a verdict lands
+            # next to the download it belongs to instead of all of them arriving after the sweep.
+            while pending and pending[0][2].done():
+                record_parse(pending.popleft(), results, len(todo), started)
 
-        candidates = [target] + sorted(assets_dir.glob(f"{safe}.tw*")) + sorted(assets_dir.glob(f"{safe}.td*"))
-        actual = next((c for c in candidates if c.exists()), None)
-        if actual is None:
-            row["download_error"] = "fetcher reported success but no file landed"
-            results.append(row)
-            continue
-        row["file"] = str(actual)
-        row["ours"] = parse_ours(actual)
-        row["theirs"] = parse_theirs(actual, scripts)
-        results.append(row)
-        mark = "ok " if row["ours"].get("ok") and row["theirs"].get("ok") else "DIFF"
-        LOG.info(
-            "[%d/%d] %-46s %s ours=%s his=%s",
-            index,
-            len(todo),
-            name[:46],
-            mark,
-            "ok" if row["ours"].get("ok") else "FAIL",
-            "ok" if row["theirs"].get("ok") else "FAIL",
-        )
+        while pending:
+            record_parse(pending.popleft(), results, len(todo), started)
 
     args.out.mkdir(parents=True, exist_ok=True)
     text = summarise(results, args.out)
