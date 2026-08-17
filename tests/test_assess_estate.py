@@ -81,12 +81,23 @@ def test_dependencies_read_the_documented_survey_key():
         "workbooks": [
             {
                 "name": "Sales",
-                "published_dependencies": [{"datasource_name": "Finance Master", "status": "resolved"}],
+                "luid": "wb-sales",
+                "published_dependencies": [
+                    {"datasource_name": "Finance Master", "luid": "ds-finance", "status": "resolved"}
+                ],
             }
         ]
     }
     _, rows = assess_estate._parse_dependencies(survey)
-    assert rows == [{"workbook_name": "Sales", "datasource_name": "Finance Master", "source": "sqlproxy/resolved"}]
+    assert rows == [
+        {
+            "workbook_name": "Sales",
+            "workbook_luid": "wb-sales",
+            "datasource_name": "Finance Master",
+            "datasource_luid": "ds-finance",
+            "source": "sqlproxy/resolved",
+        }
+    ]
 
 
 def test_declared_but_unparsable_dependencies_RAISE():
@@ -108,6 +119,47 @@ def test_understated_complexity_is_carried_from_the_survey():
     survey = {"workbooks": [{"name": "Sales", "complexity_understated": True}]}
     required, _ = assess_estate._parse_dependencies(survey)
     assert required == {"Sales"}
+
+
+def test_store_keeps_project_and_dependency_luids_for_scoped_harvest(tmp_path: Path):
+    raw = {
+        "workbooks": [{"id": "wb-sales", "name": "Sales", "project": {"id": "p-finance", "name": "Finance"}}],
+        "views": [],
+        "datasources": [{"id": "ds-finance", "name": "Finance Master", "project": {"id": "p-certified"}}],
+        "projects": [
+            {"id": "p-finance", "name": "Finance", "parentProjectId": None, "contentPermissions": "ManagedByOwner"},
+            {
+                "id": "p-certified",
+                "name": "Certified Sources",
+                "parentProjectId": None,
+                "contentPermissions": "ManagedByOwner",
+            },
+        ],
+        "groups": [],
+        "flows": [],
+        "subscriptions": [],
+        "alerts": [],
+        "custom_views": [],
+        "structure": {"publishedDatasources": []},
+        "structure_by_name": {},
+        "permissions": [],
+        "survey": {
+            "workbooks": [
+                {
+                    "name": "Sales",
+                    "luid": "wb-sales",
+                    "published_dependencies": [
+                        {"datasource_name": "Finance Master", "luid": "ds-finance", "status": "resolved"}
+                    ],
+                }
+            ]
+        },
+    }
+    store = assess_estate.write_store(tmp_path, raw, assess_estate.assemble(raw, 0.99))
+    con = assess_estate.sqlite3.connect(store)
+    assert con.execute("SELECT project_luid FROM workbook").fetchone() == ("p-finance",)
+    assert con.execute("SELECT project_luid FROM datasource").fetchone() == ("p-certified",)
+    assert con.execute("SELECT workbook_luid, datasource_luid FROM dependency").fetchone() == ("wb-sales", "ds-finance")
 
 
 # --- refusal 3: never claim a usage window we do not have ---------------------------------------

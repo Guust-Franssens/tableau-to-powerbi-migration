@@ -307,7 +307,7 @@ def iam_hard_cases(permissions: list[dict], groups: list[dict]) -> list[dict]:
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workbook (
-  luid TEXT PRIMARY KEY, name TEXT, project TEXT, owner_luid TEXT, size_mb INTEGER,
+  luid TEXT PRIMARY KEY, name TEXT, project TEXT, project_luid TEXT, owner_luid TEXT, size_mb INTEGER,
   created_at TEXT, updated_at TEXT,
   sheets INTEGER, dashboards INTEGER, calcs INTEGER, lods INTEGER, table_calcs INTEGER,
   has_user_reference INTEGER, complexity REAL, complexity_understated INTEGER,
@@ -317,10 +317,11 @@ CREATE TABLE IF NOT EXISTS view (
   luid TEXT PRIMARY KEY, workbook_luid TEXT, name TEXT, content_url TEXT,
   views_lifetime INTEGER, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS datasource (
-  luid TEXT PRIMARY KEY, name TEXT, project TEXT, is_certified INTEGER,
+  luid TEXT PRIMARY KEY, name TEXT, project TEXT, project_luid TEXT, is_certified INTEGER,
   has_extracts INTEGER, extract_last_refresh TEXT);
 CREATE TABLE IF NOT EXISTS upstream_table (datasource_name TEXT, full_name TEXT);
-CREATE TABLE IF NOT EXISTS dependency (workbook_name TEXT, datasource_name TEXT, source TEXT);
+CREATE TABLE IF NOT EXISTS dependency (
+  workbook_name TEXT, workbook_luid TEXT, datasource_name TEXT, datasource_luid TEXT, source TEXT);
 CREATE TABLE IF NOT EXISTS project (
   luid TEXT PRIMARY KEY, name TEXT, parent_luid TEXT, content_permissions TEXT);
 CREATE TABLE IF NOT EXISTS grp (luid TEXT PRIMARY KEY, name TEXT, domain TEXT, members INTEGER);
@@ -478,7 +479,9 @@ def _parse_dependencies(survey: dict | None) -> tuple[set[str], list[dict]]:
                 dep_rows.append(
                     {
                         "workbook_name": wb.get("name"),
+                        "workbook_luid": wb.get("luid"),
                         "datasource_name": name,
+                        "datasource_luid": dep.get("luid"),
                         "source": f"sqlproxy/{dep.get('status', 'unknown')}",
                     }
                 )
@@ -511,6 +514,7 @@ def assemble(raw: dict[str, Any], target: float) -> dict[str, Any]:
                 "luid": wb["id"],
                 "name": wb["name"],
                 "project": (wb.get("project") or {}).get("name"),
+                "project_luid": (wb.get("project") or {}).get("id"),
                 "owner_luid": (wb.get("owner") or {}).get("id"),
                 "size_mb": wb.get("size"),
                 "created_at": wb.get("createdAt"),
@@ -560,7 +564,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
     conn.executemany(
-        "INSERT INTO workbook VALUES (:luid,:name,:project,:owner_luid,:size_mb,:created_at,:updated_at,"
+        "INSERT INTO workbook VALUES (:luid,:name,:project,:project_luid,:owner_luid,:size_mb,:created_at,:updated_at,"
         ":sheets,:dashboards,:calcs,:lods,:table_calcs,:has_user_reference,:complexity,"
         ":complexity_understated,:views_lifetime,:view_count,:subscriptions,:alerts,:custom_views,"
         ":rank,:cumulative_share,:tier,:tier_reason)",
@@ -581,8 +585,19 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
         ],
     )
     conn.executemany(
-        "INSERT OR REPLACE INTO datasource VALUES (?,?,?,?,?,?)",
-        [(d["id"], d.get("name"), (d.get("project") or {}).get("name"), None, None, None) for d in raw["datasources"]],
+        "INSERT OR REPLACE INTO datasource VALUES (?,?,?,?,?,?,?)",
+        [
+            (
+                d["id"],
+                d.get("name"),
+                (d.get("project") or {}).get("name"),
+                (d.get("project") or {}).get("id"),
+                None,
+                None,
+                None,
+            )
+            for d in raw["datasources"]
+        ],
     )
     for ds in raw["structure"].get("publishedDatasources") or []:
         conn.execute(
@@ -599,7 +614,8 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
             [(ds.get("name"), t.get("fullName")) for t in ds.get("upstreamTables") or []],
         )
     conn.executemany(
-        "INSERT INTO dependency VALUES (:workbook_name,:datasource_name,:source)", assembled["dependencies"]
+        "INSERT INTO dependency VALUES (:workbook_name,:workbook_luid,:datasource_name,:datasource_luid,:source)",
+        assembled["dependencies"],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO project VALUES (?,?,?,?)",

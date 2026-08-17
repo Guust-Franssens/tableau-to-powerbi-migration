@@ -48,6 +48,7 @@ import subprocess
 import sys
 import time
 import traceback
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -329,12 +330,96 @@ def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-man
     return text
 
 
+def scoped_todo(
+    con: sqlite3.Connection, project_names: list[str], project_ids: list[str], workbooks_only: bool
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], int, int]:
+    """Select project workbooks and the published sources their survey edges require."""
+    if not project_names and not project_ids:
+        todo = []
+        if not workbooks_only:
+            todo.extend(
+                ("datasource", luid, name)
+                for luid, name in con.execute("SELECT luid, name FROM datasource ORDER BY name")
+            )
+        todo.extend(
+            ("workbook", luid, name) for luid, name in con.execute("SELECT luid, name FROM workbook ORDER BY name")
+        )
+        return todo, [], 0, 0
+
+    selected = list(
+        con.execute(
+            f"SELECT luid, name FROM project WHERE name IN ({','.join('?' for _ in project_names) or 'NULL'}) "
+            f"OR luid IN ({','.join('?' for _ in project_ids) or 'NULL'}) ORDER BY name, luid",
+            [*project_names, *project_ids],
+        )
+    )
+    if not selected:
+        raise ValueError("no projects matched --project/--project-id")
+    selected_ids = [row[0] for row in selected]
+    placeholders = ",".join("?" for _ in selected_ids)
+    workbooks = list(
+        con.execute(
+            f"SELECT luid, name FROM workbook WHERE project_luid IN ({placeholders}) ORDER BY name, luid", selected_ids
+        )
+    )
+    datasource_rows: list[tuple[str, str]] = []
+    if not workbooks_only:
+        datasource_rows = (
+            list(
+                con.execute(
+                    f"""
+                SELECT DISTINCT datasource.luid, datasource.name
+                FROM datasource
+                JOIN dependency ON dependency.datasource_luid = datasource.luid
+                    OR (
+                        COALESCE(dependency.datasource_luid, '') = ''
+                        AND dependency.datasource_name = datasource.name
+                    )
+                WHERE dependency.workbook_luid IN ({",".join("?" for _ in workbooks)})
+                ORDER BY datasource.name, datasource.luid
+                """,
+                    [row[0] for row in workbooks],
+                )
+            )
+            if workbooks
+            else []
+        )
+    todo = [("datasource", luid, name) for luid, name in datasource_rows]
+    todo.extend(("workbook", luid, name) for luid, name in workbooks)
+    return todo, selected, len(workbooks), len(datasource_rows)
+
+
+def parse_asset(path: Path, scripts: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run both offline parsers while the main thread starts the next fresh session."""
+    return parse_ours(path), parse_theirs(path, scripts)
+
+
+def asset_path(assets_dir: Path, kind: str, name: str, luid: str) -> Path:
+    """Return an identity-specific local filename; Tableau display names are not unique."""
+    safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in name)[:60]
+    safe_luid = "".join(char if char.isalnum() or char in "-_" else "_" for char in luid)
+    extension = ".twbx" if kind == "workbook" else ".tdsx"
+    return assets_dir / f"{safe_name}--{safe_luid}{extension}"
+
+
 def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one linear sweep
     """Harvest and sweep. Exit 2 when `--out` is committable, 1 when nothing could be assessed."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, type=Path, help="output directory (must be git-ignored, see below)")
     ap.add_argument("--env", type=Path, default=REPO_ROOT / ".env")
     ap.add_argument("--db", type=Path, help="assess_estate.py estate.db to take LUIDs from")
+    ap.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        help="project name to harvest (repeatable; includes required datasources)",
+    )
+    ap.add_argument(
+        "--project-id",
+        action="append",
+        default=[],
+        help="project LUID to harvest (repeatable; includes required datasources)",
+    )
     ap.add_argument("--limit", type=int, help="stop after N assets (for a quick pass)")
     ap.add_argument("--skip-download", action="store_true", help="reuse whatever is already in --out/assets")
     ap.add_argument("--workbooks-only", action="store_true", help="skip published datasources; sweep workbooks only")
@@ -365,13 +450,22 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
 
     db = args.db or (REPO_ROOT / "_assessment" / "estate.db")
     con = sqlite3.connect(db)
-    todo: list[tuple[str, str, str]] = []
-    if not args.workbooks_only:
-        for luid, name in con.execute("SELECT luid, name FROM datasource ORDER BY name"):
-            todo.append(("datasource", luid, name))
-    for luid, name in con.execute("SELECT luid, name FROM workbook ORDER BY name"):
-        todo.append(("workbook", luid, name))
+    try:
+        todo, selected, project_workbooks, pulled_datasources = scoped_todo(
+            con, args.project, args.project_id, args.workbooks_only
+        )
+    except (sqlite3.OperationalError, ValueError) as exc:
+        con.close()
+        LOG.error("%s; run assess_estate.py with --survey again before using project scoping", exc)
+        return 1
     con.close()
+    if selected:
+        LOG.info(
+            "project(s) %s selected: %d workbook(s), plus %d datasource(s) pulled in by dependency",
+            ", ".join(f"'{name}' ({luid})" for luid, name in selected),
+            project_workbooks,
+            pulled_datasources,
+        )
     if args.limit:
         todo = todo[: args.limit]
     LOG.info(
@@ -383,40 +477,58 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
 
     results: list[dict] = []
     started = time.perf_counter()
-    for index, (kind, luid, name) in enumerate(todo, 1):
-        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:60]
-        ext = ".twbx" if kind == "workbook" else ".tdsx"
-        target = assets_dir / f"{safe}{ext}"
-        row: dict[str, Any] = {"name": name, "kind": kind, "luid": luid, "file": str(target)}
+    pending: list[tuple[int, dict[str, Any], Future[tuple[dict[str, Any], dict[str, Any]]]]] = []
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="offline-parse") as parser:
+        for index, (kind, luid, name) in enumerate(todo, 1):
+            target = asset_path(assets_dir, kind, name, luid)
+            row: dict[str, Any] = {"name": name, "kind": kind, "luid": luid, "file": str(target)}
 
-        if not args.skip_download and not target.exists():
-            ok, detail = download(kind, luid, target, env, scripts)
-            if not ok:
-                row["download_error"] = detail
+            if not args.skip_download and not target.exists():
+                ok, detail = download(kind, luid, target, env, scripts)
+                if not ok:
+                    row["download_error"] = detail
+                    results.append(row)
+                    LOG.warning("[%d/%d] %-46s DOWNLOAD FAILED %s", index, len(todo), name[:46], detail[:80])
+                    continue
+
+            candidates = [target]
+            actual = next((c for c in candidates if c.exists()), None)
+            if actual is None:
+                row["download_error"] = "fetcher reported success but no file landed"
                 results.append(row)
-                LOG.warning("[%d/%d] %-46s DOWNLOAD FAILED %s", index, len(todo), name[:46], detail[:80])
                 continue
+            row["file"] = str(actual)
+            pending.append((index, row, parser.submit(parse_asset, actual, scripts)))
+            elapsed = time.perf_counter() - started
+            average = elapsed / index
+            LOG.info(
+                "[%d/%d] %-46s downloaded elapsed=%.0fs avg=%.1fs ETA=%.0fs",
+                index,
+                len(todo),
+                name[:46],
+                elapsed,
+                average,
+                average * (len(todo) - index),
+            )
 
-        candidates = [target] + sorted(assets_dir.glob(f"{safe}.tw*")) + sorted(assets_dir.glob(f"{safe}.td*"))
-        actual = next((c for c in candidates if c.exists()), None)
-        if actual is None:
-            row["download_error"] = "fetcher reported success but no file landed"
+        for index, row, future in pending:
+            row["ours"], row["theirs"] = future.result()
             results.append(row)
-            continue
-        row["file"] = str(actual)
-        row["ours"] = parse_ours(actual)
-        row["theirs"] = parse_theirs(actual, scripts)
-        results.append(row)
-        mark = "ok " if row["ours"].get("ok") and row["theirs"].get("ok") else "DIFF"
-        LOG.info(
-            "[%d/%d] %-46s %s ours=%s his=%s",
-            index,
-            len(todo),
-            name[:46],
-            mark,
-            "ok" if row["ours"].get("ok") else "FAIL",
-            "ok" if row["theirs"].get("ok") else "FAIL",
-        )
+            mark = "ok " if row["ours"].get("ok") and row["theirs"].get("ok") else "DIFF"
+            elapsed = time.perf_counter() - started
+            average = elapsed / index
+            LOG.info(
+                "[%d/%d] %-46s %s ours=%s his=%s elapsed=%.0fs avg=%.1fs ETA=%.0fs",
+                index,
+                len(todo),
+                row["name"][:46],
+                mark,
+                "ok" if row["ours"].get("ok") else "FAIL",
+                "ok" if row["theirs"].get("ok") else "FAIL",
+                elapsed,
+                average,
+                average * (len(todo) - index),
+            )
 
     args.out.mkdir(parents=True, exist_ok=True)
     text = summarise(results, args.out)
