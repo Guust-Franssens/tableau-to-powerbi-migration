@@ -178,9 +178,35 @@ ACCESS_DENIED_MARKERS = (
 # line ceiling.
 
 
+# TMDL reserves the single quote as its identifier delimiter: an identifier containing a space (or
+# most punctuation) MUST be quoted or Power BI Desktop refuses the model with InvalidObjectHeader.
+# The deterministic engine names unresolved custom-SQL relations `Custom SQL Query`, so the un-quoted
+# probe crashed on most real estates. Quote UNCONDITIONALLY - a quoted identifier is always valid
+# TMDL even where a bare one would be legal, which kills the "which character forces quoting?" guess.
+# Ground truth (Power BI's own serializer): examples/wind-energy-utilization/.../CO2 Savings.tmdl
+# `table 'CO2 Savings'` and model.tmdl `ref table 'CO2 Savings'`; an embedded quote is doubled, per
+# examples/broadway-stage-to-screen/.../1 Films.tmdl `column 'Sondheim''s Work'`.
+def _tmdl_ident(name: str) -> str:
+    """Quote `name` as a TMDL identifier: single quotes, doubling any embedded quote."""
+    return "'" + name.replace("'", "''") + "'"
+
+
+# A table's TMDL identifier and its FILENAME are different strings. Spaces are legal in a Windows
+# filename but `< > : " / \ | ? *` and control chars are not - a source table like `dbo:staging`
+# would yield an unwritable path (a separate failure mode). Sanitise only the filename; the `table`
+# header keeps the real quoted name, and TOM matches tables by header content, not by filename.
+def _tmdl_filename_stem(name: str) -> str:
+    """A non-empty, Windows-safe filename stem for `name` (its identifier stays separate)."""
+    stem = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in name)
+    return stem.rstrip(" .") or "probe_table"
+
+
 def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, str]:
     """The minimum PBIP that Power BI Desktop will open: one table, one column, one partition."""
     indented = "\n".join("\t\t\t\t" + line for line in m_query.split("\n"))
+    table_ident = _tmdl_ident(table)
+    column_ident = _tmdl_ident(column)
+    table_stem = _tmdl_filename_stem(table)
     return {
         f"{name}.pbip": json.dumps(
             {
@@ -221,16 +247,16 @@ def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, s
             "\tculture: en-US\n"
             "\tdefaultPowerBIDataSourceVersion: powerBI_V3\n"
             "\tsourceQueryCulture: en-US\n\n"
-            f"ref table {table}\n"
+            f"ref table {table_ident}\n"
         ),
-        f"{name}.SemanticModel/definition/tables/{table}.tmdl": (
-            f"table {table}\n\n"
-            f"\tcolumn {column}\n"
+        f"{name}.SemanticModel/definition/tables/{table_stem}.tmdl": (
+            f"table {table_ident}\n\n"
+            f"\tcolumn {column_ident}\n"
             "\t\tdataType: string\n"
             f"\t\tlineageTag: {uuid.uuid4()}\n"
             "\t\tsummarizeBy: none\n"
             f"\t\tsourceColumn: {column}\n\n"
-            f"\tpartition {table} = m\n"
+            f"\tpartition {table_ident} = m\n"
             "\t\tmode: import\n"
             "\t\tsource =\n"
             f"{indented}\n"
