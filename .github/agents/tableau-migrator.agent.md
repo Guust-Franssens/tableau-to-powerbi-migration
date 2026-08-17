@@ -205,8 +205,8 @@ PBIR files yourself.
    `fixable` / `accepted-limitation` / `false-claim`, and **both builders consume that
    classification**. Sending a builder at the raw list instead means it repairs a deferral that was
    deliberate — measured, one such row would silently re-scope six other table calcs. Give it the
-   handover slice, the active contract (`migration-spec.json` or engine bundle) and the reference bundle
-   (`migrations/workbooks/<name>/reference/`; capture with `capture_tableau_reference.py` if empty).
+   handover slice, the active contract (`migration-spec.json` or engine bundle) and the reference
+   bundle (path/tool/grade from the brief; default `migrations/workbooks/<name>/reference/`).
    **Name the mode** — this persona has three (triage / spot-check / sign-off) and they are different
    jobs; step 10 invokes it again, independently, for the last one.
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work

@@ -460,6 +460,33 @@ fidelity, the engine's for conversion) over every asset and writes `<out>/parse-
 `parse-sweep.json` — an estate-wide failure distribution, and exactly the evidence an upstream
 feature request needs instead of an anecdote.
 
+**Capture the Tableau reference imagery in the SAME trip — this is the dispatcher's job, not a
+subagent's.** A fidelity review later needs a picture of the *source*, and nothing downstream produces
+it: the Desktop Bridge `screenshot`/`screenshot-all` commands shoot the Power BI *output*, not
+Tableau. Capturing it now, while you are already authenticated to the site, is the difference between
+one command and a re-authentication against a server that may since have gone dark — which is why it
+belongs here and not inside a persona (issue #198: an operator had to ask for it by hand, because the
+builder/validator personas each routed capture themselves and stalled on the wrong tool). **Pick the
+tool by the source:**
+
+| Source | Capture command | Notes |
+|---|---|---|
+| **Tableau Public URL, or a local `.twb`/`.twbx`** | `python scripts/capture_tableau_reference.py migrations/workbooks/<slug> [--public-url <url> --view <view>]` | Writes a provenance-stamped `reference/manifest.json` — a `capabilities`-carrying `validation_grade` source; its `manual` provider also adopts user-dropped `tableau-*.png` in `reference/`. An **existing `reference/manifest.json` short-circuits to exit 0** — re-run with `--force`. |
+| **Tableau Server/Cloud** (`TABLEAU_SERVER_URL` configured) | `python scripts/capture_tableau_oracle.py --out _oracle --images [--workbook "<published name>"]` | The command on the left **exits 3** on an empty target when the URL is set (URL unset → 1): that is *"wrong tool for this source"*, **NOT** "capture is impossible" — misreading it is the whole of #198. Its `server_rest` provider is a `NotImplementedError` stub. Use the oracle, which does the live REST image export. |
+
+Three things about the oracle bite, all verified in `scripts/capture_tableau_oracle.py`:
+- **`--out` is required** — omit it and argparse exits 2, capturing nothing.
+- **`--workbook` is an exact, case-insensitive *published-workbook-name* filter** (`select_views`), so
+  substituting a migration slug for the published name silently matches **zero** views.
+- **Do not trust the oracle's exit 0.** It is computed from per-view *data* status only — image status
+  never reaches the exit code, and zero selected views also exits 0 — so `--images` can return 0
+  having produced no image. Confirm the capture in `_oracle/oracle-manifest.json` (a non-zero
+  `view_count`, plus each view's image status) before believing it happened. It writes renders to
+  `_oracle/images/<view>__<luid8>.png`, numbers to `_oracle/data/`, and that manifest.
+
+Credentials for either tool come from `.env` **or exported environment variables** (the latter take
+precedence), never CLI arguments.
+
 **The conversion engine has exactly ONE source: the installed plugin.** `tableau-fabric-skills@tableau-collection`,
 at `~/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/`. Not a sibling clone, not
 a checkout in `~/vscode-projects`, not "whichever one a script finds first". Every step resolves it
@@ -540,6 +567,17 @@ two reasons no persona can solve alone: it survives a **dropped session** (a clo
 this session's entire working memory with it — measured, 2026-08-08), and it is what a **stateless**
 subagent receives instead of re-deriving intent nobody wrote down. Then invoke `@tableau-migrator`
 per unit of work, handing it the brief.
+
+**Record the Step-1 capture in the brief — grade included.** A stateless subagent cannot see what you
+captured; the brief is how it learns. For each unit write down three things: **where the reference
+landed** (`migrations/workbooks/<slug>/reference/` for a `capture_tableau_reference.py` run, or
+`_oracle/images/…` for an oracle run), **which tool produced it**, and **what grade of evidence it
+is** — the load-bearing part. A `reference/` capture carries a `capabilities` manifest and is a
+`validation_grade` source; an **oracle** capture is **not** — its images land outside `reference/`,
+carry no `capabilities` manifest, and are taken in the view's **default state only** (no `?vf_` filter
+pinning), so they are **layout- and text-grade only**. Say so in the brief, and tell the consumer to
+log that ceiling in `limitations_encountered`: a visual PASS signed off on oracle imagery alone is
+overstated (issue #194). Do not quietly drop this, and do not inflate it.
 
 > **Running the pipeline by hand, or standing behind someone who is?**
 > [`docs/operator-runbook.md`](docs/operator-runbook.md) is the command-by-command version of this

@@ -162,16 +162,19 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
    *spec* is never a reason to decline — a missing *ground truth* is, so say which you actually lack.
 3. **Tableau reference screenshots**, one whole-dashboard capture per dashboard at minimum, ideally
    per-worksheet crops too. **Ground truth lives at `migrations/workbooks/<slug>/reference/` (with a
-   `manifest.json`) — look there FIRST; all existing migrations already have one.** If it's empty, use
-   the repo's purpose-built, provenance-stamped capture subsystem rather than hand-rolling Playwright:
-   ```
-   python scripts/capture_tableau_reference.py migrations/workbooks/<slug> [--public-url <url> --view <view>]
-   ```
-   It has a **`manual` provider** for workbooks that are *not* on Tableau Public (the enterprise case):
-   the user drops screenshots into `reference/` and they become the immutable ground truth. See
-   `docs/reference-capture.md`. Only fall back to raw Playwright (Gotchas below) if that script can't
-   serve the case. A fidelity review without ground-truth imagery is guessing — but **"not on Tableau
-   Public" is NOT a reason to refuse**; ask for a manual capture instead.
+   `manifest.json`) — look there FIRST; all existing migrations already have one**, and the brief
+   names what the dispatcher captured in Step 1 (path, tool, grade), so you never route capture
+   yourself. A fidelity review without ground-truth imagery is guessing — but **"not on Tableau
+   Public" is NOT a reason to refuse**: ask for the dispatcher's capture, or a manual one.
+
+   ⚠️ **Grade the evidence, don't just consume it (#194).** If the brief points you at an *oracle*
+   capture (`_oracle/images/…`, from `capture_tableau_oracle.py`), those images land OUTSIDE
+   `reference/` and carry **no `capabilities` manifest** — so they are **not** a `validation_grade`
+   source. Treat an oracle image as **layout- and text-grade** native-render evidence (catch gross
+   layout/label/mark differences), for the **default state only** (no `?vf_` state-pinning). Do **not**
+   sign off visual fidelity, `state_reproducible`, or `revision_bound` parity on it alone; a signed-off
+   visual PASS still needs a `validation_grade` reference (guided manual export / user-confirmed
+   screenshot). Record the gap in `limitations_encountered`. See `docs/reference-capture.md`.
 4. **The semantic model + PBIP report location** — for your own PBI-side screenshots (Desktop Bridge
    `screenshot`/`screenshot-all`, otherwise ask the orchestrator/user for a fresh one) and for the
    numeric `EVALUATE` pass (see *Skills you use* for the offline path that works on a local PBIP).
