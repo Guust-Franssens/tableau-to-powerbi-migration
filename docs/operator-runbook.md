@@ -416,6 +416,27 @@ decision. Two hard cases show up on nearly every estate: Power BI's Build permis
 all-or-nothing (*"see the chart, not the numbers"* is not expressible), and local Tableau groups have
 no Entra counterpart — that one needs an identity owner and is usually the long pole.
 
+**Check a fourth thing: is the run DEGRADED?** Since #193 a listing that cannot be read no longer
+kills the run — it is retried within a bound, then recorded. The contract:
+
+| where | what to look for |
+|---|---|
+| exit code | `0` clean or secondary-degraded · **`3` a PRIMARY listing is incomplete** · `1` nothing assessed |
+| `report.md` | a `> ⚠️ **DEGRADED**` blockquote (secondary) or a `# ⚠️ DEGRADED` **first heading** (primary) |
+| `assessment.json` | `degraded`, `degraded_primary`, and `listing_errors[]` naming each endpoint, page, attempts and elapsed time |
+| `estate.db` | the `assessment_run` row carries `degraded` / `degraded_primary` and the counts; `listing_error` rows name each failed listing (error text scrubbed). This is the ONLY degradation signal a programmatic consumer (`harvest_estate_assets.py --db`, `deploy_estate.py --estate-db`) sees — neither opens `assessment.json` |
+| the log | one `[WARN]` per failed listing, then one `[ACTION]` line |
+
+A **secondary** failure (subscriptions, alerts, custom views, group membership, flows) only ever
+*under*-reports deliberate use, so the retire-candidate tier is the one to distrust — the rest of the
+assessment stands. A **primary** failure (workbooks, views, datasources, projects, structure) means
+the coverage curve is computed from data known to be partial: **do not scope from it, re-run.**
+
+Four flags tune the network behaviour; the defaults are the old hard-coded ones:
+`--rest-timeout 180` · `--graphql-timeout 300` · `--max-attempts 3` · `--retry-budget 300`
+(seconds, except attempts). Raise the timeout for a slow connection, raise attempts for a flaky one.
+Neither retries an auth or permission refusal — that is a final answer, and a human has to fix it.
+
 ### Step 3 — lineage plan
 
 `--plan` prints the migration order by leverage: most-consumed published datasource first. The dedup
@@ -895,6 +916,22 @@ count is a signal, not noise. Ground truth is readable *mid-run* — `phase-timi
 journal, the artifact folder — and reading it early is what has caught real failures before a run
 self-reported success.
 
+### 4.11 `assess_estate.py` says DEGRADED, or exits 3
+
+| | |
+|---|---|
+| **symptom** | the run finishes and `report.md` opens with a `DEGRADED` banner; the process may exit `3` |
+| **cause** | one or more listings could not be read — a timeout, a dropped connection, or a refusal. Before #193 this was a **traceback** that discarded the whole run (three consecutive failures on one customer estate, on `customviews`, `groups/{id}/users`, `customviews`) |
+| **check** | `listing_errors[]` in `assessment.json` (or the `listing_error` table in `estate.db`) names the endpoint, page, attempt count, elapsed seconds, and `transport: true` when no status code ever came back |
+| **fix** | `transport: true` and slow (elapsed ≈ the timeout) → raise `--rest-timeout`; `transport: true` and fast → raise `--max-attempts` / `--retry-budget`; status `401`/`403` → a credential or permission problem, which **no retry can fix** |
+
+**Exit `3` is not a crash — it is a refusal to let a partial inventory pass as an estate.** Exit `0`
+with a blockquote banner means every primary listing was read in full and only a deliberate-use
+signal is missing; that assessment is usable, with the retire tier flagged as unproven.
+
+The pass-1 inventory is written to `_assessment/raw/` **before** the flakier passes run, so even a
+later failure leaves the expensive part on disk.
+
 ---
 
 ## 5. Verification checklist
@@ -1122,6 +1159,7 @@ Placeholders used in this document — and where the real value lives:
 | script | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|---|
 | `preflight.ps1` | ready | critical missing | — | — | — | — | — |
+| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — |
 | `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** |
 | `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — |
 

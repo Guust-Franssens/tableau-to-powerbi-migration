@@ -1201,7 +1201,9 @@ def project_map(bundle: Path, estate_db: Path | None) -> dict[str, str]:
 
     Two sources, deliberately in this order:
 
-    * ``estate.db`` from `assess_estate.py` - authoritative and complete, because it read the site.
+    * ``estate.db`` from `assess_estate.py` - authoritative for what it read, but NOT guaranteed
+      complete: since #193 the run survives a failed listing and still writes a DB, so consult its
+      ``assessment_run`` row (``degraded`` / ``degraded_primary``) before trusting it as whole.
     * ``source-provenance.json`` in the bundle - present without an assessment, but only covers
       workbooks that were matched back to the site. Measured on a real bundle: 10 of 58 rows carried
       an origin, the rest being local-only inputs.
