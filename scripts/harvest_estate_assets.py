@@ -4,6 +4,7 @@ purpose: download every workbook and published datasource on a Tableau site, the
          from which upstream feature requests can be written with evidence instead of anecdote.
 usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--limit N]
                                                  [--skip-download] [--workbooks-only]
+                                                 [--project NAME] [--project-id LUID]
                                                  [--allow-unignored-out]
 
 Where the output goes
