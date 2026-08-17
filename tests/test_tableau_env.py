@@ -70,6 +70,12 @@ def test_engine_child_env_bridges_our_name_to_the_engines_name():
     assert child["TABLEAU_PAT_VALUE"] == "s3cr3t"
 
 
+def test_engine_child_env_also_exports_the_documented_name_from_the_legacy_name():
+    child = te.engine_child_env({"TABLEAU_PAT_VALUE": "legacy-secret"}, base={})
+    assert child["TABLEAU_PAT_SECRET"] == "legacy-secret"
+    assert child["TABLEAU_PAT_VALUE"] == "legacy-secret"
+
+
 def test_engine_child_env_passes_through_other_keys():
     child = te.engine_child_env({"TABLEAU_SERVER_URL": "https://x", "TABLEAU_PAT_SECRET": "s3cr3t"}, base={})
     assert child["TABLEAU_SERVER_URL"] == "https://x"
@@ -154,7 +160,28 @@ def test_resolve_env_normalises_the_engines_pat_secret_name(tmp_path):
     """A .env written from the ENGINE's docs must authenticate our scripts too."""
     path = tmp_path / ".env"
     path.write_text("TABLEAU_PAT_VALUE=s3cr3t\n", encoding="utf-8")
-    assert te.resolve_env(path, environ={})["TABLEAU_PAT_SECRET"] == "s3cr3t"
+    env = te.resolve_env(path, environ={})
+    assert env["TABLEAU_PAT_SECRET"] == "s3cr3t"
+    assert env["TABLEAU_PAT_VALUE"] == "s3cr3t"
+
+
+def test_resolve_env_mirrors_the_documented_pat_secret_name(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("TABLEAU_PAT_SECRET=s3cr3t\n", encoding="utf-8")
+    env = te.resolve_env(path, environ={})
+    assert env["TABLEAU_PAT_SECRET"] == "s3cr3t"
+    assert env["TABLEAU_PAT_VALUE"] == "s3cr3t"
+
+
+def test_env_example_lists_only_the_documented_pat_secret_name():
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    keys = {
+        line.partition("=")[0]
+        for line in env_example.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#") and "=" in line
+    }
+    assert "TABLEAU_PAT_SECRET" in keys
+    assert "TABLEAU_PAT_VALUE" not in keys
 
 
 # --------------------------------------------------------------------------- require
