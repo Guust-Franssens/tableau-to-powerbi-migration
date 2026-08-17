@@ -460,6 +460,30 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
 Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
 
+# --- ADOMD.NET client assembly (probe_desktop_query.py's live-Desktop DAX gate) ---------------------
+# The .NET-SDK check above covers TOM/AMO (Microsoft.AnalysisServices.NetCore.retail.amd64). ADOMD.NET
+# is a SEPARATE nuget package (Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64) - a machine
+# can have TOM and still be missing ADOMD. That was the silent field failure this check exists for: on
+# a colleague's box the AdomdClient assembly was absent, so probe_desktop_query.py could not run a live
+# EVALUATE, and nothing flagged it up front. `dotnet add package` had even printed "Restored ... 0
+# Errors" while landing ZERO PackageReference (a net10.0 scratch project silently no-op'd the add) - so
+# console text is not proof; presence of the DLL on disk is. Hence a file check, not a restore attempt.
+#
+# It resolves the EXACT path probe_desktop_query.py globs (probe_desktop_query.py:52-55:
+# Path.home()/.nuget/packages/microsoft.analysisservices.adomdclient.netcore*/**/AdomdClient.dll, NOT
+# $env:NUGET_PACKAGES) so it PREDICTS the probe's own resolution rather than a different cache location.
+#
+# Severity: recommended, not critical. ADOMD is needed ONLY by the live-Desktop data probe - the
+# credentials/reachability gate before building a report - the same Desktop-phase-only scope as the
+# PBI_DESKTOP_PATH check above. The deterministic estate pipeline, offline TMDL validation and PBIR
+# authoring/validation never touch it, so a miss must NOT block an estate/model-only run; but it must be
+# a VISIBLE warning naming the gated capability and the exact restore, because its absence was silent.
+$adomdDll = Get-ChildItem -Path (Join-Path $HOME '.nuget\packages\microsoft.analysisservices.adomdclient.netcore*') `
+    -Recurse -Filter 'Microsoft.AnalysisServices.AdomdClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+Add-Check 'ADOMD.NET client (live DAX probe)' 'recommended' ([bool]$adomdDll) `
+    $(if ($adomdDll) { $adomdDll.FullName } else { 'not in the nuget cache - probe_desktop_query.py cannot run a live EVALUATE against an open Desktop model' }) `
+    'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the shared ~/.nuget cache the probe reads).'
+
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'
 
