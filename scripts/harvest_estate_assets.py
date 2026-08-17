@@ -373,7 +373,7 @@ def scoped_todo(
                 JOIN dependency ON dependency.datasource_luid = datasource.luid
                     OR (
                         COALESCE(dependency.datasource_luid, '') = ''
-                        AND dependency.datasource_name = datasource.name
+                        AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
                     )
                 WHERE dependency.workbook_luid IN ({",".join("?" for _ in workbooks)})
                 ORDER BY datasource.name, datasource.luid

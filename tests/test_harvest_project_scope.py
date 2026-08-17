@@ -69,7 +69,9 @@ def test_unknown_project_is_an_explicit_error(database: sqlite3.Connection) -> N
 
 
 def test_unresolved_edge_includes_all_same_named_datasource_candidates(database: sqlite3.Connection) -> None:
-    database.execute("UPDATE dependency SET datasource_luid = NULL WHERE workbook_luid = 'wb-archive'")
+    database.execute(
+        "UPDATE dependency SET datasource_luid = NULL, datasource_name = ' ledger ' WHERE workbook_luid = 'wb-archive'"
+    )
     todo, _, workbooks, datasources = harvest.scoped_todo(database, [], ["project-archive"], workbooks_only=False)
     assert (workbooks, datasources) == (1, 2)
     assert {item[1] for item in todo} == {"wb-archive", "ds-finance", "ds-archive"}
