@@ -57,6 +57,103 @@ def _options(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(**{**defaults, **kwargs})
 
 
+# --------------------------------------------------------------------------- configuration
+
+
+def test_configured_workspace_reads_dotenv_and_prefers_an_export(tmp_path, monkeypatch):
+    """The customer landing zone persists in `.env`, while an explicit session can override it."""
+    (tmp_path / ".env").write_text('FABRIC_WORKSPACE_ID="dotenv-workspace" # customer landing zone\n', encoding="utf-8")
+    monkeypatch.setattr(de, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("FABRIC_WORKSPACE_ID", raising=False)
+    assert de.configured_workspace() == "dotenv-workspace"
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "exported-workspace")
+    assert de.configured_workspace() == "exported-workspace"
+
+
+def test_workspace_flag_overrides_configured_workspace(tmp_path, monkeypatch):
+    """A one-off deployment must not be silently redirected by persisted configuration."""
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "configured-workspace")
+    monkeypatch.setattr(de, "token", lambda tenant: "token")
+    called: dict[str, str] = {}
+
+    def fake_deploy(bundle, workspace, tok, args):  # noqa: ANN001
+        called["workspace"] = workspace
+        return de.EXIT_OK
+
+    monkeypatch.setattr(de, "deploy", fake_deploy)
+    assert de.main(["--bundle", str(tmp_path), "--workspace", "flag-workspace", "--dry-run"]) == de.EXIT_OK
+    assert called["workspace"] == "flag-workspace"
+
+
+def test_main_uses_configured_workspace_when_the_flag_is_omitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "configured-workspace")
+    monkeypatch.setattr(de, "token", lambda tenant: "token")
+    called: dict[str, str] = {}
+
+    def fake_deploy(bundle, workspace, tok, args):  # noqa: ANN001
+        called["workspace"] = workspace
+        return de.EXIT_OK
+
+    monkeypatch.setattr(de, "deploy", fake_deploy)
+    assert de.main(["--bundle", str(tmp_path), "--dry-run"]) == de.EXIT_OK
+    assert called["workspace"] == "configured-workspace"
+
+
+def test_main_refuses_to_deploy_without_any_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr(de, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("FABRIC_WORKSPACE_ID", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        de.main(["--bundle", str(tmp_path), "--dry-run"])
+    assert exc.value.code == 2
+
+
+# A throwaway GUID. It is shaped like a workspace id so these cases read like a real `.env`, and it
+# is synthetic so no customer landing zone is ever committed.
+_WORKSPACE = "11111111-2222-3333-4444-555555555555"
+
+
+@pytest.mark.parametrize(
+    ("label", "declaration", "encoding"),
+    [
+        ("plain", f"FABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8"),
+        # `Set-Content -Encoding utf8` writes a BOM on Windows PowerShell 5.1, and `Get-Content`
+        # hides it from preflight - so this is the LIKELY spelling of a hand-saved `.env`, not an
+        # exotic one. Read as plain utf-8 the BOM lands on the first key, which then matches nothing
+        # and reports "no workspace declared" while preflight has just verified the same file.
+        ("utf-8 BOM", f"FABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8-sig"),
+        # ...and only the FIRST key is affected, which is what makes the failure look intermittent.
+        ("utf-8 BOM, second key", f"FABRIC_TENANT_ID=\nFABRIC_WORKSPACE_ID={_WORKSPACE}\n", "utf-8-sig"),
+        # The measured case: a TAB before the note. `split(" #")` never sees it, so the whole comment
+        # was carried into the id and surfaced as the late WorkspaceNotFound this check exists to
+        # prevent - on a value preflight had just called reachable.
+        ("tab before a comment", f"FABRIC_WORKSPACE_ID={_WORKSPACE}\t# customer landing zone\n", "utf-8"),
+        ("space before a comment", f"FABRIC_WORKSPACE_ID={_WORKSPACE} # customer landing zone\n", "utf-8"),
+        ("surrounding whitespace", f"FABRIC_WORKSPACE_ID=   {_WORKSPACE}\t \n", "utf-8"),
+        ("double quotes", f'FABRIC_WORKSPACE_ID="{_WORKSPACE}"\n', "utf-8"),
+        ("single quotes", f"FABRIC_WORKSPACE_ID='{_WORKSPACE}'\n", "utf-8"),
+        ("quotes and a comment", f'FABRIC_WORKSPACE_ID="{_WORKSPACE}"\t# both at once\n', "utf-8"),
+    ],
+)
+def test_the_declared_workspace_survives_every_ordinary_dotenv_spelling(
+    label: str, declaration: str, encoding: str, tmp_path, monkeypatch
+):
+    """`.env.example` promises quotes, whitespace and a trailing `# comment` are all fine. Keep it.
+
+    preflight VERIFIES this id and this deployer USES it, so a spelling either works in both readers
+    or the toolkit contradicts itself in front of a customer: preflight printing "workspace ...
+    is reachable" while the deploy that follows says the workspace does not exist, or that no
+    workspace was configured at all.
+
+    `tests/test_preflight_contract.py` pins both readers to one table of spellings; this covers the
+    whole `.env` -> `configured_workspace()` path, including the file ENCODING, which that table
+    cannot express.
+    """
+    (tmp_path / ".env").write_text(declaration, encoding=encoding)
+    monkeypatch.setattr(de, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("FABRIC_WORKSPACE_ID", raising=False)
+    assert de.configured_workspace() == _WORKSPACE, label
+
+
 # --------------------------------------------------------------------------- the binding
 
 

@@ -274,11 +274,11 @@ distinguishes `404 does not exist (or this identity cannot see it)` from `403 no
 Contributor role` on purpose — conflating them costs an afternoon. ✅ verified. Note that a
 wrong-tenant token lands in the **404** bucket, not the 403 one: see §4.4.
 
-The landing zone must **already exist**: `--workspace` is documented as *"EXISTING landing-zone
-workspace id (never created here)"* ✅ verified. Creating one means choosing a capacity, which is not
-our decision. It does **not** need an F capacity — both item types we create (`SemanticModel`,
-`Report`) are Power BI items, so an appropriately licensed identity suffices ✅ verified from the
-module's own comment.
+The landing zone must **already exist**: set its GUID once as `FABRIC_WORKSPACE_ID` in the
+git-ignored `.env`, or pass `--workspace` to override that value for one deploy. ✅ verified.
+Creating one means choosing a capacity, which is not our decision. It does **not** need an F capacity
+— both item types we create (`SemanticModel`, `Report`) are Power BI items, so an appropriately
+licensed identity suffices ✅ verified from the module's own comment.
 
 ### 1.4 Power BI Desktop
 

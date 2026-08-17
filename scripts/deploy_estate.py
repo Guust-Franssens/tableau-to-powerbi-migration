@@ -1,10 +1,10 @@
 """
 purpose: deploy a migrated estate into a Fabric LANDING ZONE workspace - models first, reports
          rebound to them - and survive a crash without redeploying or silently skipping anything.
-usage:   python scripts/deploy_estate.py --bundle <dir> --workspace <id> [--dry-run]
-         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --tenant <id>
-         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --skip-empty-models
-         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --skip <unit> [--skip <unit>]
+usage:   python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] [--dry-run]
+         python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] --tenant <id>
+         python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] --skip-empty-models
+         python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] --skip <unit> [--skip <unit>]
 
 Why a landing zone
 ------------------
@@ -110,6 +110,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -130,6 +131,10 @@ LOG = logging.getLogger("deploy_estate")
 
 API = "https://api.fabric.microsoft.com/v1"
 FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
+
+# A `.env` comment starts at the beginning of a value or after ANY whitespace - a tab included, which
+# is what a naive `" #"` split misses. Mirrors `preflight.ps1:ConvertFrom-DotEnvValue`'s `(^|\s)#`.
+_INLINE_COMMENT_RE = re.compile(r"(^|\s)#")
 
 # We create only these two, and both are POWER BI items rather than Fabric items - so the landing
 # zone does NOT need an F capacity, only an appropriately licensed identity. Worth knowing before
@@ -256,6 +261,71 @@ def token(tenant: str | None) -> Token:
     principal (`az login --service-principal`), so an unattended run needs no second mechanism.
     """
     return Token(tenant)
+
+
+def _dotenv_value(raw: str) -> str:
+    """Decode one `.env` value exactly as `preflight.ps1:ConvertFrom-DotEnvValue` does.
+
+    The two readers of `FABRIC_WORKSPACE_ID` - preflight, which verifies it, and this deployer,
+    which uses it - must agree, or preflight blesses an id that the deploy then mangles into a late
+    `WorkspaceNotFound`. Measured on `...111111\\t# customer landing zone`: preflight read the GUID
+    while a naive `split(" #")` kept the whole line, because the separator was a TAB.
+
+    So: matched surrounding quotes are a spelling, and a `#` at the start of the value or after
+    whitespace opens a comment - but inside quotes a `#` is DATA and `abc#def` stays whole, because
+    over-stripping corrupts a declaration just as quietly as not stripping at all. The quoted form
+    wins only when the closing quote actually ENDS the value (bar whitespace or a comment), which is
+    what leaves `""guid""` and `"a"b"` visibly malformed instead of silently empty.
+
+    `tests/fixtures/dotenv-spellings.env` is the shared table both readers are pinned to.
+
+    One deliberate STRUCTURAL difference: PowerShell finishes with a second, defensive
+    `Remove-SurroundingQuotes`, and there is no counterpart here because nothing can reach it. Any
+    value whose first and last character are the same quote already returns from the scan above (at
+    the last character the tail is empty), so the fall-through never holds a matched pair - verified
+    by brute force over every string up to length 6 of quotes, hashes, spaces, tabs and text: 55,987
+    inputs, zero differences. Re-implementing it would only add a branch no test can fail on.
+    """
+    value = raw.strip()
+    if len(value) >= 2 and value[0] in {'"', "'"}:
+        quote_char = value[0]
+        for i in range(1, len(value)):
+            if value[i] != quote_char:
+                continue
+            tail = value[i + 1 :].strip()
+            if not tail or tail.startswith("#"):
+                return value[1:i]
+    comment = _INLINE_COMMENT_RE.search(value)
+    if comment:
+        value = value[: comment.start()]
+    return value.strip()
+
+
+def dotenv_value(key: str, path: Path | None = None) -> str:
+    """Return one optional repository-local dotenv value without exporting it to the process.
+
+    Read as `utf-8-sig`, because `Set-Content -Encoding utf8` on Windows PowerShell 5.1 writes a BOM
+    by default. `Get-Content` hides that from preflight, so a plain `utf-8` read here made the first
+    key in the file invisible to the deployer alone - two of our own tools disagreeing about the
+    same file. (A UTF-16 `.env` still raises, as it does for every other Python reader in this repo.)
+    """
+    path = path if path is not None else REPO_ROOT / ".env"
+    if not path.is_file():
+        return ""
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        if name.strip() != key:
+            continue
+        return _dotenv_value(value)
+    return ""
+
+
+def configured_workspace() -> str:
+    """Resolve the configured landing zone, with a shell export overriding `.env`."""
+    return os.environ.get("FABRIC_WORKSPACE_ID", "").strip() or dotenv_value("FABRIC_WORKSPACE_ID")
 
 
 def call(method: str, url: str, tok: Any, body: dict | None = None) -> tuple[int, dict, dict]:
@@ -1844,7 +1914,10 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="estate bundle from run_estate.py")
-    parser.add_argument("--workspace", required=True, help="EXISTING landing-zone workspace id (never created here)")
+    parser.add_argument(
+        "--workspace",
+        help="EXISTING landing-zone workspace id (overrides FABRIC_WORKSPACE_ID; never created here)",
+    )
     parser.add_argument("--tenant", help="Entra tenant id; omit to use the Azure CLI default")
     parser.add_argument("--dry-run", action="store_true", help="report the plan and item count, create nothing")
     parser.add_argument(
@@ -1894,9 +1967,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    workspace = args.workspace or configured_workspace()
+    if not workspace:
+        parser.error("--workspace is required unless FABRIC_WORKSPACE_ID is set in the environment or .env")
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    return deploy(args.bundle, args.workspace, token(args.tenant), args)
+    return deploy(args.bundle, workspace, token(args.tenant), args)
 
 
 if __name__ == "__main__":

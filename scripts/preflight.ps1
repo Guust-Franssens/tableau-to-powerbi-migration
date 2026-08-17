@@ -72,6 +72,10 @@
   it. `az account set` fixes the same problem by rewriting the CLI's on-disk profile, which every
   other process on this machine then inherits.
 
+The landing-zone workspace is read from `$env:FABRIC_WORKSPACE_ID` or `FABRIC_WORKSPACE_ID` in
+`.env`. When declared, preflight checks it is reachable with the current Fabric token before a
+deploy discovers a stale id or missing access.
+
 .NOTES
   Run:  powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 [-Update] [-Tenant <id>]
   Exit: 0 if every CRITICAL item is present; 1 if any CRITICAL item is missing.
@@ -543,9 +547,11 @@ function Get-DotEnvValue([string]$Key, [string]$Path) {
     # split on the FIRST '='), plus the deliberate divergence in ConvertFrom-DotEnvValue above.
     # That divergence is the fix, not an accident - the two parsers previously agreed by being wrong
     # in the same way, and "identical to Python" was the argument that kept it.
-    # `scripts/tableau_env.py:load_env` should get the same treatment; it is owned elsewhere, so it
-    # is flagged rather than edited here. Nothing in Python reads FABRIC_TENANT_ID today, so the
-    # divergence is inert until that happens.
+    # `scripts/tableau_env.py:load_env` still reads values the old way; it is owned elsewhere and
+    # nothing asks it for a Fabric key, so that divergence stays inert. The Python reader that is NOT
+    # inert is `deploy_estate.py:_dotenv_value`, which mirrors THIS function on purpose and is pinned
+    # to the same tests/fixtures/dotenv-spellings.env table - measured while it was not: preflight
+    # reported a workspace reachable that the deploy then mangled into a late WorkspaceNotFound.
     # .env is git-ignored, which is where a real customer tenant id belongs: this repository is public.
     if (-not $Path) { $Path = Join-Path $repoRoot '.env' }
     if (-not (Test-Path $Path)) { return $null }
@@ -694,9 +700,12 @@ $fabricResource = 'https://api.fabric.microsoft.com'
 $intent = Resolve-IntendedTenant $Tenant $env:FABRIC_TENANT_ID (Get-DotEnvValue 'FABRIC_TENANT_ID')
 $intendedTenant = $intent.Tenant
 $declaredAs = $intent.Tenant
+$workspace = @($env:FABRIC_WORKSPACE_ID, (Get-DotEnvValue 'FABRIC_WORKSPACE_ID')) |
+    ForEach-Object { Remove-SurroundingQuotes $_ } | Where-Object { $_ } | Select-Object -First 1
 $azPresent = [bool](Get-Command az -ErrorAction SilentlyContinue)
 $scoped = if ($Subscription) { " (scoped: --subscription $Subscription)" } else { ' (default az context)' }
 $actualTenant = ''
+$fabricToken = ''
 
 # A declared non-GUID gets RESOLVED before it gets given up on (see Resolve-TenantIdFromDomain).
 # Still behind the declaration guard, so an undeclared run pays nothing.
@@ -709,7 +718,7 @@ if ($intendedTenant -and -not (Test-TenantIdShape $intendedTenant) -and $azPrese
 # means no token call at all, so an operator who only parses workbooks pays nothing. Preflight runs
 # before EVERY migration, so a mandatory token mint here would tax every run for a check that has
 # nothing to compare against.
-if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {
+if ((($intendedTenant -and (Test-TenantIdShape $intendedTenant)) -or $workspace) -and $azPresent) {
     $azArgs = @('account', 'get-access-token', '--resource', $fabricResource, '-o', 'json')
     # --subscription scopes ONE call. It is offered here so the fix can be verified with the same
     # command shape that applies it, rather than by mutating the CLI profile and hoping.
@@ -718,7 +727,11 @@ if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {
     # stderr is discarded rather than surfaced, so no code path can leak it.
     $tokenJson = & az @azArgs 2>$null
     if ($tokenJson) {
-        try { $actualTenant = Get-JwtTenantId ((($tokenJson | Out-String) | ConvertFrom-Json).accessToken) } catch { $actualTenant = '' }
+        try {
+            $fabricToken = (($tokenJson | Out-String) | ConvertFrom-Json).accessToken
+            $actualTenant = Get-JwtTenantId $fabricToken
+        }
+        catch { $actualTenant = ''; $fabricToken = '' }
     }
 }
 
@@ -752,6 +765,44 @@ $tenantHint = switch ($verdict.Kind) {
 }
 
 Add-Check 'Fabric token tenant' $verdict.Tier $verdict.Ok $verdict.Detail $tenantHint
+
+$workspaceCheck = if (-not $workspace) {
+    [pscustomobject]@{ Tier = 'optional'; Ok = $false; Detail = 'no landing-zone workspace declared - not checked'
+        Hint = 'Set FABRIC_WORKSPACE_ID in the git-ignored .env so deploy_estate.py can use it and preflight can verify it.' }
+}
+elseif ($workspace -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+    [pscustomobject]@{ Tier = 'recommended'; Ok = $false; Detail = "workspace '$workspace' is not a GUID - not checked"
+        Hint = 'Copy the landing-zone workspace id from the Fabric URL or workspace settings into FABRIC_WORKSPACE_ID.' }
+}
+elseif (-not $azPresent) {
+    [pscustomobject]@{ Tier = 'recommended'; Ok = $false; Detail = "workspace $workspace - not verified (az not on PATH)"
+        Hint = 'Install the Azure CLI and run az login so preflight can verify the landing-zone workspace.' }
+}
+elseif (-not $fabricToken) {
+    [pscustomobject]@{ Tier = 'recommended'; Ok = $false; Detail = "workspace $workspace - no Fabric token could be minted"
+        Hint = 'Run az login, then re-run preflight to verify the landing-zone workspace.' }
+}
+else {
+    try {
+        $workspaceHeaders = @{}
+        $workspaceHeaders['Authorization'] = 'Bearer ' + $fabricToken
+        Invoke-WebRequest -Uri "$fabricResource/v1/workspaces/$workspace" `
+            -Headers $workspaceHeaders `
+            -UseBasicParsing -ErrorAction Stop | Out-Null
+        [pscustomobject]@{ Tier = 'optional'; Ok = $true; Detail = "workspace $workspace is reachable"; Hint = '' }
+    }
+    catch {
+        $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+        $detail = switch ($status) {
+            404 { "workspace $workspace does not exist (or this identity cannot see it)" }
+            403 { "no access to workspace $workspace - this identity needs the Contributor role" }
+            default { "workspace $workspace could not be verified (HTTP $status)" }
+        }
+        [pscustomobject]@{ Tier = 'recommended'; Ok = $false; Detail = $detail
+            Hint = 'Verify FABRIC_WORKSPACE_ID and the current Azure CLI identity, then re-run preflight.' }
+    }
+}
+Add-Check 'Fabric landing-zone workspace' $workspaceCheck.Tier $workspaceCheck.Ok $workspaceCheck.Detail $workspaceCheck.Hint
 
 $odbc = (Get-OdbcDriver -ErrorAction SilentlyContinue | Where-Object Name -like '*SQL Server*').Name
 Add-Check 'ODBC Driver 18 (SQL)' 'optional' ($odbc -contains 'ODBC Driver 18 for SQL Server') `

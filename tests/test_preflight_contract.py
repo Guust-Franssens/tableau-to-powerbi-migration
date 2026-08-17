@@ -15,12 +15,19 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT = REPO_ROOT / "scripts" / "preflight.ps1"
+
+# The OTHER reader of the same file. `deploy_estate.py` resolves `FABRIC_WORKSPACE_ID` from `.env`,
+# so preflight's promises about spelling are only worth what the deployer also honours.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+import deploy_estate as de  # noqa: E402  # pylint: disable=wrong-import-position
 
 TENANT_CHECK = "Fabric token tenant"
 DESKTOP_PIN_CHECK = "PBI_DESKTOP_PATH (bridge exe pin)"
@@ -196,6 +203,17 @@ def test_the_tenant_variable_is_documented_where_an_operator_would_look_for_it()
     assert any("deploy_estate.py" in ln for ln in lines), "say what the value is FOR, not just its name"
 
 
+def test_workspace_configuration_is_documented_and_preflight_checks_it() -> None:
+    """The required deploy destination must persist next to the optional tenant configuration."""
+    lines = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    declarations = [ln for ln in lines if ln.startswith("FABRIC_WORKSPACE_ID=")]
+    assert declarations == ["FABRIC_WORKSPACE_ID="]
+    source = _preflight_source()
+    assert "(Get-DotEnvValue 'FABRIC_WORKSPACE_ID')" in source
+    assert "Add-Check 'Fabric landing-zone workspace'" in source
+    assert 'Invoke-WebRequest -Uri "$fabricResource/v1/workspaces/$workspace"' in source
+
+
 def test_the_tenant_check_reports_exactly_once_whatever_happens() -> None:
     """One unconditional emission, and a hint for every outcome the verdict can return.
 
@@ -257,6 +275,10 @@ def test_the_tenant_check_costs_nothing_until_a_comparable_tenant_is_declared() 
     opt-in. Resolving a declared DOMAIN now costs a second `az` call, so the contract is about the
     top-level FLOW rather than the whole block: every `az` invocation the flow reaches must sit
     inside a branch that has already established something was declared.
+
+    There are now TWO things worth minting a token for - a comparable tenant, or a landing-zone
+    workspace to probe - so the guard is a disjunction. Both disjuncts are still declarations, which
+    is the property being pinned: a parse-only machine that declares neither reaches no `az` call.
     """
     block = _tenant_block(_preflight_source())
     flow = block[block.index("$intent = Resolve-IntendedTenant") :]
@@ -265,7 +287,8 @@ def test_the_tenant_check_costs_nothing_until_a_comparable_tenant_is_declared() 
         if "& az" in line and not line.strip().startswith("#"):
             assert line.startswith((" ", "\t")), f"an unguarded `az` invocation at the top of the flow: {line}"
     assert first_guard < flow.index("& az"), "no `az` invocation may precede the declaration guard"
-    guard = flow.index("if ($intendedTenant -and (Test-TenantIdShape $intendedTenant) -and $azPresent) {")
+    mint_guard = "if ((($intendedTenant -and (Test-TenantIdShape $intendedTenant)) -or $workspace) -and $azPresent) {"
+    guard = flow.index(mint_guard)
     assert guard < flow.index("'get-access-token'"), "the token mint must sit behind the declaration guard"
     # Resolution runs only for a declaration that is NOT already a GUID, so the ordinary path pays
     # for one `az` call, not two.
@@ -319,22 +342,40 @@ def test_a_warning_only_mismatch_says_how_to_make_it_blocking() -> None:
 
 
 def test_no_output_path_can_carry_the_token() -> None:
-    """The token is a bearer credential: it must reach the decoder and nothing else.
+    """The token is a bearer credential: it must reach the decoder and the Fabric API, nothing else.
 
     Enumerating the allowed uses (rather than grepping `Write-Host` for it) is what makes this
     mutation-proof: any new line that touches the token - a debug print, a richer Detail string, an
     error message echoing `az` output - is a line this test has never seen and therefore fails.
+
+    The token now also lives in `$fabricToken`, because the landing-zone check has to present it to
+    Fabric. Watching the new name is the point of re-arming this: a filter that still looked only
+    for `tokenJson`/`accessToken` would have stopped watching the variable that actually holds the
+    credential - a silent disarm that passes.
     """
     block = _tenant_block(_preflight_source())
     allowed = (
         re.compile(r"^#"),  # commentary
         re.compile(r"^\$tokenJson = & az @azArgs 2>\$null$"),
         re.compile(r"^if \(\$tokenJson\) \{$"),
-        re.compile(r"^try \{ \$actualTenant = Get-JwtTenantId .*accessToken.*$"),
+        # In-process only: az's already-captured stdout is parsed and bound to a variable. `Out-String`
+        # feeds the pipeline into `ConvertFrom-Json`, not the host, and the assignment consumes it, so
+        # this line has no output stream to escape into.
+        re.compile(r"^\$fabricToken = \(\(\$tokenJson \| Out-String\) \| ConvertFrom-Json\)\.accessToken$"),
+        re.compile(r"^\$actualTenant = Get-JwtTenantId \$fabricToken$"),  # the decoder, as before
+        re.compile(r"^\$fabricToken = ''$"),  # declared/cleared: carries no value
+        re.compile(r"^catch \{ \$actualTenant = ''; \$fabricToken = '' \}$"),  # cleared on a parse failure
+        re.compile(r"^elseif \(-not \$fabricToken\) \{$"),  # truthiness only, never the value
+        # The one OUTBOUND use, and it is what the token was minted for: the Authorization header of a
+        # request to $fabricResource itself - the audience of the token - built into a local hashtable
+        # that is passed only to that call, whose success body is discarded (`Out-Null`) and whose
+        # failure path reads an HTTP status code and nothing else.
+        re.compile(r"^\$workspaceHeaders\['Authorization'\] = 'Bearer ' \+ \$fabricToken$"),
     )
+    carriers = ("tokenJson", "accessToken", "fabricToken")
     for line in block.splitlines():
         stripped = line.strip()
-        if "tokenJson" not in stripped and "accessToken" not in stripped:
+        if not any(name in stripped for name in carriers):
             continue
         assert any(pattern.match(stripped) for pattern in allowed), f"the token escapes into: {stripped}"
 
@@ -723,55 +764,80 @@ def _dotenv(key: str) -> str:
     return _emitted(raw)
 
 
+# The spellings `.env` promises to accept, and the ONE table both readers of that file are pinned to
+# (see the two tests below). Written down once on purpose: when the PowerShell and Python readers each
+# carried their own idea of a `.env` value, they diverged silently and preflight blessed an id the
+# deployer then mangled.
+_DOTENV_SPELLINGS = [
+    ("PLAIN", _TID),
+    ("DOUBLE_QUOTED", _TID),
+    ("SINGLE_QUOTED", _TID),
+    ("PADDED", _TID),
+    ("QUOTED_AND_PADDED", _TID),
+    # An inline note next to a GUID nobody recognizes by sight is the natural thing to write.
+    ("COMMENTED", _TID),
+    ("COMMENTED_TIGHT", _TID),
+    ("QUOTED_AND_COMMENTED", _TID),
+    # ...but inside quotes a '#' is DATA, and one with no whitespace in front of it is part of
+    # the value. Over-stripping corrupts a declaration just as quietly as not stripping at all.
+    ("HASH_INSIDE_QUOTES", "ab #cd"),
+    ("HASH_IS_DATA", "abc#def"),
+    # The closer is the first quote that actually ENDS the value: here the `#` right after it
+    # opens a comment, so the value stops at `ab`...
+    ("HASH_AFTER_INNER_QUOTE", "ab"),
+    # ...whereas here the first inner quote is followed by more value, so the scan keeps going
+    # and the '#' it passed over stays data.
+    ("HASH_STILL_INSIDE", 'a #b" c'),
+    ("ONLY_A_COMMENT", ""),
+    # Only a MATCHED outer pair is a quoting convention. Everything else is the value.
+    ("UNMATCHED_QUOTE", f'"{_TID}'),
+    ("INNER_QUOTES", 'ab"cd"ef'),
+    ("HAS_EQUALS", "a=b=c"),
+    # The closing quote must END the value. These two stay visibly malformed rather than
+    # decoding to '' or to a truncated fragment - a silent downgrade to "nothing was declared"
+    # would be worse than the complaint.
+    ("DOUBLE_QUOTED_TWICE", f'"{_TID}"'),
+    ("QUOTE_THEN_TAIL", 'a"b'),
+    # Present-but-empty and absent are both "no value" to every caller, which filters falsy;
+    # the PowerShell reader still distinguishes them ('' vs $null) rather than inventing one.
+    ("EMPTY", ""),
+    ("ABSENT_FROM_THE_FILE", "NULL"),
+]
+
+
 @pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
-@pytest.mark.parametrize(
-    ("key", "expected"),
-    [
-        ("PLAIN", _TID),
-        ("DOUBLE_QUOTED", _TID),
-        ("SINGLE_QUOTED", _TID),
-        ("PADDED", _TID),
-        ("QUOTED_AND_PADDED", _TID),
-        # An inline note next to a GUID nobody recognizes by sight is the natural thing to write.
-        ("COMMENTED", _TID),
-        ("COMMENTED_TIGHT", _TID),
-        ("QUOTED_AND_COMMENTED", _TID),
-        # ...but inside quotes a '#' is DATA, and one with no whitespace in front of it is part of
-        # the value. Over-stripping corrupts a declaration just as quietly as not stripping at all.
-        ("HASH_INSIDE_QUOTES", "ab #cd"),
-        ("HASH_IS_DATA", "abc#def"),
-        # The closer is the first quote that actually ENDS the value: here the `#` right after it
-        # opens a comment, so the value stops at `ab`...
-        ("HASH_AFTER_INNER_QUOTE", "ab"),
-        # ...whereas here the first inner quote is followed by more value, so the scan keeps going
-        # and the '#' it passed over stays data.
-        ("HASH_STILL_INSIDE", 'a #b" c'),
-        ("ONLY_A_COMMENT", ""),
-        # Only a MATCHED outer pair is a quoting convention. Everything else is the value.
-        ("UNMATCHED_QUOTE", f'"{_TID}'),
-        ("INNER_QUOTES", 'ab"cd"ef'),
-        ("HAS_EQUALS", "a=b=c"),
-        # The closing quote must END the value. These two stay visibly malformed rather than
-        # decoding to '' or to a truncated fragment - a silent downgrade to "nothing was declared"
-        # would be worse than the complaint.
-        ("DOUBLE_QUOTED_TWICE", f'"{_TID}"'),
-        ("QUOTE_THEN_TAIL", 'a"b'),
-        # Present-but-empty and absent are both "no value" to every caller, which filters falsy;
-        # the reader still distinguishes them ('' vs $null) rather than inventing one.
-        ("EMPTY", ""),
-        ("ABSENT_FROM_THE_FILE", "NULL"),
-    ],
-)
+@pytest.mark.parametrize(("key", "expected"), _DOTENV_SPELLINGS)
 def test_the_dotenv_reader_accepts_every_ordinary_spelling(key: str, expected: str) -> None:
     """`.env` is the documented home for a customer tenant id, so its parse decides the verdict.
 
     This is where the false blocker actually lived: the reader mirrored
     `scripts/tableau_env.py:load_env` exactly - `value.strip()`, no quote handling - and the comment
     saying so was the argument for keeping it. The two parsers agreed by being wrong in the same way.
-    `load_env` is owned elsewhere and should get the same treatment; nothing in Python reads
-    FABRIC_TENANT_ID today, so the divergence is inert until it does.
+    `load_env` is owned elsewhere and still reads values that way; nothing asks it for a Fabric key,
+    so that divergence stays inert. The Python reader that is NOT inert is
+    `deploy_estate.py:_dotenv_value`, pinned to this same table by the test below.
     """
     assert _dotenv(key) == expected
+
+
+@pytest.mark.parametrize(("key", "expected"), _DOTENV_SPELLINGS)
+def test_the_python_reader_of_the_same_file_agrees_with_preflight(key: str, expected: str) -> None:
+    """One `.env`, two readers: preflight VERIFIES the workspace id, `deploy_estate.py` USES it.
+
+    The divergence stopped being inert the moment Python started reading a Fabric key. Measured on
+    `FABRIC_WORKSPACE_ID=<guid>\\t# customer landing zone`, preflight reported the workspace
+    reachable while the deployer kept the comment and failed with the late `WorkspaceNotFound` that
+    the preflight check exists to prevent - two of our own tools contradicting each other, using a
+    value one of them had just blessed.
+
+    Pinning both readers to ONE table is what keeps that closed: a spelling either works in both or
+    fails in both, and neither can drift alone. This half runs everywhere, PowerShell or not.
+
+    `$null` (absent) and `''` (present but empty) collapse to `""` in Python. Every caller filters on
+    falsiness, so nothing is lost - the deployer asks "is a workspace declared", not "which way was
+    it left out".
+    """
+    assert de.dotenv_value(key, _FIXTURE_ENV) == ("" if expected == "NULL" else expected)
 
 
 # --- The base64url decode --------------------------------------------------------------------------
