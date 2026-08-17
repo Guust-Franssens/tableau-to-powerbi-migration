@@ -539,8 +539,9 @@ def test_a_graphql_200_error_body_is_scrubbed_before_it_is_recorded(monkeypatch,
 
 def test_estate_db_records_whether_the_run_was_degraded(tmp_path):
     """`estate.db` is read programmatically by harvest/deploy, which never open `assessment.json`.
-    Before #196 a survived-but-partial DB was byte-identical to a clean one; it must now carry the
-    marker itself - the run-level flags and one row per failed listing."""
+    Before #196 a survived-but-partial DB was indistinguishable from a clean run of a smaller
+    estate; it must now carry the marker itself - the run-level flags and one row per failed
+    listing."""
     raw = _raw_fixture([_error("workbooks", assess_estate.PRIMARY)])
     store = assess_estate.write_store(tmp_path, raw, assess_estate.assemble(raw, 0.99))
     conn = assess_estate.sqlite3.connect(store)
@@ -568,6 +569,16 @@ def test_a_graphql_error_body_never_reaches_estate_db(monkeypatch, no_sleep, tmp
     code = _run_main(monkeypatch, tmp_path, _GraphqlLeak())
     out = tmp_path / "_assessment"
     assert code == 0  # workbooks were still returned, so the structure error is SECONDARY
+    # Pin the DISCRIMINATING row (1, 0). The other two DB tests only cover (1, 1) and (0, 0), so
+    # transposing the two columns - or writing `degraded` from `degraded_primary` - passed the whole
+    # suite while claiming a secondary-degraded run was clean. The primary/secondary split is the
+    # design's core and this row is the only signal a machine consumer gets, so it must be asserted.
+    marker = (
+        assess_estate.sqlite3.connect(out / "estate.db")
+        .execute("SELECT degraded, degraded_primary FROM assessment_run")
+        .fetchone()
+    )
+    assert marker == (1, 0)
     assert ENV["TABLEAU_PAT_SECRET"].encode() not in (out / "estate.db").read_bytes()
     errs = assess_estate.sqlite3.connect(out / "estate.db").execute("SELECT error FROM listing_error").fetchall()
     assert errs and all(ENV["TABLEAU_PAT_SECRET"] not in row[0] for row in errs)

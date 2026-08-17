@@ -614,8 +614,11 @@ CREATE TABLE IF NOT EXISTS permission (
   grantee_type TEXT, grantee_luid TEXT, capability TEXT, mode TEXT);
 CREATE TABLE IF NOT EXISTS flow (luid TEXT PRIMARY KEY, name TEXT, project TEXT);
 -- Run-level completeness, added in #196. Before it, a survived-but-partial run (#193) wrote a DB
--- BYTE-IDENTICAL to a clean one, so a programmatic consumer (harvest_estate_assets.py --db,
--- deploy_estate.py --estate-db) that never opens assessment.json could not tell the two apart.
+-- INDISTINGUISHABLE from a clean run of a smaller estate: a consumer cannot tell "0 views because
+-- the site has none" from "0 views because the listing died", and has no clean run of the same site
+-- to diff against. (Not byte-identical - a primary failure also scores complexity 0 - but a
+-- programmatic consumer (harvest_estate_assets.py --db, deploy_estate.py --estate-db) that never
+-- opens assessment.json has no signal either way.)
 CREATE TABLE IF NOT EXISTS assessment_run (
   assessed_at TEXT, degraded INTEGER, degraded_primary INTEGER,
   workbooks_total INTEGER, listing_errors INTEGER);
