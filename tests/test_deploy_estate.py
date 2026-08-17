@@ -57,6 +57,56 @@ def _options(**kwargs) -> argparse.Namespace:
     return argparse.Namespace(**{**defaults, **kwargs})
 
 
+# --------------------------------------------------------------------------- configuration
+
+
+def test_configured_workspace_reads_dotenv_and_prefers_an_export(tmp_path, monkeypatch):
+    """The customer landing zone persists in `.env`, while an explicit session can override it."""
+    (tmp_path / ".env").write_text('FABRIC_WORKSPACE_ID="dotenv-workspace" # customer landing zone\n', encoding="utf-8")
+    monkeypatch.setattr(de, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("FABRIC_WORKSPACE_ID", raising=False)
+    assert de.configured_workspace() == "dotenv-workspace"
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "exported-workspace")
+    assert de.configured_workspace() == "exported-workspace"
+
+
+def test_workspace_flag_overrides_configured_workspace(tmp_path, monkeypatch):
+    """A one-off deployment must not be silently redirected by persisted configuration."""
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "configured-workspace")
+    monkeypatch.setattr(de, "token", lambda tenant: "token")
+    called: dict[str, str] = {}
+
+    def fake_deploy(bundle, workspace, tok, args):  # noqa: ANN001
+        called["workspace"] = workspace
+        return de.EXIT_OK
+
+    monkeypatch.setattr(de, "deploy", fake_deploy)
+    assert de.main(["--bundle", str(tmp_path), "--workspace", "flag-workspace", "--dry-run"]) == de.EXIT_OK
+    assert called["workspace"] == "flag-workspace"
+
+
+def test_main_uses_configured_workspace_when_the_flag_is_omitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("FABRIC_WORKSPACE_ID", "configured-workspace")
+    monkeypatch.setattr(de, "token", lambda tenant: "token")
+    called: dict[str, str] = {}
+
+    def fake_deploy(bundle, workspace, tok, args):  # noqa: ANN001
+        called["workspace"] = workspace
+        return de.EXIT_OK
+
+    monkeypatch.setattr(de, "deploy", fake_deploy)
+    assert de.main(["--bundle", str(tmp_path), "--dry-run"]) == de.EXIT_OK
+    assert called["workspace"] == "configured-workspace"
+
+
+def test_main_refuses_to_deploy_without_any_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr(de, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("FABRIC_WORKSPACE_ID", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        de.main(["--bundle", str(tmp_path), "--dry-run"])
+    assert exc.value.code == 2
+
+
 # --------------------------------------------------------------------------- the binding
 
 

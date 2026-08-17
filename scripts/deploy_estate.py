@@ -1,10 +1,10 @@
 """
 purpose: deploy a migrated estate into a Fabric LANDING ZONE workspace - models first, reports
          rebound to them - and survive a crash without redeploying or silently skipping anything.
-usage:   python scripts/deploy_estate.py --bundle <dir> --workspace <id> [--dry-run]
-         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --tenant <id>
-         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --skip-empty-models
-         python scripts/deploy_estate.py --bundle <dir> --workspace <id> --skip <unit> [--skip <unit>]
+usage:   python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] [--dry-run]
+         python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] --tenant <id>
+         python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] --skip-empty-models
+         python scripts/deploy_estate.py --bundle <dir> [--workspace <id>] --skip <unit> [--skip <unit>]
 
 Why a landing zone
 ------------------
@@ -256,6 +256,32 @@ def token(tenant: str | None) -> Token:
     principal (`az login --service-principal`), so an unattended run needs no second mechanism.
     """
     return Token(tenant)
+
+
+def dotenv_value(key: str) -> str:
+    """Return one optional repository-local dotenv value without exporting it to the process."""
+    path = REPO_ROOT / ".env"
+    if not path.is_file():
+        return ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        if name.strip() != key:
+            continue
+        value = value.strip()
+        if value[:1] in {"'", '"'}:
+            closing_quote = value.find(value[0], 1)
+            if closing_quote > 0:
+                return value[1:closing_quote]
+        return value.split(" #", maxsplit=1)[0].strip()
+    return ""
+
+
+def configured_workspace() -> str:
+    """Resolve the configured landing zone, with a shell export overriding `.env`."""
+    return os.environ.get("FABRIC_WORKSPACE_ID", "").strip() or dotenv_value("FABRIC_WORKSPACE_ID")
 
 
 def call(method: str, url: str, tok: Any, body: dict | None = None) -> tuple[int, dict, dict]:
@@ -1844,7 +1870,10 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="estate bundle from run_estate.py")
-    parser.add_argument("--workspace", required=True, help="EXISTING landing-zone workspace id (never created here)")
+    parser.add_argument(
+        "--workspace",
+        help="EXISTING landing-zone workspace id (overrides FABRIC_WORKSPACE_ID; never created here)",
+    )
     parser.add_argument("--tenant", help="Entra tenant id; omit to use the Azure CLI default")
     parser.add_argument("--dry-run", action="store_true", help="report the plan and item count, create nothing")
     parser.add_argument(
@@ -1894,9 +1923,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    workspace = args.workspace or configured_workspace()
+    if not workspace:
+        parser.error("--workspace is required unless FABRIC_WORKSPACE_ID is set in the environment or .env")
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    return deploy(args.bundle, args.workspace, token(args.tenant), args)
+    return deploy(args.bundle, workspace, token(args.tenant), args)
 
 
 if __name__ == "__main__":

@@ -196,6 +196,17 @@ def test_the_tenant_variable_is_documented_where_an_operator_would_look_for_it()
     assert any("deploy_estate.py" in ln for ln in lines), "say what the value is FOR, not just its name"
 
 
+def test_workspace_configuration_is_documented_and_preflight_checks_it() -> None:
+    """The required deploy destination must persist next to the optional tenant configuration."""
+    lines = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    declarations = [ln for ln in lines if ln.startswith("FABRIC_WORKSPACE_ID=")]
+    assert declarations == ["FABRIC_WORKSPACE_ID="]
+    source = _preflight_source()
+    assert "(Get-DotEnvValue 'FABRIC_WORKSPACE_ID')" in source
+    assert 'Add-Check \'Fabric landing-zone workspace\'' in source
+    assert 'Invoke-WebRequest -Uri "$fabricResource/v1/workspaces/$workspace"' in source
+
+
 def test_the_tenant_check_reports_exactly_once_whatever_happens() -> None:
     """One unconditional emission, and a hint for every outcome the verdict can return.
 
