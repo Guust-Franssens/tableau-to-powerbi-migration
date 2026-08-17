@@ -204,27 +204,12 @@ TABLEAU_PAT_NAME=<pat-name>
 TABLEAU_PAT_SECRET=<pat-secret>
 ```
 
-❌ **Correction — `.env.example` has NO `TABLEAU_PAT_VALUE=` line.** The previous edition printed one
-here and marked it *"✅ verified in `.env.example`"*. It is not there and never was: the file
-*explains* the second name in prose but ships no key for it. So copying `.env.example` → `.env` as
-instructed and running §2 step 1 produced the 13-minute hang in §4.1 — the wrong ✅ *caused* the
-worst stumble in the pipeline.
-
-That copy is still correct for everything **our** scripts run: `scripts/tableau_env.py` accepts
-either name, and when our Python spawns an engine script it sets the engine's name automatically ✅
-verified from `.env.example`'s own note. **The gap is exactly one command: §2 step 1, where you run
-the engine's `estate_survey.py` yourself.** That crosses a process boundary no bridge reaches. Two
-ways to close it, both fine:
-
-```powershell
-# EITHER: add the second name to .env (same value, second key — one more place to rotate)
-#   TABLEAU_PAT_VALUE=<pat-secret>
-# OR (what the cold operator used — the secret stays written down exactly once):
-$env:TABLEAU_PAT_VALUE = (Select-String .env '^TABLEAU_PAT_SECRET=(.*)$').Matches[0].Groups[1].Value
-```
-
-Either way, **always pass `--no-prompt`** to the engine script (§4.1): it converts a silent block
-into an instant, explanatory error.
+`TABLEAU_PAT_SECRET` is the one documented secret name. The engine's legacy
+`TABLEAU_PAT_VALUE` spelling remains accepted for existing `.env` files, but
+`scripts/tableau_env.py` mirrors both names in process and child environments. **Always use
+`scripts/run_engine_survey.py` for the estate survey**: it extends that bridge across the only former
+process boundary and always passes `--no-prompt`, so a missing credential fails clearly instead of
+opening a hidden-input prompt.
 
 We cannot mint a PAT for the customer: Tableau's API answers **HTTP 405** to create-PAT, so a
 Tableau user with access must issue it, and it inherits that user's permissions (a restricted
@@ -236,9 +221,9 @@ Smoke-test it **the day before**, in this order — each is cheap and each prove
 # 1. our tier reads .env and reaches the Metadata API (read-only, downloads nothing)
 python scripts\tableau_lineage.py --plan --env .env --survey _assessment\estate_survey.json --save-json _assessment\lineage.json
 
-# 2. the ENGINE's own auth path, which is a different code path — see §4.1
-python <engine>\skills\tableau-migration\scripts\estate_survey.py `
-    --server <host> --site <site> --pat-name <pat-name> --env-file .env --no-prompt `
+# 2. the ENGINE's own auth path via the credential wrapper — see §4.1
+python scripts\run_engine_survey.py `
+    --server <host> --site <site> --pat-name <pat-name> --env-file .env `
     --json _assessment\estate_survey.json
 ```
 
@@ -359,7 +344,7 @@ convention — see §7 for which ones actually are.
 
 | # | command | ~time (38 wb / 55 assets) | produces |
 |---|---|---|---|
-| 1 | `python <engine>/…/estate_survey.py --server <host> --site <site> --pat-name <name> --env-file .env --no-prompt --json _assessment/estate_survey.json` | ⚠️ ~32 s | REST dependency ground truth |
+| 1 | `python scripts/run_engine_survey.py --server <host> --site <site> --pat-name <name> --env-file .env --json _assessment/estate_survey.json` | ⚠️ ~32 s | REST dependency ground truth |
 | 2 | `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` | ⚠️ ~34 s | `report.md`, `assessment.json`, `estate.db` |
 | 3 | `python scripts/tableau_lineage.py --plan --survey _assessment/estate_survey.json` | seconds | model-first order — **survey edges override the Metadata API** |
 | 4 | `python scripts/harvest_estate_assets.py --out _sweep` | ✅ **120 s / 55 assets** | `_sweep/assets/*`, `parse-sweep.md` |
@@ -394,9 +379,8 @@ convention — see §7 for which ones actually are.
 
 - `--server` is **required** and has no default. It takes a host *or* a URL.
 - `--json` takes a **PATH**, not a bare flag.
-- `--no-prompt` is not in the brief's original command and **you should always pass it** — see §4.1.
-  It converts the worst failure in this pipeline from a silent block into an instant, explanatory
-  error.
+- `scripts/run_engine_survey.py` supplies `--no-prompt` itself, converting a missing secret from a
+  hidden-input block into an instant, explanatory error.
 
 `--pat-name` on the command line is the safe default. It *can* come from the process environment
 variable `TABLEAU_PAT_NAME` ✅ verified (`fetch_tds._resolve_auth`:
@@ -773,14 +757,12 @@ Ordered by what actually cost time.
 |---|---|
 | **symptom** | the command produces no further output and never returns. ⚠️ reported: 13 minutes lost; the tell was **0.11 CPU-seconds and zero network connections** |
 | **cause** | it is **blocked on a hidden `getpass` prompt** for the PAT secret |
-| **check** | `Get-Process -Id <pid> \| Select-Object CPU` — near-zero CPU with no sockets is a prompt, not work. Then: does `.env` contain **`TABLEAU_PAT_VALUE`**? |
-| **fix** | make the secret visible to the engine's own key — add `TABLEAU_PAT_VALUE=<secret>` to `.env`, or set `$env:TABLEAU_PAT_VALUE` for that one call (§1.3a has both) — **and always pass `--no-prompt`** |
+| **check** | `Get-Process -Id <pid> \| Select-Object CPU` — near-zero CPU with no sockets is a prompt, not work. Then: was the engine run through `scripts/run_engine_survey.py`? |
+| **fix** | use `python scripts/run_engine_survey.py … --env-file .env`; it supplies the engine's legacy spelling and `--no-prompt` automatically |
 
-**Why our `.env` is not enough on its own** ✅ verified: our scripts document the secret as
-`TABLEAU_PAT_SECRET`; the engine reads it as `TABLEAU_PAT_VALUE`. `scripts/tableau_env.py` bridges
-the two — **but only for an engine script that OUR Python spawns**. Running one yourself from a
-shell crosses a process boundary no bridge reaches. The engine's `--env-file` layer looks the secret
-up under its *own* key (`TABLEAU_PAT_VALUE`), finds nothing, and falls through to the prompt.
+**Why the wrapper is required** ✅ verified: our scripts document the secret as
+`TABLEAU_PAT_SECRET`; the engine reads its legacy `TABLEAU_PAT_VALUE` spelling. The wrapper reads
+either spelling from `.env`, exports both to the engine, and invokes it with `--no-prompt`.
 
 **Correction to the folklore — the current engine is NOT silent.** ✅ verified by calling
 `fetch_tds._resolve_auth` directly with injected seams: before prompting, 2.126.0 writes a loud
