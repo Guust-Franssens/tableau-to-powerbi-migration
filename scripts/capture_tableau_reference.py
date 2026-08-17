@@ -9,7 +9,10 @@ Providers, resolved by FITNESS (not availability):
   - public_playwright   : Tableau Public only (implemented; needs --public-url + --view)
   - embedded_thumbnail  : extract thumbnails baked into the .twb (implemented; rare, layout-hint only)
   - manual              : user-dropped screenshots already in reference/ (implemented; validate + hash)
-  - server_rest         : Tableau Server/Cloud REST image export (STUB - no Server to test against)
+  - server_rest         : Tableau Server/Cloud REST image export (provider NOT wired; the transport is
+                          implemented and live-tested in capture_tableau_oracle.py --images, which
+                          calls the same /views/{id}/image?resolution=high endpoint. What is missing
+                          here is the provider CONTRACT: the provenance manifest and state-pinning.)
 
 Default is FAIL CLOSED: if nothing can produce a reference the script exits non-zero and asks for a
 source, unless --structural-only is passed (which records a blocked manifest and cannot claim
@@ -210,11 +213,20 @@ def collect_manual(reference_dir: Path) -> list[Path]:
 
 
 def capture_server_rest(_slug_dir: Path) -> list[dict] | None:
-    """STUB: Tableau Server/Cloud REST image export. Not implemented - no Server to validate against."""
+    """NOT WIRED: Tableau Server/Cloud REST image export. The transport already exists elsewhere.
+
+    ``capture_tableau_oracle.py --images`` calls the same ``/views/{id}/image?resolution=high``
+    endpoint against a live site, with ``401002`` re-auth, classified transient/credential failures
+    and jittered backoff. Do not reimplement it here; what is missing is this provider's *contract*.
+    """
     raise NotImplementedError(
-        "server_rest provider is specified but not implemented (no Tableau Server available to test "
-        "against). See docs/reference-capture.md. Set credentials via env (TABLEAU_SERVER_URL / _SITE / "
-        "_PAT_NAME / _PAT_SECRET) and implement /api/<v>/serverinfo negotiation + /views/{id}/image."
+        "server_rest is not wired into this provider chain -- but the REST image transport IS "
+        "implemented and live-tested. Use: python scripts/capture_tableau_oracle.py --images "
+        "(same /views/{id}/image?resolution=high endpoint, with retry/re-auth hardening). "
+        "What is still missing HERE is the provider contract, not the endpoint: the provenance "
+        "manifest (layout_grade/text_readable/state_reproducible/revision_bound/validation_grade, "
+        "without which the validator will not grade visual fidelity) and state-pinning via "
+        "?vf_<field>=<value>. See docs/reference-capture.md and issue #194."
     )
 
 
