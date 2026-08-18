@@ -452,8 +452,9 @@ second copy.
 **Three things about that invocation will bite you, all measured:** `--server` is required (there is
 no default); `--json` takes a **PATH**, not a bare flag; and — via `run_engine_survey.py` — the PAT
 **name** rides through from `.env`, so the `--pat-name` above is optional: it carries the whole file
-into the engine's child env (with `--no-prompt`). Pass it **only** for a *direct* `estate_survey.py`
-call — the engine's `credential_resolver.py` reads the *secret* from `--env-file`, not the name.
+into the engine's child env (with `--no-prompt`). A *direct* `estate_survey.py` call must supply the
+name itself — `--pat-name` or an exported `TABLEAU_PAT_NAME` — because the engine's
+`credential_resolver.py` reads only the *secret* from `--env-file`, never the name.
 
 `harvest_estate_assets.py` is worth more than the download: it also runs **both** parsers (ours for
 fidelity, the engine's for conversion) over every asset and writes `<out>/parse-sweep.md` /
