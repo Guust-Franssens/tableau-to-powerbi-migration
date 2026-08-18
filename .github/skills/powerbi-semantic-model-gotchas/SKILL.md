@@ -70,6 +70,14 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   the measure (e.g. `'X Value'`) instead.
 - **The `.pbip` file's `$schema` must end in a literal numeric version** (e.g.
   `.../pbipProperties/1.0.0/schema.json`) — never the placeholder text `1.x.x`.
+- ⚠️ **GUID-shaped relationship names must be real GUIDs.** Friendly relationship names are valid
+  (`relationship rel_Orders_Date`, or a quoted descriptive name), but a UUID-looking `8-4-4-4-12`
+  token is parsed as a GUID by TOM. A cold-run build emitted `w1b1e5d0-...`; `w` is not hex, so the
+  relationship failed even though the shape looked deliberate. If you want UUID names, generate real
+  all-hex GUIDs; if you want readable names, do not fake a GUID with a prefix.
+- **Inside a TMDL object block, every property must precede every annotation.** Violating this can
+  raise `Invalid indentation was detected!` on a correctly indented neighbouring line, so don't chase
+  whitespace first. Reorder the block as properties, then annotations/extended properties.
 - **Field Parameter / dimension-parameter calc tables: `sourceColumn` must be the BRACKETED
   calc-column reference `[Value1]`/`[Value2]`/`[Value3]` — never bare `Value1`, never the friendly
   display name.** A DAX table-constructor row like `{("Label", NAMEOF(...), Order), ...}` with 3
@@ -110,6 +118,11 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   (`sourceColumn: "CDD_0_1"`) looks fine and even validates fine, but fails **only at refresh/commit
   time** with `Column 'CDD_0_1' cannot be found`. Whenever you rename a column for any reason, grep
   every measure/calculated-column expression that references it and update to the new `name`.
+- **When a verification harness reads dates through pythonnet/ADOMD, never compare `str(value)`.**
+  `str()` formats a .NET `DateTime` in the host culture; a cold run saw `03/01/2015` instead of the
+  invariant `2015-01-03`, creating a false failure on the exact date columns being checked for real
+  `.xls` corruption. Format explicitly (`yyyy-MM-dd`, or round-trip `o` for date-times) before any
+  oracle comparison.
 - **Always pass an explicit culture to M type-conversion calls** (`Table.TransformColumnTypes`,
   `Number.FromText`, `Date.FromText`) — **and make its value match the source's actual textual
   representation, never a fixed constant and never the model's `culture`** (a hard-coded constant is
@@ -208,17 +221,29 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 - **Ground-truth EACH table calc two independent ways in Python** (Tableau semantics via sorted-partition
   `.iloc`/`cumcount`, and a literal DAX-mechanics replica via boolean masks over the raw table) and assert
   equality per probe row — two independent codings agreeing is far stronger than restating one formula.
-- **A running total must clear EVERY date-ish column of its own table, not just the daily one** [seen,
-  LogisticsLive]. The canonical `CALCULATE(SUM(t[v]), FILTER(ALL(t[Date]), t[Date] <= MAX(t[Date])))` is
-  only correct while `t[Date]` is the axis. Put a coarser same-table column on the axis — a month-start
-  column you added so the report can reproduce a Tableau `mn`/`tmn` bin — and the surviving `t[Month]`
-  filter still restricts the fact rows, so the "running total" silently collapses to **that bucket's own
-  total**: a plausible-looking, non-cumulative line that no structural validation flags. Fix:
-  `VAR _asOf = MAX(t[Date]) RETURN CALCULATE(SUM(t[v]), FILTER(ALL(t[Date], t[Month]), t[Date] <= _asOf))`
-  — `ALL()` takes several columns of one table, and the `VAR` pins the as-of date in the outer context.
-  Measured on a 730-row table: old form returned exactly the month total for all 24 months, new form
-  accumulated to the grand total to the cent, and the two agreed on **0 of 730 days** of difference at the
-  daily grain (strict superset). Generalizes to any measure that removes a filter by naming one column.
+- **A running total is correct only at the grain it was addressed for — validate it against the
+  visual axis, not just the DAX shape.** Two different mechanisms shipped the same silent symptom:
+  - `CALCULATE(SUM(t[v]), FILTER(ALL(t[Date]), t[Date] <= MAX(t[Date])))` only clears `t[Date]`. Put a
+    coarser same-table column on the axis (for example a month-start bin) and the surviving `t[Month]`
+    filter restricts the rows, so the line becomes that bucket's own total. Fix by pinning the as-of
+    date in a `VAR` and clearing every same-table date-ish column the visual can filter, e.g.
+    `CALCULATE(SUM(t[v]), FILTER(ALL(t[Date], t[Month]), t[Date] <= _asOf))`. Measured on a 730-row
+    table: old form returned exactly the month total for all 24 months; the fixed form accumulated to
+    the grand total to the cent.
+  - `WINDOW(... ORDERBY(c))` has the matching trap by address, not by filter clearing: it is cumulative
+    only when `c` is literally the visual's category grain. Measured cold run S14:
+
+    | visual axis | emitted measure returned | verdict |
+    |---|---|---|
+    | `'Orders'[Order_Date]` | 16.45 → … → 2,297,200.86 | ✅ cumulative |
+    | `'Date'[Date]` | 16.45, 288.06, 19.54 … | ❌ each day's own total |
+    | `'Date'[Month Start]` | 14,236.89, 4,519.89 … | ❌ each month's own total |
+
+    The emitted report used `'Date'[Month Start]` on the axis beside a measure ordered by
+    `'Orders'[Order_Date]`, so the measure disagreed with its own visual.
+  - **Gate reality:** structural validators and `check_datamodel.py` do not see PBIR category bindings;
+    a cheap model-only gate cannot prove this. Until a cross-artifact report-axis check exists, run
+    `EVALUATE` probes at every axis grain the emitted visuals bind to and compare to the source/oracle.
 
 **Month/quarter binning is a MODEL job, and it lands on you mid-migration:**
 - Power BI cannot bin a date to month in the **report** layer when the model has no date table, no
@@ -286,8 +311,10 @@ measure, **`sortByColumn` is the mechanism that works** — and it is the model'
   `PathID`+`PointOrder` wells. Origin+destination lat/long as four columns on a single fact row **cannot**
   draw an arc — the report is then stuck with endpoint bubbles. This is a model-shape decision, not a
   report one.
-- **Azure Map POINT maps: the model owes the report a single LEAF geography column, because the
-  Location well is a DRILL HIERARCHY** [seen, `book_6-1-Maps` Superstore, 2026-08-09]. Tableau plots
+- **Azure Map POINT maps (`visual.json` `visualType: "azureMap"`): the model owes the report a
+  single LEAF geography column, because the Location well is a DRILL HIERARCHY** [seen,
+  `book_6-1-Maps` Superstore, 2026-08-09]. Read the emitted PBIR `visualType`, not the source mark
+  type, before choosing this recipe. Tableau plots
   geographic fields on Detail at the **finest** level present, so `Country / State / City` draws one
   mark per city. Azure Maps does the opposite: *"When entering multiple values into the Location
   field, you create a geo-hierarchy"*
@@ -317,8 +344,10 @@ measure, **`sortByColumn` is the mechanism that works** — and it is the model'
 - **Provision EVERY dashboard-visible metric.** If a Tableau dashboard shows a KPI tile/value, the model
   must have a backing measure or column for it — the report builder works against a *frozen* model and can
   only render a static placeholder card for a metric that has no backing field (seen: 3 Airline tiles).
-- **A city-grain bubble map needs a concatenated `Place` column FROM YOU, and it needs a comma-free
-  name** [seen, Superstore `8-1-Dashboards`]. Bing geocodes a Location field **by name**, so bare US city
+- **Legacy Bing bubble maps (`visualType: "map"`/Bing, not `azureMap`) need a concatenated
+  `Place` column FROM YOU, and it needs a comma-free name.** Read the emitted PBIR `visualType`; a cold
+  run inherited a stale Bing assumption for a bundle that emitted only `azureMap` visuals and looked for
+  a deprecation modal that could not exist. Bing geocodes a Location field **by name**, so bare US city
   names put Springfield/Columbus/Franklin in Europe, Africa and Australia — verified 100 % US data (1
   country, 49 states, 531 cities) rendering across three continents. The report layer **cannot** fix this:
   dragging `Country`/`State` in beside `City` turns the Location well into a **geo-hierarchy** that renders
@@ -600,13 +629,30 @@ but **do not adopt it**: the correct culture is whatever locale the *build host*
 culture pin bakes the build machine into the artifact and corrupts on the next machine. That, not
 unreachability, is the reason to prefer the CSV path below.
 
-**Fix: take the legacy `.xls` reader out of the path.** Re-land the sheet as an invariant-format CSV
-(ISO `yyyy-MM-dd` dates, `.` decimals — both parse identically in every culture) and read it with
-`Csv.Document`; keep an explicit culture on the type step. Do this from a re-runnable `_build/`
-script so the bundle can be rebuilt. Post-fix the model matched the source **exactly** (9,994 rows,
-`SUM(Sales) = 2,297,200.86`, `SUM(Profit) = 286,397.02`, dates `2015-01-03..2018-12-30`, zero blanks).
-Do **not** reach for an OS-level `Set-Culture`: that is an account-wide change outside the repo's
-scope (§3) — and it is unnecessary, because the CSV path is locale-proof by construction.
+**Fix: take the legacy `.xls` reader out of the path.** Re-land each sheet as an invariant-format
+CSV and read it with `Csv.Document`. Do it from a re-runnable `_build/` script, and keep every generated
+CSV inside that migration bundle's `data/` folder (or its documented data folder) so parallel waves do
+not share mutable files. The details matter:
+
+- Write RFC-4180 CSV with Python's `csv` module (`newline=""`, UTF-8/UTF-8-SIG, `QuoteStyle.Csv` in
+  M) so embedded commas and quotes round-trip — e.g. `It's Hot Message Books with Stickers, 2 3/4" x 5"`.
+- Emit decimals with a round-tripping invariant representation (`.` decimal separator). Strip a trailing
+  `.0` only for values destined for `Int64.Type`, and fail the build if a value would be written in
+  scientific notation unless you have explicitly tested the M type that will parse it.
+- Choose date text from the model's M type list: `yyyy-MM-dd` for `date`, `yyyy-MM-ddTHH:mm:ss` for
+  `datetime`/`datetimezone` (plus an explicit zone only when the source has one).
+- Write atomically in the same folder: create `*.partial`, flush/close it, then replace the target path.
+  Do not write to a shared temp directory or to another worktree's bundle.
+- The type-conversion culture must describe the **bytes being parsed**. For an invariant CSV,
+  `Table.TransformColumnTypes(..., "en-US")` is correct because the file uses `.` decimals and ISO
+  dates — not because the author, host, customer or model culture is `en-US`. For an in-place `.xls`
+  stopgap, the culture has to match the host locale that rendered the text (§3), which is why that
+  stopgap is not portable.
+
+Post-fix the measured model matched the source **exactly** (9,994 rows, `SUM(Sales) = 2,297,200.86`,
+`SUM(Profit) = 286,397.02`, dates `2015-01-03..2018-12-30`, zero blanks). Do **not** reach for an
+OS-level `Set-Culture`: that is an account-wide change outside the repo's scope (§3), and the CSV path
+is locale-proof by construction.
 
 **After the first full refresh, assert every import table's row count against its source/oracle.** Run
 `python scripts/refresh_pbip_model.py --pid <pid> --canaries Orders Customers` (name every import
