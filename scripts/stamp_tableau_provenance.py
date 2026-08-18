@@ -33,7 +33,7 @@ toolchain has now been bitten by four separate times. When the hash does not mat
 as ``origin.match: "name_only"`` rather than silently claimed as the source: a same-named workbook
 that is a different build is exactly the situation this file exists to make visible.
 
-⚠️ **The LUID path is not an optimisation, it is the only thing that works on harvested input.**
+NOTE: **The LUID path is not an optimisation, it is the only thing that works on harvested input.**
 ``harvest_estate_assets.py`` names every download ``<luid>_<sanitized-name><ext>`` on purpose
 (display names are not unique across projects), so a stem-vs-``name`` comparison compares
 ``4f2c...-a1_Sales_Q3_Review`` against ``Sales - Q3 Review`` and can never match. Measured: **20 of
