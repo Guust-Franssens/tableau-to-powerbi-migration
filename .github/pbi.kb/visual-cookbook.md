@@ -146,15 +146,16 @@ Deprecated (do not emit): `filledMap` -> `azureMap`, `map` -> `azureMap`, `qnaVi
 
 ## What's actually in here (measured against CLI 0.1.4, 2026-07-28)
 
-An empirical sweep of all 29 `visuals/*.md` entries against `catalog describe` gives the honest
-breakdown — **use it to decide whether opening an entry is even worth a lookup** (19 + 7 + 3 = 29;
-27 of the 29 also ship a sibling `visuals/<type>.visual.json` — `azureMap` and `forecast` do not):
+An empirical sweep of all 31 `visuals/*.md` entries against `catalog describe` gives the honest
+breakdown — **use it to decide whether opening an entry is even worth a lookup** (19 + 8 + 4 = 31;
+27 of the 31 also ship a sibling `visuals/<type>.visual.json` — `azureMap`, `forecast`,
+`step-line`, and `textSlicer` do not):
 
 | Category | Count | Do you need the cookbook? |
 |---|---|---|
 | **Typed entries whose role tables exactly match the CLI** (zero drift found) | **19** | ❌ **No.** Their Roles / formatting-object sections are literally transcribed `catalog describe` output. Call the CLI instead — it's live and can't go stale. Their only residual value is the Tableau-idiom mapping + tier verdict. |
-| **Idiom entries** — `error-bars`, `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars`, `forecast` | **7** | ✅ **Yes.** These are *not visual types*: `catalog describe error-bars` → `VISUAL_TYPE_UNKNOWN`. They document a technique applied to a host visual, which the CLI has no concept of. `forecast` is the strongest case: the CLI *does* describe a `forecast` object, but only its cosmetics — the entry exists to tell you the model parameters are **not authorable at all**. |
-| **Render-truth entries** — `actionButton`, `shape`, `azureMap` | **3** | ✅ **Yes, critically.** These carry behaviour the CLI cannot know and in one case gets actively wrong. |
+| **Idiom entries** — `error-bars`, `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars`, `forecast`, `step-line` | **8** | ✅ **Yes.** These are *not visual types*: `catalog describe error-bars` → `VISUAL_TYPE_UNKNOWN`. They document a technique applied to a host visual, which the CLI has no concept of. `forecast` is the strongest case: the CLI *does* describe a `forecast` object, but only its cosmetics — the entry exists to tell you the model parameters are **not authorable at all**. |
+| **Render-truth entries** — `actionButton`, `shape`, `azureMap`, `textSlicer` | **4** | ✅ **Yes, critically.** These carry behaviour the CLI cannot know and in one case gets actively wrong. |
 
 **The canonical proof that CLI vocabulary ≠ render truth:** `catalog describe actionButton` reports
 `"deprecated": false` and a `text` formatting object — i.e. perfectly usable. In reality Desktop
@@ -227,7 +228,21 @@ visual name if one exists.
 ### ➖ Out of scope (not Tableau-migration relevant)
 `rdlVisual`, `dataQueryVisual`, `realTimeLineChart`, `scriptVisual` / `pythonVisual`,
 `accessibleTable`, `animatedNumber`, `scorecard`, `bookmarkNavigator`, `aiNarratives`,
-niche slicers (`listSlicer`/`textSlicer`/`advancedSlicerVisual`/`filterSlicer` beyond core `slicer`).
+niche slicers (`listSlicer`/`advancedSlicerVisual`/`filterSlicer` beyond core `slicer`).
+
+## Known deterministic-engine emission defects to re-check each release
+
+These are tracked here so report-layer repair work can copy the right PBIR shape when engine output
+is wrong or lossy.
+
+- ⚠️ sort definitions omitted: Tableau toolbar sorts come from `<shelf-sort-spec>`. When omitted
+  upstream, estate outputs can lose visual `query.sortDefinition` payloads entirely.
+- ⚠️ trellis axis hidden: some small-multiple emissions set `valueAxis.show = false` where Tableau
+  shows a value scale.
+- ⚠️ scatter transparency slot: `scatterChart` transparency belongs on `markers.transparency`; a
+  `dataPoint.transparency` write is inert.
+- ⚠️ legend-vs-gradient collision: bindings that include `Series` can override a measure-driven
+  `dataPoint.fill` / `FillRule` gradient, so a Tableau encoding that uses both can degrade silently.
 
 ## Layout
 

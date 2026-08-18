@@ -38,3 +38,10 @@ Maps custom-territory Tableau maps/polygons to Power BI Shape map with a custom 
 ## Binding notes
 
 Template binds State to Category, `[CP Profit Ratio]` to Value, and `[CP Sales]` to Tooltips.
+
+## Fidelity gotcha: `Series` vs measure gradient
+
+⚠️ inferred, needs local re-check: when `Series` is bound, legend colors can override a
+`dataPoint.fill`/`FillRule` measure gradient. If a Tableau source encodes both pane splitting and a
+color ramp on the same shelf, model it as a trade-off (keep legend split **or** keep measure ramp),
+not as a no-loss 1:1 mapping.
