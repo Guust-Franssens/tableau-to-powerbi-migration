@@ -280,6 +280,12 @@ change under you with no repo diff — and several agent Gotchas encode version-
 | Python | >= 3.11 (3.11.9 tested) |
 
 If a version differs, re-verify the version-specific Gotchas in `.github/agents/` before trusting them.
+For **Power BI Desktop specifically**, treat the matrix as "the build this machine's bridge already
+answers on, discovered empirically" rather than a portable version string. Field reports on
+2026-08-18 found one machine silently launching an older side-by-side Desktop while the bridge sat at
+`NO_BRIDGE`, and another where the documented Desktop build was not installed at all. Pin the exe with
+`PBI_DESKTOP_PATH` **before launch**, then verify the running process by PID (`powerbi-desktop status`
+→ `Get-CimInstance Win32_Process ... CommandLine`); the bridge CLI reports no exe path or version.
 
 ### 5. Python tooling
 

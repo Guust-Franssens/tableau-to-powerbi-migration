@@ -683,6 +683,31 @@ trusting a single number it returns. When they disagree, prefer the **pid-scoped
 (`probe_desktop_query.py`'s `_child_port(pid)`, which walks Desktop→child `msmdsrv` and never widens
 the lookup). A wrong-model read is far more dangerous than a failed read: it returns confident,
 plausible numbers about somebody else's data.
+
+### ⚠️ Offline `ConnectFolder` has the same implicit-connection cross-talk hazard
+
+Measured 2026-08-18 in a multi-agent build, with a sibling `pbi-semantic-builder` using the same MCP
+server for a different model. A `table_operations List` call that omitted `connectionName` silently
+returned the sibling workbook's tables (confirmed against that build's `generated-edit-declarations.json`);
+a follow-up column call then failed with "table not found." `ListConnections` also showed a stale
+two-connection snapshot for a moment right after `Disconnect`.
+
+**Rule:** after any connect call, pass the returned `connectionName` explicitly on every model-object
+operation in a multi-agent build. Never rely on the implicit "last connection." The readback pattern
+that confirmed a disconnect had landed was re-running `Disconnect` on the same name and getting
+`not found`.
+
+Nuance, verified against the MCP tool schemas in this doc pass: `connectionName` is optional and
+documented as "Uses the last connection if omitted" on `table_operations`, `column_operations`,
+`measure_operations`, `relationship_operations`, and `partition_operations`. The same schema says
+`connection_operations` **forbids** `connectionName` on `Connect`, `ConnectFabric`, `ConnectFolder`,
+and `ConnectBimFile` because the name is auto-generated; use the returned name only after the connect
+call. That is 5 checked operation types out of the broader MCP surface, not proof that all operation
+types share the same parameter.
+
+What was **not** measured: how long the stale `ListConnections` snapshot persists. The observation was
+"a moment" / seconds apart, not a bounded duration.
+
 ## 7. Legacy `.xls` navigation keys, and Desktop sessions that turn errors into hangs
 
 Measured 2026-08-08 (`book_6-1-Maps`, same Superstore BIFF8 `.xls` and same en-BE machine as §6).
