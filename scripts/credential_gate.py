@@ -85,6 +85,48 @@ DENY_RIGHTS = "(OI)(CI)(WD,AD,WA)"
 # are kept because the enforcement difference is real and belongs in the log.
 BLOCK_ACTIONS = frozenset({"block", "block-marker-only"})
 
+# Files that mark a directory as a legitimately gateable UNIT of work - one migration, or one engine
+# bundle. A gate target should be one of these, because the hook's `_blocking_marker()` walks UPWARD
+# from any write target and stops at the first marker it meets: a marker therefore governs its whole
+# subtree, and one placed too high governs work it knows nothing about.
+SCOPE_MARKERS = ("migration-spec.json", ENGINE_RECEIPT, "input_manifest.json")
+
+# Shape of a repository checkout rather than a unit of work. `.git` alone is the decisive one (it is
+# what the real incident hit); the other two catch a checkout exported without its git directory.
+REPO_ROOT_SIGNS = (".git", "AGENTS.md", "pyproject.toml")
+
+
+def _scope_refusal(migration: Path) -> str | None:
+    """Why `migration` is too broad to gate, or None when it is a legitimate scoped target.
+
+    Measured 2026-08-18, from a real incident: `credential_gate.py block` was invoked from the wrong
+    working directory and wrote its marker at the REPO ROOT. Because `_blocking_marker()` walks up
+    from any write target and returns the first marker found, that one file governed every migration
+    in the checkout - blocking ~13 unrelated in-flight agents at once, including bundles that had
+    already independently earned their clearance, and stranding a live unsaved DAX measure in a
+    Desktop session with nowhere to write.
+
+    Nothing refused it, because `apply_block` accepted any directory at all. The blast radius of a
+    gate is its entire subtree, so the target has to BE a unit of work - not merely contain some.
+
+    Deliberately a positive check with an escape hatch: a directory carrying its own scope marker is
+    always allowed, anything shaped like a checkout root is always refused, and anything else is
+    refused with `--force-scope` named in the message. That keeps an unusual-but-legitimate layout
+    workable without making the catastrophic case reachable by accident.
+    """
+    resolved = migration.resolve()
+    if resolved.parent == resolved:
+        return f"{resolved} is a filesystem root"
+    for sign in REPO_ROOT_SIGNS:
+        if (resolved / sign).exists():
+            return f"{resolved} looks like a repository checkout root (contains {sign}), not one migration or bundle"
+    if any((resolved / name).is_file() for name in SCOPE_MARKERS):
+        return None
+    return (
+        f"{resolved} carries none of {', '.join(SCOPE_MARKERS)}, so it is not identifiable as a single "
+        "migration or engine bundle"
+    )
+
 
 def _audit(migration: Path, action: str, detail: str) -> None:
     """Append a tamper-evident-ish record of every gate transition."""
@@ -405,7 +447,7 @@ def _redundant_rearm(migration: Path, sources: list[str]) -> str | None:
     return earned
 
 
-def apply_block(migration: Path, sources: list[str]) -> int:
+def apply_block(migration: Path, sources: list[str], force_scope: bool = False) -> int:
     """Write the marker and deny write access to the output folder.
 
     ⚠️ The marker states a STATE, never a VERDICT, and the distinction is load-bearing. This runs at
@@ -419,6 +461,22 @@ def apply_block(migration: Path, sources: list[str]) -> int:
     same conflation was fixed in the classifier's console output first; the file kept the old claim,
     so the two disagreed and the file won.
     """
+    refusal = _scope_refusal(migration)
+    if refusal:
+        if not force_scope:
+            log.error(
+                "REFUSING to arm the gate: %s.\n"
+                "A marker governs its ENTIRE subtree (the hook walks upward and stops at the first "
+                "one), so arming here would block every migration beneath it - including any that "
+                "already earned a clearance. This is usually a wrong working directory: pass the "
+                "migration or bundle directory explicitly. Use --force-scope only if you really do "
+                "mean to gate everything below this path.",
+                refusal,
+            )
+            return 2
+        log.warning("--force-scope: arming the gate on a target that failed the scope check (%s).", refusal)
+        _audit(migration, "block-forced-scope", refusal)
+
     if (migration / OVERRIDE).exists():
         if _override_is_authentic(migration):
             log.warning("Override present and audit-backed: gate NOT applied - human authorized a build-only run.")
@@ -768,6 +826,14 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("migration", type=Path)
         if name == "block":
             p.add_argument("--sources", nargs="*", default=[])
+            p.add_argument(
+                "--force-scope",
+                action="store_true",
+                help=(
+                    "arm the gate even when the target is not identifiable as a single migration or "
+                    "bundle. A marker governs its whole subtree, so this can block unrelated work."
+                ),
+            )
         if name == "clear":
             p.add_argument("--reason", default="manual")
             p.add_argument("--earned", action="store_true", help=argparse.SUPPRESS)
@@ -781,7 +847,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.cmd == "block":
-        return apply_block(migration, args.sources)
+        return apply_block(migration, args.sources, force_scope=args.force_scope)
     if args.cmd == "clear":
         return clear_block(migration, args.reason, earned=args.earned)
     if args.cmd == "authorize":

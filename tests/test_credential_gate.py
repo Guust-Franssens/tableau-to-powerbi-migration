@@ -82,6 +82,10 @@ def run_hook(payload: dict) -> dict:
 @pytest.fixture
 def migration(tmp_path: Path) -> Path:
     (tmp_path / "fabric").mkdir()
+    # A real migration dir always carries its spec, and `apply_block` now REQUIRES a scope marker
+    # before it will arm (a marker governs its whole subtree; one written too high blocked ~13
+    # unrelated agents in a real incident). Writing it here makes the fixture match reality.
+    (tmp_path / "migration-spec.json").write_text("{}", encoding="utf-8")
     yield tmp_path
     run_gate("clear", str(tmp_path), "--reason", "test-teardown")
 
@@ -892,7 +896,9 @@ def test_the_hook_does_not_block_teardown_of_an_unrelated_cleared_fixture(tmp_pa
     armed = tmp_path / "variant-still-armed"
     cleared = tmp_path / "variant-already-cleared"
     (armed / "fabric").mkdir(parents=True)
+    (armed / "migration-spec.json").write_text("{}", encoding="utf-8")
     (cleared / "fabric").mkdir(parents=True)
+    (cleared / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(armed), "--sources", "shipment")
     run_gate("block", str(cleared), "--sources", "shipment")
     run_gate("clear", str(cleared), "--reason", "already earned")
@@ -937,6 +943,7 @@ def test_the_cd_fix_does_not_block_legitimate_teardown_via_the_same_pattern(tmp_
     """
     mig = tmp_path / "mig2"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(mig), "--sources", "x")
     run_gate("clear", str(mig), "--reason", "already earned")
 
@@ -949,6 +956,7 @@ def migration_fixture(tmp_path: Path) -> Path:
     """Helper: an armed migration directory at tmp_path/mig, for tests that need the path fixed."""
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     return mig
 
 
@@ -1196,6 +1204,7 @@ def test_rearming_an_already_probe_cleared_gate_is_a_no_op(tmp_path: Path) -> No
     """
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(mig), "--sources", "shipment")
     run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
 
@@ -1215,6 +1224,7 @@ def test_rearming_after_a_BARE_clear_still_arms(tmp_path: Path) -> None:
     """
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(mig), "--sources", "shipment")
     run_gate("clear", str(mig), "--reason", "I decided it is fine")  # NOT --earned
 
@@ -1235,6 +1245,7 @@ def test_rearming_with_a_NEW_source_still_arms(tmp_path: Path) -> None:
     """
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(mig), "--sources", "shipment")
     run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
 
@@ -1250,6 +1261,7 @@ def test_the_rearm_skip_is_order_insensitive_on_sources(tmp_path: Path) -> None:
     """Source ORDER is a classifier implementation detail, not a change in what was proven."""
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(mig), "--sources", "shipment", "orders")
     run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
 
@@ -1275,6 +1287,7 @@ def test_an_extract_only_migration_that_was_never_gated_verifies_CLEAN(tmp_path:
     """
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     (mig / "fabric" / "model.tmdl").write_text("table Orders")  # a real, audited artifact
 
     proc = run_gate("verify", str(mig))
@@ -1295,6 +1308,7 @@ def test_a_genuinely_unearned_clear_is_STILL_reported(tmp_path: Path) -> None:
     """
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(mig), "--sources", "shipment")
     run_gate("clear", str(mig), "--reason", "I decided it is fine")  # NOT --earned
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
@@ -1314,6 +1328,7 @@ def test_an_earned_clear_still_verifies_clean_for_a_live_source(tmp_path: Path) 
     """
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
     run_gate("block", str(mig), "--sources", "shipment")
     run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
