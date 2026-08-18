@@ -154,6 +154,20 @@ The skip is deliberately narrow, and fails closed on anything it cannot parse:
 - the source list must be **identical** (order-insensitive) — a newly added live source has no
   reachability evidence at all, so it still arms the gate.
 
+### Cleared migrations also shield themselves from unrelated ancestor markers
+
+The hook walks upward from a write target, so a marker placed too high can otherwise govern every
+migration beneath it. A migration that already earned a `probe-cleared` for the **same source list**
+is treated as its own boundary: the hook reads the nearest audit log below an ancestor marker and
+reuses the same transition/source comparison as re-arming. A bare file is never a shield, and neither
+is `manual-clear`; only an audit-backed `probe-cleared` after the latest block counts.
+
+This deliberately stays audit-backed rather than adding a new "cleared" file. A file-only token would
+repeat the override failure mode: agents already forged control files, including via string fragments
+chosen to dodge literal filename matching. The audit log is still not unforgeable at same-user
+privilege, but it is one source of truth and it preserves the ordering rule that a later block
+invalidates earlier evidence.
+
 ---
 
 ## Why it is built this way
