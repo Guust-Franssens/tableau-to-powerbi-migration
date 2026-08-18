@@ -247,6 +247,42 @@ def test_customer_data_is_gitignored_in_every_tree() -> None:
         )
 
 
+def test_build_gitignore_keeps_scratch_ignored_but_tracks_tamper_audit_trail() -> None:
+    """`_build/` is mixed content: keep scratch ignored, track replay + ledger for tamper portability."""
+
+    def _check_verbose(path: str) -> str:
+        result = subprocess.run(
+            ["git", "check-ignore", "-v", path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.strip()
+
+    def _is_ignored(path: str) -> bool:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    ignored_out = _check_verbose("migrations/workbooks/foo/_build/scratch.bin")
+    assert _is_ignored("migrations/workbooks/foo/_build/scratch.bin")
+    assert "_build/**" in ignored_out
+
+    script_out = _check_verbose("migrations/workbooks/foo/_build/fix_post_engine.py")
+    assert not _is_ignored("migrations/workbooks/foo/_build/fix_post_engine.py")
+    assert "!**/_build/*.py" in script_out
+
+    ledger_out = _check_verbose("migrations/workbooks/foo/_build/generated-edit-declarations.json")
+    assert not _is_ignored("migrations/workbooks/foo/_build/generated-edit-declarations.json")
+    assert "!**/_build/generated-edit-declarations.json" in ledger_out
+
+
 def test_every_script_is_documented_in_the_scripts_readme() -> None:
     """`scripts/` is 20+ files; an undocumented one is a file nobody can find.
 
