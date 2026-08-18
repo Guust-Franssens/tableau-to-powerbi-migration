@@ -469,13 +469,11 @@ Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offl
 # Errors" while landing ZERO PackageReference (a net10.0 scratch project silently no-op'd the add) - so
 # console text is not proof; presence of the DLL on disk is. Hence a file check, not a restore attempt.
 #
-# It resolves the EXACT path probe_desktop_query.py globs (probe_desktop_query.py:52-55:
-# Path.home()/.nuget/packages/microsoft.analysisservices.adomdclient.netcore*/**/AdomdClient.dll, NOT
-# $env:NUGET_PACKAGES) so it PREDICTS the probe's own resolution rather than a different cache location.
-# Honouring NUGET_PACKAGES here would be a BUG: dotnet restores into it but the probe never reads it, so
-# preflight would PASS while the probe still failed. (probe's Path.home() and refresh_pbip_model.py:473's
-# os.path.expanduser("~") resolve to the SAME base - both go through os.path.expanduser - so those two
-# cannot disagree; that NEITHER honours NUGET_PACKAGES is a separate cross-file gap - see #203.)
+# It resolves the EXACT cache precedence the Python entry points use: `$env:NUGET_PACKAGES` when
+# non-empty, otherwise `$HOME/.nuget/packages`. That makes preflight predict probe_desktop_query.py's
+# ADOMD lookup and refresh_pbip_model.py's AMO/TOM lookup instead of checking a different cache. The
+# old Path.home()/os.path.expanduser("~") defaults were equivalent; the fixed gap is that none of the
+# three sites honoured dotnet's NUGET_PACKAGES override.
 #
 # Severity: CRITICAL, by this file's own rule above — "critical if any persona's Definition of Done
 # depends on it, even when the dependency only fails later at handoff/validation time". It does, and
@@ -487,11 +485,12 @@ Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offl
 # printed "Ready to migrate" and exited 0 while the probe exited 2 — reproducing exactly the silent
 # false-green #199 was filed to remove. Do NOT downgrade this to recommended without also removing
 # the refresh/save gate from those two personas.
-$adomdDll = Get-ChildItem -Path (Join-Path $HOME '.nuget\packages\microsoft.analysisservices.adomdclient.netcore*') `
+$nugetPackagesRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $HOME '.nuget\packages' }
+$adomdDll = Get-ChildItem -Path (Join-Path $nugetPackagesRoot 'microsoft.analysisservices.adomdclient.netcore*') `
     -Recurse -Filter 'Microsoft.AnalysisServices.AdomdClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
 Add-Check 'ADOMD.NET client (Desktop probe/refresh)' 'critical' ([bool]$adomdDll) `
     $(if ($adomdDll) { $adomdDll.FullName } else { 'not in the nuget cache - probe_desktop_query.py / refresh_pbip_model.py cannot reach an open Desktop model' }) `
-    'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the shared ~/.nuget cache the probe reads).'
+    'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the active NuGet global-packages cache the probe reads).'
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'

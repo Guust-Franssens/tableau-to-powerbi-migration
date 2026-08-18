@@ -49,10 +49,20 @@ from _credential_modal import (
     inspect_credential_modal,
 )
 
-# ADOMD.NET assembly shipped in the nuget cache (netcore build). Resolved at import time.
+# ADOMD.NET assembly shipped in the nuget cache (netcore build).
 _ADOMD_PKG = "microsoft.analysisservices.adomdclient.netcore*"
 _ADOMD_DLL = "Microsoft.AnalysisServices.AdomdClient.dll"
-_ADOMD_GLOBS = [str(Path.home() / ".nuget/packages" / _ADOMD_PKG / "**" / _ADOMD_DLL)]
+
+
+def nuget_packages_root() -> Path:
+    """Return the NuGet global-packages cache root, matching dotnet's NUGET_PACKAGES precedence."""
+    return Path(os.environ.get("NUGET_PACKAGES") or (Path.home() / ".nuget" / "packages"))
+
+
+def adomd_dll_globs() -> list[str]:
+    """Glob patterns that can locate ADOMD.NET in the active NuGet global-packages cache."""
+    return [str(nuget_packages_root() / _ADOMD_PKG / "**" / _ADOMD_DLL)]
+
 
 # Desktop binds its msmdsrv port a moment AFTER the process appears, so a scoped lookup needs a
 # short retry - but a bounded one, because a miss must end in a loud failure, never a fallback.
@@ -99,7 +109,7 @@ def _load_adomd():
         print("PREFLIGHT: ERROR pythonnet not installed (uv pip install pythonnet)")
         sys.exit(2)
 
-    for pattern in _ADOMD_GLOBS:
+    for pattern in adomd_dll_globs():
         hits = glob.glob(pattern, recursive=True)
         if hits:
             dll = Path(hits[0])
