@@ -27,6 +27,7 @@ def test_process_server_env_does_not_preempt_offline_cli_capture(tmp_path: Path,
     slug_dir = tmp_path / "workbook"
     _write_embedded_thumbnail(slug_dir)
     monkeypatch.setenv("TABLEAU_SERVER_URL", "https://unrelated.invalid")
+    monkeypatch.delenv("TABLEAU_PAT_SECRET", raising=False)
 
     assert capture.main([str(slug_dir)]) == 0
     manifest = json.loads((slug_dir / "reference" / "manifest.json").read_text(encoding="utf-8"))
@@ -75,7 +76,29 @@ def test_explicit_server_capture_writes_returned_records(tmp_path: Path, monkeyp
     """Successful Server records are written without invoking lower-fidelity providers."""
     slug_dir = tmp_path / "workbook"
     slug_dir.mkdir()
-    server_records = [{"name": "Server dashboard", "states": []}]
+    server_records = [
+        {
+            "name": "Server Dashboard",
+            "states": [
+                {
+                    "state_slug": "default",
+                    "state": {},
+                    "image": "server/dashboard.png",
+                    "provider": "server_rest",
+                    "capabilities": [
+                        capture.CAP_LAYOUT,
+                        capture.CAP_TEXT,
+                        capture.CAP_STATE,
+                        capture.CAP_REVISION,
+                        capture.CAP_VALIDATION,
+                    ],
+                    "dimensions": {"w": 1600, "h": 1100, "dpr": 2},
+                    "sha256": "server-render-sha",
+                    "numeric_oracle": None,
+                }
+            ],
+        }
+    ]
     monkeypatch.setattr(capture, "capture_server_rest", lambda _slug_dir: server_records)
 
     def unexpected_offline_call(*_args) -> list[dict]:

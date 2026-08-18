@@ -77,7 +77,7 @@ the best provider *for the requested purpose* and records which it used and why.
 | **Authenticated browser** (Playwright w/ session) | States/actions/extensions REST can't reproduce | ❌ specified-only |
 | **Public Playwright** | Tableau **Public** only, after capture QA | ⚠️ works (this repo's demos); hardening TODO |
 | **Guided manual export from the exact `.twbx`** (Tableau Desktop/Reader) | Extract-only workbooks with no live Server view — can be *validation-grade* | ❌ specified-only (guided prompts) |
-| **Embedded `.twbx` thumbnail** | Low-resolution rendered evidence for mark shape, layering, axis direction and labels; XML wins any conflict | ⚠️ extractor implemented; found in 17/17 workbooks in one Superstore-family estate, but worksheet coverage was partial (5/10 in one workbook) |
+| **Embedded `.twbx` thumbnail** | Low-resolution rendered evidence for mark shape, layering, axis direction and labels; XML wins any conflict | ⚠️ extractor implemented; found in 17/17 workbooks in one Superstore-family estate, superseding the older "~4% carry thumbnails" figure for this measurement shape; worksheet coverage was still partial (5/10 in one workbook) |
 | **User-supplied screenshots** | Always-available floor; must be *guided* (exact filenames, reset state, viewport) | ⚠️ folder convention only |
 
 ### Default = fail **closed**
@@ -209,6 +209,8 @@ toolkit to migrate real customer dashboards**:
 - **Normalize** viewport/device layout, locale, timezone, fonts, DPI to the dashboard's **declared
   size** (the parser has it) or you get false "proportion" discrepancies from capture geometry alone.
 - Treat dashboard **extensions / web objects / maps** as provider capability checks.
+- ⚠️ `.twbx` result-cache `tmn:` columns decoding to `None` is not characterised yet and needs a
+  fixture before this trap can be classified as decoder bug vs source limitation.
 - A reference is only valid for the source it was captured from — **re-capture if the source changed**.
 
 ## Implementation status
