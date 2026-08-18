@@ -84,6 +84,29 @@ association living only in `oracle-manifest.json` (`workbook_luid` / `workbook_n
 rename; a folder-per-workbook layout is coupled to a name and silently splits a capture in two when
 someone renames the workbook upstream. The flat capture stays the authoritative artifact.
 
+⚠️ **Capture a whole batch in ONE invocation — `oracle-manifest.json` is rewritten wholesale per run,
+never appended.** A second invocation into the same `--out` replaces the manifest, so a
+workbook-at-a-time loop silently ends up with a manifest describing only the last workbook while the
+image and data files from every earlier run are still on disk. That is the worst shape: the artifacts
+look complete and the index says otherwise.
+
+`--workbook` is `action="append"` and documented *"(repeatable)"* (`capture_tableau_oracle.py:469`),
+so the fix needs no new CLI surface — pass one flag per workbook and capture the set in a single run:
+
+```
+python scripts/capture_tableau_oracle.py --out _oracle --images \
+    --workbook "Sales Overview" --workbook "Ops Detail" --workbook "Exec Summary"
+```
+
+There is no `--project` flag, and server-side project filtering is blocked for now: Tableau's numeric
+project id (the one in the site's own URL) has no public API mapping (issue #191). So expand the
+project to its workbook names first, then pass them all in one invocation.
+
+Only split into batches when you deliberately want crash-isolation on a long run — and then archive
+each `oracle-manifest.json` before the next invocation overwrites it, and merge afterwards. Merging
+is not automated on purpose: two manifests can disagree about a view's `capabilities`, and silently
+picking one would corrupt the evidence grade this whole document exists to protect.
+
 It is, however, the one artifact in this toolkit that does not follow the
 `migrations/workbooks/<slug>/{source,fabric,data,reference}` convention, so browsing "what did we
 capture for workbook X" otherwise means cross-referencing JSON by hand. Bridge it *after* capture:
