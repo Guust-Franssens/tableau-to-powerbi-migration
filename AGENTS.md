@@ -521,6 +521,21 @@ Historic cost of not having this: **three** retracted or nearly-retracted defect
 went 2.60.0 → 2.72.0 unnoticed; then 2.113.0 → 2.126.0 (13 releases) *mid-dry-run*; then 2.113.0 →
 2.126.0 → upstream 2.135.0 with two copies live at once. Each was caught only by a manual `git fetch`.
 
+**An engine defect is filed UPSTREAM — `gh issue create --repo Yarbrdab000/tableau-fabric-skills`.**
+The plugin tree is read-only, so an issue is the only way a finding reaches the person who can fix it.
+Thirteen have gone there (#114–#141) and the author closes them, so this works — which is exactly why
+filing one in the *wrong* tracker is expensive: it looks filed, it is searchable, and it is invisible
+to him forever. ⚠️ **The two numbering ranges do not overlap and that is the trap**: ours passed 200
+while upstream was still at ~141, so a bare `#220` reads as plausible in either repo and nothing
+flags the mistake. Measured 2026-08-18: **three** engine issues (a bare Column in a Measure-only role,
+a stubbed calc dropping a required role, and the DoD gap behind both) sat in *our* tracker for days —
+found only when someone asked "shouldn't that be a feature request upstream?", and re-filed as #142–#144.
+
+**The test: who has to change code?** If the fix edits `migrate_estate.py`, `pbir_lint.py` or anything
+under the plugin, it is upstream — even when we also ship a mitigation on our side. Our tracker is for
+*our* tier (`scripts/`, the personas, the skills, the docs). When both apply, file upstream and keep a
+local issue only for the mitigation, cross-linked — never a second copy of the defect report.
+
 **Where does the output go?** Be honest about this rather than promising: **local PBIP is the only
 supported target today.** There is no publish step in this repo — `pbi-deployer` is phase 2 and does
 not exist yet. Getting a finished model/report into a Fabric workspace is a manual `fab import` or a
