@@ -477,16 +477,19 @@ Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offl
 # os.path.expanduser("~") resolve to the SAME base - both go through os.path.expanduser - so those two
 # cannot disagree; that NEITHER honours NUGET_PACKAGES is a separate cross-file gap - see #203.)
 #
-# Severity: recommended, not critical. ADOMD is used by the pbip-model-refresh skill's live-Desktop
-# steps - BOTH the read-only DAX probe (probe_desktop_query.py) and the refresh + cache.abf persist
-# (refresh_pbip_model.py imports _load_adomd) - i.e. the credentials/reachability gate and the model
-# refresh before building a report. That is the same Desktop-phase-only scope as the PBI_DESKTOP_PATH
-# check above: the deterministic estate pipeline, offline TMDL validation and PBIR authoring/validation
-# never touch it, so a miss must NOT block an estate/model-only run; but it must be a VISIBLE warning
-# naming the gated capability and the exact restore, because its absence was silent.
+# Severity: CRITICAL, by this file's own rule above — "critical if any persona's Definition of Done
+# depends on it, even when the dependency only fails later at handoff/validation time". It does, and
+# unconditionally: `pbi-semantic-builder`'s DoD step 8 is a HANDOFF GATE that runs
+# refresh_pbip_model.py (which imports `_load_adomd`) to refresh and SAVE `.pbi/cache.abf`, and
+# `pbi-report-builder`'s step 1 refuses to open Desktop without that file. So every migration that
+# ends in a report needs ADOMD — this is not the live-source-only scope it first appears to be.
+# Measured 2026-08-17: with only this lookup suppressed on an otherwise healthy machine, preflight
+# printed "Ready to migrate" and exited 0 while the probe exited 2 — reproducing exactly the silent
+# false-green #199 was filed to remove. Do NOT downgrade this to recommended without also removing
+# the refresh/save gate from those two personas.
 $adomdDll = Get-ChildItem -Path (Join-Path $HOME '.nuget\packages\microsoft.analysisservices.adomdclient.netcore*') `
     -Recurse -Filter 'Microsoft.AnalysisServices.AdomdClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
-Add-Check 'ADOMD.NET client (Desktop probe/refresh)' 'recommended' ([bool]$adomdDll) `
+Add-Check 'ADOMD.NET client (Desktop probe/refresh)' 'critical' ([bool]$adomdDll) `
     $(if ($adomdDll) { $adomdDll.FullName } else { 'not in the nuget cache - probe_desktop_query.py / refresh_pbip_model.py cannot reach an open Desktop model' }) `
     'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the shared ~/.nuget cache the probe reads).'
 
