@@ -14,7 +14,10 @@ import json, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.abspath(os.path.join(HERE, "..", "fabric", "PriceOfProsperity.Report"))
 VIS_DIR = os.path.join(REPORT, "definition", "pages", "dashboard", "visuals")
-SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json"
+# 2.9.0 is the newest visualContainer schema that actually RESOLVES. A newer URL 404s and
+# `powerbi-report-author validate` then silently SKIPS schema checking for every visual it
+# emits while still printing "0 error(s)", so a broken encoding ships green.
+SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json"
 E = "Country Indicators"
 
 PAGE_W, PAGE_H = 1366, 900

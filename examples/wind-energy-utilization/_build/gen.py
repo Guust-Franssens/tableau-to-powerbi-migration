@@ -11,7 +11,10 @@ _REPO = Path(__file__).resolve().parents[3]
 REP = str(_REPO / "migrations" / "wind-energy-utilization" / "fabric" / "WindEnergyUtilization.Report")
 PAGE = "overview"
 VIS = os.path.join(REP, "definition", "pages", PAGE, "visuals")
-SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.11.0/schema.json"
+# 2.9.0 is the newest visualContainer schema that actually RESOLVES. A newer URL 404s and
+# `powerbi-report-author validate` then silently SKIPS schema checking for every visual it
+# emits while still printing "0 error(s)", so a broken encoding ships green.
+SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json"
 
 # ---- palette ----
 NAVY="'#29263D'"; BLUE="'#5E79BC'"; TEAL="'#76B7B2'"; LIGHT="'#C1CAE0'"
