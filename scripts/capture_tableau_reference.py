@@ -233,6 +233,7 @@ def _write_manifest(reference_dir: Path, workbook_sha: str | None, dashboards: l
         "source_workbook_sha256": workbook_sha,
         "dashboards": dashboards,
     }
+    reference_dir.mkdir(parents=True, exist_ok=True)
     path = reference_dir / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return path
@@ -296,12 +297,15 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
     # source. Merely inheriting credentials from an unrelated `.env` is not a capture request.
     if args.server_rest and not args.structural_only:
         try:
-            capture_server_rest(slug_dir)
-        except NotImplementedError as exc:
-            log.error("Server capture requested (--server-rest) but: %s", exc)
+            records = capture_server_rest(slug_dir)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            log.error("Server capture requested (--server-rest) but capture failed: %s", exc)
             return 3
-
-    records: list[dict] = _run_providers(args, reference_dir, workbook, dashboards)
+        if not records:
+            log.error("Server capture requested (--server-rest) but produced no reference records")
+            return 3
+    else:
+        records = _run_providers(args, reference_dir, workbook, dashboards)
 
     if records:
         manifest = _write_manifest(reference_dir, workbook_sha, records)
@@ -351,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     manifest = Path(args.slug_dir) / "reference" / "manifest.json"
-    if manifest.is_file() and not args.force:
+    if manifest.is_file() and not args.force and not (args.server_rest and not args.structural_only):
         log.info("%s already exists - use --force to re-capture", manifest)
         return 0
     return resolve_and_capture(args)
