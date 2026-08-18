@@ -112,7 +112,14 @@ def _load_adomd():
             from Microsoft.AnalysisServices.AdomdClient import AdomdConnection
 
             return AdomdConnection
-    print("PREFLIGHT: ERROR Microsoft.AnalysisServices.AdomdClient.dll not found in the nuget cache")
+    print(
+        "PREFLIGHT: ERROR Microsoft.AnalysisServices.AdomdClient.dll not found in the nuget cache - "
+        "restore it (a DIFFERENT nuget package from the TOM/AMO one), forcing a supported TFM so the "
+        "add cannot silently no-op on a net10 default: "
+        r"dotnet new console -o $env:TEMP\adomd --framework net8.0; "
+        r"dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 "
+        "--version 19.84.1"
+    )
     sys.exit(2)
 
 

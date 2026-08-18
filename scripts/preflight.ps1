@@ -460,6 +460,39 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
 Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
 
+# --- ADOMD.NET client assembly (the pbip-model-refresh skill's live-Desktop probe + refresh) --------
+# The .NET-SDK check above covers TOM/AMO (Microsoft.AnalysisServices.NetCore.retail.amd64). ADOMD.NET
+# is a SEPARATE nuget package (Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64) - a machine
+# can have TOM and still be missing ADOMD. That was the silent field failure this check exists for: on
+# a colleague's box the AdomdClient assembly was absent, so probe_desktop_query.py could not run a live
+# EVALUATE, and nothing flagged it up front. `dotnet add package` had even printed "Restored ... 0
+# Errors" while landing ZERO PackageReference (a net10.0 scratch project silently no-op'd the add) - so
+# console text is not proof; presence of the DLL on disk is. Hence a file check, not a restore attempt.
+#
+# It resolves the EXACT path probe_desktop_query.py globs (probe_desktop_query.py:52-55:
+# Path.home()/.nuget/packages/microsoft.analysisservices.adomdclient.netcore*/**/AdomdClient.dll, NOT
+# $env:NUGET_PACKAGES) so it PREDICTS the probe's own resolution rather than a different cache location.
+# Honouring NUGET_PACKAGES here would be a BUG: dotnet restores into it but the probe never reads it, so
+# preflight would PASS while the probe still failed. (probe's Path.home() and refresh_pbip_model.py:473's
+# os.path.expanduser("~") resolve to the SAME base - both go through os.path.expanduser - so those two
+# cannot disagree; that NEITHER honours NUGET_PACKAGES is a separate cross-file gap - see #203.)
+#
+# Severity: CRITICAL, by this file's own rule above — "critical if any persona's Definition of Done
+# depends on it, even when the dependency only fails later at handoff/validation time". It does, and
+# unconditionally: `pbi-semantic-builder`'s DoD step 8 is a HANDOFF GATE that runs
+# refresh_pbip_model.py (which imports `_load_adomd`) to refresh and SAVE `.pbi/cache.abf`, and
+# `pbi-report-builder`'s step 1 refuses to open Desktop without that file. So every migration that
+# ends in a report needs ADOMD — this is not the live-source-only scope it first appears to be.
+# Measured 2026-08-17: with only this lookup suppressed on an otherwise healthy machine, preflight
+# printed "Ready to migrate" and exited 0 while the probe exited 2 — reproducing exactly the silent
+# false-green #199 was filed to remove. Do NOT downgrade this to recommended without also removing
+# the refresh/save gate from those two personas.
+$adomdDll = Get-ChildItem -Path (Join-Path $HOME '.nuget\packages\microsoft.analysisservices.adomdclient.netcore*') `
+    -Recurse -Filter 'Microsoft.AnalysisServices.AdomdClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+Add-Check 'ADOMD.NET client (Desktop probe/refresh)' 'critical' ([bool]$adomdDll) `
+    $(if ($adomdDll) { $adomdDll.FullName } else { 'not in the nuget cache - probe_desktop_query.py / refresh_pbip_model.py cannot reach an open Desktop model' }) `
+    'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the shared ~/.nuget cache the probe reads).'
+
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'
 
