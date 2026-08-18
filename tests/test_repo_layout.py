@@ -247,6 +247,42 @@ def test_customer_data_is_gitignored_in_every_tree() -> None:
         )
 
 
+def test_build_gitignore_keeps_scratch_ignored_but_tracks_tamper_audit_trail() -> None:
+    """`_build/` is mixed content: keep scratch ignored, track replay + ledger for tamper portability."""
+
+    def _check_verbose(path: str) -> str:
+        result = subprocess.run(
+            ["git", "check-ignore", "-v", path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.strip()
+
+    def _is_ignored(path: str) -> bool:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    ignored_out = _check_verbose("migrations/workbooks/foo/_build/scratch.bin")
+    assert _is_ignored("migrations/workbooks/foo/_build/scratch.bin")
+    assert "_build/**" in ignored_out
+
+    script_out = _check_verbose("migrations/workbooks/foo/_build/fix_post_engine.py")
+    assert not _is_ignored("migrations/workbooks/foo/_build/fix_post_engine.py")
+    assert "!**/_build/*.py" in script_out
+
+    ledger_out = _check_verbose("migrations/workbooks/foo/_build/generated-edit-declarations.json")
+    assert not _is_ignored("migrations/workbooks/foo/_build/generated-edit-declarations.json")
+    assert "!**/_build/generated-edit-declarations.json" in ledger_out
+
+
 def test_every_script_is_documented_in_the_scripts_readme() -> None:
     """`scripts/` is 20+ files; an undocumented one is a file nobody can find.
 
@@ -441,3 +477,32 @@ def test_no_committed_file_leaks_an_absolute_user_path() -> None:
         "committed file(s) contain an absolute user path; run `python scripts/set_data_folder.py "
         "--sanitize` (scoped to the migration you touched) before committing:\n  " + "\n  ".join(leaks)
     )
+
+
+def test_newly_exposed_build_audit_files_are_absolute_path_clean() -> None:
+    """The `_build` files un-ignored by #184 must be safe before their first commit."""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    paths = [Path(rel) for rel in filter(None, listed.split("\0"))]
+    candidates = [
+        REPO_ROOT / rel
+        for rel in paths
+        if rel.match("**/_build/*.py") or rel.match("**/_build/generated-edit-declarations.json")
+    ]
+
+    leaks = []
+    for path in candidates:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        hit = ABSOLUTE_USER_PATH_RE.search(content)
+        if hit:
+            leaks.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {hit.group(0)!r}")
+
+    assert not leaks, "newly exposed _build audit file(s) leak absolute user path(s):\n  " + "\n  ".join(leaks)
