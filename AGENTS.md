@@ -346,6 +346,16 @@ So the ritual that actually predicts CI is `ruff format` → `ruff check --fix` 
 roots)** → the targeted tests. Every step of that is load-bearing: skipping `pylint` hides `C0301` and
 `C0302`, and running it on only one root hides anything living in a skill bundle.
 
+⚠️ **Run pylint as `.\.venv\Scripts\python.exe -m pylint`, never the bare `pylint` on PATH.** The
+global install (`uv tool install pylint`) cannot see the project's optional extras, so it invents
+findings CI never sees. Measured 2026-08-18 on an unchanged tree: bare `pylint scripts` reported
+**9.95/10, exit 10** with **13 findings** — nine `E0401 Unable to import` (`tableauhyperapi`,
+`playwright`, `PIL`, `lxml`, `cryptography`) plus pre-existing `R0913`s — while
+`.\.venv\Scripts\python.exe -m pylint scripts` on the same bytes returned **10.00/10, exit 0**. The
+two differ *only* in which interpreter resolves imports. Chasing the phantom nine is pure waste, and
+worse, the real signal is buried among them; if a finding names a third-party import, check which
+pylint you ran before touching anything.
+
 ### 6. Preflight — verify everything above in one command
 
 ```

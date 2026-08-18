@@ -55,9 +55,10 @@ Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
     PROBE: ERROR <detail>                      the probe itself could not run
 
 Module-size strategy (pylint `max-module-lines = 1200`): SPLIT, not waive. The verdict-line matchers
-already live in `_verdict_lines.py`; the next extraction is the PBIP scaffold writers (`_tmdl_ident`
-/ `_tmdl_filename_stem` / `_pbip_files`). Do that before adding bulk here - a
-`# pylint: disable=too-many-lines` would only hide a module that still has a real seam left.
+live in `_verdict_lines.py` and the PBIP scaffold writers (`_tmdl_ident` / `_tmdl_filename_stem` /
+`_pbip_files`) in `_probe_pbip.py`; both are re-exported here because the seam tests reach them
+through this module. Both named seams are now taken, so the next growth spurt needs a NEW seam
+argued on its own merits - not a `# pylint: disable=too-many-lines`, which would only hide it.
 """
 
 from __future__ import annotations
@@ -73,6 +74,15 @@ import time
 import uuid
 from pathlib import Path
 
+# `_tmdl_ident` / `_tmdl_filename_stem` are re-exported, not used directly in this module: the seam
+# tests reach them as `probe_live_source._tmdl_*`, so the names are load-bearing here. `noqa`/`pylint`
+# suppressions are required or `ruff check --fix` deletes them as unused imports and the seam tests
+# fail - which is exactly what happened when this extraction first landed.
+from _probe_pbip import (  # noqa: F401  # pylint: disable=unused-import
+    _pbip_files,
+    _tmdl_filename_stem,
+    _tmdl_ident,
+)
 from _verdict_lines import (
     _has_credential_stop_verdict,
     _has_data_ok_verdict,
@@ -121,24 +131,6 @@ PROBE_TIMEOUT_SECONDS = REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECON
 # the credential exception and then crashes posting it back over the named pipe, so the client sees
 # a socket error and the real text is destroyed in transit. These fragments are what actually
 # reaches us, across both the clean and the crashed path.
-_SCHEMA_BASE = "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/"
-_PLATFORM_SCHEMA = (
-    "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json"
-)
-# `definition.pbir` sits one level ABOVE `definition/`, so it does not share `_SCHEMA_BASE`, and it
-# is NOT optional: omitting it is `PBIR_JSON_FILE_NO_SCHEMA` ("Fabric rejects PBIR definition JSON
-# files without $schema"). Value copied from the committed deliverable
-# `examples/shipping-kpis/fabric/ShippingKPIs.Report/definition.pbir`.
-_PBIR_PROPERTIES_SCHEMA = (
-    "https://developer.microsoft.com/json-schemas/fabric/item/report/definitionProperties/2.0.0/schema.json"
-)
-# `.pbip` / `.pbism` are project-level, not PBIR, so they have their own schema roots again. The
-# `.pbip` one must end in a LITERAL numeric version, never the placeholder `1.x.x`
-# (`.github/skills/powerbi-semantic-model-gotchas/SKILL.md`).
-_PBIP_PROPERTIES_SCHEMA = "https://developer.microsoft.com/json-schemas/fabric/pbip/pbipProperties/1.0.0/schema.json"
-_PBISM_PROPERTIES_SCHEMA = (
-    "https://developer.microsoft.com/json-schemas/fabric/item/semanticModel/definitionProperties/1.0.0/schema.json"
-)
 
 # A "table not found" is a SPEC error, not a reachability one - the connection plainly worked well
 # enough for the server to tell us the object is missing. Classifying it as UNREACHABLE would send a
@@ -151,6 +143,13 @@ BAD_TABLE_MARKERS = (
     "table_or_view_not_found",
     "unknown table",
     "no such table",
+    # A Power Query NAVIGATION miss: `Source{[Name="X",Kind="Table"]}` matched no row, which is
+    # `[Expression.Error] The key didn't match any rows in the table.` It is definitionally a
+    # name/shape error - the connector enumerated the catalog to discover the key was absent, so the
+    # server plainly answered - yet it names neither the object nor "not found", so it used to fall
+    # all the way through to the unclassified-ERROR bucket. Matched apostrophe-agnostically because
+    # the engine emits both the straight and the typographic form.
+    "match any rows",
 )
 
 CREDENTIAL_MARKERS = (
@@ -183,154 +182,6 @@ ACCESS_DENIED_MARKERS = (
 # line ceiling.
 
 
-# TMDL reserves the single quote as its identifier delimiter: an identifier containing a space (or
-# most punctuation) MUST be quoted or Power BI Desktop refuses the model with InvalidObjectHeader.
-# The deterministic engine names unresolved custom-SQL relations `Custom SQL Query`, so the un-quoted
-# probe crashed on most real estates. Quote UNCONDITIONALLY - a quoted identifier is always valid
-# TMDL even where a bare one would be legal, which kills the "which character forces quoting?" guess.
-# Ground truth (Power BI's own serializer): examples/wind-energy-utilization/.../CO2 Savings.tmdl
-# `table 'CO2 Savings'` and model.tmdl `ref table 'CO2 Savings'`; an embedded quote is doubled, per
-# examples/broadway-stage-to-screen/.../1 Films.tmdl `column 'Sondheim''s Work'`.
-def _tmdl_ident(name: str) -> str:
-    """Quote `name` as a TMDL identifier: single quotes, doubling any embedded quote."""
-    return "'" + name.replace("'", "''") + "'"
-
-
-# A table's TMDL identifier and its FILENAME are different strings. Spaces are legal in a Windows
-# filename but `< > : " / \ | ? *` and control chars are not - a source table like `dbo:staging`
-# would yield an unwritable path (a separate failure mode). Sanitise only the filename; the `table`
-# header keeps the real quoted name, and TOM matches tables by header content, not by filename.
-def _tmdl_filename_stem(name: str) -> str:
-    """A non-empty, Windows-safe filename stem for `name` (its identifier stays separate)."""
-    stem = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in name)
-    return stem.rstrip(" .") or "probe_table"
-
-
-def _pbip_files(name: str, m_query: str, table: str, column: str) -> dict[str, str]:
-    """The minimum PBIP that Power BI Desktop will open: one table, one column, one partition."""
-    indented = "\n".join("\t\t\t\t" + line for line in m_query.split("\n"))
-    table_ident = _tmdl_ident(table)
-    column_ident = _tmdl_ident(column)
-    table_stem = _tmdl_filename_stem(table)
-    return {
-        f"{name}.pbip": json.dumps(
-            {
-                "$schema": _PBIP_PROPERTIES_SCHEMA,
-                "version": "1.0",
-                "artifacts": [{"report": {"path": f"{name}.Report"}}],
-            },
-            indent=2,
-        ),
-        f"{name}.SemanticModel/.platform": json.dumps(
-            {
-                "$schema": _PLATFORM_SCHEMA,
-                "metadata": {"type": "SemanticModel", "displayName": name},
-                "config": {"version": "2.0", "logicalId": str(uuid.uuid4())},
-            },
-            indent=2,
-        ),
-        # 4.2, matching all 16 shipped examples under `examples/*/fabric/*.SemanticModel/`. 4.0 is
-        # an older project version this repo no longer produces anywhere else.
-        f"{name}.SemanticModel/definition.pbism": json.dumps(
-            {"$schema": _PBISM_PROPERTIES_SCHEMA, "version": "4.2", "settings": {}},
-            indent=2,
-        ),
-        f"{name}.SemanticModel/definition/database.tmdl": (
-            # 1702, never lower. Measured 2026-08-03 (a real Power BI Desktop crash, "Frown"
-            # feedback): TOM refuses to load a model that requests a LOWER compatibilityLevel than
-            # whatever Desktop's current AS instance already has cached ("Tabular databases do not
-            # support CompatibilityLevel downgrade"). This template used 1567 - a value that does
-            # not appear ANYWHERE else in this repo's real migrations, and is lower even than the
-            # 1606 that triggered the crash. This repo's own documented convention (superstore-
-            # sales-performance/migration-spec.json) is 1702+ for newly created models; matching it
-            # here means the probe's throwaway model can only ever be requesting an UPGRADE
-            # relative to whatever baseline Desktop already initialized, never a downgrade.
-            "database\n\tcompatibilityLevel: 1702\n"
-        ),
-        f"{name}.SemanticModel/definition/model.tmdl": (
-            "model Model\n"
-            "\tculture: en-US\n"
-            "\tdefaultPowerBIDataSourceVersion: powerBI_V3\n"
-            "\tsourceQueryCulture: en-US\n\n"
-            f"ref table {table_ident}\n"
-        ),
-        f"{name}.SemanticModel/definition/tables/{table_stem}.tmdl": (
-            f"table {table_ident}\n\n"
-            f"\tcolumn {column_ident}\n"
-            "\t\tdataType: string\n"
-            f"\t\tlineageTag: {uuid.uuid4()}\n"
-            "\t\tsummarizeBy: none\n"
-            f"\t\tsourceColumn: {column}\n\n"
-            f"\tpartition {table_ident} = m\n"
-            "\t\tmode: import\n"
-            "\t\tsource =\n"
-            f"{indented}\n"
-        ),
-        f"{name}.Report/.platform": json.dumps(
-            {
-                "$schema": _PLATFORM_SCHEMA,
-                "metadata": {"type": "Report", "displayName": name},
-                "config": {"version": "2.0", "logicalId": str(uuid.uuid4())},
-            },
-            indent=2,
-        ),
-        f"{name}.Report/definition.pbir": json.dumps(
-            {
-                "$schema": _PBIR_PROPERTIES_SCHEMA,
-                "version": "4.0",
-                "datasetReference": {"byPath": {"path": f"../{name}.SemanticModel"}},
-            },
-            indent=2,
-        ),
-        f"{name}.Report/definition/version.json": json.dumps(
-            {
-                "$schema": _SCHEMA_BASE + "versionMetadata/1.0.0/schema.json",
-                # Three-part and MUST match `^[1-9][0-9]*\.(0|[1-9][0-9]*)\.0$`, so the two-part
-                # "4.0" this used to carry is a schema error, not a variant spelling. This is the
-                # PBIR *definition* version (2.0.0 in every shipped example), which is a different
-                # number from `definition.pbir`'s project `version` above - do not sync them.
-                "version": "2.0.0",
-            },
-            indent=2,
-        ),
-        f"{name}.Report/definition/report.json": json.dumps(
-            {
-                "$schema": _SCHEMA_BASE + "report/1.0.0/schema.json",
-                # `reportVersionAtImport` is LOCATION-DEPENDENT, and this scaffold is the place the
-                # confusion already cost us once. It is FORBIDDEN here at the top level (`/ must NOT
-                # have additional properties`) and REQUIRED inside each `themeCollection` entry
-                # (`PBIR_THEME_VERSION_AT_IMPORT_MISSING`). The probe registers no theme at all, so
-                # there is no entry to carry it and the correct scaffold has it nowhere. If you ever
-                # add a `baseTheme`/`customTheme` here, that entry must carry its own
-                # `reportVersionAtImport` - see `examples/shipping-kpis/.../definition/report.json`.
-                "themeCollection": {},
-                "layoutOptimization": "None",
-                "resourcePackages": [],
-            },
-            indent=2,
-        ),
-        f"{name}.Report/definition/pages/pages.json": json.dumps(
-            {
-                "$schema": _SCHEMA_BASE + "pagesMetadata/1.0.0/schema.json",
-                "pageOrder": ["p"],
-                "activePageName": "p",
-            },
-            indent=2,
-        ),
-        f"{name}.Report/definition/pages/p/page.json": json.dumps(
-            {
-                "$schema": _SCHEMA_BASE + "page/1.0.0/schema.json",
-                "name": "p",
-                "displayName": "Probe",
-                "displayOption": "FitToPage",
-                "height": 720,
-                "width": 1280,
-            },
-            indent=2,
-        ),
-    }
-
-
 def normalize_host(server: str) -> str:
     """Reduce a spec's `server` to the bare host Power BI connectors and DNS both expect.
 
@@ -347,17 +198,37 @@ def normalize_host(server: str) -> str:
     return host.rstrip(".").strip()
 
 
-def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
+def _m_sql_literal(sql: str) -> str:
+    """Escape custom SQL as a single-line M string literal body.
+
+    Two transforms, both load-bearing. `"` is doubled (M's own escape). Then the text is collapsed
+    onto ONE line, because `_pbip_files` indents every line of the query with tabs to sit under
+    `source =` in TMDL - which would otherwise push tabs INSIDE the string literal. SQL is
+    whitespace-insensitive so collapsing is safe, with one exception: `--` comments run to
+    end-of-line, so a collapse would comment out everything after them. Strip those first.
+    """
+    without_comments = re.sub(r"--[^\n]*", " ", sql)
+    return " ".join(without_comments.split()).replace('"', '""')
+
+
+def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = None) -> tuple[str, str]:
     """Return (m_query, note) for a one-row read of `table`.
 
     Names no secret: every connector below defers to Power BI's own credential store, which is the
     entire point - the probe must exercise the SAME credential path the real model will use, or it
     proves nothing about the real model.
+
+    `custom_sql` is that principle applied to a Tableau relation of `type='text'` - a hand-written
+    SELECT that Tableau merely NAMES (e.g. `Flight_Level_Query`). No such table exists at the
+    source, so the generic `Kind="Table"` navigation below can never match it, and the resulting
+    failure says nothing about reachability. When it is present the probe runs the SQL itself, which
+    is also exactly what the migrated model will do.
     """
     klass = (conn.get("class") or "").lower()
     server = normalize_host(conn.get("server") or "")
     database = conn.get("database") or ""
     schema = conn.get("schema") or "default"
+    native = _m_sql_literal(custom_sql) if custom_sql else None
 
     if klass == "databricks":
         http_path = conn.get("http_path")
@@ -366,11 +237,16 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
                 "Databricks source has no 'http_path' in the spec (the SQL warehouse path). "
                 "Re-parse the workbook with the current parse_tableau.py, which captures it."
             )
-        m = (
+        head = (
             "let\n"
             f'    Source = Databricks.Catalogs("{server}", "{http_path}", null),\n'
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
-            f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
+        )
+        if native:
+            m = head + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1)\n' + "in\n    one"
+            return m, f"Databricks {server}{http_path} :: {database} :: custom SQL '{table}'"
+        m = (
+            head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
             f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n'
             f'    one = Table.FirstN(Table.SelectColumns(tbl, {{"{column}"}}), 1)\n'
             "in\n"
@@ -379,6 +255,15 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
         return m, f"Databricks {server}{http_path} :: {database}.{schema}.{table}"
 
     if klass in {"sqlserver", "azure_sql_dw", "azuresqldw"}:
+        if native:
+            m = (
+                "let\n"
+                f'    Source = Sql.Database("{server}", "{database}", [Query="{native}"]),\n'
+                "    one = Table.FirstN(Source, 1)\n"
+                "in\n"
+                "    one"
+            )
+            return m, f"SQL Server {server} :: {database} :: custom SQL '{table}'"
         m = (
             "let\n"
             f'    Source = Sql.Database("{server}", "{database}"),\n'
@@ -400,11 +285,16 @@ def build_m_query(conn: dict, table: str, column: str) -> tuple[str, str]:
             )
         role = (conn.get("role") or "").strip()
         options = f'[Role="{role}"]' if role else "null"
-        m = (
+        head = (
             "let\n"
             f'    Source = Snowflake.Databases("{server}", "{warehouse}", {options}),\n'
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
-            f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
+        )
+        if native:
+            m = head + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1)\n' + "in\n    one"
+            return m, f"Snowflake {server} ({warehouse}) :: {database} :: custom SQL '{table}'"
+        m = (
+            head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
             f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n'
             f'    one = Table.FirstN(Table.SelectColumns(tbl, {{"{column}"}}), 1)\n'
             "in\n"
@@ -566,12 +456,18 @@ def _close(pid: int, pbip: Path) -> bool:
     return True
 
 
-def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[str], str] | None:
+def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[dict], str] | None:
     """Pick the source, its candidate tables and a column to probe. None when nothing to probe.
 
     Returns ALL tables, not just the first: a "table not found" is a spec error, and the workbook
     usually names several, so the probe can move on to the next rather than declaring the whole
     source unreachable over one bad name.
+
+    Real tables are ordered FIRST and custom-SQL relations last. Both are probeable (see
+    `build_m_query`), but a real table costs the source a catalog lookup and a one-row read, whereas
+    a custom-SQL relation runs the workbook's own hand-written SELECT - which can be arbitrarily
+    expensive. Reachability is equally proven either way, so prefer the cheap proof when the spec
+    offers one.
     """
     if source_index >= len(sources):
         log.error("PROBE: ERROR source index %d out of range (%d sources)", source_index, len(sources))
@@ -587,7 +483,8 @@ def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict,
         log.info("PROBE: SKIPPED not a live source ('%s') - nothing to probe", conn.get("powerbi_target"))
         return None
 
-    tables = [t["name"] for t in (source.get("tables") or []) if t.get("name")]
+    tables = [t for t in (source.get("tables") or []) if t.get("name")]
+    tables.sort(key=lambda t: bool(t.get("custom_sql")))
     fields = [f for f in source.get("fields", []) if f.get("kind") == "column"]
     if not tables or not fields:
         log.error("PROBE: ERROR source has no table/column to probe")
@@ -1105,16 +1002,20 @@ def _probe_one(
             return 0, "DATA_OK"
         if verdict != "BAD_TABLE" or i == len(tables) - 1:
             return rc, verdict
-        log.warning("table '%s' not found at the source - trying the next one in the spec", table)
+        log.warning("table '%s' not found at the source - trying the next one in the spec", table.get("name"))
     return 1, "BAD_TABLE"
 
 
-def _probe_one_table(migration: Path, conn: dict, target: tuple[str, str], opts: tuple[int, bool]) -> tuple[int, str]:
-    """Run the probe against one specific table. Returns (exit code, verdict)."""
-    table, column = target
-    timeout_sec, keep = opts
+def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts: tuple[int, bool]) -> tuple[int, str]:
+    """Run the probe against one specific table. Returns (exit code, verdict).
+
+    `opts` is read positionally rather than unpacked into names: this function sits at pylint's
+    `max-locals` ceiling, and each element is used exactly once.
+    """
+    table_spec, column = target
+    table = table_spec.get("name", "")
     try:
-        m_query, note = build_m_query(conn, table, column)
+        m_query, note = build_m_query(conn, table, column, custom_sql=table_spec.get("custom_sql"))
     except ValueError as exc:
         log.error("PROBE: ERROR %s", exc)
         return 1, "ERROR"
@@ -1135,11 +1036,11 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[str, str], opts:
             _record_attempt(migration, verdict, f"{table} -> {verdict} (no catalog)")
             return 1, verdict
         log.info("model loaded - refreshing")
-        rc, verdict = _refresh_and_classify(pid, table, timeout_sec, _network_fault_observed(conn))
+        rc, verdict = _refresh_and_classify(pid, table, opts[0], _network_fault_observed(conn))
         _record_attempt(migration, verdict, f"{table} -> {verdict}")
         return rc, verdict
     finally:
-        if pid and not keep:
+        if pid and not opts[1]:
             if _close(pid, pbip):
                 log.info("closed desktop pid %d", pid)
 
