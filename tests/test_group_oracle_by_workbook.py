@@ -1,0 +1,188 @@
+"""The grouping step must never invent a destination, and never lose the capture.
+
+`capture_tableau_oracle.py`'s flat, LUID-keyed layout is the authoritative artifact - it survives a
+workbook or view rename, which a folder-per-workbook layout cannot. This script only makes that
+capture browsable, so every test here pins one of the two ways "convenience" could cost evidence:
+
+1. **guessing a destination** - slugifying a workbook name into a path creates folders that look
+   like deliverables and are not, and silently splits a workbook across two spellings; and
+2. **downgrading the evidence grade** - copying only the views that succeeded, so a per-workbook
+   folder reads as a complete capture when it is not.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
+
+
+def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok"):
+    stem = f"{name}__{luid}"
+    view: dict = {
+        "view_luid": luid,
+        "view_name": name,
+        "workbook_luid": f"wb-{workbook}",
+        "workbook_name": workbook,
+    }
+    view["data"] = {"status": "ok", "path": f"data/{stem}.csv", "row_count": 5} if data == "ok" else {"status": data}
+    view["image"] = {"status": "ok", "path": f"images/{stem}.png"} if image == "ok" else {"status": image}
+    return view
+
+
+def _capture(tmp_path: Path, views: list[dict]) -> Path:
+    """A capture directory on disk: the manifest plus every file its views claim."""
+    oracle = tmp_path / "_oracle"
+    (oracle / "data").mkdir(parents=True)
+    (oracle / "images").mkdir(parents=True)
+    for view in views:
+        for kind in ("data", "image"):
+            entry = view.get(kind) or {}
+            if entry.get("status") == "ok" and entry.get("path"):
+                (oracle / entry["path"]).write_bytes(b"payload")
+    manifest = {"schema": "tableau-oracle/1", "captured_at": "2026-08-18T00:00:00Z", "views": views}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return oracle
+
+
+def _migrations(tmp_path: Path, *slugs: str) -> Path:
+    root = tmp_path / "migrations" / "workbooks"
+    for slug in slugs:
+        (root / slug).mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+# --------------------------------------------------------------------------- happy path
+
+
+def test_views_land_in_the_matching_existing_folder(tmp_path):
+    oracle = _capture(tmp_path, [_view("Availability Summary", "Detail", "aaa")])
+    root = _migrations(tmp_path, "availability-summary")
+    assert grp.run(oracle, root, dry_run=False) == 0
+    reference = root / "availability-summary" / "reference"
+    assert (reference / "data" / "Detail__aaa.csv").is_file()
+    assert (reference / "images" / "Detail__aaa.png").is_file()
+
+
+def test_the_capture_is_copied_never_moved(tmp_path):
+    """The flat capture stays authoritative; grouping must not consume it."""
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    grp.run(oracle, _migrations(tmp_path, "sales"), dry_run=False)
+    assert (oracle / "data" / "V__aaa.csv").is_file(), "the source capture must survive grouping"
+    assert (oracle / "images" / "V__aaa.png").is_file()
+
+
+@pytest.mark.parametrize("folder", ["ds-tail-level", "DS_Tail_Level", "dstaillevel"])
+def test_punctuation_and_case_do_not_prevent_a_match(tmp_path, folder):
+    oracle = _capture(tmp_path, [_view("DS Tail Level", "V", "aaa")])
+    root = _migrations(tmp_path, folder)
+    assert grp.run(oracle, root, dry_run=False) == 0
+    assert (root / folder / "reference" / "data" / "V__aaa.csv").is_file()
+
+
+# --------------------------------------------------------------------------- never invent a folder
+
+
+def test_a_workbook_with_no_folder_is_reported_and_no_folder_is_created(tmp_path):
+    """THE test. Slugifying a name into a path manufactures something that looks like a deliverable.
+    An absent destination is a fact to report, not a directory to create."""
+    oracle = _capture(tmp_path, [_view("Not Migrated Yet", "V", "aaa")])
+    root = _migrations(tmp_path, "something-else")
+    assert grp.run(oracle, root, dry_run=False) == 1
+    assert not (root / "not-migrated-yet").exists()
+    assert not (root / "notmigratedyet").exists()
+    report = json.loads((oracle / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert report["workbooks_unmatched"] == 1
+    assert report["unmatched"][0]["workbook"] == "Not Migrated Yet"
+
+
+def test_an_ambiguous_name_is_reported_rather_than_resolved_by_picking_one(tmp_path):
+    """Two folders normalizing to one key is precisely when a confident answer is wrong."""
+    oracle = _capture(tmp_path, [_view("Tail Level", "V", "aaa")])
+    root = _migrations(tmp_path, "tail-level", "tail_level")
+    assert grp.run(oracle, root, dry_run=False) == 1
+    report = json.loads((oracle / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert report["workbooks_ambiguous"] == 1
+    assert len(report["ambiguous"][0]["folders"]) == 2
+    for slug in ("tail-level", "tail_level"):
+        assert not (root / slug / "reference").exists(), "an ambiguous match must copy nothing"
+
+
+def test_a_cross_project_caption_suffix_is_reported_unmatched_not_silently_matched(tmp_path):
+    """`normalize()` drops punctuation, never words, so Tableau's ' | Project : X' suffix does not
+    match the bare folder. Reporting that is honest; quietly matching it would be a guess."""
+    oracle = _capture(tmp_path, [_view("DS Tail Level | Project : Enterprise Dashboards", "V", "aaa")])
+    root = _migrations(tmp_path, "ds-tail-level")
+    assert grp.run(oracle, root, dry_run=False) == 1
+    assert not (root / "ds-tail-level" / "reference").exists()
+
+
+# --------------------------------------------------------------------------- evidence grade
+
+
+def test_a_failed_view_is_not_copied_but_is_still_counted_in_the_workbook_manifest(tmp_path):
+    """A folder holding only the successes reads as a complete capture. It is not one."""
+    views = [_view("Sales", "Good", "aaa"), _view("Sales", "Blocked", "bbb", data="source_credential")]
+    oracle = _capture(tmp_path, views)
+    root = _migrations(tmp_path, "sales")
+    grp.run(oracle, root, dry_run=False)
+    subset = json.loads((root / "sales" / "reference" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert subset["view_count"] == 2
+    assert subset["data_ok"] == 1
+    assert subset["credential_blocked"] == 1
+    assert not (root / "sales" / "reference" / "data" / "Blocked__bbb.csv").exists()
+
+
+def test_the_workbook_manifest_carries_capture_provenance(tmp_path):
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    root = _migrations(tmp_path, "sales")
+    grp.run(oracle, root, dry_run=False)
+    subset = json.loads((root / "sales" / "reference" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert subset["grouped_from"] == "tableau-oracle/1"
+    assert subset["captured_at"] == "2026-08-18T00:00:00Z"
+    assert subset["workbook_luid"] == "wb-Sales"
+
+
+def test_a_view_whose_file_vanished_is_skipped_without_crashing(tmp_path):
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    (oracle / "data" / "V__aaa.csv").unlink()
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=False) == 0
+    assert (root / "sales" / "reference" / "images" / "V__aaa.png").is_file()
+
+
+# --------------------------------------------------------------------------- dry run / errors
+
+
+def test_dry_run_writes_absolutely_nothing(tmp_path):
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=True) == 0
+    assert not (root / "sales" / "reference").exists()
+    assert not (oracle / grp.UNMATCHED_REPORT).exists()
+
+
+def test_a_missing_manifest_names_the_file_it_wanted(tmp_path):
+    with pytest.raises(FileNotFoundError, match="oracle-manifest.json"):
+        grp.run(tmp_path, tmp_path, dry_run=False)
+
+
+def test_a_missing_migrations_root_is_survivable(tmp_path):
+    """Reported as unmatched, not crashed: the capture is still intact and worth saying so."""
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    assert grp.run(oracle, tmp_path / "nope", dry_run=False) == 1
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [("DS_Tail_Level", "dstaillevel"), ("DS Tail Level", "dstaillevel"), ("ds-tail-level", "dstaillevel"), ("", "")],
+)
+def test_normalize(name, expected):
+    assert grp.normalize(name) == expected

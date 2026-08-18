@@ -63,6 +63,58 @@ as interchangeable ground truth.
   regenerate, crop, or annotate it** (a builder-curated original silently destroys validator
   independence). Per-worksheet crops, if needed, are produced by the producer, not the builder.
 
+### The oracle capture is FLAT, and grouping it is a separate step
+
+`scripts/capture_tableau_oracle.py` does **not** write into the bundle above. It writes every view of
+every workbook flat into `_oracle/images/<view>__<luid8>.png` and `_oracle/data/`, with the workbook
+association living only in `oracle-manifest.json` (`workbook_luid` / `workbook_name` per view).
+
+**That is deliberate and is not changing.** A LUID-keyed flat layout survives a workbook or view
+rename; a folder-per-workbook layout is coupled to a name and silently splits a capture in two when
+someone renames the workbook upstream. The flat capture stays the authoritative artifact.
+
+It is, however, the one artifact in this toolkit that does not follow the
+`migrations/workbooks/<slug>/{source,fabric,data,reference}` convention, so browsing "what did we
+capture for workbook X" otherwise means cross-referencing JSON by hand. Bridge it *after* capture:
+
+```
+python scripts/group_oracle_by_workbook.py --oracle _oracle [--migrations migrations/workbooks] [--dry-run]
+```
+
+It **copies** (never moves) each workbook's views into `<slug>/reference/{images,data}/` and writes a
+per-workbook `oracle-manifest.json` subset beside them, with the per-workbook counts recomputed so a
+partial capture cannot read as complete.
+
+Why a post-step rather than a `--group-by-workbook` flag on the capture:
+
+- it re-runs against an **existing** capture at **zero REST cost**. Tableau meters
+  `/views/.../data` and `/image` at 100 calls/hr/Creator, so re-capturing merely to change the on-disk
+  layout is the expensive way to get bytes you already have.
+- capture stays a pure "talk to the API" step and grouping a pure "arrange local files" step, so the
+  grouping is testable with no network at all.
+
+**It matches folders that ALREADY EXIST and never slugifies a name into a path.** Both sides are
+normalized (lowercased, non-alphanumerics dropped). A workbook with no folder is **reported, not
+created**; a name that normalizes onto two folders is **reported ambiguous, not resolved by picking
+one**. Exit `0` = everything landed, `1` = grouped what it could (details in
+`_oracle/oracle-grouping-report.json`), `2` = the capture could not be read.
+
+⚠️ **The normalizer drops punctuation and case but never words**, so a workbook carrying Tableau's
+cross-project disambiguation suffix (`"Sales | Project : Finance"`) does **not** match a `sales`
+folder and is reported unmatched. That is the same blind spot as the engine's own `_norm_ds()`, filed
+upstream as [tableau-fabric-skills#145](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/145);
+reporting it is the honest outcome, and is why the exit code distinguishes "grouped everything" from
+"grouped what it could".
+
+> Credit: this pattern was validated independently by a user against a real capture — 38/38 workbooks,
+> 95/95 views, zero ambiguous matches, zero name mismatches — before it was upstreamed here.
+
+⚠️ **An oracle capture is NOT `validation_grade`.** Its images land outside `reference/`, carry no
+`capabilities` manifest, and are taken in the view's **default state only** (no `?vf_` filter
+pinning), so they are **layout- and text-grade only**. Grouping moves the files; it does not upgrade
+the evidence. A visual PASS signed off on oracle imagery alone is overstated — log the ceiling in
+`limitations_encountered`.
+
 ## Providers — resolve by *fitness*, not availability
 
 The most important correction from the review: **REST is not automatically "highest fidelity."** A
