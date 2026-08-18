@@ -5,6 +5,7 @@ usage:   python scripts/assess_estate.py --out _assessment [--survey <estate_sur
                                          [--coverage-target 0.99] [--env .env]
                                          [--rest-timeout 180] [--graphql-timeout 300]
                                          [--max-attempts 3] [--retry-budget 300]
+                                         [--deadline 7200] [--max-consecutive-transient-failures 3]
 
 Why this exists
 ---------------
@@ -61,6 +62,11 @@ Retries are bounded and classified (the split ``capture_tableau_oracle.py`` uses
 connection or gateway 5xx is transient and earns backoff; **an auth or permission refusal is a final
 answer and is never retried** - no number of retries conjures a credential.
 
+Two run-level bounds sit above the per-call retry budget. A circuit breaker opens after consecutive
+transient endpoint failures, and a deadline stops starting new requests once the whole assessment has
+used its budget. Both degrade the result instead of raising, so the inventory already collected is
+still written and the partial assessment is explicitly marked incomplete.
+
 Exit codes: ``0`` assessed (possibly degraded on secondary listings), ``1`` nothing could be
 assessed, ``3`` a PRIMARY listing was incomplete - the assessment is not a complete inventory.
 """
@@ -110,6 +116,8 @@ GRAPHQL_ROOT = "/api/metadata/graphql"
 # allow an unbounded fast loop against a connection that is refused instantly.
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_BUDGET_SEC = 300.0
+DEFAULT_RUN_DEADLINE_SEC = 7200.0
+DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FAILURES = 3
 BACKOFF_BASE_SEC = 1.0
 BACKOFF_CAP_SEC = 30.0
 
@@ -144,6 +152,8 @@ class HttpPolicy:
     graphql_timeout: float = DEFAULT_GRAPHQL_TIMEOUT_SEC
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     retry_budget_sec: float = DEFAULT_RETRY_BUDGET_SEC
+    run_deadline_sec: float = DEFAULT_RUN_DEADLINE_SEC
+    max_consecutive_transient_failures: int = DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FAILURES
 
 
 @dataclass(frozen=True)
@@ -243,11 +253,13 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
         self.site_id: str | None = None
         self.reauths = 0
         self.retries = 0
+        self.run_started = time.monotonic()
+        self.consecutive_transient_failures = 0
+        self.circuit_opened: str | None = None
         # Set once authentication is known to be impossible. Without it, a re-auth that cannot
         # succeed makes every remaining call pay the full retry budget - hundreds of endpoints x
         # minutes each - which is the unbounded stall the crash at least made obvious.
         self.auth_failed = False
-        self.errors: list[dict[str, Any]] = []
 
     def _raw(self, method: str, path: str, body: dict | None = None, root: str | None = None):
         """One HTTP round trip. Never raises for a transport failure - returns status 0 instead, so
@@ -285,14 +297,19 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
             }
         }
         for attempt in range(1, self.policy.max_attempts + 1):
+            bound = self._run_bound_detail()
+            if bound:
+                raise RuntimeError(f"sign-in skipped: {bound}")
             status, payload = self._raw("POST", "/auth/signin", credentials)
             text = self._scrub(payload)
+            kind = classify(status, text)
             if status == 200:
                 creds = json.loads(payload)["credentials"]
                 self.token, self.site_id = creds["token"], creds["site"]["id"]
                 return
-            if classify(status, text) != "transient" or attempt == self.policy.max_attempts:
-                self.auth_failed = True
+            if kind != "transient" or attempt == self.policy.max_attempts:
+                if kind in {"denied", "failed"}:
+                    self.auth_failed = True
                 hint = (
                     "the server could not be reached"
                     if status == NETWORK_ERROR_STATUS
@@ -310,9 +327,26 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
             self._raw("POST", "/auth/signout")
             self.token = None
 
-    def _fail(self, record: dict[str, Any]) -> dict[str, Any]:
-        """Record one FINAL failure on the site and hand the same dict back to the caller."""
-        self.errors.append(record)
+    def _run_bound_detail(self) -> str | None:
+        """Return the run-level stop reason, if no further HTTP request should be started."""
+        if self.circuit_opened:
+            return self.circuit_opened
+        elapsed = time.monotonic() - self.run_started
+        if elapsed >= self.policy.run_deadline_sec:
+            return f"run deadline exceeded after {self.policy.run_deadline_sec:.0f}s"
+        return None
+
+    def _fail(self, record: dict[str, Any], *, counts_for_circuit: bool = False) -> dict[str, Any]:
+        """Hand one final failure back to the caller and update the run-level circuit breaker."""
+        if counts_for_circuit:
+            self.consecutive_transient_failures += 1
+            if self.consecutive_transient_failures >= self.policy.max_consecutive_transient_failures:
+                self.circuit_opened = (
+                    f"transient failure circuit opened after "
+                    f"{self.consecutive_transient_failures} consecutive endpoint failure(s)"
+                )
+        else:
+            self.consecutive_transient_failures = 0
         return record
 
     def scrub_text(self, text: str) -> str:
@@ -348,9 +382,13 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
             kind == "transient"
             and attempt < self.policy.max_attempts
             and time.monotonic() - started + delay < self.policy.retry_budget_sec
+            and time.monotonic() - self.run_started + delay < self.policy.run_deadline_sec
+            and not self.circuit_opened
         )
 
-    def _request_json(self, method: str, path: str, body: dict | None = None, root: str | None = None):
+    def _request_json(  # pylint: disable=too-many-return-statements,too-many-locals
+        self, method: str, path: str, body: dict | None = None, root: str | None = None
+    ):
         """The one recovery ladder -> ``(payload, error)``; exactly one of the two is ever set.
 
         Re-authenticate on session loss, back off on a transient fault within a bounded budget, and
@@ -358,20 +396,36 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
         job is to degrade one data point, not to lose an estate-wide assessment.
         """
         started = time.monotonic()
+        bound = self._run_bound_detail()
+        if bound:
+            return None, self._fail(
+                _record(path, NETWORK_ERROR_STATUS, f"{bound}; not starting another request", 0, started)
+            )
         if self.auth_failed:
             return None, self._fail(_record(path, NETWORK_ERROR_STATUS, "authentication failed; not retrying", 0, 0.0))
         reauths = attempt = 0
         while True:
             attempt += 1
+            bound = self._run_bound_detail()
+            if bound:
+                return None, self._fail(
+                    _record(path, NETWORK_ERROR_STATUS, f"{bound}; not starting another request", attempt - 1, started)
+                )
             status, payload = self._raw(method, path, body, root)
             text = self._scrub(payload)
             kind = classify(status, text)
             if kind == "ok":
                 try:
-                    return json.loads(payload), None
+                    parsed = json.loads(payload)
                 except json.JSONDecodeError as exc:
                     detail = f"HTTP 200 but the body is not JSON ({exc}) - a proxy or portal answered"
                     return None, self._fail(_record(path, status, detail, attempt, started))
+                if not isinstance(parsed, dict):
+                    typename = type(parsed).__name__
+                    detail = f"HTTP 200 but the JSON body is {typename}, expected object"
+                    return None, self._fail(_record(path, status, detail, attempt, started))
+                self.consecutive_transient_failures = 0
+                return parsed, None
             if kind == "session_lost" and reauths < MAX_REAUTH:
                 reauths += 1
                 self.reauths += 1
@@ -383,7 +437,9 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
             detail = f"{'transport' if status == NETWORK_ERROR_STATUS else f'HTTP {status}'}: {text[:200]}"
             delay = backoff_delay(attempt)
             if not self._may_retry(kind, attempt, started, delay):
-                return None, self._fail(_record(path, status, detail, attempt, started))
+                return None, self._fail(
+                    _record(path, status, detail, attempt, started), counts_for_circuit=kind == "transient"
+                )
             self.retries += 1
             LOG.warning("  %s -> %s; retry %d/%d in %.1fs", path, detail[:90], attempt, self.policy.max_attempts, delay)
             time.sleep(delay)
@@ -789,11 +845,11 @@ def collect(site: Site, survey: dict | None, checkpoint=None) -> dict[str, Any]:
 
 
 def _grants(site: Site, object_type: str, luid: str, name: str | None, path: str) -> tuple[list[dict], list[dict]]:
-    """Flatten one object's granteeCapabilities into rows. A 403 yields nothing, never an abort.
+    """Flatten one object's granteeCapabilities into rows. An auth refusal yields nothing, never an abort.
 
-    Returns ``(rows, errors)``: a 403 is a genuine answer ("you may not see this") and stays silent,
-    while a transport failure is NO answer and is recorded, so an IAM export thinned by a flaky
-    connection cannot be read as an estate with fewer grants.
+    Returns ``(rows, errors)``: a 401/403 is a genuine answer ("you may not see this") and stays
+    silent, while any other failure is NO useful answer and is recorded, so an IAM export thinned by
+    a flaky connection or a bad permissions endpoint cannot be read as an estate with fewer grants.
     """
     payload, error = site.get_checked(f"/sites/{site.site_id}{path}/permissions")
     rows = []
@@ -812,7 +868,7 @@ def _grants(site: Site, object_type: str, luid: str, name: str | None, path: str
                     "mode": capability.get("mode"),
                 }
             )
-    if error and error.get("transport"):
+    if error and error.get("status") not in AUTH_STATUSES:
         return rows, [{"listing": f"{object_type} grants: {name}", "severity": SECONDARY, **error}]
     return rows, []
 
@@ -958,6 +1014,14 @@ def _checkpoint(out: Path, inventory: dict[str, list]) -> None:
     """
     _write_raw(out, inventory)
     LOG.info("  checkpoint: pass-1 inventory persisted to %s", out / "raw")
+
+
+def _clear_final_artifacts(out: Path) -> None:
+    """Remove final verdict artifacts from an earlier run before writing fresh raw checkpoints."""
+    for name in ("report.md", "assessment.json", "estate.db"):
+        path = out / name
+        if path.exists():
+            path.unlink()
 
 
 def _write_run_marker(conn: sqlite3.Connection, assembled: dict[str, Any]) -> None:
@@ -1331,6 +1395,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"wall-clock seconds one call may spend retrying (default {DEFAULT_RETRY_BUDGET_SEC:.0f}); "
         "attempts alone cannot stop a slow-failing endpoint from eating the run",
     )
+    network.add_argument(
+        "--deadline",
+        type=float,
+        default=DEFAULT_RUN_DEADLINE_SEC,
+        help=f"wall-clock seconds for the whole assessment run (default {DEFAULT_RUN_DEADLINE_SEC:.0f}); "
+        "when exceeded, partial results are written as degraded",
+    )
+    network.add_argument(
+        "--max-consecutive-transient-failures",
+        type=int,
+        default=DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FAILURES,
+        help=f"open the run-level circuit after this many transient endpoint failures (default "
+        f"{DEFAULT_MAX_CONSECUTIVE_TRANSIENT_FAILURES})",
+    )
     return parser
 
 
@@ -1342,7 +1420,14 @@ def main() -> int:
     env = resolve_env(args.env)
     require(env)
     LOG.info("credentials: %s from the %s", "TABLEAU_PAT_SECRET", env_source("TABLEAU_PAT_SECRET", args.env))
-    policy = HttpPolicy(args.rest_timeout, args.graphql_timeout, args.max_attempts, args.retry_budget)
+    policy = HttpPolicy(
+        args.rest_timeout,
+        args.graphql_timeout,
+        args.max_attempts,
+        args.retry_budget,
+        args.deadline,
+        args.max_consecutive_transient_failures,
+    )
     site = Site(env, policy)
     site.sign_in()
     LOG.info("signed in to %r (api %s)", site.site, site.version)
@@ -1353,6 +1438,7 @@ def main() -> int:
 
     started = time.perf_counter()
     args.out.mkdir(parents=True, exist_ok=True)
+    _clear_final_artifacts(args.out)
     raw = collect(site, survey, checkpoint=lambda inventory: _checkpoint(args.out, inventory))
     assembled = assemble(raw, args.coverage_target)
     site.sign_out()
