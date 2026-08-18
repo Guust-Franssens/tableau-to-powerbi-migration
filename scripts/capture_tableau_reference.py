@@ -218,7 +218,7 @@ def capture_server_rest(_slug_dir: Path) -> list[dict] | None:
     """
     raise NotImplementedError(
         "server_rest is not wired into this provider chain -- but the REST image transport IS "
-        "implemented and live-tested. Use: python scripts/capture_tableau_oracle.py --images "
+        "implemented and live-tested. Use: python scripts/capture_tableau_oracle.py --out <dir> --images "
         "(same /views/{id}/image?resolution=high endpoint, with retry/re-auth hardening). "
         "What is still missing HERE is the provider contract, not the endpoint: the provenance "
         "manifest (layout_grade/text_readable/state_reproducible/revision_bound/validation_grade, "
