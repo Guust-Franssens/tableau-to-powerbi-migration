@@ -464,7 +464,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", required=True, type=Path, help="output directory (should be git-ignored)")
     parser.add_argument("--env", type=Path, default=Path(".env"), help="git-ignored KEY=VALUE credentials file")
-    parser.add_argument("--workbook", action="append", default=None, help="workbook name filter (repeatable)")
+    parser.add_argument(
+        "--workbook",
+        action="append",
+        default=None,
+        help=(
+            "published Tableau workbook caption filter; exact, case-insensitive match, not the migration slug "
+            "(repeatable)"
+        ),
+    )
     parser.add_argument("--images", action="store_true", help="also capture /image?resolution=high per view")
     parser.add_argument("--limit", type=int, default=0, help="stop after N views (0 = all)")
     parser.add_argument(
@@ -527,11 +535,29 @@ def log_progress(index: int, total: int, record: dict[str, Any]) -> None:
 def write_manifest(
     records: list[dict[str, Any]], session: TableauSession, env: dict[str, str], out_dir: Path, started: float
 ) -> int:
-    """Write the manifest and return the process exit code (0 ok / 1 failure / 2 credential-blocked)."""
+    """Write the manifest and return the process exit code.
+
+    Codes: 0 all selected views captured, 1 partial non-credential failure, 2 credential-blocked,
+    3 total non-credential failure, 4 no views selected.
+    """
     ok = [r for r in records if r.get("data", {}).get("status") == "ok"]
     empty = [r for r in ok if r["data"]["row_count"] == 0]
-    blocked = [r for r in records if r.get("data", {}).get("status") == "source_credential"]
-    failed = [r for r in records if r.get("data", {}).get("status") not in {"ok", "source_credential"}]
+    complete = [
+        r
+        for r in records
+        if r.get("data", {}).get("status") == "ok" and r.get("image", {"status": "ok"}).get("status") == "ok"
+    ]
+    blocked = [
+        r for r in records if "source_credential" in {r.get("data", {}).get("status"), r.get("image", {}).get("status")}
+    ]
+    failed = [
+        r
+        for r in records
+        if any(
+            status not in {"ok", "source_credential"}
+            for status in (r.get("data", {}).get("status"), r.get("image", {"status": "ok"}).get("status"))
+        )
+    ]
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -539,6 +565,7 @@ def write_manifest(
         "site": env["TABLEAU_SITE"],
         "rest_api_version": env.get("TABLEAU_REST_API_VERSION"),
         "view_count": len(records),
+        "captured_complete": len(complete),
         "data_ok": len(ok),
         "data_empty": len(empty),
         "credential_blocked": len(blocked),
@@ -553,7 +580,7 @@ def write_manifest(
 
     LOG.info(
         "\n%d/%d captured (%d empty), %d credential-blocked, %d failed, %d re-auth(s), %d retr(ies), %.0fs -> %s",
-        len(ok),
+        len(complete),
         len(records),
         len(empty),
         len(blocked),
@@ -570,9 +597,12 @@ def write_manifest(
             len(blocked),
         )
         for record in blocked:
-            LOG.warning("  - %s (%s): %s", record["view_name"], record["workbook_name"], record["data"]["detail"])
+            blocked_detail = record.get("data", {}).get("detail") or record.get("image", {}).get("detail")
+            LOG.warning("  - %s (%s): %s", record["view_name"], record["workbook_name"], blocked_detail)
+    if not records:
+        return 4
     if failed:
-        return 1
+        return 1 if complete else 3
     return 2 if blocked else 0
 
 
@@ -606,8 +636,9 @@ def build_retry_policy(max_attempts: int, budget_sec: float) -> RetryPolicy:
 def main() -> int:
     """Capture the oracle for every selected view.
 
-    Exit codes: ``0`` all captured, ``1`` a hard failure, ``2`` some view needs a credential on the
-    Tableau side (actionable only by a human -- never by a retry).
+    Exit codes: ``0`` all selected views captured, ``1`` partial non-credential failure,
+    ``2`` some selected view needs a credential on the Tableau side (actionable only by a human --
+    never by a retry), ``3`` total non-credential failure, ``4`` no views selected.
     """
     args = build_parser().parse_args()
 

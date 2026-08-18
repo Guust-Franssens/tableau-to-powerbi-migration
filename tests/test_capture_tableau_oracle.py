@@ -316,13 +316,19 @@ def test_slug_is_filesystem_safe():
 # --------------------------------------------------------------------------- manifest contract
 
 
-def _record(status: str, rows: int = 1) -> dict:
+def _record(status: str, rows: int = 1, image_status: str | None = None) -> dict:
     data = {"status": status}
     if status == "ok":
         data.update({"row_count": rows, "elapsed_sec": 1.0, "reauths": 0, "retries": 0})
     else:
         data["detail"] = "adb.example.net: Tableau needs an unexpired OAuth refresh token"
-    return {"view_name": "V", "workbook_name": "W", "data": data}
+    record = {"view_name": "V", "workbook_name": "W", "data": data}
+    if image_status is not None:
+        image = {"status": image_status}
+        if image_status != "ok":
+            image["detail"] = "image export failed"
+        record["image"] = image
+    return record
 
 
 def _write(tmp_path, records):
@@ -336,14 +342,34 @@ def test_a_clean_capture_exits_zero(tmp_path):
     assert _write(tmp_path, [_record("ok")]) == 0
 
 
+def test_a_clean_image_capture_exits_zero(tmp_path):
+    """A data+image run is successful only when the image succeeded too."""
+    assert _write(tmp_path, [_record("ok", image_status="ok")]) == 0
+
+
+def test_zero_selected_views_exits_four(tmp_path):
+    """Selecting nothing is a failed invocation, not a successful capture of an empty estate."""
+    assert _write(tmp_path, []) == 4
+
+
+def test_every_image_failed_exits_three(tmp_path):
+    """Data success alone is not enough when the requested reference images all failed."""
+    assert _write(tmp_path, [_record("ok", image_status="failed"), _record("ok", image_status="failed")]) == 3
+
+
+def test_partial_image_success_exits_one(tmp_path):
+    """A caller must be able to distinguish a partial reference-image set from a clean capture."""
+    assert _write(tmp_path, [_record("ok", image_status="ok"), _record("ok", image_status="failed")]) == 1
+
+
 def test_a_credential_block_exits_two_not_one(tmp_path):
     """Exit 2 is distinct on purpose: it means 'a human must act', not 'the tool is broken'."""
     assert _write(tmp_path, [_record("ok"), _record("source_credential")]) == 2
 
 
-def test_a_hard_failure_outranks_a_credential_block(tmp_path):
-    """A broken run must not be downgraded to 'just needs a credential' by a co-occurring block."""
-    assert _write(tmp_path, [_record("failed"), _record("source_credential")]) == 1
+def test_partial_hard_failure_outranks_a_credential_block(tmp_path):
+    """A partly broken run must not be downgraded to 'just needs a credential' by a co-occurring block."""
+    assert _write(tmp_path, [_record("ok"), _record("failed"), _record("source_credential")]) == 1
 
 
 def test_manifest_records_recovery_counts(tmp_path):
