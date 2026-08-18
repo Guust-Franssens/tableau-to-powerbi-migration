@@ -53,6 +53,11 @@ Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
     PROBE: ACCESS_DENIED <detail>              permissions must change; signing in again is not enough
     PROBE: UNREACHABLE <detail>                refresh failed for a non-credential reason
     PROBE: ERROR <detail>                      the probe itself could not run
+
+Module-size strategy (pylint `max-module-lines = 1200`): SPLIT, not waive. The verdict-line matchers
+already live in `_verdict_lines.py`; the next extraction is the PBIP scaffold writers (`_tmdl_ident`
+/ `_tmdl_filename_stem` / `_pbip_files`). Do that before adding bulk here - a
+`# pylint: disable=too-many-lines` would only hide a module that still has a real seam left.
 """
 
 from __future__ import annotations
