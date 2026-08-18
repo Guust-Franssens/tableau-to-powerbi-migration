@@ -450,10 +450,10 @@ installs under `~/.copilot/installed-plugins/tableau-collection/tableau-fabric-s
 second copy.
 
 **Three things about that invocation will bite you, all measured:** `--server` is required (there is
-no default); `--json` takes a **PATH**, not a bare flag; and the PAT **name** cannot come from a
-`.env` file, so pass `--pat-name` on the command line. `run_engine_survey.py` reads the one documented
-`TABLEAU_PAT_SECRET` key (or the legacy engine spelling in existing environments), exports both names
-to the engine, and supplies `--no-prompt` so a missing secret fails clearly rather than hanging.
+no default); `--json` takes a **PATH**, not a bare flag; and — via `run_engine_survey.py` — the PAT
+**name** rides through from `.env`, so the `--pat-name` above is optional: it carries the whole file
+into the engine's child env (with `--no-prompt`). Pass it **only** for a *direct* `estate_survey.py`
+call — the engine's `credential_resolver.py` reads the *secret* from `--env-file`, not the name.
 
 `harvest_estate_assets.py` is worth more than the download: it also runs **both** parsers (ours for
 fidelity, the engine's for conversion) over every asset and writes `<out>/parse-sweep.md` /
