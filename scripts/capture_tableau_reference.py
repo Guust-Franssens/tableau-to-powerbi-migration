@@ -3,11 +3,11 @@ purpose: Acquire a provenance-stamped reference image of the SOURCE Tableau dash
          migration, so pbi-report-builder can mimic the original and pbi-migration-validator can grade
          fidelity against immutable ground truth. See docs/reference-capture.md for the full design.
 usage:   python scripts/capture_tableau_reference.py <tree>/<slug> [--public-url URL --view NAME]
-                                                       [--structural-only] [--force]
+                                                       [--server-rest] [--structural-only] [--force]
 
 Providers, resolved by FITNESS (not availability):
   - public_playwright   : Tableau Public only (implemented; needs --public-url + --view)
-  - embedded_thumbnail  : extract thumbnails baked into the .twb (implemented; rare, layout-hint only)
+  - embedded_thumbnail  : extract thumbnails baked into the .twb (implemented; layout-hint only)
   - manual              : user-dropped screenshots already in reference/ (implemented; validate + hash)
   - server_rest         : Tableau Server/Cloud REST image export (provider NOT wired; the transport is
                           implemented and live-tested in capture_tableau_oracle.py --images, which
@@ -35,9 +35,6 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("capture-reference")
@@ -175,7 +172,7 @@ def capture_public_playwright(public_url: str, view: str, out_path: Path) -> dic
 
 
 def extract_embedded_thumbnail(twb_or_twbx: Path, out_dir: Path) -> list[dict] | None:
-    """Extract <thumbnails> images baked into a .twb/.twbx. Layout HINT only (low-res, ~4% of books)."""
+    """Extract <thumbnails> images baked into a .twb/.twbx. Layout hint only; low-res and possibly stale."""
     try:
         if twb_or_twbx.suffix.lower() == ".twbx":
             with zipfile.ZipFile(twb_or_twbx) as archive:
@@ -295,15 +292,13 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
     workbook_sha = _sha256(workbook) if workbook else None
     dashboards = _dashboard_names(slug_dir) or ["dashboard"]
 
-    # Configured-but-unavailable Server must HALT, not silently fall through to a lower-fidelity source.
-    # Read through the shared resolver so a `.env` counts as "configured" -- reading os.environ alone
-    # made a canonical `.env` invisible here, so this halt never fired for the users most likely to
-    # have one (found in review of #97).
-    if resolve_env(args.env).get("TABLEAU_SERVER_URL"):
+    # A requested-but-unavailable Server must HALT, not silently fall through to a lower-fidelity
+    # source. Merely inheriting credentials from an unrelated `.env` is not a capture request.
+    if args.server_rest and not args.structural_only:
         try:
             capture_server_rest(slug_dir)
         except NotImplementedError as exc:
-            log.error("Server capture requested (TABLEAU_SERVER_URL set) but: %s", exc)
+            log.error("Server capture requested (--server-rest) but: %s", exc)
             return 3
 
     records: list[dict] = _run_providers(args, reference_dir, workbook, dashboards)
@@ -342,6 +337,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--public-url", help="Tableau Public workbookRepoUrl (demo provider)")
     parser.add_argument(
         "--env", type=Path, default=Path(".env"), help="git-ignored KEY=VALUE credentials (default .env)"
+    )
+    parser.add_argument(
+        "--server-rest",
+        action="store_true",
+        help="request Server/Cloud REST capture (currently halts because the provider is not wired)",
     )
     parser.add_argument("--view", help="Tableau Public view name (with --public-url)")
     parser.add_argument(
