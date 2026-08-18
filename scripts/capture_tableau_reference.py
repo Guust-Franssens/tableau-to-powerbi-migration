@@ -3,11 +3,11 @@ purpose: Acquire a provenance-stamped reference image of the SOURCE Tableau dash
          migration, so pbi-report-builder can mimic the original and pbi-migration-validator can grade
          fidelity against immutable ground truth. See docs/reference-capture.md for the full design.
 usage:   python scripts/capture_tableau_reference.py <tree>/<slug> [--public-url URL --view NAME]
-                                                       [--structural-only] [--force]
+                                                       [--server-rest] [--structural-only] [--force]
 
 Providers, resolved by FITNESS (not availability):
   - public_playwright   : Tableau Public only (implemented; needs --public-url + --view)
-  - embedded_thumbnail  : extract thumbnails baked into the .twb (implemented; rare, layout-hint only)
+  - embedded_thumbnail  : extract thumbnails baked into the .twb (implemented; layout-hint only)
   - manual              : user-dropped screenshots already in reference/ (implemented; validate + hash)
   - server_rest         : Tableau Server/Cloud REST image export (provider NOT wired; the transport is
                           implemented and live-tested in capture_tableau_oracle.py --images, which
@@ -35,9 +35,6 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("capture-reference")
@@ -175,7 +172,7 @@ def capture_public_playwright(public_url: str, view: str, out_path: Path) -> dic
 
 
 def extract_embedded_thumbnail(twb_or_twbx: Path, out_dir: Path) -> list[dict] | None:
-    """Extract <thumbnails> images baked into a .twb/.twbx. Layout HINT only (low-res, ~4% of books)."""
+    """Extract <thumbnails> images baked into a .twb/.twbx. Layout hint only; low-res and possibly stale."""
     try:
         if twb_or_twbx.suffix.lower() == ".twbx":
             with zipfile.ZipFile(twb_or_twbx) as archive:
@@ -221,7 +218,7 @@ def capture_server_rest(_slug_dir: Path) -> list[dict] | None:
     """
     raise NotImplementedError(
         "server_rest is not wired into this provider chain -- but the REST image transport IS "
-        "implemented and live-tested. Use: python scripts/capture_tableau_oracle.py --images "
+        "implemented and live-tested. Use: python scripts/capture_tableau_oracle.py --out <dir> --images "
         "(same /views/{id}/image?resolution=high endpoint, with retry/re-auth hardening). "
         "What is still missing HERE is the provider contract, not the endpoint: the provenance "
         "manifest (layout_grade/text_readable/state_reproducible/revision_bound/validation_grade, "
@@ -231,6 +228,7 @@ def capture_server_rest(_slug_dir: Path) -> list[dict] | None:
 
 
 def _write_manifest(reference_dir: Path, workbook_sha: str | None, dashboards: list[dict]) -> Path:
+    reference_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "captured_at": _utcnow(),
         "source_workbook_sha256": workbook_sha,
@@ -284,6 +282,19 @@ def _run_providers(
     return records
 
 
+def _capture_requested_server(slug_dir: Path) -> tuple[int, list[dict] | None]:
+    """Run an explicit Server capture request; return an exit code plus records on success."""
+    try:
+        server_records = capture_server_rest(slug_dir)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log.error("Server capture requested (--server-rest) but: %s", exc)
+        return 3, None
+    if not server_records:
+        log.error("Server capture requested (--server-rest) but no records were returned")
+        return 3, None
+    return 0, server_records
+
+
 def resolve_and_capture(args: argparse.Namespace) -> int:
     """Run the fitness-ordered providers, write the manifest, and fail closed if nothing is produced."""
     slug_dir = Path(args.slug_dir).resolve()
@@ -295,16 +306,15 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
     workbook_sha = _sha256(workbook) if workbook else None
     dashboards = _dashboard_names(slug_dir) or ["dashboard"]
 
-    # Configured-but-unavailable Server must HALT, not silently fall through to a lower-fidelity source.
-    # Read through the shared resolver so a `.env` counts as "configured" -- reading os.environ alone
-    # made a canonical `.env` invisible here, so this halt never fired for the users most likely to
-    # have one (found in review of #97).
-    if resolve_env(args.env).get("TABLEAU_SERVER_URL"):
-        try:
-            capture_server_rest(slug_dir)
-        except NotImplementedError as exc:
-            log.error("Server capture requested (TABLEAU_SERVER_URL set) but: %s", exc)
-            return 3
+    # A requested-but-unavailable Server must HALT, not silently fall through to a lower-fidelity
+    # source. Merely inheriting credentials from an unrelated `.env` is not a capture request.
+    if args.server_rest and not args.structural_only:
+        status, server_records = _capture_requested_server(slug_dir)
+        if status:
+            return status
+        manifest = _write_manifest(reference_dir, workbook_sha, server_records)
+        log.info("wrote %s (%d dashboard state(s))", manifest, len(server_records))
+        return 0
 
     records: list[dict] = _run_providers(args, reference_dir, workbook, dashboards)
 
@@ -326,8 +336,8 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
     log.error(
         "No reference image could be produced and --structural-only was not set. Provide a source:\n"
         "  * Tableau Public: --public-url <workbookRepoUrl> --view <viewName>\n"
-        "  * Tableau Server/Cloud: set TABLEAU_SERVER_URL/_SITE/_PAT_NAME/_PAT_SECRET (provider is a "
-        "stub today)\n"
+        "  * Tableau Server/Cloud: use capture_tableau_oracle.py --out <dir> --images; --server-rest "
+        "records an explicit request but this provider is a fail-closed stub today\n"
         "  * Manual: drop tableau-<name>.png screenshots into %s\n"
         "Refusing to build a report blind. See docs/reference-capture.md.",
         reference_dir,
@@ -343,6 +353,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--env", type=Path, default=Path(".env"), help="git-ignored KEY=VALUE credentials (default .env)"
     )
+    parser.add_argument(
+        "--server-rest",
+        action="store_true",
+        help="request Server/Cloud REST capture (currently halts because the provider is not wired)",
+    )
     parser.add_argument("--view", help="Tableau Public view name (with --public-url)")
     parser.add_argument(
         "--structural-only", action="store_true", help="proceed without a reference (cannot claim visual fidelity)"
@@ -351,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     manifest = Path(args.slug_dir) / "reference" / "manifest.json"
-    if manifest.is_file() and not args.force:
+    if manifest.is_file() and not args.force and not (args.server_rest and not args.structural_only):
         log.info("%s already exists - use --force to re-capture", manifest)
         return 0
     return resolve_and_capture(args)
