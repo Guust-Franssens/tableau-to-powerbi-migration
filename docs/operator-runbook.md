@@ -382,11 +382,13 @@ convention — see §7 for which ones actually are.
 - `scripts/run_engine_survey.py` supplies `--no-prompt` itself, converting a missing secret from a
   hidden-input block into an instant, explanatory error.
 
-`--pat-name` on the command line is the safe default. It *can* come from the process environment
-variable `TABLEAU_PAT_NAME` ✅ verified (`fetch_tds._resolve_auth`:
-`args.pat_name or os.environ.get("TABLEAU_PAT_NAME")`) — but **not** from the `.env` file, because
-the `--env-file` layer is only consulted for *secrets*. Omitting the name is harmless: it raises an
-immediate `SystemExit` naming both options ✅ verified by direct call.
+`--pat-name` on the command line is the safe default, but **through `run_engine_survey.py` it is
+optional**: the wrapper forwards the whole `.env` into the engine's child process environment, and
+the engine reads the name from there ✅ verified (`fetch_tds._resolve_auth`:
+`args.pat_name or os.environ.get("TABLEAU_PAT_NAME")`), and confirmed by a live sign-in with `.env`
+alone. It is genuinely required only for a **direct** `estate_survey.py` call that bypasses the
+wrapper — there the `--env-file` layer is consulted for *secrets* only, never the name, and omitting
+it raises an immediate `SystemExit` naming both options ✅ verified by direct call.
 
 Expect on success: `[SURVEY] N workbook(s); M depend on a published datasource; K datasource(s) must
 be fetched first.` then one `[DEPENDS]` line per dependent workbook, then `[OK] survey written to …`.
