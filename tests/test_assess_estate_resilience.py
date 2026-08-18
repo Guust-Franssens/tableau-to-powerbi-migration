@@ -246,14 +246,39 @@ def test_backoff_grows_and_is_capped():
 def test_a_failed_re_auth_stops_the_run_from_paying_the_budget_on_every_call(monkeypatch, no_sleep):
     """A session that cannot be re-established would otherwise cost every remaining endpoint its
     full retry budget - the unbounded stall the crash at least made obvious."""
-    server = FakeTableau({"/customviews?": 401, "/auth/signin": [200, 401]})
+
+    class ExpiredThenDenied(FakeTableau):
+        """One expired session on a data call, then a real PAT denial on re-auth."""
+
+        def urlopen(self, request, timeout=None):
+            if "/customviews?" in request.full_url:
+                self.calls.append((request.full_url, timeout))
+                raise urllib.error.HTTPError(request.full_url, 401, "expired", {}, _Response(401, b"401002"))
+            return super().urlopen(request, timeout)
+
+    server = ExpiredThenDenied({"/auth/signin": [200, 401]})
     site = _site(server, monkeypatch, max_attempts=3)
-    monkeypatch.setattr(assess_estate, "SESSION_LOST", "")  # every 401 body now reads as session loss
     site.paged("/sites/site-1/customviews", "customViews", "customView")
     assert site.auth_failed
     before = len(server.calls)
     site.paged("/sites/site-1/subscriptions", "subscriptions", "subscription")
     assert len(server.calls) == before  # not one further request was made
+    assert no_sleep == []
+
+
+def test_a_transient_re_auth_failure_does_not_latch_auth_failed(monkeypatch, no_sleep):
+    """A mid-run transport blip is not a credential failure, and later primary calls must still run."""
+    server = FakeTableau({"/customviews?": 401, "/auth/signin": [200, TimeoutError("timed out")]})
+    site = _site(server, monkeypatch, max_attempts=1)
+    monkeypatch.setattr(assess_estate, "SESSION_LOST", "")  # every 401 body now reads as session loss
+    _, error = site.paged("/sites/site-1/customviews", "customViews", "customView")
+    assert "re-authentication failed" in error["error"]
+    assert "authentication failed; not retrying" not in error["error"]
+    assert not site.auth_failed
+    before = len(server.calls)
+    rows, followup_error = site.paged("/sites/site-1/subscriptions", "subscriptions", "subscription")
+    assert rows == [] and followup_error is None
+    assert len(server.calls) > before
     assert no_sleep == []
 
 
@@ -294,6 +319,16 @@ def test_an_unreadable_grant_IS_degraded(monkeypatch, no_sleep):
     _, errors = assess_estate._grants(site, "workbook", "wb-1", "Sales", "/workbooks/wb-1")
     assert errors[0]["severity"] == assess_estate.SECONDARY
     assert "Sales" in errors[0]["listing"] and no_sleep == []
+
+
+@pytest.mark.parametrize("status", [404, 429, 500])
+def test_a_permissions_endpoint_failure_degrades_the_iam_export(status, monkeypatch, no_sleep):
+    """Only auth refusals are a useful permissions answer; other statuses mean the grant rows are unknown."""
+    site = _site(FakeTableau({"/permissions": status}), monkeypatch, max_attempts=1)
+    _, errors = assess_estate._grants(site, "project", "p-1", "Finance", "/projects/p-1")
+    assert errors and errors[0]["status"] == status
+    assert errors[0]["severity"] == assess_estate.SECONDARY
+    assert no_sleep == []
 
 
 def test_an_unreadable_group_records_NULL_members_not_zero(monkeypatch, no_sleep, tmp_path):
@@ -389,6 +424,83 @@ def test_every_secondary_listing_degrades_INDIVIDUALLY(monkeypatch, no_sleep):
     assert len(raw["workbooks"]) == 1 and no_sleep == []
 
 
+def test_consecutive_transient_failures_open_a_run_circuit_and_still_write_partial_results(
+    monkeypatch, no_sleep, tmp_path
+):
+    """A dead site is bounded across the run, not merely one call at a time."""
+    server = FakeTableau({"/groups/g-1/users": 500, "/subscriptions?": 500})
+    monkeypatch.setattr(assess_estate.urllib.request, "urlopen", server.urlopen)
+    monkeypatch.setattr(assess_estate, "resolve_env", lambda *_a, **_k: dict(ENV))
+    monkeypatch.setattr(assess_estate, "env_source", lambda *_a, **_k: "test")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "assess_estate.py",
+            "--out",
+            str(tmp_path / "_assessment"),
+            "--max-attempts",
+            "1",
+            "--max-consecutive-transient-failures",
+            "2",
+        ],
+    )
+    assert assess_estate.main() == 3
+    out = tmp_path / "_assessment"
+    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
+    assert (out / "estate.db").exists() and (out / "raw" / "workbooks.json").exists()
+    assert assessment["degraded"] is True
+    assert not any("/customviews?" in path for path in server.paths())
+    assert any("transient failure circuit opened" in error["error"] for error in assessment["listing_errors"])
+    assert no_sleep == []
+
+
+def test_the_run_deadline_bounds_the_whole_assessment_with_a_virtual_clock(monkeypatch, tmp_path):
+    """Successes reset the circuit, so only the run-level deadline can stop many slow successful calls."""
+
+    class Clock:
+        """A clock advanced by urlopen and sleep, never by real time."""
+
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class SlowSuccess(FakeTableau):
+        """Every HTTP request succeeds but consumes virtual time."""
+
+        def __init__(self, clock: Clock) -> None:
+            super().__init__()
+            self.clock = clock
+
+        def urlopen(self, request, timeout=None):
+            self.clock.now += 5.0
+            return super().urlopen(request, timeout)
+
+    clock = Clock()
+    server = SlowSuccess(clock)
+    monkeypatch.setattr(assess_estate.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(assess_estate.time, "sleep", clock.sleep)
+    monkeypatch.setattr(assess_estate.urllib.request, "urlopen", server.urlopen)
+    monkeypatch.setattr(assess_estate, "resolve_env", lambda *_a, **_k: dict(ENV))
+    monkeypatch.setattr(assess_estate, "env_source", lambda *_a, **_k: "test")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["assess_estate.py", "--out", str(tmp_path / "_assessment"), "--max-attempts", "1", "--deadline", "12"],
+    )
+    assert assess_estate.main() == 3
+    out = tmp_path / "_assessment"
+    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
+    assert (out / "estate.db").exists() and (out / "raw" / "workbooks.json").exists()
+    assert any("run deadline exceeded" in error["error"] for error in assessment["listing_errors"])
+    assert len(server.calls) < 6
+
+
 def test_an_unreadable_structure_call_is_PRIMARY(monkeypatch, no_sleep):
     """A workbook we could not see scores 0 complexity, and 0 is not "simple" - it is "unknown",
     and it feeds the retire-candidate tier directly."""
@@ -428,10 +540,40 @@ def test_the_configured_timeouts_reach_urlopen(monkeypatch, no_sleep):
     assert rest == [7.0] and gql == [11.0] and no_sleep == []
 
 
+def test_the_http_client_does_not_keep_a_write_only_error_ledger(monkeypatch):
+    """Failures are surfaced through collection_errors, not duplicated into an unread Site.errors list."""
+    server = FakeTableau()
+    monkeypatch.setattr(assess_estate.urllib.request, "urlopen", server.urlopen)
+    site = assess_estate.Site(ENV)
+    assert not hasattr(site, "errors")
+
+
 def test_the_defaults_are_the_documented_ones():
     policy = assess_estate.HttpPolicy()
     assert (policy.rest_timeout, policy.graphql_timeout) == (180.0, 300.0)
     assert policy.max_attempts == 3
+    assert policy.run_deadline_sec == 7200.0
+    assert policy.max_consecutive_transient_failures == 3
+
+
+@pytest.mark.parametrize("body", [b"null", b"[]", b"0"])
+def test_a_200_with_a_non_object_json_body_returns_a_recorded_error(body, monkeypatch, no_sleep):
+    """The recovery ladder must never return ``(None, None)`` or a non-object payload on HTTP 200."""
+
+    class NonObjectBody(FakeTableau):
+        """Return a syntactically valid but unusable JSON value for one endpoint."""
+
+        def urlopen(self, request, timeout=None):
+            if "/customviews?" in request.full_url:
+                self.calls.append((request.full_url, timeout))
+                return _Response(200, body)
+            return super().urlopen(request, timeout)
+
+    site = _site(NonObjectBody(), monkeypatch, max_attempts=1)
+    payload, error = site.get_checked("/sites/site-1/customviews?pageSize=1000")
+    assert payload is None
+    assert error and "expected object" in error["error"]
+    assert no_sleep == []
 
 
 # --- 7. end to end: the reproduction from the issue ----------------------------------------------
@@ -483,6 +625,41 @@ def test_a_clean_run_still_exits_0_with_no_warning(monkeypatch, no_sleep, tmp_pa
     assert code == 0
     assert report.startswith("# Estate assessment")
     assert "DEGRADED" not in report and no_sleep == []
+
+
+def test_a_mid_run_abort_removes_previous_final_artifacts(monkeypatch, no_sleep, tmp_path):
+    """After an abort, an operator must not read a stale report beside fresh raw checkpoints."""
+    out = tmp_path / "_assessment"
+    out.mkdir()
+    for name in ("report.md", "assessment.json", "estate.db"):
+        (out / name).write_text("old verdict", encoding="utf-8")
+
+    server = FakeTableau()
+    monkeypatch.setattr(assess_estate.urllib.request, "urlopen", server.urlopen)
+    monkeypatch.setattr(assess_estate, "resolve_env", lambda *_a, **_k: dict(ENV))
+    monkeypatch.setattr(assess_estate, "env_source", lambda *_a, **_k: "test")
+
+    def aborting_collect(_site, _survey, checkpoint=None):
+        if checkpoint:
+            checkpoint(
+                {
+                    "workbooks": [{"id": "wb-1"}],
+                    "views": [],
+                    "datasources": [],
+                    "projects": [],
+                    "groups": [],
+                    "flows": [],
+                }
+            )
+        raise RuntimeError("mid-run abort")
+
+    monkeypatch.setattr(assess_estate, "collect", aborting_collect)
+    monkeypatch.setattr(sys, "argv", ["assess_estate.py", "--out", str(out), "--max-attempts", "1"])
+    with pytest.raises(RuntimeError, match="mid-run abort"):
+        assess_estate.main()
+    assert (out / "raw" / "workbooks.json").exists()
+    assert not any((out / name).exists() for name in ("report.md", "assessment.json", "estate.db"))
+    assert no_sleep == []
 
 
 def test_the_pat_secret_never_reaches_a_persisted_artifact(monkeypatch, no_sleep, tmp_path):
