@@ -397,6 +397,16 @@ def test_no_committed_file_declares_an_unresolvable_visual_container_schema() ->
     )
 
 
+def test_visual_cookbook_indexes_new_step_line_and_text_slicer_entries() -> None:
+    """Issue #176 added two new KB entries; keep index links and scope notes aligned."""
+
+    cookbook = (REPO_ROOT / ".github/pbi.kb/visual-cookbook.md").read_text(encoding="utf-8")
+    assert "step-line" in cookbook
+    assert "textSlicer" in cookbook
+    assert "listSlicer`/`advancedSlicerVisual`/`filterSlicer`" in cookbook
+    assert "listSlicer`/`textSlicer`/`advancedSlicerVisual`/`filterSlicer`" not in cookbook
+
+
 def test_no_committed_file_leaks_an_absolute_user_path() -> None:
     """`ABSOLUTE_USER_PATH_RE` was only ever unit-tested against a synthetic string - never applied
     to the repo it is meant to protect. This applies it.
