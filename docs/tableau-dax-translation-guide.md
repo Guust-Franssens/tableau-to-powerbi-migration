@@ -19,7 +19,7 @@ weren't present in any workbook yet — keep them here because real-world workbo
 | `LEFT(str, n)` / `RIGHT(str, n)` | `LEFT(str, n)` / `RIGHT(str, n)` | **[seen]** identical signature |
 | `REPLACE(str, old, new)` | `SUBSTITUTE(str, old, new)` | **[seen]** `REPLACE([Pivot Field Values],",",".")` → `SUBSTITUTE('T'[Pivot Field Values], ",", ".")` |
 | `ISNULL(x)` | `ISBLANK(x)` | **[seen]** semantics differ subtly — DAX blank ≠ SQL NULL in all cases; verify on fields that can be `0` or `""` |
-| `TRIM(SPLIT(str, delim, n))` | No 1:1 DAX. Prefer Power Query `Text.Split`/`Splitter.SplitTextByDelimiter`, or nested `MID`/`FIND` in DAX as a last resort | **[seen]** `TRIM( SPLIT( [Pivot Field Names], " ", 2 ) )` — do this in M, not DAX |
+| `TRIM(SPLIT(str, delim, n))` | No 1:1 DAX. Prefer Power Query `Text.Split`/`Splitter.SplitTextByDelimiter`, or nested `MID`/`FIND` in DAX as a last resort. If `delim=" "` in source data, normalize `UNICHAR(160)` first (`SUBSTITUTE(text, UNICHAR(160), " ")`) before `FIND(" ", …)` so NBSP rows don't disappear. | **[seen, Superstore, 2026-08-15]** `SPLIT([Product Name], " ", 1)` mismatched 6 manufacturers until NBSP normalization; after `SUBSTITUTE(..., UNICHAR(160), " ")`: **466/466 members, 0 mismatches** |
 | `DATE(DATEPARSE("yyyy", str))` | `DATE(VALUE(str), 1, 1)` for year-only strings; `DATEVALUE(str)` for full dates | **[seen]** |
 | `str(x)` (implicit in concatenation) | Not needed — DAX `&` auto-converts; use `FORMAT(x, "0")` for explicit control | **[seen]** |
 | `ATTR(x)` | In a calculated **column** (row context) it's just `[x]`. In a **measure** (aggregated context), emulate with `IF(HASONEVALUE('T'[x]), VALUES('T'[x]), "*")` | **[seen]** used inside a row-level text-building calc, so becomes a plain column ref |
@@ -270,12 +270,22 @@ so don't ship them when you can't ground-truth them.
 
 | Tableau | DAX equivalent (offline-verifiable) |
 |---|---|
-| `RANK(SUM([Sales]))` | `RANKX(ALL('T'[Category]), [Sales Measure])` |
+| `RANK(SUM([Sales]))` | `RANKX(ALL('T'[Category]), [Sales Measure], , DESC, Skip)` |
 | `RUNNING_SUM(SUM([Sales]))` | `VAR _asOf = MAX('T'[Date]) RETURN CALCULATE(SUM('T'[Sales]), FILTER(ALL('T'[Date], 'T'[Month]), 'T'[Date] <= _asOf))` — list **every** date-ish column of `'T'` in the `ALL()`; see the axis-grain warning below |
 | `INDEX()` (1-based running position in a partition) | calc column `CALCULATE(COUNTROWS('T'), FILTER(ALLEXCEPT('T',[part]), 'T'[order] <= EARLIER('T'[order])))` |
 | `LOOKUP(agg, FIRST())` / `LOOKUP(agg, LAST())` | hidden helper calc column `CALCULATE(agg, ALLEXCEPT('T',[part]), 'T'[Date] = CALCULATE(MIN/MAX('T'[Date]), ALLEXCEPT('T',[part])))`, then "growth of $X" measures divide by it |
 | `IF MIN([Date]) = LOOKUP(MIN([Date]), LAST()) THEN <expr> END` (is-last-row guard) | `IF(MAX('T'[Date]) = CALCULATE(MAX('T'[Date]), ALLEXCEPT('T',[part])), <expr>)`; OR-FIRST variant adds `\|\| MAX(...) = CALCULATE(MIN(...), ...)`; Tableau `END`-without-`ELSE` → omit the DAX else (BLANK on non-endpoint rows) |
 | `% of Total` / `pcto:` table calc | `DIVIDE([m], CALCULATE([m], ALLSELECTED('T')))` (verify addressing/partitioning against Tableau when a live engine exists) |
+
+**Tie mode mapping (RANK family) — make the tie policy explicit, never implicit:**
+
+| Tableau rank calc | DAX tie mode / pattern | Confidence |
+|---|---|---|
+| `RANK(...)` | `RANKX(..., , DESC, Skip)` (competition ranking: `1,2,2,4`) | ✅ **verified** [seen, Superstore, 2026-08-15] |
+| `RANK_DENSE(...)` | `RANKX(..., , DESC, Dense)` (`1,2,2,3`) | ⚠️ **inferred, needs workbook-level check** |
+| `RANK_MODIFIED(...)` | No 1-call `RANKX` equivalent; emulate modified competition rank (`1,3,3,4`) by adjusting `Skip` with tie size | ⚠️ **inferred, needs workbook-level check** |
+| `RANK_UNIQUE(...)` | No native tie-breaking mode; add a deterministic secondary sort key and rank the composite order | ⚠️ **inferred, needs workbook-level check** |
+| `RANK_PERCENTILE(...)` | Percentile-rank pattern over the chosen rank measure (e.g. `DIVIDE([Rank]-1, [N]-1)`) with the same tie policy as source | ⚠️ **inferred, needs workbook-level check** |
 
 **Validate every table calc two independent ways in Python** (Tableau semantics via sorted-partition
 `.iloc`/`cumcount`, and a literal DAX-mechanics replica via boolean masks over the raw table); two
@@ -423,6 +433,10 @@ Three things that are easy to get wrong, all measured:
 - **`(-N, 0)` is a trailing `N + 1` window, not `N`** — it spans N rows back *through the current row
   inclusive*. With Tableau's default parameter value 10 that is an **11-month** average. Reproduce the
   off-by-one faithfully and say so in the measure description; do not "correct" it to N.
+- **`DATESINPERIOD` counts the interval you pass, not "periods by context."** The cold-run failure
+  mode here was monthly logic written as day logic (using `DAY`), yielding values off by ~22x across
+  all 48 months. If you express a monthly trailing window with `DATESINPERIOD`, the interval must be
+  `MONTH` (or use `WINDOW(... ORDERBY([Month Start]))` as above).
 - **Truncate at the partition start, don't blank it.** Tableau averages row 1 against itself alone, and
   bare `WINDOW` agrees. Adding a "full window only" guard is a fidelity regression, not a safety check.
 - ⚠️ **Axis-membership trap: `ALLSELECTED('Date'[Month Start])` is NOT the same axis Tableau draws.**
@@ -495,21 +509,22 @@ help migrate dashboards to Power BI, and what are their limitations?"*
 - **Any formula this guide doesn't yet cover** — flagged in `limitations_encountered` for manual
   follow-up rather than silently guessed.
 
-**A durable capability-gap class, not a translation shortfall — live user-input parameters
-[seen, Superstore, high severity].** Tableau supports two live end-user-input mechanisms Power BI has
-no direct equivalent for:
-- **Live free-text entry** bound to a visual (e.g. Superstore's 3 "Insight" text boxes feeding a
-  live preview and downstream callouts). Power BI has no native writeback UI — true writeback needs
-  Power Apps integration, out of scope for a like-for-like migration.
-- **Live date-entry parameters** (as opposed to a date-range *slicer* over real data). Power BI
-  What-if parameters are numeric-slider-only; there's no native live date-text-entry control.
+**Live user-input parameters — split reproducible filter input from true writeback gaps
+[seen, Superstore, high severity, re-verified 2026-08-15].**
+- ✅ **Type-in text parameter used as a filter/`CONTAINS` predicate is reproducible in native Power BI**
+  via the GA **Input slicer** (`textSlicer`): <https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-input-slicer>.
+  Measured in the cold run: input `chris` returned 15 matching customers (including mid-string
+  `Sean Christensen`), `smith` returned 5, and the axis rescaled 14K → 5K.
+- ❌ **Live writeback-style text entry (type value and display/persist it back into the viz/callouts)
+  remains a real product-surface gap** in native Power BI. If true writeback is required, route via a
+  Power Apps visual: <https://learn.microsoft.com/en-us/power-apps/maker/canvas-apps/powerapps-custom-visual>.
+- ⚠️ **Live date-text-entry parameter remains unverified in this repo's measured path.** Current
+  guidance still points to numeric What-if parameters (<https://learn.microsoft.com/en-us/power-bi/transform-model/desktop-what-if>)
+  plus slicers over real date columns, but treat this as **inferred** until a workbook-level proof for
+  date-text-entry parity is captured.
 
-Both were implemented as **static seed tables/measures** defaulted to the Tableau workbook's current
-values — the downstream logic they feed (e.g. the CP/PP comparison window) remains fully dynamic and
-recomputes correctly if the seed is changed via a slicer, but the specific "type a value into a live
-text/date box" interaction style is lost. Call this out to the customer as its own named capability
-gap, distinct from ordinary measure-translation limitations that a better prompt or more effort could
-close — this one is a genuine Power BI product-surface gap, not an execution shortfall.
+When neither writeback nor date-text-entry parity is in scope, implement as **seed table/measures +
+slicer** and explicitly document the interaction change (input control style changed, downstream logic preserved).
 
 **A parser-level structural idiom, not a translation gap — internal relationship-model table-anchor
 pseudo-columns [seen, Airline Alliance].** Tableau data sources built on the newer relationship model

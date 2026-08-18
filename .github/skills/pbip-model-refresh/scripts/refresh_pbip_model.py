@@ -102,6 +102,7 @@ from probe_desktop_query import (
     first_table,
     is_auto_date_table_name,
     measure_names,
+    nuget_packages_root,
     table_names,
 )
 
@@ -457,6 +458,11 @@ def _instance(pid: int | None) -> dict | None:
     return instances[0] if len(instances) == 1 else None
 
 
+def amo_dll_glob() -> str:
+    """Glob pattern that can locate AMO/TOM in the active NuGet global-packages cache."""
+    return str(nuget_packages_root() / "**" / "netcoreapp*" / "Microsoft.AnalysisServices*.dll")
+
+
 def _load_amo():
     """Load AMO (Microsoft.AnalysisServices.Tabular) for the ImageSave path.
 
@@ -470,8 +476,7 @@ def _load_amo():
     load("coreclr")
     import clr
 
-    base = os.path.expanduser(r"~\.nuget\packages")
-    for dll in glob.glob(os.path.join(base, "**", "netcoreapp*", "Microsoft.AnalysisServices*.dll"), recursive=True):
+    for dll in glob.glob(amo_dll_glob(), recursive=True):
         if "resources" in dll.lower():
             continue
         try:

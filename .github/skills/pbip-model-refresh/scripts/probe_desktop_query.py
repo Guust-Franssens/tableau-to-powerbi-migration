@@ -49,10 +49,20 @@ from _credential_modal import (
     inspect_credential_modal,
 )
 
-# ADOMD.NET assembly shipped in the nuget cache (netcore build). Resolved at import time.
+# ADOMD.NET assembly shipped in the nuget cache (netcore build).
 _ADOMD_PKG = "microsoft.analysisservices.adomdclient.netcore*"
 _ADOMD_DLL = "Microsoft.AnalysisServices.AdomdClient.dll"
-_ADOMD_GLOBS = [str(Path.home() / ".nuget/packages" / _ADOMD_PKG / "**" / _ADOMD_DLL)]
+
+
+def nuget_packages_root() -> Path:
+    """Return the NuGet global-packages cache root, matching dotnet's NUGET_PACKAGES precedence."""
+    return Path(os.environ.get("NUGET_PACKAGES") or (Path.home() / ".nuget" / "packages"))
+
+
+def adomd_dll_globs() -> list[str]:
+    """Glob patterns that can locate ADOMD.NET in the active NuGet global-packages cache."""
+    return [str(nuget_packages_root() / _ADOMD_PKG / "**" / _ADOMD_DLL)]
+
 
 # Desktop binds its msmdsrv port a moment AFTER the process appears, so a scoped lookup needs a
 # short retry - but a bounded one, because a miss must end in a loud failure, never a fallback.
@@ -99,7 +109,7 @@ def _load_adomd():
         print("PREFLIGHT: ERROR pythonnet not installed (uv pip install pythonnet)")
         sys.exit(2)
 
-    for pattern in _ADOMD_GLOBS:
+    for pattern in adomd_dll_globs():
         hits = glob.glob(pattern, recursive=True)
         if hits:
             dll = Path(hits[0])
@@ -112,7 +122,14 @@ def _load_adomd():
             from Microsoft.AnalysisServices.AdomdClient import AdomdConnection
 
             return AdomdConnection
-    print("PREFLIGHT: ERROR Microsoft.AnalysisServices.AdomdClient.dll not found in the nuget cache")
+    print(
+        "PREFLIGHT: ERROR Microsoft.AnalysisServices.AdomdClient.dll not found in the nuget cache - "
+        "restore it (a DIFFERENT nuget package from the TOM/AMO one), forcing a supported TFM so the "
+        "add cannot silently no-op on a net10 default: "
+        r"dotnet new console -o $env:TEMP\adomd --framework net8.0; "
+        r"dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 "
+        "--version 19.84.1"
+    )
     sys.exit(2)
 
 
