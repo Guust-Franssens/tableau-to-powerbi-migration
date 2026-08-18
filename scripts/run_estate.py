@@ -41,6 +41,15 @@ things a conversation cannot be trusted to remember every time:
    gate. `check_empty_model.py` is the offline artifact scan that catches it, wired in below as
    `EXIT_EMPTY_MODEL`.
 
+5. **A report can pass every check above and be STRUCTURALLY INVALID.** When a Tableau calc falls
+   back to a stub, the engine drops its projection instead of binding it; if that projection was the
+   sole occupant of a REQUIRED visual role, `powerbi-report-author validate` rejects the report
+   (`PBIR_ROLE_REQUIRED_MISSING`) while the engine grades the same bytes `definition_of_done: warn`,
+   `0 error`, `Viz=built`. The engine's own always-on linter has no required-role rule and its real
+   validate pre-gate is default-off *and* non-binding (filed upstream as #220 / #221), so nothing in
+   the default conversion path can see it. `check_pbir_valid.py` delegates to the first-party
+   validator and makes its verdict bind, wired in below as `EXIT_INVALID_PBIR`.
+
 Deliberately NOT here
 ---------------------
 No migration logic. This never writes TMDL, never writes PBIR, never opens Power BI Desktop. It runs
@@ -73,10 +82,14 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from check_empty_model import REPORT_NAME as EMPTY_MODEL_REPORT
 from check_empty_model import render as render_empty_model
 from check_empty_model import scan as scan_for_empty_models
+from check_pbir_valid import REPORT_NAME as PBIR_VALID_REPORT
+from check_pbir_valid import render as render_pbir_valid
+from check_pbir_valid import scan as scan_pbir_validity
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
 from migration_bundle import sha256_file, write_engine_receipt
 
@@ -94,6 +107,7 @@ EXIT_DOD_FAILED = 3
 EXIT_COLLISION = 4
 EXIT_ENGINE_SOURCE = 5
 EXIT_EMPTY_MODEL = 6
+EXIT_INVALID_PBIR = 7
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
@@ -388,6 +402,29 @@ def check_empty_models(out_dir: Path) -> dict:
     return report
 
 
+def check_pbir_validity(out_dir: Path) -> dict:
+    """Run the FIRST-PARTY PBIR validator over the reports that ship, and let its verdict bind.
+
+    THE THIRD reason this script exists. `check_empty_models` catches a model that opens with no
+    rows; this catches a report that does not validate at all - the engine emits it and grades it a
+    pass. Measured 2026-08-18 (engine 2.151.0): a stubbed Tableau calc had its projection dropped
+    rather than bound, leaving a `clusteredColumnChart` with no `Y` role;
+    `powerbi-report-author validate` returned `PBIR_ROLE_REQUIRED_MISSING` and exit 1 while the
+    engine reported `definition_of_done: warn`, `0 error`, `Viz=built` on the same bytes.
+
+    The engine is not missing the tool - it has a `--validate` pre-gate - it is missing the DEFAULT:
+    that gate is opt-in and explicitly "never changes the structural aggregate". Its always-on
+    linter (`pbir_lint.py`) is hand-rolled and has no required-role rule. Filed as #220 / #221.
+
+    Delegated, not reimplemented: the role-requirement catalog belongs to Microsoft's CLI and is
+    versioned with it. Degrades to SKIPPED when that CLI is absent, so a machine without Node still
+    completes a run. The verdict is written to ``<bundle>/pbir-validity-check.json``.
+    """
+    report = scan_pbir_validity(out_dir)
+    (out_dir / PBIR_VALID_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI surface, kept out of ``main`` so the run logic stays readable."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -462,35 +499,64 @@ def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list
     return EXIT_OK
 
 
-def final_verdict(collisions: list, dod_ok: bool, dod_detail: str, empty_models: dict, out_dir: Path) -> int:
+class GateResults(NamedTuple):
+    """Every independent verdict one estate run produces, in precedence order.
+
+    Grouped rather than passed loose because the list grows: it was three gates, is now four, and
+    each addition otherwise pushes `final_verdict` and `main` past pylint's argument and local
+    limits. One named bundle also makes the precedence order below readable at the call site.
+    """
+
+    collisions: dict
+    dod_ok: bool
+    dod_detail: str
+    pbir_valid: dict
+    empty_models: dict
+
+
+def final_verdict(gates: GateResults, out_dir: Path) -> int:
     """The verdict the engine's own exit code cannot give us.
 
-    Precedence is collision > definition of done > empty model. All three refuse the bundle and the
-    earlier ones are the broader signal, so they are what a reader should act on first. Only the
-    exit code is exclusive: the empty-model *text* is printed by the caller before this runs, so a
-    quiet defect is never hidden behind a loud one.
+    Precedence is collision > definition of done > invalid PBIR > empty model. All four refuse the
+    bundle and the earlier ones are the broader signal, so they are what a reader should act on
+    first. Invalid PBIR outranks an empty model because it is the harder failure: a report that will
+    not open correctly cannot even be assessed for whether its data landed. Only the exit code is
+    exclusive: both quieter defects are PRINTED by the caller before this runs, so neither is ever
+    hidden behind a louder one.
     """
-    if collisions:
-        print_collisions(collisions)
+    if gates.collisions:
+        print_collisions(gates.collisions)
         return EXIT_COLLISION
-    if not dod_ok:
+    if not gates.dod_ok:
         print(
-            f"\nESTATE: DOD_FAILED - {dod_detail}\n"
+            f"\nESTATE: DOD_FAILED - {gates.dod_detail}\n"
             "  The engine exits 0 even on a failed definition of done (deliberate: one bad workbook\n"
             "  should not fail a batch). This is the exit code it cannot give you. Do not hand this\n"
             "  bundle downstream until the failing workbook(s) are resolved or explicitly accepted."
         )
         return EXIT_DOD_FAILED
-    if empty_models["status"] != "OK":
+    if gates.pbir_valid.get("status") == "INVALID":
         print(
-            f"\nESTATE: EMPTY_MODEL - {empty_models['models_empty']} of {empty_models['models_scanned']} "
-            "model(s) would open and load NO ROWS\n"
-            "  These passed the definition of done: they built, they bound, they validate. They have\n"
-            "  no data. Nothing else in this pipeline can tell 'migrated' from 'migrated and empty',\n"
-            f"  so this is the exit code that does. Details: {out_dir / EMPTY_MODEL_REPORT}"
+            f"\nESTATE: INVALID_PBIR - {gates.pbir_valid['reports_invalid']} of "
+            f"{gates.pbir_valid['reports_scanned']} report(s) FAIL first-party structural validation\n"
+            "  These passed the engine's definition of done, which never runs the Microsoft\n"
+            "  validator over its own output. A required role left unbound is usually a STUBBED\n"
+            f"  measure whose projection was dropped. Details: {out_dir / PBIR_VALID_REPORT}"
+        )
+        return EXIT_INVALID_PBIR
+    if gates.empty_models["status"] != "OK":
+        print(
+            f"\nESTATE: EMPTY_MODEL - {gates.empty_models['models_empty']} of "
+            f"{gates.empty_models['models_scanned']} model(s) would open and load NO ROWS\n"
+            "  These passed the definition of done: they built, they bound, and (per the check\n"
+            "  above) they validate. They have no data. Nothing else in this pipeline can tell\n"
+            f"  'migrated' from 'migrated and empty'. Details: {out_dir / EMPTY_MODEL_REPORT}"
         )
         return EXIT_EMPTY_MODEL
-    print("\nESTATE: READY - definition of done is not failed, no approval collisions, no empty models.")
+    print(
+        "\nESTATE: READY - definition of done is not failed, no approval collisions, "
+        "no invalid reports, no empty models."
+    )
     return EXIT_OK
 
 
@@ -540,8 +606,13 @@ def main(argv: list[str] | None = None) -> int:
     # --- phase 2: the check the engine's exit code cannot give us -----------------------------
     started = time.monotonic()
     dod_ok, dod_detail = check_definition_of_done(report)
-    collisions = find_approval_collisions(report)
-    empty_models = check_empty_models(args.output)
+    gates = GateResults(
+        collisions=find_approval_collisions(report),
+        dod_ok=dod_ok,
+        dod_detail=dod_detail,
+        pbir_valid=check_pbir_validity(args.output),
+        empty_models=check_empty_models(args.output),
+    )
     phases.append({"phase": "adjudicate", "elapsed_sec": round(time.monotonic() - started, 1)})
 
     # --- phase 3: slice -----------------------------------------------------------------------
@@ -554,14 +625,15 @@ def main(argv: list[str] | None = None) -> int:
     timings = write_phase_record(args.output, phases)
 
     # --- report -------------------------------------------------------------------------------
-    print_summary(report, args.output, slices, timings, dod_detail)
+    print_summary(report, args.output, slices, timings, gates.dod_detail)
 
-    # Printed BEFORE the verdict, and on a pass as well as a fail: an empty model that ships
+    # Printed BEFORE the verdict, and on a pass as well as a fail: a quiet defect that ships
     # alongside a `failed` definition of done is the one most likely to be missed, because the reader
     # stops at the first blocking verdict.
-    print("\n" + render_empty_model(empty_models))
+    print("\n" + render_empty_model(gates.empty_models))
+    print("\n" + render_pbir_valid(gates.pbir_valid))
 
-    return final_verdict(collisions, dod_ok, dod_detail, empty_models, args.output)
+    return final_verdict(gates, args.output)
 
 
 if __name__ == "__main__":
