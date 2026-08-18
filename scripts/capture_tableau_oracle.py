@@ -77,9 +77,23 @@ REST_TIMEOUT_SEC = 180
 SESSION_LOST_CODE = "401002"
 MAX_REAUTH_PER_VIEW = 2
 DEFAULT_MAX_ATTEMPTS = 5
-DEFAULT_RETRY_BUDGET_SEC = 120.0
 BACKOFF_BASE_SEC = 1.0
 BACKOFF_CAP_SEC = 30.0
+# The retry budget is a RETRY-ADMISSION DEADLINE, not a hard wall-clock cap. export() charges it from
+# monotonic() BEFORE the first attempt, and only AFTER an attempt returns does it admit another retry
+# -- while monotonic() is still inside the deadline. A socket timeout takes the whole REST_TIMEOUT_SEC
+# to return, and _request() reports it as a *transient* NETWORK_ERROR_STATUS (it does not raise), so
+# it is retry-eligible -- yet a budget at or below one REST_TIMEOUT_SEC is already spent by the time
+# that full-timeout failure returns, so THAT failure (the commonest on a slow/proxied/VPN link) gets
+# ZERO retries at any --max-attempts (issue #197, field-reported, reproduced with a virtual clock).
+# The floor below which a full-timeout failure cannot be retried is therefore ONE timeout plus the
+# first backoff -- NOT 2x. 2x is neither the minimum needed to admit a retry (a budget between 1x and
+# 2x retries a slow failure fine) nor enough to fit two COMPLETE full-timeout attempts once backoff is
+# counted (2*180 + backoff > 360). Faster transients -- an immediate 5xx, a short Retry-After -- still
+# retry until the budget is spent, so a smaller budget is a deliberate choice, not a bug. The default
+# sits comfortably above the floor; both are expressed via REST_TIMEOUT_SEC so they cannot drift.
+RETRY_ADMISSION_FLOOR_SEC = REST_TIMEOUT_SEC + BACKOFF_BASE_SEC
+DEFAULT_RETRY_BUDGET_SEC = 2.0 * REST_TIMEOUT_SEC
 
 # Status 0 is our own marker for a network-level failure (reset, DNS, gateway timeout) that never
 # produced an HTTP status at all. Tableau Cloud sits behind a gateway that intermittently 502/504s.
@@ -160,7 +174,12 @@ class SiteCredentials:
 @dataclass(frozen=True)
 class RetryPolicy:
     """Bounds on recovery. Both bounds matter: attempts alone cannot stop a slow-failing endpoint
-    from eating an estate run, and a wall-clock budget alone would allow an unbounded fast loop."""
+    from eating an estate run, and a wall-clock budget alone would allow an unbounded fast loop.
+
+    ``budget_sec`` is a RETRY-ADMISSION DEADLINE, not a hard wall-clock cap: charged from before the
+    first attempt, it gates whether ANOTHER retry is admitted, so an already-started attempt (or a
+    nested re-auth) may finish past it. A value at or below one ``REST_TIMEOUT_SEC`` admits zero
+    retries after a full-timeout failure (see the constant note above)."""
 
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     budget_sec: float = DEFAULT_RETRY_BUDGET_SEC
@@ -195,8 +214,11 @@ class TableauSession:
         accept: str | None = None,
         authed: bool = True,
     ) -> tuple[int, bytes, dict[str, str]]:
-        """One HTTP round trip. Never raises for a network failure -- returns status 0 instead, so
-        the retry loop can treat a reset connection and a gateway 503 the same way."""
+        """One HTTP round trip. Never raises for a network failure -- returns status 0 when no HTTP
+        response arrived at all (reset/DNS/refused/timeout), so the retry loop can treat a reset
+        connection and a gateway 503 the same way. When a response DID arrive but reading its body
+        failed mid-stream, the real HTTP status is kept (a 503 is still usefully a 503) and the body
+        read error is reported in the payload -- either way, this method does not raise."""
         req = urllib.request.Request(
             f"{self._creds.base.rstrip('/')}/api/{self._creds.version}{path}",
             data=json.dumps(body).encode() if body else None,
@@ -212,7 +234,19 @@ class TableauSession:
             with urllib.request.urlopen(req, timeout=REST_TIMEOUT_SEC) as resp:
                 return resp.status, resp.read(), dict(resp.headers)
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read(), dict(exc.headers or {})
+            # Reading the error body is itself a socket read: on a 5xx it can time out (TimeoutError
+            # is a subclass of OSError) or arrive truncated (http.client.IncompleteRead). That
+            # failure is raised INSIDE this handler, and Python does NOT route an exception raised in
+            # one except clause to a sibling except of the same try -- so without this guard it would
+            # escape _request uncaught, breaking the documented "never raises for a network failure"
+            # contract and denying the retry loop its turn. Keep the authoritative HTTP status (a 503
+            # whose body read timed out is still usefully a 503, and stays retry-eligible via
+            # TRANSIENT_STATUSES) and substitute a describing body instead of raising.
+            try:
+                body = exc.read()
+            except (OSError, http.client.HTTPException) as read_exc:
+                body = f"{type(read_exc).__name__}: {read_exc}".encode()
+            return exc.code, body, dict(exc.headers or {})
         except (OSError, http.client.HTTPException) as exc:
             # URLError (a subclass of OSError) covers DNS/refused/timeout; HTTPException covers
             # RemoteDisconnected and IncompleteRead, which urlopen does not always wrap.
@@ -300,6 +334,14 @@ class TableauSession:
             kind, detail = classify_export_error(status, text)
 
             if kind == "session_lost" and reauths < MAX_REAUTH_PER_VIEW:
+                # Re-auth is a SEPARATE recovery path from transient retry, and is deliberately NOT
+                # gated by the admission deadline. It is bounded instead by MAX_REAUTH_PER_VIEW (and
+                # sign_in's own max_attempts), because abandoning a view mid-re-auth after a
+                # recoverable session loss throws away estate-capture progress for no gain. Since the
+                # budget is a retry-admission deadline and not a hard wall-clock cap (see RetryPolicy),
+                # a sign_in that blocks can push this view past the deadline -- consistent, not a
+                # violation. The very next iteration's transient check charges any elapsed re-auth
+                # time against the deadline, so a slow re-auth still curtails FURTHER transient retries.
                 reauths += 1
                 self.reauth_count += 1
                 retries.append("session_lost")
@@ -435,7 +477,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry-budget",
         type=float,
         default=DEFAULT_RETRY_BUDGET_SEC,
-        help=f"max seconds spent retrying ONE export (default {DEFAULT_RETRY_BUDGET_SEC:.0f})",
+        help=(
+            f"seconds to admit retries for ONE export -- a deadline for admitting the NEXT retry, "
+            f"charged from before attempt 1, NOT a hard wall-clock cap (default "
+            f"{DEFAULT_RETRY_BUDGET_SEC:.0f}). At or below one {REST_TIMEOUT_SEC}s request timeout, a "
+            f"failure that blocks for the full timeout cannot be retried; faster transient failures "
+            f"still retry until it is spent"
+        ),
     )
     return parser
 
@@ -528,6 +576,33 @@ def write_manifest(
     return 2 if blocked else 0
 
 
+def build_retry_policy(max_attempts: int, budget_sec: float) -> RetryPolicy:
+    """Build the retry policy, warning when the budget is too small to retry a full-timeout failure.
+
+    ``budget_sec`` is a retry-admission deadline, charged from before the first attempt, which can
+    itself block for the full ``REST_TIMEOUT_SEC`` on a socket timeout. Below
+    ``RETRY_ADMISSION_FLOOR_SEC`` (one timeout plus the first backoff) the deadline is already spent
+    when such a failure returns, so it is retried zero times -- the issue #197 footgun.
+
+    This warns rather than clamps OR rejects, on purpose. A sub-floor budget is NOT incoherent: it is
+    a deliberate, useful choice for FAST-failing transients (a tight budget cutting a long Retry-After
+    loop short is exactly what ``test_retry_budget_stops_a_slow_failure_before_max_attempts`` relies
+    on), so clamping would silently defeat it and rejecting would forbid it. The warning is therefore
+    scoped to the one thing that is actually broken -- a failure that blocks for the *full* per-request
+    timeout -- and says so, rather than the old, false blanket claim that nothing below 2x is retried.
+    """
+    if budget_sec < RETRY_ADMISSION_FLOOR_SEC:
+        LOG.warning(
+            "--retry-budget %.0fs is below the %.0fs needed to retry a failure that blocks for the "
+            "full %ds request timeout (one timeout plus the first backoff), so such a failure will "
+            "NOT be retried; faster transient failures still retry until the budget is spent",
+            budget_sec,
+            RETRY_ADMISSION_FLOOR_SEC,
+            REST_TIMEOUT_SEC,
+        )
+    return RetryPolicy(max_attempts=max_attempts, budget_sec=budget_sec)
+
+
 def main() -> int:
     """Capture the oracle for every selected view.
 
@@ -547,7 +622,7 @@ def main() -> int:
             pat_secret=pat_secret(env),
             version=env.get("TABLEAU_REST_API_VERSION", "3.21"),
         ),
-        RetryPolicy(max_attempts=args.max_attempts, budget_sec=args.retry_budget),
+        build_retry_policy(args.max_attempts, args.retry_budget),
     )
     session.sign_in()
     LOG.info("signed in to site %r (api %s)", env["TABLEAU_SITE"], session.version)
