@@ -59,6 +59,17 @@ as interchangeable ground truth.
 - **Capability flags, not a fidelity rank.** A provider advertises what its output is fit *for*:
   `layout_grade`, `text_readable`, `state_reproducible`, `revision_bound`, `validation_grade`. The
   validator refuses to sign off visual fidelity against anything lacking `validation_grade`.
+
+⚠️ **A user-dropped screenshot is NOT `validation_grade` by default** — pass
+`--manual-validation-grade` to assert it. Until 2026-08-18 the `manual` provider hardcoded
+`validation_grade`, so any PNG left in `reference/` silently claimed the tier the validator signs off
+on, with nothing verifying resolution, filter-state pinning, or even that the image came from the
+handed-over workbook rather than a newer published revision. It failed **open**: the provider with
+the weakest provenance claimed the strongest guarantee, by default, with no operator action and no
+log line — and it outranked a live Tableau Server REST render, which is honestly graded layout+text
+because `capture_tableau_oracle.py --images` captures the view's **default state** with no `?vf_`
+pinning. Reported from a real estate run; the flag keeps the legitimate case (a human who did capture
+full-resolution, state-pinned renders) while making the claim explicit and attributable.
 - **Immutable + hashed.** The producer writes each image + its SHA-256; **neither consumer may
   regenerate, crop, or annotate it** (a builder-curated original silently destroys validator
   independence). Per-worksheet crops, if needed, are produced by the producer, not the builder.

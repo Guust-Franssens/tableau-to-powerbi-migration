@@ -258,6 +258,38 @@ def _dashboard_record(name: str, image: Path, reference_dir: Path, state_rec: di
     }
 
 
+def _manual_capabilities(args: argparse.Namespace) -> list[str]:
+    """Capabilities for a user-dropped screenshot: layout+text, and `validation_grade` only on request.
+
+    A dropped file is UN-PROVENANCED by construction. Nothing here knows its resolution, whether its
+    filters were pinned, whether it came from the handed-over workbook or a newer published revision,
+    or even that it is a screenshot of this dashboard. This used to hardcode `validation_grade` - the
+    top tier, the one `pbi-migration-validator` requires before it may sign off visual fidelity - so
+    any PNG someone happened to leave in `reference/` silently outranked a live Tableau Server REST
+    render (`capture_tableau_oracle.py --images`, which is honestly graded layout+text because it is
+    captured in the view's DEFAULT STATE with no `?vf_` filter pinning).
+
+    That inverted the whole point of grading by fitness, and it failed OPEN: the weakest-provenance
+    provider claimed the strongest guarantee, with no operator action and no log line.
+
+    A human who genuinely captured a full-resolution, state-pinned render can still say so with
+    `--manual-validation-grade`. The difference is that the claim is now explicit, attributable and
+    logged, instead of a default nobody chose.
+    """
+    if getattr(args, "manual_validation_grade", False):
+        log.warning(
+            "--manual-validation-grade: recording user-supplied screenshots as %s on YOUR assertion. "
+            "Nothing verified resolution, state pinning or source revision.",
+            CAP_VALIDATION,
+        )
+        return [CAP_LAYOUT, CAP_TEXT, CAP_VALIDATION]
+    log.info(
+        "user-supplied screenshots recorded as layout+text only (un-provenanced); pass "
+        "--manual-validation-grade if you captured them full-resolution with filters pinned"
+    )
+    return [CAP_LAYOUT, CAP_TEXT]
+
+
 def _run_providers(
     args: argparse.Namespace, reference_dir: Path, workbook: Path | None, dashboards: list[str]
 ) -> list[dict]:
@@ -275,7 +307,7 @@ def _run_providers(
             log.warning("using embedded thumbnails - LAYOUT HINT ONLY, not validation-grade")
     if not records:
         for img in collect_manual(reference_dir):
-            rec = {"provider": "manual", "capabilities": [CAP_LAYOUT, CAP_TEXT, CAP_VALIDATION]}
+            rec = {"provider": "manual", "capabilities": _manual_capabilities(args)}
             records.append(_dashboard_record(img.stem, img, reference_dir, rec))
         if records:
             log.info("using %d user-supplied reference screenshot(s)", len(records))
@@ -363,6 +395,15 @@ def main(argv: list[str] | None = None) -> int:
         "--structural-only", action="store_true", help="proceed without a reference (cannot claim visual fidelity)"
     )
     parser.add_argument("--force", action="store_true", help="re-capture even if a manifest exists")
+    parser.add_argument(
+        "--manual-validation-grade",
+        action="store_true",
+        help=(
+            "record user-supplied screenshots in reference/ as validation_grade. Off by default: a "
+            "dropped file is un-provenanced, so it cannot claim the tier the validator signs off on. "
+            "Pass this only if YOU captured them full-resolution with filters pinned."
+        ),
+    )
     args = parser.parse_args(argv)
 
     manifest = Path(args.slug_dir) / "reference" / "manifest.json"
