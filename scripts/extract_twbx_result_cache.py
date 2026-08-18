@@ -45,6 +45,17 @@ Caveats worth stating in any finding built on this
 * Values are raw doubles as computed, NOT display-formatted (unlike the REST ``/data`` endpoint), so
   no de-formatting is needed, but neither is any rounding applied.
 * Entries are keyed by query shape, not by worksheet; ``--match`` filters by field name.
+* ``TEMP()()(0)`` columns can be a calculation's inputs, not its output. Measured examples held the
+  numerator/denominator of a ratio, unadjusted Sales for a ``* 1.1`` calculation, and a byte-identical
+  copy of ``sum:Sales:ok``. Do not compare a TEMP column as though it were the named calculation.
+* ``entries[].fields`` is an alphabetically sorted superset used for discovery. The positional row
+  schema is only ``entries[].columns[].alias``.
+* ``tmn:`` (truncated-month) columns decoded as ``None`` in every measured row, while ``yr:`` and
+  ``mn:`` decoded normally. ``tmn:`` is a field-name prefix, not a binary record tag, and no source
+  cache fixture is committed to prove another payload interpretation; treat it as unavailable rather
+  than comparing the nulls until the underlying record encoding can be characterized.
+* A cache entry can reflect the viz's filters rather than the full source. One measured cache held 785
+  customers while its extract held 793, so set equality can falsely condemn a correct model.
 """
 
 from __future__ import annotations

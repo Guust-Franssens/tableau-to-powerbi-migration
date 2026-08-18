@@ -31,9 +31,15 @@ Caveats (deliberately stated, because over-claiming here is the failure mode thi
 * Thumbnails are typically **192x192**. They are decisive for *shape*: mark type, layering, axis
   direction, presence of markers/labels, header text format, grand-total rows. They are NOT evidence
   for fonts, exact colours, spacing or pixel parity -- keep claiming those ``unverifiable-without-
-  reference``.
-* They reflect the state at the workbook's **last save**, not necessarily the current data.
-* A worksheet never displayed before saving may be missing or blank; ``--strict`` fails on zero.
+  reference``. Wider views may appear only as a top-left square crop.
+* They reflect the state at the workbook's **last save**, not necessarily the current data. Tableau
+  regenerates a thumbnail only when it renders that sheet, so saved images can be stale; copied sheets
+  can also carry byte-identical thumbnails between workbooks.
+* Coverage is partial. A worksheet never displayed before saving may be missing or blank; one measured
+  workbook carried 5 thumbnails for 10 worksheets. ``--strict`` fails only when the total is zero.
+* When a thumbnail conflicts with live pane/shelf XML, **the XML wins**: a cached image can be stale or
+  copied, while the shelf records the current workbook definition. In one measured conflict the image
+  showed three blue bars but the pane XML explicitly encoded stacked colour.
 * Dashboards are not thumbnailed per se -- these are worksheet renders.
 """
 
