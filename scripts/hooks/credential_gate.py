@@ -39,10 +39,12 @@ import json
 import os
 import re
 import sys
+import importlib.util
 from pathlib import Path
 
 MARKER = ".credential-gate-BLOCKED.json"
 OVERRIDE = ".credential-gate-AUTHORIZED"
+AUDIT = ".credential-gate-audit.log"
 
 # Artifacts whose creation IS the harm: a persisted semantic model / report for a source that was
 # never reached. Deliberately not ".json" or ".md" - the agent should stay free to write its spec
@@ -62,6 +64,8 @@ GUARDED_SUFFIXES = (".tmdl", ".pbism", ".pbir", ".pbip", ".platform")
 # Security-through-obscurity is explicitly NOT the goal - MAI reading this comment changes nothing,
 # because the denial does not depend on the agent not knowing about it.
 CONTROL_FILES = (OVERRIDE.lower(), MARKER.lower())
+
+_CORE_GATE = None
 
 # Write-capable tools, lowercased. The SAME edit surfaces as `apply_patch` on preToolUse and `edit`
 # on permissionRequest (measured), so both must be listed or one event silently allows it.
@@ -279,13 +283,78 @@ def _blocking_marker(target: Path) -> Path | None:
     Walks upward from the target: a marker governs everything beneath the directory it sits in,
     which is how one gate covers `<migration>/fabric/**` without knowing the layout.
     """
+    nearest_audit_scope: Path | None = None
     for parent in [target, *target.parents]:
         if (parent / OVERRIDE).exists():
-            return None
+            if _override_is_authentic(parent):
+                return None
         marker = parent / MARKER
         if marker.is_file():
+            if nearest_audit_scope is not None and nearest_audit_scope != parent:
+                if _earned_clear_shields(nearest_audit_scope, marker):
+                    return None
             return marker
+        if nearest_audit_scope is None and (parent / AUDIT).is_file():
+            nearest_audit_scope = parent
     return None
+
+
+def _core_gate_module():
+    """Load the gate CLI module so the hook reuses its audit ordering/source comparison."""
+    global _CORE_GATE  # pylint: disable=global-statement
+    if _CORE_GATE is not None:
+        return _CORE_GATE
+
+    scripts_dir = Path(__file__).resolve().parents[1]
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    spec = importlib.util.spec_from_file_location("_credential_gate_core_for_hook", scripts_dir / "credential_gate.py")
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:  # pylint: disable=broad-exception-caught  # pragma: no cover - fail closed.
+        return None
+    _CORE_GATE = module
+    return module
+
+
+def _marker_sources(marker: Path) -> list[str] | None:
+    """Read the source list from a BLOCKED marker, failing closed on malformed content."""
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    sources = payload.get("sources")
+    if not isinstance(sources, list):
+        return None
+    return [str(source) for source in sources]
+
+
+def _override_is_authentic(scope: Path) -> bool:
+    """A local override shields the hook only when the audit log backs it."""
+    core = _core_gate_module()
+    if core is None:
+        return False
+    return bool(core._override_is_authentic(scope))  # pylint: disable=protected-access
+
+
+def _earned_clear_shields(scope: Path, marker: Path) -> bool:
+    """Whether `scope` earned a probe clearance for the same sources as `marker`.
+
+    The hook deliberately reuses `credential_gate._redundant_rearm`: it is the audited transition
+    check that already invalidates stale `probe-cleared` evidence after later block actions and
+    compares source lists membership-exactly. `authorize` is not enough here; the shield is only for
+    sources a probe actually proved reachable.
+    """
+    sources = _marker_sources(marker)
+    if sources is None:
+        return False
+    core = _core_gate_module()
+    if core is None:
+        return False
+    return core._redundant_rearm(scope, sources) == "probe-cleared"  # pylint: disable=protected-access
 
 
 def _extract_args_text(payload: dict) -> str:
