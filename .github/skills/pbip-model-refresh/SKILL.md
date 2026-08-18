@@ -125,6 +125,40 @@ stay byte-identical.
 > human must look at Desktop before the run proceeds. Check this first before suspecting the bridge or
 > filing an upstream defect.
 
+> ⚠️ **Do not wait blindly for `NO_BRIDGE` / `not_connected` — bound the bridge wait, then prove the
+> executable by PID.** Field report, 2026-08-18, two machines: a box with two Desktop versions
+> installed silently launched the **older** one by default, and the Desktop Bridge stayed at
+> `NO_BRIDGE` for 10+ minutes with no error. `PBI_DESKTOP_PATH` does **not** fix an already-running
+> wrong instance; it is read at launch, not polled. Kill that Desktop by PID, set `PBI_DESKTOP_PATH`
+> first, then relaunch.
+>
+> Use the CLI's bounded wait instead of a human-length cold-start guess:
+>
+> ```
+> powerbi-desktop status --pid <pid> --wait-seconds 90
+> ```
+>
+> Measured in this doc pass with
+> `npx --yes @microsoft/powerbi-desktop-bridge-cli status --help`: `--wait-seconds <seconds>` is
+> documented by the CLI itself as **"Wait for bridge readiness before returning not_connected"**
+> (default `0`). Ninety seconds matches this repo's ~2-minute cap for an unresponsive external
+> system. If the bounded wait still returns `not_connected`, treat the likely cause as "wrong Desktop
+> build for this machine's bridge", not "keep waiting".
+>
+> The bridge CLI does **not** expose the Desktop exe path or version. Verified output for a connected
+> instance has exactly these fields: `pid`, `bridgeStatus`, `currentFilePath`, `hasUnsavedChanges`,
+> `reportDir`, `pages`. So the discovery primitive is OS-level: take the `pid` from `status`, then
+> run `Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select-Object CommandLine`.
+>
+> ⚠️ **MSIX/Store Desktop remains unresolved, not supported or unsupported.** A separate field report
+> found that the documented known-good `2.157.627.0` was not installed on a third machine; only a
+> classic per-machine build and a Store/MSIX build were present. Do not generalize from that. Open
+> [#178](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/178) Defect 2
+> reports `refresh_pbip_model.py` refusing an MSIX-launched Desktop with `WRONG_MODEL` because
+> pid→model-folder resolution could not follow the Store launch path, while
+> `probe_desktop_query._child_port` resolved the same pid fine. That measures a narrow
+> identity-resolution gap, not Store bridge compatibility.
+
 Read-only preflight (proves credentials + source reachability without changing anything):
 
 ```
