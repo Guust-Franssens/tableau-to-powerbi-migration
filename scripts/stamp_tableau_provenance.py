@@ -27,11 +27,20 @@ Two independent layers, so the file is useful even with no Tableau access at all
 * **origin** (when credentials are supplied and the workbook is found on the site) - server, site,
   workbook LUID, project, owner, ``updatedAt``, plus the Tableau product and REST API versions.
 
-Matching is by **workbook name**, confirmed by re-downloading and comparing the sha256, because a
-name alone is not identity - a point this toolchain has now been bitten by four separate times. When
-the hash does not match, that is recorded as ``origin.match: "name_only"`` rather than silently
-claimed as the source: a same-named workbook that is a different build is exactly the situation this
-file exists to make visible.
+Matching prefers the **workbook LUID**, and falls back to the **name**; either way it is confirmed by
+re-downloading and comparing the sha256, because a name alone is not identity - a point this
+toolchain has now been bitten by four separate times. When the hash does not match, that is recorded
+as ``origin.match: "name_only"`` rather than silently claimed as the source: a same-named workbook
+that is a different build is exactly the situation this file exists to make visible.
+
+⚠️ **The LUID path is not an optimisation, it is the only thing that works on harvested input.**
+``harvest_estate_assets.py`` names every download ``<luid>_<sanitized-name><ext>`` on purpose
+(display names are not unique across projects), so a stem-vs-``name`` comparison compares
+``4f2c...-a1_Sales_Q3_Review`` against ``Sales - Q3 Review`` and can never match. Measured: **20 of
+20** harvested workbooks reported ``no workbook of this name on the site`` while every one of them
+was present. Stripping the prefix alone is not sufficient either - ``safe_component`` also rewrites
+every non ``[A-Za-z0-9-_]`` character to ``_`` and truncates to 60 chars, so the remainder is lossy
+and cannot be inverted. The LUID is exact, which is why it is tried first.
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import sys
 import time
 import urllib.error
@@ -148,17 +158,65 @@ class TableauLookup:
         return hashlib.sha256(payload).hexdigest() if status == 200 else None
 
 
-def find_origin(lookup: TableauLookup, stem: str, local_sha: str) -> dict[str, Any] | None:
-    """Identify a local workbook on the site by name, then CONFIRM by content hash.
+HARVEST_STEM_RE = re.compile(
+    r"^(?P<luid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_(?P<rest>.+)$"
+)
 
-    Returns ``None`` when no workbook of that name exists. When one does, ``match`` records how
-    strongly it was confirmed -- ``"sha256"`` when the bytes agree, ``"name_only"`` when they do not.
+
+def split_harvest_stem(stem: str) -> tuple[str | None, str]:
+    """Split ``harvest_estate_assets.py``'s ``<luid>_<sanitized-name>`` stem into its two parts.
+
+    Returns ``(None, stem)`` unchanged for any other filename, so a hand-placed or hand-renamed
+    workbook keeps the plain name-matching behaviour and gains nothing it did not ask for.
+    """
+    match = HARVEST_STEM_RE.match(stem)
+    return (match.group("luid"), match.group("rest")) if match else (None, stem)
+
+
+def _sanitized(text: str) -> str:
+    """``harvest_estate_assets.safe_component(text, 60)``, replicated so this script stays standalone.
+
+    Kept deliberately in sync with that function: `[A-Za-z0-9-_]` survives, everything else becomes
+    ``_``, then a 60-character truncation. Because it is lossy AND truncating it can only ever be
+    used to compare a *remote* name forward into filename space, never to recover a display name.
+    """
+    return "".join(char if char.isalnum() or char in "-_" else "_" for char in text)[:60]
+
+
+def find_origin(lookup: TableauLookup, stem: str, local_sha: str) -> dict[str, Any] | None:
+    """Identify a local workbook on the site by LUID or name, then CONFIRM by content hash.
+
+    Returns ``None`` when no workbook matches. When one does, ``matched_by`` records *how it was
+    found* (``"luid"`` / ``"name"`` / ``"sanitized_name"``) and ``match`` records *how strongly it was
+    confirmed* -- ``"sha256"`` when the bytes agree, ``"name_only"`` when they do not. Those are two
+    independent axes: a LUID match with ``name_only`` means "this is provably the same item on the
+    site, and it has changed since we harvested it", which is a different and more useful statement
+    than a name collision.
+
     A name-only match is still worth recording: it says "a workbook of this name exists there and it
     is NOT this build", which is precisely the ambiguity that makes a cited figure irreproducible.
     """
-    candidates = [wb for wb in lookup.workbooks() if wb.get("name") == stem]
+    luid, name_part = split_harvest_stem(stem)
+    workbooks = lookup.workbooks()
+
+    matched_by, candidates = None, []
+    if luid is not None:
+        candidates = [wb for wb in workbooks if str(wb.get("id") or "").lower() == luid.lower()]
+        if candidates:
+            matched_by = "luid"
+    if not candidates:
+        candidates = [wb for wb in workbooks if wb.get("name") == name_part]
+        if candidates:
+            matched_by = "name"
+    if not candidates and luid is not None:
+        # Only undo a transformation we KNOW was applied: the stem carries harvest's LUID prefix, so
+        # its remainder went through safe_component(). Never loosen matching for a hand-placed file.
+        candidates = [wb for wb in workbooks if _sanitized(str(wb.get("name") or "")) == name_part]
+        if candidates:
+            matched_by = "sanitized_name"
     if not candidates:
         return None
+
     workbook = candidates[0]
     remote_sha = lookup.content_sha256(workbook["id"])
     return {
@@ -172,9 +230,10 @@ def find_origin(lookup: TableauLookup, stem: str, local_sha: str) -> dict[str, A
         "updated_at": workbook.get("updatedAt"),
         "tableau_product_version": lookup.product_version,
         "rest_api_version": lookup.version,
+        "matched_by": matched_by,
         "match": "sha256" if remote_sha == local_sha else "name_only",
         "remote_sha256": remote_sha,
-        "same_name_count": len(candidates),
+        "same_name_count": sum(1 for wb in workbooks if wb.get("name") == workbook.get("name")),
     }
 
 
@@ -207,10 +266,10 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
                 origin, record["lookup_error"] = None, f"{type(exc).__name__}: {str(exc)[:150]}"
             record["origin"] = origin
             if origin is None:
-                record["origin_note"] = "no workbook of this name on the site - local-only input"
+                record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
             elif origin["match"] == "name_only":
                 record["origin_note"] = (
-                    "a workbook of this name exists on the site but is a DIFFERENT build - "
+                    f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
                     "figures measured here will not reproduce against it"
                 )
         records.append(record)

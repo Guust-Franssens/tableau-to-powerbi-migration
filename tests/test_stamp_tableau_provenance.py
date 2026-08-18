@@ -110,6 +110,88 @@ def test_a_workbook_absent_from_the_site_yields_no_origin():
     assert prov.find_origin(FakeLookup([{"id": "a", "name": "Other"}]), "Superstore", "x") is None
 
 
+# ------------------------------------------------------- harvested filenames (`<luid>_<name>`)
+
+HARVEST_LUID = "4f2c1a9e-3b7d-4c21-9a55-8e0b6d1f7c34"
+
+
+def test_a_harvested_filename_matches_by_luid_not_by_its_mangled_stem():
+    """THE regression. `harvest_estate_assets.py` writes `<luid>_<sanitized-name><ext>` because
+    display names are not unique across projects. Comparing that whole stem against the site's
+    `name` can never match, so the stamper reported `no workbook of this name on the site` for
+    every harvested file - 20/20 false negatives in one measured run, each for a workbook that
+    demonstrably existed. The LUID in the filename is exact identity; use it.
+    """
+    lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Sales - Q3 Review", "project": {"name": "Finance"}}])
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Sales___Q3_Review", "x")
+    assert origin is not None, "a harvested workbook present on the site must be found"
+    assert origin["matched_by"] == "luid"
+    assert origin["workbook_name"] == "Sales - Q3 Review"
+
+
+def test_luid_match_survives_a_rename_on_the_site():
+    """The LUID is stable across renames, which is the whole point of preferring it: the name in our
+    filename is a snapshot from harvest time and may be stale."""
+    lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Renamed Since Harvest"}])
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Original_Name", "x")
+    assert origin["matched_by"] == "luid"
+
+
+def test_luid_matching_is_case_insensitive():
+    """REST hands back LUIDs lowercased, but a filename can be round-tripped through tooling that
+    upper-cases it; a case difference must not read as 'not on the site'."""
+    lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Sales"}])
+    assert prov.find_origin(lookup, f"{HARVEST_LUID.upper()}_Sales", "x")["matched_by"] == "luid"
+
+
+def test_a_deleted_and_recreated_workbook_falls_back_to_the_sanitized_name():
+    """A new LUID for the same name is the shape of a delete-and-republish. Falling back keeps the
+    record useful, and `matched_by` says plainly that it was NOT an identity match."""
+    lookup = FakeLookup([{"id": "a-brand-new-luid", "name": "Sales / Q3: Review"}])
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Sales___Q3__Review", "x")
+    assert origin["matched_by"] == "sanitized_name"
+
+
+def test_the_sanitized_fallback_is_NOT_offered_to_hand_placed_files():
+    """Loosening the match is only justified where we know harvest applied the transformation. A
+    plain `Sales_Q3_Review.twbx` a human dropped in a folder must not fuzzy-match `Sales/Q3 Review`
+    - that would be exactly the name-is-not-identity error this module exists to prevent."""
+    lookup = FakeLookup([{"id": "a", "name": "Sales/Q3 Review"}])
+    assert prov.find_origin(lookup, "Sales_Q3_Review", "x") is None
+
+
+def test_a_plain_name_still_matches_exactly_as_before():
+    """The harvested path must not regress the ordinary one."""
+    lookup = FakeLookup([{"id": "a", "name": "Superstore"}])
+    assert prov.find_origin(lookup, "Superstore", "x")["matched_by"] == "name"
+
+
+def test_a_luid_prefixed_stem_whose_luid_is_gone_still_matches_the_exact_name():
+    lookup = FakeLookup([{"id": "some-other-luid", "name": "Superstore"}])
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Superstore", "x")
+    assert origin["matched_by"] == "name"
+
+
+@pytest.mark.parametrize(
+    "stem,expected",
+    [
+        (f"{HARVEST_LUID}_Sales", (HARVEST_LUID, "Sales")),
+        ("Sales", (None, "Sales")),
+        ("not-a-uuid_Sales", (None, "not-a-uuid_Sales")),
+        (f"{HARVEST_LUID}", (None, HARVEST_LUID)),  # prefix with no name after it is not a harvest stem
+    ],
+)
+def test_split_harvest_stem(stem, expected):
+    assert prov.split_harvest_stem(stem) == expected
+
+
+def test_same_name_count_still_counts_names_when_matched_by_luid():
+    """`same_name_count` answers 'is this name ambiguous on the site', which stays worth knowing even
+    when we resolved the file by LUID."""
+    lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Sales"}, {"id": "other", "name": "Sales"}])
+    assert prov.find_origin(lookup, f"{HARVEST_LUID}_Sales", "x")["same_name_count"] == 2
+
+
 # --------------------------------------------------------------------------- build()
 
 
