@@ -257,6 +257,19 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   source**, not the workbook, so a workbook-named guess dangles. Deleting a redundant copy is usually
   the wrong fix if the engine's own manifests declare it as `output_folder` — repoint it instead, and
   prefer a relative cross-tree `byPath` (`../../pbip/<name>/<Model>.SemanticModel`), which does resolve.
+- **A missing REQUIRED role in engine output means the measure was STUBBED — bind the stub, do NOT
+  delete the visual.** 🟢 Measured 2026-08-18 on a cold run of engine 2.151.0 (issue #220).
+  `validate` failed with `PBIR_ROLE_REQUIRED_MISSING` — *Required role "Y" missing or has no
+  projections for visualType "clusteredColumnChart"* — on the engine's own **pristine** output. Cause:
+  that visual's only measure was a Tableau `FIXED` LOD which fell back to an inert stub
+  (`unresolved_reference: cross-table terms`), and the engine dropped the projection rather than
+  binding it; the two sibling visuals whose measure *translated* bound `Y` normally. ⚠️ The repair is
+  **not** to delete the visual — the stub already exists in the model as
+  `measure 'Regional Revenue (FIXED)' = BLANK()`, so re-adding it to `Y` makes the report valid and
+  openable while keeping the gap visible (a blank column) and the preserved `TableauFormula`
+  annotation pointing at what to restore. Deleting instead throws away the only in-report evidence
+  that the source had a chart there. So before concluding a field is missing, grep the model for a
+  `= BLANK()` measure matching the worksheet's shelf.
 
 ## 4. Crosstabs and tables — a recurring fragility class
 
