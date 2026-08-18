@@ -321,8 +321,8 @@ def resolve_and_capture(args: argparse.Namespace) -> int:
     log.error(
         "No reference image could be produced and --structural-only was not set. Provide a source:\n"
         "  * Tableau Public: --public-url <workbookRepoUrl> --view <viewName>\n"
-        "  * Tableau Server/Cloud: set TABLEAU_SERVER_URL/_SITE/_PAT_NAME/_PAT_SECRET (provider is a "
-        "stub today)\n"
+        "  * Tableau Server/Cloud: use capture_tableau_oracle.py --images; --server-rest records an "
+        "explicit request but this provider is a fail-closed stub today\n"
         "  * Manual: drop tableau-<name>.png screenshots into %s\n"
         "Refusing to build a report blind. See docs/reference-capture.md.",
         reference_dir,
