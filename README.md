@@ -14,7 +14,7 @@
 &nbsp;![Migrations](https://img.shields.io/badge/migrations-16-2ea44f)
 &nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-27%2F27-2ea44f)
 
-**[Showcase](docs/showcase/README.md)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
+**[Showcase](docs/showcase/README.md)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Prerequisites](#prerequisites)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
 
 </div>
 
@@ -30,7 +30,7 @@
 
 Point it at a Tableau `.twb` / `.twbx` and it produces a working **Fabric Power BI semantic model + report**. **16 real, publicly available Tableau Public dashboards** have been run through it end to end, spanning KPI dashboards, IronViz infographics, network and origin-destination maps, a what-if calculator, and a 91-worksheet enterprise workbook.
 
-- 🧩 &nbsp;**Deterministic parser, not a black box.** Tableau's `.twb` XML is extracted by code into a schema-validated `migration-spec.json` contract (20/20 `pytest`), so the fuzzy LLM work is scoped to only what needs judgment.
+- 🧩 &nbsp;**Deterministic parser, not a black box.** Tableau's `.twb` XML is extracted by code into a schema-validated `migration-spec.json` contract (27/27 parser tests), so the fuzzy LLM work is scoped to only what needs judgment.
 - 🤖 &nbsp;**Four Copilot CLI agents.** An orchestrator coordinates a semantic-model builder, a report builder, and an independent read-only fidelity validator.
 - 📊 &nbsp;**DAX + visual translation.** LOD expressions and table calculations become DAX; Tableau worksheets become native Power BI visuals via a 27-entry, render-verified PBIR cookbook.
 - 🔍 &nbsp;**Figure-by-figure validation.** The validator compares each built visual against the Tableau original, on both layout and numbers, and routes discrepancies back, catching bugs that would otherwise ship silently.
@@ -38,7 +38,9 @@ Point it at a Tableau `.twb` / `.twbx` and it produces a working **Fabric Power 
 - 📝 &nbsp;**Honest about limits.** Every bug and capability gap found along the way is documented, not hidden (see [capabilities &amp; limitations](docs/capabilities-and-limitations.md)).
 
 This is not a generic "AI can do anything" claim. It is a working pipeline, run end to end against 16
-different workbooks, with the bugs found along the way documented honestly.
+different workbooks, with the bugs found along the way documented honestly. The practical handoff
+today is a **local PBIP project** (`.SemanticModel` + `.Report`) that you can inspect in Power BI
+Desktop or publish manually; a polished publish/refresh/screenshot deployer agent is still roadmap.
 
 ## 🖼️ Showcase
 
@@ -146,13 +148,35 @@ The three subagents are orchestrated by `tableau-migrator`, a custom Copilot CLI
 
 ![Architecture: a deterministic parser extracts a schema-validated migration-spec.json contract, then LLM agents translate it to a Fabric Power BI semantic model + report](docs/architecture.png)
 
+<a id="prerequisites"></a>
+
+## ⚙️ Prerequisites
+
+You can browse the showcase and read the examples without any local setup. Before you run a migration,
+install or confirm the runner pieces below:
+
+- **Git + GitHub Copilot CLI** for the agent personas.
+- **Python 3.11+ and `uv`** for the parser, harvesters, validators and tests.
+- **Node.js 20+** for the Power BI report-authoring and Desktop bridge CLIs.
+- **Power BI Desktop** for opening, refreshing and rendering the local PBIP output.
+- **Copilot plugins/MCP servers** below, including the separate deterministic conversion engine plugin
+  (`tableau-fabric-skills@tableau-collection`).
+
+The Quickstart below stops at a **local PBIP** (`migrations\workbooks\<name>\fabric\...`). For a
+customer/estate run, treat publish-to-Fabric as an operator step documented in the runbook, not as a
+finished one-command agent handoff yet.
+
 <details>
-<summary><strong>⚡ Setup: Copilot plugins &amp; MCP (self-configuring)</strong></summary>
+<summary><strong>⚡ Copilot plugins, conversion engine &amp; MCP (self-configuring)</strong></summary>
 
 <br>
 
-This toolkit's agents build on Microsoft's official Fabric/Power BI **skill plugin** and talk to Power
-BI through **MCP servers**. Those dependencies are declared in the repo so a clone is self-configuring:
+This toolkit has two tiers. The **deterministic Tableau → PBIP conversion engine is not in this
+repo**; it is installed as the `tableau-fabric-skills@tableau-collection` Copilot plugin. This repo
+contains the parser, wrappers, examples, docs, and four Copilot agent personas that critique, enrich
+and fix the engine's output. The agents also build on Microsoft's official Fabric/Power BI skill
+plugin and talk to Power BI through **MCP servers**. Those dependencies are declared in the repo so a
+clone is self-configuring:
 
 - [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Declares the required plugins
   (`powerbi-authoring@fabric-collection` from `microsoft/skills-for-fabric`, plus this repo's own
@@ -190,14 +214,21 @@ BI through **MCP servers**. Those dependencies are declared in the repo so a clo
   [`docs/credential-gate.md`](docs/credential-gate.md) — including an honest threat model, since this
   stops the *accidental* case outright but only *detects* deliberate circumvention.
 
-In Copilot CLI, install the plugins once with `/plugin` (add marketplaces `microsoft/skills-for-fabric`
-and `Guust-Franssens/powerbi-playbook`, enable `powerbi-authoring` and
-`powerbi-playbook`) and register the MCP servers with `/mcp`. Then run
+In Copilot CLI, install the plugins once with `/plugin` (including
+`tableau-fabric-skills@tableau-collection`, plus the `microsoft/skills-for-fabric` and
+`Guust-Franssens/powerbi-playbook` skill plugins) and register the MCP servers with `/mcp`. Then run
 `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
+Preflight reports a concrete install hint for anything missing and blocks if the conversion engine is
+installed from more than one source; the plugin is the canonical engine.
 
 </details>
 
-## Quickstart
+### Power BI Desktop settings for unattended runs
+
+Set these after Desktop is installed and before the first agent/refresh run. They are intentionally
+here rather than at the top of Quickstart: they matter only once you are about to open models in
+Desktop, and front-loading them before clone/env setup makes the first-run path look more dangerous
+than it is.
 
 > ### ⚠️ One-time Power BI Desktop setting: turn OFF Privacy Levels
 >
@@ -252,6 +283,8 @@ and `Guust-Franssens/powerbi-playbook`, enable `powerbi-authoring` and
 > agent whose credentials are read-only service accounts; think harder before doing it on an analyst's
 > laptop.
 
+## Quickstart
+
 **Clone.** The 16 worked examples under `examples/` are ~91% of the repo's files. If you're mainly
 here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
 the example blobs:
@@ -270,6 +303,8 @@ For the full repo (all examples + showcase), use a normal `git clone …`. Then 
 uv venv
 .venv\Scripts\Activate.ps1
 uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
+
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
 
 # Parse a workbook into the intermediate spec
 python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.twbx `
@@ -343,7 +378,7 @@ routes you to the right tree and explains why data sources are migrated first.
 uv sync --extra dev
 ruff format . ; ruff check . --fix
 pylint scripts
-pytest -q            # 20 parser tests
+pytest -q            # 27 parser tests
 ```
 
 ## 📊 Status: what's covered
