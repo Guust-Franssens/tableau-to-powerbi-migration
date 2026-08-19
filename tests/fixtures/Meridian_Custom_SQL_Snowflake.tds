@@ -1,0 +1,258 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- build 20262.26.0804.1806                               --><datasource xmlns:user="http://www.tableausoftware.com/xml/user" formatted-name="Meridian Calc Gauntlet (Live Snowflake)" inline="true" source-platform="win" version="18.1" xml:base="https://10ax.online.tableau.com">
+
+  <repository-location id="MeridianCalcGauntletLiveSnowflake" path="/t/fabric-migration-lab/datasources" revision="1.1" site="fabric-migration-lab"/>
+
+  <connection class="federated">
+
+    <named-connections>
+
+      <named-connection caption="ORG-ACCOUNT.snowflakecomputing.com" name="snowflake.meridiancalc">
+
+        <connection authentication="Username Password" class="snowflake" dbname="MERIDIAN" odbc-connect-string-extras="" one-time-sql="" schema="SALES" server="ORG-ACCOUNT.snowflakecomputing.com" service="" temp-table-detection="optimized" username="TABLEAU_SVC" warehouse="COMPUTE_WH" workgroup-auth-mode=""/>
+
+      </named-connection>
+
+    </named-connections>
+
+    <relation connection="snowflake.meridiancalc" name="Custom SQL Query" type="text">SELECT o.TOTAL_PRICE, o.ORDER_DATE, o.ORDER_STATUS, c.CUSTOMER_NAME, c.NATION, c.REGION, d.CALENDAR_YEAR FROM SALES.FACT_ORDERS o JOIN SALES.DIM_CUSTOMER c ON c.CUSTOMER_KEY = o.CUSTOMER_KEY JOIN SALES.DIM_DATE d ON d.DATE_KEY = o.ORDER_DATE</relation><cols>
+
+      <map key="[FACT_ORDERS_TOTAL_PRICE]" value="[FACT_ORDERS].[TOTAL_PRICE]"/>
+
+      <map key="[FACT_ORDERS_ORDER_DATE]" value="[FACT_ORDERS].[ORDER_DATE]"/>
+
+      <map key="[FACT_ORDERS_ORDER_STATUS]" value="[FACT_ORDERS].[ORDER_STATUS]"/>
+
+      <map key="[DIM_CUSTOMER_CUSTOMER_NAME]" value="[DIM_CUSTOMER].[CUSTOMER_NAME]"/>
+
+      <map key="[DIM_CUSTOMER_NATION]" value="[DIM_CUSTOMER].[NATION]"/>
+
+      <map key="[DIM_CUSTOMER_REGION]" value="[DIM_CUSTOMER].[REGION]"/>
+
+      <map key="[DIM_DATE_CALENDAR_YEAR]" value="[DIM_DATE].[CALENDAR_YEAR]"/>
+
+    </cols>
+
+    <metadata-records>
+
+      <metadata-record class="column">
+
+        <remote-name>TOTAL_PRICE</remote-name>
+
+        <local-name>[FACT_ORDERS_TOTAL_PRICE]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>TOTAL_PRICE</remote-alias>
+
+        <local-type>real</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>ORDER_DATE</remote-name>
+
+        <local-name>[FACT_ORDERS_ORDER_DATE]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>ORDER_DATE</remote-alias>
+
+        <local-type>date</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>ORDER_STATUS</remote-name>
+
+        <local-name>[FACT_ORDERS_ORDER_STATUS]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>ORDER_STATUS</remote-alias>
+
+        <local-type>string</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>CUSTOMER_NAME</remote-name>
+
+        <local-name>[DIM_CUSTOMER_CUSTOMER_NAME]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>CUSTOMER_NAME</remote-alias>
+
+        <local-type>string</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>NATION</remote-name>
+
+        <local-name>[DIM_CUSTOMER_NATION]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>NATION</remote-alias>
+
+        <local-type>string</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>REGION</remote-name>
+
+        <local-name>[DIM_CUSTOMER_REGION]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>REGION</remote-alias>
+
+        <local-type>string</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>CALENDAR_YEAR</remote-name>
+
+        <local-name>[DIM_DATE_CALENDAR_YEAR]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>CALENDAR_YEAR</remote-alias>
+
+        <local-type>integer</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+    </metadata-records>
+
+  </connection>
+
+  <column caption="Total Price" datatype="real" name="[FACT_ORDERS_TOTAL_PRICE]" role="measure" type="quantitative"/>
+
+  <column caption="Order Date" datatype="date" name="[FACT_ORDERS_ORDER_DATE]" role="dimension" type="ordinal"/>
+
+  <column caption="Order Status" datatype="string" name="[FACT_ORDERS_ORDER_STATUS]" role="dimension" type="nominal"/>
+
+  <column caption="Customer Name" datatype="string" name="[DIM_CUSTOMER_CUSTOMER_NAME]" role="dimension" type="nominal"/>
+
+  <column caption="Nation" datatype="string" name="[DIM_CUSTOMER_NATION]" role="dimension" type="nominal"/>
+
+  <column caption="Region" datatype="string" name="[DIM_CUSTOMER_REGION]" role="dimension" type="nominal"/>
+
+  <column caption="Calendar Year" datatype="integer" name="[DIM_DATE_CALENDAR_YEAR]" role="dimension" type="ordinal"/>
+
+  <column caption="Revenue" datatype="real" name="[Revenue]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="SUM([FACT_ORDERS_TOTAL_PRICE])"/>
+
+  </column>
+
+  <column caption="Avg incl Nation (INCLUDE)" datatype="real" name="[LOD_Include]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="{ INCLUDE [DIM_CUSTOMER_NATION] : AVG([FACT_ORDERS_TOTAL_PRICE]) }"/>
+
+  </column>
+
+  <column caption="Revenue excl Nation (EXCLUDE)" datatype="real" name="[LOD_Exclude]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="{ EXCLUDE [DIM_CUSTOMER_NATION] : SUM([FACT_ORDERS_TOTAL_PRICE]) }"/>
+
+  </column>
+
+  <column caption="Nested LOD" datatype="real" name="[LOD_Nested]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="{ FIXED [DIM_CUSTOMER_REGION] : AVG({ FIXED [DIM_CUSTOMER_NATION] : SUM([FACT_ORDERS_TOTAL_PRICE]) }) }"/>
+
+  </column>
+
+  <column caption="Running Sum" datatype="real" name="[TC_RunningSum]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="RUNNING_SUM(SUM([FACT_ORDERS_TOTAL_PRICE]))"/>
+
+  </column>
+
+  <column caption="Window Avg" datatype="real" name="[TC_WindowAvg]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="WINDOW_AVG(SUM([FACT_ORDERS_TOTAL_PRICE]))"/>
+
+  </column>
+
+  <column caption="Rank" datatype="real" name="[TC_Rank]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="RANK(SUM([FACT_ORDERS_TOTAL_PRICE]))"/>
+
+  </column>
+
+  <column caption="Percent of Total" datatype="real" name="[TC_PctOfTotal]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="SUM([FACT_ORDERS_TOTAL_PRICE]) / TOTAL(SUM([FACT_ORDERS_TOTAL_PRICE]))"/>
+
+  </column>
+
+  <column caption="Customer Number" datatype="string" name="[STR_Split]" role="dimension" type="nominal">
+
+    <calculation class="tableau" formula="SPLIT([DIM_CUSTOMER_CUSTOMER_NAME], '#', 2)"/>
+
+  </column>
+
+  <column caption="Customer Digits" datatype="string" name="[STR_Regex]" role="dimension" type="nominal">
+
+    <calculation class="tableau" formula="REGEXP_EXTRACT([DIM_CUSTOMER_CUSTOMER_NAME], '([0-9]+)')"/>
+
+  </column>
+
+  <column caption="Order Quarter" datatype="date" name="[DT_Trunc]" role="dimension" type="nominal">
+
+    <calculation class="tableau" formula="DATETRUNC('quarter', [FACT_ORDERS_ORDER_DATE])"/>
+
+  </column>
+
+  <column caption="Order Month Number" datatype="integer" name="[DT_Part]" role="dimension" type="nominal">
+
+    <calculation class="tableau" formula="DATEPART('month', [FACT_ORDERS_ORDER_DATE])"/>
+
+  </column>
+
+  <column caption="Safe Total" datatype="real" name="[NULL_Handling]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="ZN([FACT_ORDERS_TOTAL_PRICE]) + IFNULL([FACT_ORDERS_TOTAL_PRICE], 0)"/>
+
+  </column>
+
+  <column caption="Status Label" datatype="string" name="[CASE_Status]" role="dimension" type="nominal">
+
+    <calculation class="tableau" formula="CASE [FACT_ORDERS_ORDER_STATUS] WHEN 'O' THEN 'Open' WHEN 'F' THEN 'Filled' WHEN 'P' THEN 'Pending' ELSE 'Other' END"/>
+
+  </column>
+
+  <column caption="Revenue in Thousands" datatype="real" name="[Nested_Ref]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="[Revenue] / 1000"/>
+
+  </column>
+
+</datasource>
