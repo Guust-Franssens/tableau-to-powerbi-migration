@@ -280,6 +280,16 @@ def _describe_named_connection(conn_el: etree._Element, mode: str) -> dict[str, 
 _CONTAINER_RELATION_TYPES = {"collection", "join", "union"}
 
 
+def _unknown_row_count() -> dict[str, str]:
+    """Return the normal no-volume-yet marker.
+
+    Parse remains offline and fast: it records table-level unknowns rather than opening packaged
+    `.hyper` files. `extract_hyper_data.py --enrich-spec` is the opt-in step that replaces these
+    with `{value, source: "hyper", as_of}` hints after it pays the Hyper-read cost.
+    """
+    return {"source": "unknown"}
+
+
 def _published_ds_name(repo: etree._Element, connection: dict[str, Any]) -> tuple[str | None, str]:
     """Resolve the published datasource's real name, and say which attribute it came from.
 
@@ -398,6 +408,7 @@ def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]
                     "name": name,
                     "source_relation": "custom-sql" if rel_type == "text" else rel_type,
                     "custom_sql": rel.text if rel_type == "text" else None,
+                    "row_count": _unknown_row_count(),
                 }
             )
     return tables
@@ -1592,6 +1603,47 @@ _SPEC_CONTRACT_BAD_CANARIES: tuple[tuple[str, dict[str, Any]], ...] = (
                     "severtiy": "critical",
                 }
             ],
+        },
+    ),
+    (
+        "bare integer row_count",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [
+                {
+                    "id": "ds.sales",
+                    "connection": {"class": "hyper", "mode": "extract"},
+                    "tables": [{"id": "tbl.sales", "name": "Sales", "source_relation": "table", "row_count": 42}],
+                    "fields": [],
+                }
+            ],
+            "worksheets": [],
+            "dashboards": [],
+        },
+    ),
+    (
+        "unknown row_count with value",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [
+                {
+                    "id": "ds.sales",
+                    "connection": {"class": "hyper", "mode": "extract"},
+                    "tables": [
+                        {
+                            "id": "tbl.sales",
+                            "name": "Sales",
+                            "source_relation": "table",
+                            "row_count": {"source": "unknown", "value": 0},
+                        }
+                    ],
+                    "fields": [],
+                }
+            ],
+            "worksheets": [],
+            "dashboards": [],
         },
     ),
 )

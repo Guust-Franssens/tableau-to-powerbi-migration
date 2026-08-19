@@ -22,6 +22,20 @@ def _fixture_spec() -> dict:
     return json.loads(FIXTURE_SPEC.read_text(encoding="utf-8"))
 
 
+def _spec_with_first_table_row_count(row_count: object) -> dict:
+    spec = _fixture_spec()
+    if not spec["data_sources"][0].get("tables"):
+        spec["data_sources"][0]["tables"] = [{"id": "tbl.sales", "name": "Sales", "source_relation": "table"}]
+    spec["data_sources"][0]["tables"][0]["row_count"] = row_count
+    return spec
+
+
+def _validation_errors_for_spec(tmp_path: Path, spec: dict) -> list[str]:
+    path = tmp_path / "migration-spec.json"
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    return collect_spec_validation_errors(path)
+
+
 def _run_cli_with_schema(spec_path: Path, schema_path: Path) -> subprocess.CompletedProcess:
     script = """
 import sys
@@ -40,6 +54,49 @@ raise SystemExit(validate_spec.main([sys.argv[1]]))
         errors="replace",
         check=False,
     )
+
+
+def test_schema_rejects_bare_integer_row_count(tmp_path: Path) -> None:
+    """row_count must carry provenance; a bare number is unsafe because it can be stale or absent."""
+    errors = _validation_errors_for_spec(tmp_path, _spec_with_first_table_row_count(42))
+
+    assert any("row_count" in error and "42" in error for error in errors)
+
+
+def test_schema_rejects_unknown_row_count_with_value(tmp_path: Path) -> None:
+    """Unknown is a normal state, but it must not carry a fake zero/small value."""
+    errors = _validation_errors_for_spec(tmp_path, _spec_with_first_table_row_count({"source": "unknown", "value": 0}))
+
+    assert any("row_count" in error and "not valid under any" in error for error in errors)
+
+
+def test_schema_rejects_unknown_row_count_source(tmp_path: Path) -> None:
+    """Consumers branch on source, so unrecognised provenance must fail validation."""
+    errors = _validation_errors_for_spec(
+        tmp_path,
+        _spec_with_first_table_row_count({"value": 42, "source": "spreadsheet-guess", "as_of": "2026-08-19T10:04:00Z"}),
+    )
+
+    assert any("row_count" in error and "spreadsheet-guess" in error for error in errors)
+
+
+def test_schema_accepts_unknown_row_count_without_value(tmp_path: Path) -> None:
+    """Unknown round-trips explicitly and cannot be confused with zero."""
+    errors = _validation_errors_for_spec(tmp_path, _spec_with_first_table_row_count({"source": "unknown"}))
+
+    assert errors == []
+
+
+def test_existing_spec_without_row_count_still_validates(tmp_path: Path) -> None:
+    """Back-compat: committed specs produced before this field remains valid."""
+    spec = _fixture_spec()
+    for data_source in spec["data_sources"]:
+        for table in data_source.get("tables", []):
+            table.pop("row_count", None)
+
+    errors = _validation_errors_for_spec(tmp_path, spec)
+
+    assert errors == []
 
 
 def test_malformed_appended_limitation_names_the_bad_field(tmp_path: Path) -> None:
@@ -232,8 +289,9 @@ def test_legitimate_appended_limitation_passes_and_is_not_rewritten(tmp_path: Pa
 
 
 def test_every_committed_spec_validates_against_the_schema() -> None:
-    """The example corpus carries real appended limitations and must stay valid."""
+    """The example/migration corpus carries real appended limitations and must stay valid."""
     specs = sorted((REPO_ROOT / "examples").glob("*/migration-spec.json"))
+    specs.extend(sorted((REPO_ROOT / "migrations").glob("*/*/migration-spec.json")))
     assert specs
     invalid = {path: collect_spec_validation_errors(path) for path in specs}
     assert not {path: errors for path, errors in invalid.items() if errors}

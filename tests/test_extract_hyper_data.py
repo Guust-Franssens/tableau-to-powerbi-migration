@@ -110,7 +110,9 @@ def test_default_export_writes_every_relation_across_every_extract(tmp_path: Pat
     assert manifest["ds.big"]["total_row_count"] == 5
     assert manifest["ds.big"]["joins"] == [{"left": "Orders.csv_FACT", "right": "Products.csv_DIM", "type": "inner"}]
     assert len(all_relations) == 3
-    assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"] == 3
+    assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"]["value"] == 3
+    assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"]["source"] == "hyper"
+    assert big_relations["ds.big.Extract.Orders.csv_FACT.csv"]["row_count"]["as_of"].endswith("Z")
     assert _csv_row_count(output_dir / "ds.big.Extract.Orders.csv_FACT.csv") == 3
     assert _csv_row_count(output_dir / "ds.big.Extract.Products.csv_DIM.csv") == 2
     assert _csv_row_count(output_dir / "ds.small.csv") == 4
@@ -165,7 +167,62 @@ def test_same_qualified_table_name_in_distinct_extracts_keeps_both_datasources(t
     assert manifest["ds.annotations"]["relation_count"] == 1
     assert manifest["ds.orders"]["relations"][0]["qualified_name"] == '"Extract"."Extract"'
     assert manifest["ds.annotations"]["relations"][0]["qualified_name"] == '"Extract"."Extract"'
-    assert manifest["ds.orders"]["relations"][0]["row_count"] == 3
-    assert manifest["ds.annotations"]["relations"][0]["row_count"] == 1
+    assert manifest["ds.orders"]["relations"][0]["row_count"]["value"] == 3
+    assert manifest["ds.orders"]["relations"][0]["row_count"]["source"] == "hyper"
+    assert manifest["ds.annotations"]["relations"][0]["row_count"]["value"] == 1
     assert _csv_row_count(output_dir / "ds.orders.csv") == 3
     assert _csv_row_count(output_dir / "ds.annotations.csv") == 1
+
+
+def test_enrich_spec_writes_table_level_hyper_row_counts(tmp_path: Path) -> None:
+    """The post-parse enrichment step persists the count where consumers can use it: tables[]."""
+    orders_hyper = tmp_path / "orders.hyper"
+    _create_hyper(
+        orders_hyper,
+        {"Orders.csv_FACT": (["Order ID", "Sales"], [("o1", "10"), ("o2", "20"), ("o3", "30")])},
+    )
+
+    workbook = tmp_path / "orders.twbx"
+    with zipfile.ZipFile(workbook, "w") as archive:
+        archive.write(orders_hyper, "Data/orders/orders.hyper")
+
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "migration_spec_version": "1.0",
+                "source": {"file_name": "orders.twbx"},
+                "data_sources": [
+                    {
+                        "id": "ds.orders",
+                        "connection": {"class": "hyper", "mode": "extract", "hyper_file": "Data/orders/orders.hyper"},
+                        "tables": [
+                            {
+                                "id": "tbl.orders",
+                                "name": "Orders.csv_FACT",
+                                "source_relation": "table",
+                                "row_count": {"source": "unknown"},
+                            }
+                        ],
+                        "fields": [],
+                    }
+                ],
+                "worksheets": [],
+                "dashboards": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    enriched = tmp_path / "enriched.json"
+    subprocess.run(
+        [sys.executable, str(SCRIPT), str(workbook), str(spec), "--enrich-spec", "--enriched-output", str(enriched)],
+        check=True,
+        cwd=SCRIPT.parents[1],
+    )
+
+    table = json.loads(enriched.read_text(encoding="utf-8"))["data_sources"][0]["tables"][0]
+
+    assert table["row_count"]["value"] == 3
+    assert table["row_count"]["source"] == "hyper"
+    assert table["row_count"]["as_of"].endswith("Z")
