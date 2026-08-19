@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import subprocess
 import sys
@@ -226,3 +227,50 @@ def test_enrich_spec_writes_table_level_hyper_row_counts(tmp_path: Path) -> None
     assert table["row_count"]["value"] == 3
     assert table["row_count"]["source"] == "hyper"
     assert table["row_count"]["as_of"].endswith("Z")
+
+
+def _load_script_module():
+    """Import scripts/extract_hyper_data.py directly; scripts/ is not an importable package."""
+    spec = importlib.util.spec_from_file_location("extract_hyper_data_under_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_duplicate_unqualified_table_names_are_omitted_rather_than_last_write_wins() -> None:
+    """Two schemas holding the same table name must yield no count, not a confidently wrong one."""
+    module = _load_script_module()
+    relations = [
+        {"table": "Orders", "row_count": {"value": 3, "source": "hyper", "as_of": "Z"}},
+        {"table": "Orders", "row_count": {"value": 42104338, "source": "hyper", "as_of": "Z"}},
+        {"table": "Products", "row_count": {"value": 7, "source": "hyper", "as_of": "Z"}},
+    ]
+
+    counts = module._row_count_by_table_name(relations)
+
+    assert "orders" not in counts, "an ambiguous name must be omitted, not resolved by iteration order"
+    assert counts["products"]["value"] == 7
+
+
+def test_a_null_hyper_file_is_reported_not_raised(tmp_path: Path) -> None:
+    """parse_tableau emits hyper_file: null when <extract><connection> carries no dbname."""
+    module = _load_script_module()
+    migration_spec = {
+        "data_sources": [
+            {"id": "ds.orders", "connection": {"class": "hyper", "mode": "extract", "hyper_file": None}, "tables": []}
+        ]
+    }
+
+    manifest = module.extract_data_sources(migration_spec, {}, tmp_path / "out")
+
+    assert "hyper file not found" in manifest["ds.orders"]["error"]
+
+
+def test_schema_scratch_never_lands_beside_the_workbook() -> None:
+    """Extracted .hyper residue under migrations/<tree>/<slug>/source/ is NOT gitignored (issue #125)."""
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "dir=args.workbook.parent" not in source, (
+        "scratch extraction must stay in the OS temp dir: a TemporaryDirectory beside the workbook "
+        "leaves customer .hyper data in an unignored path, and it is not cleaned up if the process is killed"
+    )

@@ -177,8 +177,10 @@ def extract_data_sources(
             connection_info = ds["connection"]
             if connection_info["mode"] != "extract":
                 continue
-            hyper_file_name = Path(connection_info.get("hyper_file", "")).name
-            hyper_path = _resolve_hyper_path(hyper_files, connection_info.get("hyper_file") or "")
+            # Normalise once: the spec schema allows a null hyper_file, and Path(None) raises.
+            hyper_file_value = connection_info.get("hyper_file") or ""
+            hyper_file_name = Path(hyper_file_value).name
+            hyper_path = _resolve_hyper_path(hyper_files, hyper_file_value)
             if hyper_path is None:
                 logger.warning("Hyper file not found for %s: %s", ds["id"], hyper_file_name)
                 manifest[ds["id"]] = {"error": f"hyper file not found: {hyper_file_name}"}
@@ -257,7 +259,7 @@ def _row_count_by_table_name(relations: list[dict[str, Any]]) -> dict[str, dict[
     ambiguous: set[str] = set()
     for relation in relations:
         key = _normalise_table_name(relation.get("table"))
-        if not key or key in ambiguous:
+        if not key or key in ambiguous or key in counts:
             ambiguous.add(key)
             counts.pop(key, None)
             continue
@@ -342,7 +344,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.schema:
-        with tempfile.TemporaryDirectory(prefix="hyper_schema_", dir=args.workbook.parent) as scratch:
+        with tempfile.TemporaryDirectory(prefix="hyper_schema_") as scratch:
             tables = describe_schema(args.workbook, Path(scratch))
         print(json.dumps({"hyper_tables": tables}, indent=2))
         logger.info(
@@ -357,7 +359,7 @@ def main() -> None:
         if args.migration_spec is None:
             parser.error("migration_spec is required with --enrich-spec")
         migration_spec = json.loads(args.migration_spec.read_text(encoding="utf-8"))
-        with tempfile.TemporaryDirectory(prefix="hyper_schema_", dir=args.workbook.parent) as scratch:
+        with tempfile.TemporaryDirectory(prefix="hyper_schema_") as scratch:
             hyper_files = extract_hyper_files(args.workbook, Path(scratch))
             enriched, updated = enrich_spec_with_hyper_counts(migration_spec, hyper_files)
         target = args.enriched_output or args.migration_spec
