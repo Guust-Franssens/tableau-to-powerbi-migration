@@ -1,0 +1,140 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- build 20262.26.0804.1806                               --><datasource xmlns:user="http://www.tableausoftware.com/xml/user" formatted-name="Meridian Trips (Live Databricks)" inline="true" source-platform="win" version="18.1" xml:base="https://10ax.online.tableau.com">
+
+  <document-format-change-manifest>
+
+    <DatabricksCatalog/>
+
+  </document-format-change-manifest>
+
+  <repository-location id="MeridianTripsLiveDatabricks" path="/t/fabric-migration-lab/datasources" revision="5.0" site="fabric-migration-lab"/>
+
+  <connection class="federated">
+
+    <named-connections>
+
+      <named-connection caption="adb-000000000000000.0.azuredatabricks.net" name="databricks.meridiantrips">
+
+        <connection authentication="auth-client-creds" authentication-type="" class="databricks" dbname="samples" odbc-connect-string-extras="" one-time-sql="" server="adb-000000000000000.0.azuredatabricks.net" username="00000000-0000-0000-0000-000000000000" usesPrivateConnect="" v-auth-scope="" v-http-path="/sql/1.0/warehouses/0000000000000000" v-oidc-discovery-endpoint="" v-query-tags="" workgroup-auth-mode=""/>
+
+      </named-connection>
+
+    </named-connections>
+
+    <relation connection="databricks.meridiantrips" name="Custom SQL Query" type="text">SELECT tpep_pickup_datetime, trip_distance, fare_amount, pickup_zip, dropoff_zip FROM nyctaxi.trips</relation><cols>
+
+      <map key="[tpep_pickup_datetime]" value="[trips].[tpep_pickup_datetime]"/>
+
+      <map key="[trip_distance]" value="[trips].[trip_distance]"/>
+
+      <map key="[fare_amount]" value="[trips].[fare_amount]"/>
+
+      <map key="[pickup_zip]" value="[trips].[pickup_zip]"/>
+
+      <map key="[dropoff_zip]" value="[trips].[dropoff_zip]"/>
+
+    </cols>
+
+    <metadata-records>
+
+      <metadata-record class="column">
+
+        <remote-name>tpep_pickup_datetime</remote-name>
+
+        <local-name>[tpep_pickup_datetime]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>tpep_pickup_datetime</remote-alias>
+
+        <local-type>datetime</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>trip_distance</remote-name>
+
+        <local-name>[trip_distance]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>trip_distance</remote-alias>
+
+        <local-type>real</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>fare_amount</remote-name>
+
+        <local-name>[fare_amount]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>fare_amount</remote-alias>
+
+        <local-type>real</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>pickup_zip</remote-name>
+
+        <local-name>[pickup_zip]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>pickup_zip</remote-alias>
+
+        <local-type>integer</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+      <metadata-record class="column">
+
+        <remote-name>dropoff_zip</remote-name>
+
+        <local-name>[dropoff_zip]</local-name>
+
+        <parent-name>[Custom SQL Query]</parent-name>
+
+        <remote-alias>dropoff_zip</remote-alias>
+
+        <local-type>integer</local-type>
+
+        <contains-null>true</contains-null>
+
+      </metadata-record>
+
+    </metadata-records>
+
+  </connection>
+
+  <column caption="Pickup Time" datatype="datetime" name="[tpep_pickup_datetime]" role="dimension" type="ordinal"/>
+
+  <column caption="Trip Distance" datatype="real" name="[trip_distance]" role="measure" type="quantitative"/>
+
+  <column caption="Fare Amount" datatype="real" name="[fare_amount]" role="measure" type="quantitative"/>
+
+  <column caption="Pickup Zip" datatype="integer" name="[pickup_zip]" role="dimension" type="ordinal"/>
+
+  <column caption="Dropoff Zip" datatype="integer" name="[dropoff_zip]" role="dimension" type="ordinal"/>
+
+  <column caption="Fare per Mile" datatype="real" name="[Fare_per_Mile]" role="measure" type="quantitative">
+
+    <calculation class="tableau" formula="SUM([fare_amount]) / SUM([trip_distance])"/>
+
+  </column>
+
+</datasource>
