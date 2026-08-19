@@ -167,5 +167,12 @@ _probe-lab/
 tests/fixtures/live/
 
 
-# Tableau oracle capture - data-bearing (Tableau's computed values + rendered PNGs)
-_oracle/
+# Tableau oracle capture - data-bearing (Tableau's computed values + rendered PNGs of a customer's
+# dashboards). GLOB, not an exact name, for the same reason as `_harvest*` and `_sweep*` above
+# (issue #125): a second run under `_oracle-2`/`_oracle-2026-08-19` was NOT matched by the exact
+# `_oracle/` rule and would have been staged on this PUBLIC repo. Measured 2026-08-19:
+# `git check-ignore _oracle-2/images/customer.png` exited 1 (not ignored) while `_oracle/...`
+# exited 0. That second run is not hypothetical - `capture_tableau_oracle.py` rewrites
+# `oracle-manifest.json` wholesale per invocation, and `docs/reference-capture.md` tells operators
+# to archive the manifest between batch invocations, which makes `_oracle-2` the obvious next step.
+/_oracle*/
