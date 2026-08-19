@@ -211,6 +211,25 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
     on a 2026-08-13 bundle it reads `"../<Name>.SemanticModel"` — ⚠️ engine-version dependent, and
     unresolvable either way).
 
+- ⚠️ **A "shipped" deliverable can be structurally present and functionally EMPTY — check content, not
+  existence.** Reported 2026-08-19 from a 46-asset estate, found by direct verification rather than by
+  trusting a prior "done" status. A report folder that a sign-off had already passed contained only
+  Desktop-local settings: no real pages, no visuals, no model — the copy step was silently skipped or
+  partially interrupted, and every folder that was *supposed* to exist did exist. This is a different
+  failure from the `byPath` case above: there the reference is broken and Desktop tells you; here the
+  reference is fine and there is simply nothing behind it.
+  - Assert the shipped `<Name>.Report/definition/pages/` enumerates real pages **with visuals**, and
+    the shipped `<Name>.SemanticModel/definition/tables/` holds real tables — not merely that the
+    folders exist. A folder count is not a content check.
+  - **Trace the specific files you verified through to the shipped path.** Same estate, separate case:
+    a semantic model shipped with an unresolved stub still in it because the *fixed* working copy was
+    never the copy that got promoted. Verifying a fix in `<bundle>/pbip/` proves nothing about
+    `migrations/**/fabric/` — one direction, three locations, and the last hop is the one nobody
+    re-checks. Never assume a fix in one location propagated to another; re-run the check against the
+    deliverable itself.
+  - Corollary: a `✅ shipped` from an earlier session is a **claim**, not evidence. Re-verify it against
+    the artifact before building on it.
+
 - **Visual-level filter = a top-level `filterConfig` key in `visual.json` (sibling to `visual`, NOT
   nested under it)**, `type:"Categorical"`, `Version:2` `In`-condition. Nesting it under `visual` is
   silently ignored. **Do not use this as a slicer default** — slicer pre-selection is

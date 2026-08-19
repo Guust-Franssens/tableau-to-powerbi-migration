@@ -212,6 +212,16 @@ Re-localizing, reopening, refreshing and saving again produced a cache that **di
 `Stop-Process -Force` + reopen (`PREFLIGHT: DATA_OK`, no refresh). So "refresh last, after sanitize"
 does not rescue the cache: Desktop keys the cache to the definition it was built from.
 
+> ⚠️ **Do NOT gate on `cache.abf` mtime ≥ newest definition-file mtime.** Proposed independently on
+> 2026-08-19 by a field team hitting the post-ship-edit case above, and it is a **false-green
+> generator**: the measurement in the paragraph above is precisely a cache that was 15 s *newer* than
+> the definition and still opened `NO_DATA`. A timestamp comparison passes exactly the build it needs
+> to catch. The concern behind it is real — a post-ship polish edit (a caption, a reference line, a
+> textbox resize) silently invalidates an already-verified refresh — but the only sound gate is
+> behavioural: **after any TMDL rewrite, re-run refresh + persist, then prove it with a cold reopen**
+> (`Stop-Process -Id <literal pid> -Force`, reopen, `PREFLIGHT: DATA_OK` with no refresh). Compare
+> behaviour, never timestamps.
+
 > **Hand-off rule:** leave the model **localized + refreshed**. Persisting is the default and safe —
 > the compatibility alignment above keeps the cache loadable — but a persisted cache only *survives*
 > a hand-off when nothing rewrites the TMDL afterwards, and the committer still has to run the
