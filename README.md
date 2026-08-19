@@ -218,6 +218,40 @@ and `Guust-Franssens/powerbi-playbook`, enable `powerbi-authoring` and
 > this setting — Desktop ships as an MSIX package and stores it outside the registry — so it stays a
 > documented manual step rather than an automated check.
 
+> ### ⚠️ Second one-time setting, if you migrate custom SQL: allow native database queries
+>
+> **Options → Global → Security → uncheck "Require user approval for new native database queries"**
+>
+> A Tableau **custom SQL** relation has no table to navigate to, so it migrates to a
+> `Value.NativeQuery(...)` partition. Desktop gates those behind *"Permission is required to run this
+> native database query"* — a modal, so it stalls a headless refresh exactly like the Privacy dialog
+> above. One estate hit ~35 such partitions across 72% of its assets, which is 35 potential stalls
+> rather than one.
+>
+> Four things decide whether this affects you
+> ([Microsoft Learn](https://learn.microsoft.com/en-us/power-query/native-database-query)):
+>
+> - **It is a Desktop-only prompt.** The Service, a gateway refresh and XMLA refresh never show it. If
+>   a model's refresh path ends in the Service, you can ignore this entirely.
+> - **Approval is keyed to the exact query TEXT**, not the data source or the file — so regenerating a
+>   model with changed SQL re-arms the prompt, even for whitespace.
+> - **Approval does not travel with the artifact.** It is user- and machine-scoped, so a fresh build
+>   agent, and every analyst you hand a deliverable to, starts unapproved.
+> - **You cannot dodge it in M.** `[EnableFolding=true]` does not suppress it (Microsoft's own folding
+>   doc shows the prompt appearing *with* that option set), no `Value.NativeQuery` option suppresses
+>   it, and `Sql.Database(…, [Query=…])` prompts identically.
+>
+> ⚠️ **Set it in the UI, not the registry.** The widely-repeated `DisableNativeDbQueryPrompt` registry
+> value is community folklore rather than documented, and on an **MSIX/Store** Desktop it does nothing
+> at all: measured 2026-08-19 on 2.157.828.0, all three candidate keys are absent because MSIX
+> virtualises registry writes into `%LOCALAPPDATA%\Packages\Microsoft.MicrosoftPowerBIDesktop_*\Settings\`
+> — the same reason preflight cannot read the Privacy setting above.
+>
+> Unlike Privacy Levels, this one is a genuine security feature: it exists so a native query written by
+> someone else cannot run under **your** database credentials. Turning it off is reasonable on a build
+> agent whose credentials are read-only service accounts; think harder before doing it on an analyst's
+> laptop.
+
 **Clone.** The 16 worked examples under `examples/` are ~91% of the repo's files. If you're mainly
 here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
 the example blobs:
