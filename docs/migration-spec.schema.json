@@ -294,16 +294,20 @@
   },
   "definitions": {
     "rowCountHint": {
-      "description": "Provenance-tagged row-count hint. Unknown deliberately has no value so consumers cannot mistake absence for zero/small.",
+      "description": "Provenance-tagged row-count hint. Unknown deliberately has no value so consumers cannot mistake absence for zero/small. observed_at is when WE READ the count, not when it became true - the underlying extract may be far older, and nothing here records its refresh time.",
       "oneOf": [
         {
           "type": "object",
-          "required": ["value", "source", "as_of"],
+          "required": ["value", "source", "observed_at"],
           "additionalProperties": false,
           "properties": {
             "value": { "type": "integer", "minimum": 0 },
             "source": { "type": "string", "enum": ["hyper", "live"] },
-            "as_of": { "type": "string", "format": "date-time" }
+            "observed_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC 3339 timestamp of when this count was READ. format:date-time is annotation-only under jsonschema without the format-nongpl extra, so parse_tableau._schema_contract_errors enforces it with datetime.fromisoformat instead."
+            }
           }
         },
         {

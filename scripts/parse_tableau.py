@@ -285,7 +285,7 @@ def _unknown_row_count() -> dict[str, str]:
 
     Parse remains offline and fast: it records table-level unknowns rather than opening packaged
     `.hyper` files. `extract_hyper_data.py --enrich-spec` is the opt-in step that replaces these
-    with `{value, source: "hyper", as_of}` hints after it pays the Hyper-read cost.
+    with `{value, source: "hyper", observed_at}` hints after it pays the Hyper-read cost.
     """
     return {"source": "unknown"}
 
@@ -1669,6 +1669,40 @@ def _unavailable_schema_result(message: str, require_jsonschema: bool, cause: Ex
     return []
 
 
+def _observed_at_errors(spec: dict[str, Any]) -> list[str]:
+    """Return errors for row_count.observed_at values jsonschema's format:date-time cannot catch.
+
+    `"format": "date-time"` is ANNOTATION-ONLY unless jsonschema is installed with the
+    `format-nongpl` extra (which pulls `rfc3339-validator`). Measured in this venv: FORMAT_CHECKER
+    enforces only date/email/idn-email/idn-hostname/ipv4/ipv6/regex, so `observed_at: "yesterday"`,
+    `""` and `"2026-13-45T99:99:99Z"` are all ACCEPTED even with `format_checker=` passed. Adding
+    that kwarg would look like a fix, pass every gate, and change nothing.
+
+    `datetime.fromisoformat` needs no dependency, cannot silently degrade, and is strictly stronger
+    than a regex (it rejects month 13 and 30 February, which a shape pattern accepts). It requires
+    Python 3.11+ to accept a trailing `Z`, which `requires-python` already guarantees.
+    """
+    errors = []
+    for ds_index, data_source in enumerate(spec.get("data_sources") or []):
+        for tbl_index, table in enumerate((data_source or {}).get("tables") or []):
+            row_count = (table or {}).get("row_count")
+            if not isinstance(row_count, dict) or "observed_at" not in row_count:
+                continue
+            location = f"$.data_sources[{ds_index}].tables[{tbl_index}].row_count.observed_at"
+            raw = row_count["observed_at"]
+            if not isinstance(raw, str):
+                errors.append(f"{location}: expected an RFC 3339 string, got {type(raw).__name__}")
+                continue
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except ValueError as exc:
+                errors.append(f"{location}: {raw!r} is not a valid RFC 3339 timestamp ({exc})")
+                continue
+            if parsed.tzinfo is None:
+                errors.append(f"{location}: {raw!r} has no UTC offset; a bare local time is ambiguous")
+    return errors
+
+
 def collect_spec_validation_errors(
     spec: dict[str, Any], schema_path: Path, *, require_jsonschema: bool = False
 ) -> list[str]:
@@ -1696,7 +1730,7 @@ def collect_spec_validation_errors(
         context = _limitation_context(spec, path_parts)
         expectation = _expectation(error)
         errors.append(f"{location}{context}: {error.message};{expectation}")
-    return errors
+    return errors + _observed_at_errors(spec)
 
 
 def validate_spec(spec: dict[str, Any], schema_path: Path) -> None:

@@ -73,9 +73,9 @@ def _utc_now_z() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _hyper_row_count(value: object, as_of: str) -> dict[str, Any]:
+def _hyper_row_count(value: object, observed_at: str) -> dict[str, Any]:
     """Wrap a Hyper count with provenance so stale extract counts are never mistaken for live facts."""
-    return {"value": int(value), "source": "hyper", "as_of": as_of}
+    return {"value": int(value), "source": "hyper", "observed_at": observed_at}
 
 
 def _copy_sql(table: object, columns: list[str], csv_path: Path) -> str:
@@ -86,10 +86,10 @@ def _copy_sql(table: object, columns: list[str], csv_path: Path) -> str:
 
 
 def export_tables_to_csv(
-    connection: Connection, output_dir: Path, as_of: str | None = None
+    connection: Connection, output_dir: Path, observed_at: str | None = None
 ) -> dict[str, dict[str, Any]]:
     """Export every table in one Hyper file to CSV, keyed by qualified table name."""
-    as_of = as_of or _utc_now_z()
+    observed_at = observed_at or _utc_now_z()
     results: dict[str, dict[str, Any]] = {}
     output_dir.mkdir(parents=True, exist_ok=True)
     for schema in connection.catalog.get_schema_names():
@@ -102,7 +102,9 @@ def export_tables_to_csv(
             results[str(table)] = {
                 "csv_path": str(csv_path.resolve()),
                 "columns": columns,
-                "row_count": _hyper_row_count(connection.execute_scalar_query(f"SELECT COUNT(*) FROM {table}"), as_of),
+                "row_count": _hyper_row_count(
+                    connection.execute_scalar_query(f"SELECT COUNT(*) FROM {table}"), observed_at
+                ),
             }
     if not results:
         raise ValueError("No tables found in any schema")
@@ -148,12 +150,12 @@ def _export_hyper_file(
     output_dir: Path,
     ds_id: str,
     hyper: HyperProcess,
-    as_of: str,
+    observed_at: str,
 ) -> dict[str, dict[str, Any]]:
     """Export one data source's Hyper file without deduping across other extracts."""
     with tempfile.TemporaryDirectory(prefix="hyper_csv_", dir=output_dir) as stage:
         with Connection(endpoint=hyper.endpoint, database=str(hyper_path)) as connection:
-            staged = export_tables_to_csv(connection, Path(stage), as_of)
+            staged = export_tables_to_csv(connection, Path(stage), observed_at)
         exported: dict[str, dict[str, Any]] = {}
         for qualified_name, info in staged.items():
             final_csv = _relation_csv_path(output_dir, ds_id, qualified_name, len(staged))
@@ -170,7 +172,7 @@ def extract_data_sources(
     """Export every relation in every extract-backed data source and return a manifest by data source."""
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {}
-    as_of = _utc_now_z()
+    observed_at = _utc_now_z()
 
     with HyperProcess(telemetry=Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
         for ds in migration_spec["data_sources"]:
@@ -186,7 +188,7 @@ def extract_data_sources(
                 manifest[ds["id"]] = {"error": f"hyper file not found: {hyper_file_name}"}
                 continue
 
-            exported = _export_hyper_file(hyper_path, output_dir, ds["id"], hyper, as_of)
+            exported = _export_hyper_file(hyper_path, output_dir, ds["id"], hyper, observed_at)
             relations = [_manifest_relation(name, info) for name, info in sorted(exported.items())]
             _assert_no_silent_loss(ds["id"], len(exported), relations)
             manifest[ds["id"]] = {
@@ -206,7 +208,7 @@ def extract_data_sources(
     return manifest
 
 
-def _describe_hyper_file(connection: Connection, hyper_file: str, as_of: str) -> list[dict[str, Any]]:
+def _describe_hyper_file(connection: Connection, hyper_file: str, observed_at: str) -> list[dict[str, Any]]:
     """Describe every table in one open Hyper file with provenance-tagged row counts."""
     tables: list[dict[str, Any]] = []
     for schema in connection.catalog.get_schema_names():
@@ -219,7 +221,7 @@ def _describe_hyper_file(connection: Connection, hyper_file: str, as_of: str) ->
                     "schema": str(schema),
                     "table": str(table.name),
                     "qualified_name": str(table),
-                    "row_count": _hyper_row_count(rows, as_of),
+                    "row_count": _hyper_row_count(rows, observed_at),
                     "columns": [
                         {"name": c.name.unescaped, "type": str(c.type), "nullable": str(c.nullability)}
                         for c in definition.columns
@@ -239,11 +241,11 @@ def describe_schema(workbook_path: Path, hyper_dir: Path) -> list[dict[str, Any]
     """
     tables: list[dict[str, Any]] = []
     hyper_files = extract_hyper_files(workbook_path, hyper_dir)
-    as_of = _utc_now_z()
+    observed_at = _utc_now_z()
     with HyperProcess(telemetry=Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
         for name, path in sorted(hyper_files.items()):
             with Connection(endpoint=hyper.endpoint, database=path) as connection:
-                tables.extend(_describe_hyper_file(connection, name, as_of))
+                tables.extend(_describe_hyper_file(connection, name, observed_at))
     return tables
 
 
@@ -298,7 +300,7 @@ def enrich_spec_with_hyper_counts(
     """
     enriched = json.loads(json.dumps(migration_spec))
     updated = 0
-    as_of = _utc_now_z()
+    observed_at = _utc_now_z()
     with HyperProcess(telemetry=Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
         for ds in enriched.get("data_sources", []):
             connection_info = ds.get("connection") or {}
@@ -309,7 +311,7 @@ def enrich_spec_with_hyper_counts(
                 logger.warning("Hyper file not found for %s: %s", ds.get("id"), connection_info.get("hyper_file"))
                 continue
             with Connection(endpoint=hyper.endpoint, database=str(hyper_path)) as connection:
-                relations = _describe_hyper_file(connection, connection_info.get("hyper_file") or "", as_of)
+                relations = _describe_hyper_file(connection, connection_info.get("hyper_file") or "", observed_at)
             updated += _apply_hyper_counts_to_tables(ds, relations)
     return enriched, updated
 

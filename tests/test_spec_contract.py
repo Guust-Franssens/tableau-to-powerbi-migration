@@ -74,7 +74,9 @@ def test_schema_rejects_unknown_row_count_source(tmp_path: Path) -> None:
     """Consumers branch on source, so unrecognised provenance must fail validation."""
     errors = _validation_errors_for_spec(
         tmp_path,
-        _spec_with_first_table_row_count({"value": 42, "source": "spreadsheet-guess", "as_of": "2026-08-19T10:04:00Z"}),
+        _spec_with_first_table_row_count(
+            {"value": 42, "source": "spreadsheet-guess", "observed_at": "2026-08-19T10:04:00Z"}
+        ),
     )
 
     assert any("row_count" in error and "spreadsheet-guess" in error for error in errors)
@@ -97,6 +99,44 @@ def test_existing_spec_without_row_count_still_validates(tmp_path: Path) -> None
     errors = _validation_errors_for_spec(tmp_path, spec)
 
     assert errors == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "yesterday",
+        "",
+        "2026-13-45T99:99:99Z",
+        "2026-02-30T00:00:00Z",
+        "2026-08-19",
+        "2026-08-19T10:04:00",
+    ],
+)
+def test_schema_rejects_an_observed_at_that_is_not_a_real_utc_timestamp(tmp_path: Path, bad: str) -> None:
+    """jsonschema's format:date-time is annotation-only here, so a stdlib check does the work.
+
+    Measured in this venv: Draft7Validator.FORMAT_CHECKER enforces only
+    date/email/idn-email/idn-hostname/ipv4/ipv6/regex - `date-time` is absent because
+    `rfc3339-validator` is not installed (pyproject declares `jsonschema>=4.22` with no
+    `format-nongpl` extra). Passing `format_checker=` would accept every value below while looking
+    like a fix. The last two cases are why a shape regex is not enough either: a date-only value and
+    a naive local time are both well-formed and both ambiguous.
+    """
+    errors = _validation_errors_for_spec(
+        tmp_path, _spec_with_first_table_row_count({"value": 42, "source": "hyper", "observed_at": bad})
+    )
+
+    assert any("observed_at" in error for error in errors), f"{bad!r} was accepted"
+
+
+def test_schema_accepts_a_real_rfc3339_observed_at(tmp_path: Path) -> None:
+    """Both a Z suffix and an explicit offset are valid; the stdlib check must not over-reject."""
+    for good in ("2026-08-19T10:04:00Z", "2026-08-19T10:04:00+02:00", "2026-08-19T10:04:00.123456Z"):
+        errors = _validation_errors_for_spec(
+            tmp_path, _spec_with_first_table_row_count({"value": 42, "source": "hyper", "observed_at": good})
+        )
+
+        assert errors == [], f"{good!r} was rejected: {errors}"
 
 
 def test_malformed_appended_limitation_names_the_bad_field(tmp_path: Path) -> None:
