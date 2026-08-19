@@ -159,6 +159,39 @@ stay byte-identical.
 > `probe_desktop_query._child_port` resolved the same pid fine. That measures a narrow
 > identity-resolution gap, not Store bridge compatibility.
 
+> ⚠️ **A `Value.NativeQuery` partition can block an unattended refresh on its own approval modal —
+> and this is now a live concern, because migrated custom-SQL sources emit exactly that shape.**
+> Power BI Desktop gates native database queries behind *"Permission is required to run this native
+> database query"*, controlled by **Options → Global → Security → "Require user approval for new
+> native database queries"**
+> ([Microsoft Learn](https://learn.microsoft.com/en-us/power-query/native-database-query)).
+> Researched 2026-08-19; the parts that decide how you handle it:
+>
+> | fact | consequence |
+> |---|---|
+> | The prompt is a **Desktop / mashup-engine** construct. The Service, a gateway refresh and XMLA-triggered refresh never show it. | If the deliverable refreshes in the Service, there is no problem to solve. It is *our* Desktop-bridge pipeline that is exposed. |
+> | Approval is keyed to the **exact query text**, not the data source or the file. | A migration that regenerates M re-arms the prompt every time the SQL changes by so much as whitespace. |
+> | Approval state is **user- and machine-scoped** and is **not** stored in the PBIP/PBIX. | It does not travel with the artifact. A fresh build agent, or the customer's analyst opening the deliverable, starts unapproved. |
+> | `[EnableFolding=true]` does **not** suppress it — the Learn folding page shows the prompt appearing *with* that option set. | Do not expect the emitted options record to help. |
+> | `Sql.Database(server, db, [Query="..."])` triggers the **same** prompt. | Switching connector shape is not an escape. |
+> | No option in `Value.NativeQuery`'s options record suppresses it. | The only supported off switch is the global setting. |
+>
+> ⚠️ **The registry recipe you will find online (`DisableNativeDbQueryPrompt = 1` under
+> `HKCU\SOFTWARE\Microsoft\Microsoft Power BI Desktop`) is community folklore, not Microsoft-documented
+> — and it does NOT apply to an MSIX/Store Desktop.** Measured here 2026-08-19 on Desktop
+> 2.157.828.0 installed from the Store: all three candidate keys (`HKCU\SOFTWARE\Microsoft\...`,
+> `HKLM\SOFTWARE\Microsoft\...`, `HKCU\SOFTWARE\Policies\Microsoft\...`) are **absent**, because MSIX
+> virtualises registry writes into
+> `%LOCALAPPDATA%\Packages\Microsoft.MicrosoftPowerBIDesktop_8wekyb3d8bbwe\Settings\settings.dat`.
+> So on a Store install, pushing that key does nothing at all and gives you a false sense of having
+> fixed it. Verify by observation on **your** install: `reg export` the key, toggle the option in the
+> Options UI, export again, diff. On MSIX, set it through the UI once per agent profile.
+>
+> **If the probe or a refresh stalls on a custom-SQL source, check for this modal before concluding
+> anything about credentials.** `blocking_dialog_candidates()` will report it as
+> `BLOCKED_BY_DIALOG` rather than a false `NO_CREDENTIAL`, which is honest but not yet specific —
+> capture the modal's exact title when you first hit one so it can be classified by name.
+
 Read-only preflight (proves credentials + source reachability without changing anything):
 
 ```
