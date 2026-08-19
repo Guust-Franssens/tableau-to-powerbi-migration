@@ -4,6 +4,11 @@ The handover fixture shape is copied from `_bundle-208/handover/Admin_Insights_S
 `workbook.model_translation_handoff.needs_review[]` entries carry `category`, `fallback_reason`,
 `has_suggestion`, `name`, and `role`; column entries in that bundle do not always carry
 `target_table`, so the checker must recover the table from TMDL.
+
+The same entries reach the checker two ways, and the tests cover both because the difference is
+the whole of the phase-2/phase-3 defect: `report.json` (`workbooks[].model_translation_handoff`) is
+the PRIMARY source and is on disk when the gate runs; the `handover/*.json` slices are written one
+phase later and are a fallback for a bundle with no usable `report.json`.
 """
 
 from __future__ import annotations
@@ -290,6 +295,149 @@ def test_handover_entry_without_blank_body_is_not_a_placeholder(tmp_path: Path) 
     _write_model(bundle, "Workbook", "Sales", _column_table(expr="1"))
 
     assert cbp.scan(bundle)["status"] == cbp.STATUS_OK
+
+
+def _write_report_json(bundle: Path, workbooks: list[dict]) -> None:
+    """The engine's own report.json - the primary handover source, present from phase 2."""
+    payload = {"tool": "tableau-fabric-skills", "generated_at": "2026-08-19T00:00:00Z", "workbooks": workbooks}
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _refused_calc(name: str = "Flag", table: str | None = "Sales", role: str = "dimension") -> dict:
+    return {
+        "category": "type_or_shape_mismatch",
+        "fallback_reason": "IFNULL arguments return inconsistent types",
+        "has_suggestion": False,
+        "name": name,
+        "role": role,
+        "target_table": table,
+    }
+
+
+def test_a_fresh_bundle_correlates_from_report_json_before_any_handover_slice_exists(tmp_path: Path) -> None:
+    """`handover/` is written in phase 3, AFTER this gate runs in phase 2 - it is not engine output.
+
+    Reading the slices made the check a no-op on every first run: the folder does not exist, the
+    glob returns nothing, and the bundle is declared clean. report.json is where `slice_handovers`
+    gets the same entries from, and it is already on disk.
+    """
+    bundle = tmp_path / "bundle"
+    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": {"requests": [_refused_calc()]}}])
+    _write_model(bundle, "Workbook", "Sales", _column_table())
+    _write_filter_visual(bundle, "Workbook")
+    assert not (bundle / "handover").exists(), "the fixture is not a fresh run if the slices already exist"
+
+    report = cbp.scan(bundle)
+
+    assert report["status"] == cbp.STATUS_REFERENCED
+    assert report["placeholders_found"] == 1
+    assert report["findings"][0]["handover"]["handover_path"] == "report.json"
+
+
+def test_the_pbip_folder_names_the_owner_when_it_differs_from_the_workbook_name(tmp_path: Path) -> None:
+    """`pbip_folder` is the engine's own answer to "which folder did this workbook build".
+
+    Measured in `_bundle-208`: it is `pbip/<dir>/<name>.pbip` and its `<dir>` is what the TMDL side
+    of the correlation is keyed on. Deriving the owner from the display name instead would miss any
+    workbook whose folder was sanitised, and miss it SILENTLY - as a clean bundle.
+    """
+    bundle = tmp_path / "bundle"
+    _write_report_json(
+        bundle,
+        [
+            {
+                "name": "Workbook (Live Snowflake)",
+                "pbip_folder": "pbip/Workbook_Live_Snowflake_/Workbook_Live_Snowflake_.pbip",
+                "model_translation_handoff": {"requests": [_refused_calc()]},
+            }
+        ],
+    )
+    _write_model(bundle, "Workbook_Live_Snowflake_", "Sales", _column_table())
+
+    report = cbp.scan(bundle)
+
+    assert report["placeholders_found"] == 1
+    assert report["findings"][0]["owner"] == "Workbook_Live_Snowflake_"
+
+
+def test_a_previous_estates_slices_cannot_outlive_the_report_json_that_replaced_them(tmp_path: Path) -> None:
+    """Reusing `--output` leaves the last estate's `handover/` in place; it is not evidence about this one.
+
+    The current report.json lists workbooks and no refused calcs, which is an authoritative "there
+    are none". Topping that up from stale slices correlates the PREVIOUS estate's names against the
+    CURRENT run's TMDL, which is how a fixed calc keeps being reported as broken.
+    """
+    bundle = _bundle(tmp_path)
+    _write_handover(bundle, "Workbook", [_refused_calc()])
+    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": {"requests": []}}])
+    _write_model(bundle, "Workbook", "Sales", _column_table())
+    _write_filter_visual(bundle, "Workbook")
+
+    report = cbp.scan(bundle)
+
+    assert report["status"] == cbp.STATUS_OK
+    assert report["placeholders_found"] == 0
+
+
+def test_a_bundle_without_a_usable_report_json_still_reads_the_handover_slices(tmp_path: Path) -> None:
+    """Backward compatibility: a bundle produced before the coordinator wrote a report.json."""
+    bundle = _bundle(tmp_path)
+    _write_handover(bundle, "Workbook", [_refused_calc()])
+    _write_model(bundle, "Workbook", "Sales", _column_table())
+
+    report = cbp.scan(bundle)
+
+    assert report["status"] == cbp.STATUS_UNREFERENCED
+    assert report["findings"][0]["handover"]["handover_path"] == "handover/Workbook.json"
+
+
+def test_a_truncated_handover_slice_is_counted_rather_than_raised(tmp_path: Path) -> None:
+    """A corrupt input is evidence, not an exception.
+
+    The two sibling readers in this module (`_page_names`, `_report_references`) already guard their
+    reads. This one did not, and it is called from a coordinator that runs three other gates after
+    it: the raise meant none of them printed a verdict, and the process exited 1 - which that script
+    reads as "the engine itself failed".
+    """
+    bundle = _bundle(tmp_path)
+    _write_handover(bundle, "Workbook", [_refused_calc()])
+    (bundle / "handover" / "Truncated.json").write_text('{"workbook": {', encoding="utf-8")
+    _write_model(bundle, "Workbook", "Sales", _column_table())
+
+    report = cbp.scan(bundle)
+
+    assert report["placeholders_found"] == 1, "the readable slice's evidence was lost with the corrupt one"
+    assert report["handover_unreadable"] == 1
+    assert report["handover_unreadable_paths"] == ["handover/Truncated.json"]
+    assert "Truncated.json" in cbp.render(report), "an uncorrelatable input must be visible in the verdict"
+
+
+def test_an_unreadable_report_json_degrades_to_the_slices_and_says_so(tmp_path: Path) -> None:
+    """The primary source failing must not be silent: it is why the fallback is being trusted."""
+    bundle = _bundle(tmp_path)
+    (bundle / "report.json").write_text('{"workbooks": [', encoding="utf-8")
+    _write_handover(bundle, "Workbook", [_refused_calc()])
+    _write_model(bundle, "Workbook", "Sales", _column_table())
+
+    report = cbp.scan(bundle)
+
+    assert report["placeholders_found"] == 1
+    assert report["handover_unreadable_paths"] == ["report.json"]
+    assert "report.json" in cbp.render(report)
+
+
+def test_an_unreadable_input_alone_does_not_invent_a_placeholder(tmp_path: Path) -> None:
+    """The false-positive control for the guard: nothing correlated, so the status is still OK."""
+    bundle = _bundle(tmp_path)
+    (bundle / "handover" / "Truncated.json").write_text('{"workbook": {', encoding="utf-8")
+    _write_model(bundle, "Workbook", "Sales", _column_table())
+
+    report = cbp.scan(bundle)
+
+    assert report["status"] == cbp.STATUS_OK
+    assert report["handover_unreadable"] == 1
+    assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_OK
 
 
 def test_cli_exit_codes_distinguish_clean_gap_and_material_dependency(tmp_path: Path) -> None:

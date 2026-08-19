@@ -54,7 +54,10 @@ things a conversation cannot be trusted to remember every time:
    calc and why translation failed, and the TMDL carries a BLANK()-only column or measure. If PBIR
    filters or visual field bindings reference it, the page can render empty while every structural
    gate passes. `check_blank_placeholders.py` correlates handover + TMDL + PBIR and blocks only the
-   report-referenced cases, wired in below as `EXIT_BLANK_PLACEHOLDER`.
+   report-referenced cases, wired in below as `EXIT_BLANK_PLACEHOLDER`. It reads the handover half
+   from `report.json`, NOT from `<bundle>/handover/`: those slices are written by `slice_handovers`
+   in phase 3, one phase AFTER this gate runs, so globbing them made the check a no-op on every
+   fresh run and, on a re-used `--output` folder, correlated the previous estate's entries.
 
 Deliberately NOT here
 ---------------------
@@ -447,6 +450,12 @@ def check_blank_placeholders(out_dir: Path) -> dict:
 
     Severity is intentionally split: unreferenced placeholders are a visible migration gap, but not
     an estate-level refusal; report-referenced placeholders block because they affect rendered pages.
+
+    Runs HERE, in phase 2, and therefore reads `report.json` rather than `<bundle>/handover/` -
+    `slice_handovers` does not write those slices until phase 3. Moving this call after the slicing
+    would work too and is the wrong fix: it reorders the coordinator's phases for one gate's
+    convenience, and the slices left behind by a previous run into the same ``--output`` folder are
+    stale evidence about THIS one.
     """
     report = scan_blank_placeholders(out_dir)
     (out_dir / BLANK_PLACEHOLDER_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
