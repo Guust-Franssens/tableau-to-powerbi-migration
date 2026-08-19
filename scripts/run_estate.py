@@ -50,6 +50,12 @@ things a conversation cannot be trusted to remember every time:
    the default conversion path can see it. `check_pbir_valid.py` delegates to the first-party
    validator and makes its verdict bind, wired in below as `EXIT_INVALID_PBIR`.
 
+6. **A report can consume a BLANK() placeholder the engine safely emitted.** The handover names the
+   calc and why translation failed, and the TMDL carries a BLANK()-only column or measure. If PBIR
+   filters or visual field bindings reference it, the page can render empty while every structural
+   gate passes. `check_blank_placeholders.py` correlates handover + TMDL + PBIR and blocks only the
+   report-referenced cases, wired in below as `EXIT_BLANK_PLACEHOLDER`.
+
 Deliberately NOT here
 ---------------------
 No migration logic. This never writes TMDL, never writes PBIR, never opens Power BI Desktop. It runs
@@ -87,6 +93,10 @@ from typing import NamedTuple
 from check_empty_model import REPORT_NAME as EMPTY_MODEL_REPORT
 from check_empty_model import render as render_empty_model
 from check_empty_model import scan as scan_for_empty_models
+from check_blank_placeholders import REPORT_NAME as BLANK_PLACEHOLDER_REPORT
+from check_blank_placeholders import STATUS_REFERENCED as BLANK_PLACEHOLDER_REFERENCED
+from check_blank_placeholders import render as render_blank_placeholders
+from check_blank_placeholders import scan as scan_blank_placeholders
 from check_pbir_valid import REPORT_NAME as PBIR_VALID_REPORT
 from check_pbir_valid import render as render_pbir_valid
 from check_pbir_valid import scan as scan_pbir_validity
@@ -108,6 +118,7 @@ EXIT_COLLISION = 4
 EXIT_ENGINE_SOURCE = 5
 EXIT_EMPTY_MODEL = 6
 EXIT_INVALID_PBIR = 7
+EXIT_BLANK_PLACEHOLDER = 8
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
@@ -425,6 +436,23 @@ def check_pbir_validity(out_dir: Path) -> dict:
     return report
 
 
+def check_blank_placeholders(out_dir: Path) -> dict:
+    """Correlate engine fallback handover entries with BLANK()-only TMDL objects.
+
+    THE FOURTH reason this script exists. The deterministic tier can safely refuse a Tableau calc by
+    preserving its formula in handover and emitting a BLANK() placeholder in TMDL. That is a good
+    engine fallback, but if the PBIR report consumes the placeholder in a filter or visual field
+    binding, the report can render empty while TMDL deserialization, PBIR validation and model
+    refresh all pass. The verdict is written to ``<bundle>/blank-placeholder-check.json``.
+
+    Severity is intentionally split: unreferenced placeholders are a visible migration gap, but not
+    an estate-level refusal; report-referenced placeholders block because they affect rendered pages.
+    """
+    report = scan_blank_placeholders(out_dir)
+    (out_dir / BLANK_PLACEHOLDER_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI surface, kept out of ``main`` so the run logic stays readable."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -511,6 +539,7 @@ class GateResults(NamedTuple):
     dod_ok: bool
     dod_detail: str
     pbir_valid: dict
+    blank_placeholders: dict
     empty_models: dict
 
 
@@ -544,6 +573,16 @@ def final_verdict(gates: GateResults, out_dir: Path) -> int:
             f"  measure whose projection was dropped. Details: {out_dir / PBIR_VALID_REPORT}"
         )
         return EXIT_INVALID_PBIR
+    if gates.blank_placeholders.get("status") == BLANK_PLACEHOLDER_REFERENCED:
+        print(
+            f"\nESTATE: BLANK_PLACEHOLDER - {gates.blank_placeholders['placeholders_referenced']} "
+            f"handover-backed BLANK() placeholder(s) are used by report filters or visual fields\n"
+            "  The engine safely refused to translate these calcs and recorded why in handover;\n"
+            "  the blocking problem is that the shipping PBIR consumes the placeholders, so a page\n"
+            "  or visual can render empty while structural validation still passes. "
+            f"Details: {out_dir / BLANK_PLACEHOLDER_REPORT}"
+        )
+        return EXIT_BLANK_PLACEHOLDER
     if gates.empty_models["status"] != "OK":
         print(
             f"\nESTATE: EMPTY_MODEL - {gates.empty_models['models_empty']} of "
@@ -555,7 +594,7 @@ def final_verdict(gates: GateResults, out_dir: Path) -> int:
         return EXIT_EMPTY_MODEL
     print(
         "\nESTATE: READY - definition of done is not failed, no approval collisions, "
-        "no invalid reports, no empty models."
+        "no invalid reports, no report-referenced BLANK() placeholders, no empty models."
     )
     return EXIT_OK
 
@@ -611,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         dod_ok=dod_ok,
         dod_detail=dod_detail,
         pbir_valid=check_pbir_validity(args.output),
+        blank_placeholders=check_blank_placeholders(args.output),
         empty_models=check_empty_models(args.output),
     )
     phases.append({"phase": "adjudicate", "elapsed_sec": round(time.monotonic() - started, 1)})
@@ -631,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
     # alongside a `failed` definition of done is the one most likely to be missed, because the reader
     # stops at the first blocking verdict.
     print("\n" + render_empty_model(gates.empty_models))
+    print("\n" + render_blank_placeholders(gates.blank_placeholders))
     print("\n" + render_pbir_valid(gates.pbir_valid))
 
     return final_verdict(gates, args.output)
