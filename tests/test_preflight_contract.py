@@ -176,6 +176,15 @@ def test_the_upstream_engine_check_stays_opt_in_and_advisory() -> None:
     assert "upstream_version_url" in upstream_block, "the URL belongs to engine_source.py, not to preflight"
 
 
+def test_bundle_engine_receipt_drift_is_surfaced_as_an_advisory_check() -> None:
+    """A stale bundle must name its receipt version without blocking a migration in flight."""
+    source = _preflight_source()
+    block = source[source.index("# --- Engine receipt drift") : source.index("# --- Skill plugins ---")]
+    assert "check_engine_receipts.py" in block
+    assert "--root $repoRoot" in block
+    _assert_add_check_tier(block, "engine: bundle receipt versions", "optional")
+
+
 # --------------------------------------------------------------------------------------------------
 # The wrong-tenant check (#124). A token that MINTS successfully can still be for another tenant, and
 # Fabric then answers WorkspaceNotFound for a workspace that exists - measured four times across two
