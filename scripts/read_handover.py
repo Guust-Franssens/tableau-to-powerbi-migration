@@ -21,15 +21,19 @@ The problem is not that the data is unreachable. It is that reading it costs mor
   *"File too large to read at once (346.9 KB)"*), so every consumer has to recover - by parsing it
   programmatically, or by hunting byte ranges. That recovery works, but it is a round trip every
   agent pays on every workbook, and hunting ranges requires knowing offsets nobody has.
-* **Most of the size is duplication.** ``category_guidance`` is emitted per REQUEST, not per
-  category. Verified across all 38 handovers in ``_bundle-208``: there is exactly ONE distinct
-  guidance string per category estate-wide, so a 60-request file carries 60 copies of an
-  886-character block - about 53 KB of pure repetition. Printing it once per category present is
-  lossless by measurement, and costs 4,481 bytes for all seven categories.
+* **A meaningful slice of the size is duplication.** ``category_guidance`` is emitted per REQUEST,
+  not per category. Verified across all 38 handovers in ``_bundle-208``: there is exactly ONE
+  distinct guidance string per category estate-wide. In the worked example, 60 requests carry
+  48,824 bytes of guidance where the 6 categories actually present need 4,049 - so **44,775 bytes,
+  12.6% of the 355 KB file, is pure repetition**. Printing it once per category is lossless by
+  measurement. (An earlier version of this docstring said "~53 KB" and "most of the bulk"; both
+  were overstated. It is a worthwhile saving, not the dominant cost.)
 * **The genuinely alarming findings are not the ones a reader lands on.** ``pbip_ref_drops`` marks
   visuals whose every field binding was dropped - they render blank on a report that validates
-  clean. There were **15** in the worked example and nobody had looked at them, because nothing
-  ranked them above the 170-item worklist they sit beside.
+  clean. There are **15** in the worked example and **26 across 9 of the 38 workbooks**, sitting
+  beside a 170-item worklist that does not rank them. No persona or skill surfaced them before this
+  tool; whether a human ever looked is not something this file can know, and the earlier "nobody had
+  looked at them" is narrowed accordingly.
 
 ⚠️ **What this tool is NOT.** An earlier version of this docstring claimed that reading the slice
 directly failed *silently* - that a truncated read returned ``needs_review[]`` (the same calcs with
@@ -68,7 +72,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_MAX_BYTES = 40_000
+DEFAULT_MAX_BYTES = 20_000
 
 # Order categories by how much judgement they need, so the summary reads as a suggested work order
 # rather than an arbitrary dict ordering.
@@ -225,6 +229,12 @@ def ordered_categories(counts: dict[str, int]) -> list[str]:
 # --------------------------------------------------------------------------------------------
 
 
+def _blen(text: str) -> int:
+    """UTF-8 byte length. Budgeting on ``len()`` counts CHARACTERS, which under-counts every
+    non-ASCII formula (a real one here carries U+25B2) and lets `--max-bytes` be quietly exceeded."""
+    return len(text.encode("utf-8"))
+
+
 def render_request(r: dict, index: int, total: int) -> str:
     """One request, in full. The formula is never abbreviated - it is the point of the tool."""
     lines = [
@@ -240,10 +250,21 @@ def render_request(r: dict, index: int, total: int) -> str:
     if isinstance(fields, list) and fields:
         lines.append("    fields       :")
         for f in fields:
-            if isinstance(f, dict):
-                lines.append(f"        - {f.get('caption', '?')}  ({f.get('kind', '?')})")
-            else:
+            if not isinstance(f, dict):
                 lines.append(f"        - {f}")
+                continue
+            # Every recorded attribute is repair-relevant: `table`/`column` say WHERE to bind,
+            # `type` constrains the DAX, and `references_formula` marks a dependency on another
+            # stub - which decides ordering. Printing only caption+kind dropped all of it.
+            head = f"        - {f.get('caption', '?')}  ({f.get('kind', '?')})"
+            src = ".".join(str(f[k]) for k in ("table", "column") if f.get(k))
+            if src:
+                head += f"  [{src}]"
+            if f.get("type"):
+                head += f"  type={f['type']}"
+            lines.append(head)
+            if f.get("references_formula"):
+                lines.append("          ^ references another calc's formula - repair that one first")
 
     formula = (r.get("formula") or "").rstrip()
     if formula:
@@ -270,30 +291,30 @@ def render_category(wb_name: str, reqs: list[dict], category: str, max_bytes: in
         "--- REQUESTS ---",
     ]
 
-    budget = max_bytes - sum(len(x) + 1 for x in out)
+    banner_reserve = max(800, max_bytes // 4)
+    budget = max_bytes - sum(_blen(x) + 1 for x in out) - banner_reserve
     shown = 0
     for i, r in enumerate(selected, 1):
         block = render_request(r, i, len(selected))
-        if shown and len(block) + 1 > budget:
+        # No first-item bypass. `if shown and ...` emitted request 1 unconditionally, so a single
+        # large request could blow any cap - including a 100-byte one - while still reporting
+        # that it had honoured it.
+        if _blen(block) + 1 > budget:
             break
         out.append(block)
         out.append("")
-        budget -= len(block) + 2
+        budget -= _blen(block) + 2
         shown += 1
 
     if shown < len(selected):
         remaining = [r.get("name") or "(unnamed)" for r in selected[shown:]]
-        out += [
-            "",
-            "!" * 78,
-            f"!! OUTPUT TRUNCATED at --max-bytes={max_bytes}. "
-            f"{shown} of {len(selected)} shown; {len(remaining)} NOT shown.",
-            "!! You have NOT seen the whole queue. Get the rest with either:",
-            f"!!   --max-bytes {max_bytes * 3}",
-            "!!   --name '<name>'   for any of:",
-        ]
-        out += [f"!!     {n}" for n in remaining]
-        out.append("!" * 78)
+        out += _truncation_banner(
+            max_bytes,
+            shown,
+            remaining,
+            banner_reserve,
+            recovery="!!   --name '<name>'   to print any one of them IN FULL, uncapped",
+        )
     return "\n".join(out)
 
 
@@ -431,46 +452,205 @@ def _emptied_block(emptied: list[dict]) -> list[str]:
     return out + [""]
 
 
-def _worklist_group_block(category: str, group: list[dict]) -> str:
-    """One category's items, with each distinct remediation text printed once above them."""
+def _worklist_group_head(category: str, group: list[dict]) -> str:
+    """One category's heading plus each distinct remediation text, printed once above its items."""
     block = ["", f"## {category}  ({len(group)} item(s))"]
     remedies = sorted({(i.get("remediation") or "").strip() for i in group} - {""})
     block += [f"    FIX: {text}" for text in remedies]
-    for item in group:
-        where = item.get("worksheet") or item.get("visual") or "?"
-        page = item.get("page_display") or item.get("page")
-        block.append(f"    - {(item.get('severity') or '?'):<8} {f'{where} [{page}]' if page else where}")
-        reason = (item.get("reason") or "").strip()
-        if reason:
-            block.append(f"      why: {reason}")
     return "\n".join(block)
 
 
-def _viz_truncation_banner(
-    max_bytes: int, shown: int, total: int, stopped_at: str, grouped: dict[str, list[dict]]
+def _worklist_item_label(category: str, item: dict) -> str:
+    """Short identity for an item that did NOT fit, so the banner can name it precisely."""
+    where = item.get("worksheet") or item.get("visual") or "?"
+    page = item.get("page_display") or item.get("page")
+    return f"{category}: {where} [{page}]" if page else f"{category}: {where}"
+
+
+def _worklist_item_block(item: dict) -> str:
+    """One worklist item: severity, where it lives, and why it is on the queue."""
+    where = item.get("worksheet") or item.get("visual") or "?"
+    page = item.get("page_display") or item.get("page")
+    lines = [f"    - {(item.get('severity') or '?'):<8} {f'{where} [{page}]' if page else where}"]
+    reason = (item.get("reason") or "").strip()
+    if reason:
+        lines.append(f"      why: {reason}")
+    return "\n".join(lines)
+
+
+def _truncation_banner(
+    max_bytes: int,
+    shown: int,
+    omitted: list[str],
+    name_budget: int,
+    *,
+    recovery: str = "!!   --severity <blocking|high|medium|low>   to work one band at a time",
 ) -> list[str]:
-    """Loud, itemised stop. Silent truncation is the exact defect this module exists to remove."""
-    counts = ", ".join(f"{c}={len(g)}" for c, g in sorted(grouped.items()))
-    return [
+    """Loud, itemised stop, that ITSELF fits.
+
+    Naming every omitted item is the goal, but it cannot be unconditional: 170 labels is ~11 KB,
+    which silently blew the very cap this banner reports on. So names are printed until
+    ``name_budget`` is spent, and the remainder is reported as an explicit count with the command
+    that prints it - never dropped without saying so.
+
+    ⚠️ Shared by `--category`, `--viz` and `--fidelity` ON PURPOSE. `render_category` used to carry
+    its own copy that appended every remaining name unbudgeted; it survived three rounds of fixing
+    this exact bug next door, and the 308-view sweep could not see it because no real category has
+    enough long-named requests to overflow. One implementation is the only way that stays fixed.
+    """
+    head = [
         "",
         "!" * 78,
-        f"!! OUTPUT TRUNCATED at --max-bytes={max_bytes}. {shown} of {total} item(s) shown; {total - shown} NOT shown.",
+        f"!! OUTPUT TRUNCATED at --max-bytes={max_bytes}. "
+        f"{shown} of {shown + len(omitted)} item(s) shown; {len(omitted)} NOT shown.",
         "!! You have NOT seen the whole queue. Get the rest with either:",
         f"!!   --max-bytes {max_bytes * 3}",
-        "!!   --severity <blocking|high|medium|low>   to work one band at a time",
-        f"!!   (stopped before category {stopped_at!r}; all categories: {counts})",
-        "!" * 78,
+        recovery,
+        "!! NOT shown:",
     ]
+
+    tail_rule = "!" * 78
+    all_names = [f"!!     {n}" for n in omitted]
+    # EVERY part of the banner is content and must be reserved before naming anything. Three
+    # separate overshoots came from forgetting one of them: the names (24,631), the head
+    # (20,401), and then the footer + closing rule (20,120) - each against a 20,000 cap.
+    spent = sum(_blen(x) + 1 for x in head) + _blen(tail_rule) + 1
+
+    # Naming every omitted item is the whole point, so check whether they ALL fit first. A blind
+    # footer reserve is self-defeating at small caps: it costs ~130 bytes to say "and N more"
+    # even when the names it replaces were cheaper than the sentence itself.
+    if spent + sum(_blen(x) + 1 for x in all_names) <= name_budget:
+        return head + all_names + [tail_rule]
+
+    def _more_line(n: int) -> str:
+        return (
+            f"!!     ... and {n} more not named here (the list itself "
+            f"would exceed --max-bytes); raise --max-bytes or narrow with --severity"
+        )
+
+    # Only now is the footer certain, so only now does it earn a reserve. len(omitted) has at
+    # least as many digits as the count actually printed, so this can never under-reserve.
+    footer_reserve = _blen(_more_line(len(omitted))) + 1
+    named: list[str] = []
+    for line in all_names:
+        if spent + footer_reserve + _blen(line) + 1 > name_budget:
+            break
+        named.append(line)
+        spent += _blen(line) + 1
+    named.append(_more_line(len(omitted) - len(named)))
+    return head + named + [tail_rule]
+
+
+def _fidelity_counts(wb: dict) -> list[str]:
+    """Tier counts only - cheap enough to always print, so `--viz` never hides that this exists."""
+    rows = [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)]
+    if not rows:
+        return []
+    tiers: dict[str, int] = {}
+    for v in rows:
+        tiers[str(v.get("tier") or "?")] = tiers.get(str(v.get("tier") or "?"), 0) + 1
+    flagged = sum(1 for v in rows if (v.get("reason") or "").strip())
+    out = [
+        f"--- VISUAL FIDELITY ({len(rows)} visual(s)): " + " | ".join(f"{k} {n}" for k, n in sorted(tiers.items())),
+    ]
+    if flagged:
+        out.append(f"    {flagged} visual(s) recorded a fidelity reason - see --fidelity for each")
+    return out + [""]
+
+
+def render_fidelity(wb_name: str, wb: dict, max_bytes: int) -> str:
+    """`viz_fidelity[]` in full, grouped by reason.
+
+    Its own view because the detail is ~15 KB on the worked example - large enough to blow the
+    whole `--viz` budget on its own. It is not optional information, though: measured on
+    `_bundle-208`, 17 `rebuilt_with_deferrals` reasons appear ONLY here and in no remediation
+    worklist item, so a consumer working from `--viz` alone never learns of them.
+    """
+    rows = [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)]
+    if not rows:
+        return f"=== {wb_name} - VISUAL FIDELITY ===\n\nNo viz_fidelity rows recorded."
+
+    by_reason: dict[str, list[dict]] = {}
+    for v in rows:
+        by_reason.setdefault((v.get("reason") or "").strip(), []).append(v)
+
+    out = [f"=== {wb_name} - VISUAL FIDELITY ({len(rows)} visual(s)) ==="]
+    out += _fidelity_counts(wb)
+    banner_reserve = max(800, max_bytes // 4)
+    budget = max_bytes - sum(_blen(x) + 1 for x in out) - banner_reserve
+    omitted: list[str] = []
+    shown = 0
+
+    # Clean rows carry no reason; their tiers are already in the counts above.
+    for reason in sorted(k for k in by_reason if k):
+        group = by_reason[reason]
+        block = "\n".join(
+            [f"\n## {reason}  ({len(group)} visual(s))"]
+            + [
+                f"    {str(v.get('status') or '?'):<22} {v.get('worksheet') or '?'}"
+                f" ({v.get('visual_type') or '?'}, tier {v.get('tier') or '?'})"
+                for v in group
+            ]
+        )
+        if omitted or _blen(block) + 1 > budget:
+            omitted += [f"{reason}: {v.get('worksheet') or '?'}" for v in group]
+            continue
+        out.append(block)
+        budget -= _blen(block) + 1
+        shown += len(group)
+
+    if omitted:
+        out += _truncation_banner(max_bytes, shown, omitted, banner_reserve)
+    elif not shown:
+        out.append("(no visual recorded a fidelity reason)")
+    return "\n".join(out)
+
+
+def _budgeted_worklist(grouped: dict[str, list[dict]], budget: int) -> tuple[list[str], list[str], int]:
+    """Fill ``budget`` with worklist detail, returning (lines, omitted labels, shown count).
+
+    Split out of `render_viz` so the budgeting is testable on its own and the caller stays under
+    pylint's local-variable ceiling. Once anything has been omitted the loop keeps collecting
+    labels rather than resuming: a queue that skips item 40 and then prints item 41 reads as if
+    40 does not exist, which is the failure mode the banner exists to prevent.
+    """
+    lines: list[str] = []
+    omitted: list[str] = []
+    shown = 0
+    for cat in sorted(grouped, key=lambda c: -len(grouped[c])):
+        group = grouped[cat]
+        head = _worklist_group_head(cat, group)
+        if omitted or _blen(head) + 1 > budget:
+            omitted += [_worklist_item_label(cat, i) for i in group]
+            continue
+        lines.append(head)
+        budget -= _blen(head) + 1
+        for item in group:
+            line = _worklist_item_block(item)
+            if _blen(line) + 1 > budget:
+                omitted.append(_worklist_item_label(cat, item))
+                continue
+            lines.append(line)
+            budget -= _blen(line) + 1
+            shown += 1
+    return lines, omitted, shown
 
 
 def render_viz(wb_name: str, wb: dict, severity: str | None, max_bytes: int) -> str:
-    """Report-side queue: emptied visuals first, then worklist items grouped by category."""
+    """Report-side queue: emptied visuals first, then worklist items grouped by category.
+
+    ``max_bytes`` governs the worklist detail. The emptied-visuals block is deliberately OUTSIDE
+    that budget: it is the highest-severity content in the file, it is small (~1 KB on the worked
+    example against a 20 KB default), and hiding it to honour a cap would defeat the reason this
+    view leads with it. Every other section is budgeted, the truncation banner included.
+    """
     items = [i for i in (worklist_of(wb).get("items") or []) if isinstance(i, dict)]
     if severity:
         items = [i for i in items if (i.get("severity") or "").lower() == severity.lower()]
 
     out = [f"=== {wb_name} - REPORT REMEDIATION QUEUE ===", ""]
     out += _emptied_block(_emptied_visuals(wb))
+    out += _fidelity_counts(wb)
 
     if not items:
         scope = f" at severity {severity!r}" if severity else ""
@@ -481,17 +661,19 @@ def render_viz(wb_name: str, wb: dict, severity: str | None, max_bytes: int) -> 
         grouped.setdefault(item.get("category") or "uncategorised", []).append(item)
 
     out.append(f"--- {len(items)} ITEM(S) IN {len(grouped)} CATEGORY(IES) ---")
-    budget = max_bytes - sum(len(x) + 1 for x in out)
-    shown = 0
+    # Reserve room for the banner up front. Without this the body spends the whole budget and the
+    # banner - which can be ~11 KB when it names 170 omitted items - lands entirely outside it.
+    banner_reserve = max(800, max_bytes // 4)
+    budget = max_bytes - sum(_blen(x) + 1 for x in out) - banner_reserve
 
-    for cat in sorted(grouped, key=lambda c: -len(grouped[c])):
-        chunk = _worklist_group_block(cat, grouped[cat])
-        if shown and len(chunk) + 1 > budget:
-            return "\n".join(out + _viz_truncation_banner(max_bytes, shown, len(items), cat, grouped))
-        out.append(chunk)
-        budget -= len(chunk) + 1
-        shown += len(grouped[cat])
+    # Budget PER ITEM, not per category. Emitting whole category chunks meant one big category
+    # blew the cap outright, and the banner could only name the category it stopped on - so the
+    # individual items you had not seen were never listed.
+    body, omitted, shown = _budgeted_worklist(grouped, budget)
+    out += body
 
+    if omitted:
+        out += _truncation_banner(max_bytes, shown, omitted, banner_reserve)
     return "\n".join(out)
 
 
@@ -500,7 +682,7 @@ def render_viz(wb_name: str, wb: dict, severity: str | None, max_bytes: int) -> 
 # --------------------------------------------------------------------------------------------
 
 
-DECOY_WARNING = """\
+NEEDS_REVIEW_NOTE = """\
 NOTE: `model_translation_handoff.needs_review[]` in the raw JSON is NOT this queue.
 It lists the same calculations by name but carries only 5 fields - no formula, no fields,
 no target_table, no guidance. It is enough to REPORT a stub and structurally insufficient to
@@ -512,18 +694,37 @@ def render_default(wb_name: str, wb: dict, target: Path) -> str:
     reqs = requests_of(wb)
     out = _model_section(wb_name, wb, reqs, target)
     out += _report_section(wb)
-    out.append(DECOY_WARNING)
+    out.append(NEEDS_REVIEW_NOTE)
     return "\n".join(out)
 
 
 def render_list(found: list[tuple[str, dict, Path]]) -> str:
-    """Every workbook in a bundle with the size of both its queues, so triage can be estate-wide."""
-    out = [f"{len(found)} workbook(s):", ""]
-    for name, wb, _ in sorted(found, key=lambda t: t[0].lower()):
+    """Every workbook in a bundle, ranked by urgency, with the size of both its queues.
+
+    Sorted by urgency rather than name, and carrying the emptied count, because alphabetical
+    order actively buried the signal this view exists to surface: measured on `_bundle-208`,
+    `Meridian_Hostile_Identifiers` has an emptied visual but zero calc requests and zero
+    worklist items, so a name-sorted `N calc / N report` line rendered it as `0 / 0` - the
+    least urgent-looking row in the estate.
+    """
+    rows = []
+    for name, wb, _ in found:
         reqs = requests_of(wb)
-        items = worklist_of(wb).get("items")
-        n_items = len(items) if isinstance(items, list) else 0
-        out.append(f"    {name:<52} {len(reqs):>4} calc request(s)  {n_items:>4} report item(s)")
+        items = [i for i in (worklist_of(wb).get("items") or []) if isinstance(i, dict)]
+        blocking = sum(1 for i in items if (i.get("severity") or "").lower() == "blocking")
+        rows.append((name, len(reqs), len(items), blocking, len(_emptied_visuals(wb))))
+
+    out = [
+        f"{len(found)} workbook(s), most urgent first (emptied visuals > blocking items > queue size):",
+        "",
+    ]
+    for name, n_reqs, n_items, blocking, emptied in sorted(
+        rows, key=lambda r: (-r[4], -r[3], -(r[1] + r[2]), r[0].lower())
+    ):
+        line = f"    {name:<52} {n_reqs:>4} calc request(s)  {n_items:>4} report item(s)  {blocking:>3} blocking"
+        if emptied:
+            line += f"  !! {emptied} EMPTIED"
+        out.append(line)
     return "\n".join(out)
 
 
@@ -540,6 +741,7 @@ def build_json(wb_name: str, wb: dict, category: str | None) -> dict:
         "requests": slim,
         "report_items": worklist_of(wb).get("items") or [],
         "emptied_visuals": _emptied_visuals(wb),
+        "viz_fidelity": [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)],
     }
 
 
@@ -559,6 +761,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--category", help="print full repair detail for one category")
     p.add_argument("--name", help="print one calculation in full, by name")
     p.add_argument("--viz", action="store_true", help="print the report-side remediation queue")
+    p.add_argument(
+        "--fidelity",
+        action="store_true",
+        help="print viz_fidelity[] in full, grouped by reason (its own view: ~15 KB, and it "
+        "carries deferral reasons that appear in no remediation item)",
+    )
     p.add_argument("--severity", help="with --viz: blocking | high | medium | low")
     p.add_argument("--list", action="store_true", help="list workbooks in the target and exit")
     p.add_argument("--json", type=Path, metavar="FILE", help="also write a machine-readable form")
@@ -607,6 +815,8 @@ def main(argv: list[str] | None = None) -> int:
         print(render_category(wb_name, requests_of(wb), args.category, args.max_bytes))
     elif args.viz:
         print(render_viz(wb_name, wb, args.severity, args.max_bytes))
+    elif args.fidelity:
+        print(render_fidelity(wb_name, wb, args.max_bytes))
     else:
         print(render_default(wb_name, wb, source))
 

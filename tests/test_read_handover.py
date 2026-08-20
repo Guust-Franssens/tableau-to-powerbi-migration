@@ -198,13 +198,56 @@ def test_untruncated_output_carries_no_truncation_banner(tmp_path, capsys):
     assert "TRUNCATED" not in out
 
 
-def test_one_oversized_request_is_still_shown(tmp_path, capsys):
-    """Kills: a budget that returns zero items, which would look like an empty queue."""
+def test_one_oversized_request_is_named_rather_than_silently_dropped(tmp_path, capsys):
+    """Kills: a budget that returns zero items AND says nothing, which reads as an empty queue.
+
+    The original form of this test asserted the request was *inlined* (`[1/1] Huge` in the body).
+    That encoded a real defect - a first-item bypass that let one request blow any cap, including
+    a 100-byte one - which a blind review caught. The caller's legitimate need is to never be left
+    with a silently empty view; that is now met by naming the item and handing over a command that
+    retrieves it, so the assertion moved to the contract rather than the old behaviour.
+    """
     path = write_slice(tmp_path, make_workbook([make_request("Huge", formula="X" * 5000)]))
 
     _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "100"], capsys)
 
-    assert "[1/1] Huge" in out
+    assert "TRUNCATED" in out, "a dropped request must never be silent"
+    assert "Huge" in out, "the omitted request was not named anywhere"
+    assert "[1/1] Huge" not in out, "an oversized request must not be inlined past the cap"
+
+
+def test_the_named_escape_hatch_actually_returns_the_oversized_request(tmp_path, capsys):
+    """Kills: a banner that points at `--name`, while `--name` is itself truncated.
+
+    `render_named` is deliberately unbudgeted, and that is precisely what makes the strict cap in
+    `render_category` acceptable - there is always a way to get the full text. If this ever starts
+    truncating, the cap becomes a real data-loss bug rather than a triage aid.
+    """
+    path = write_slice(tmp_path, make_workbook([make_request("Huge", formula="X" * 5000)]))
+
+    code, out = run([str(path), "--name", "Huge"], capsys)
+
+    assert code == 0
+    assert "X" * 5000 in out, "--name must return the whole formula, uncapped"
+
+
+def test_the_truncation_banner_itself_fits_inside_max_bytes(tmp_path, capsys):
+    """Kills all three measured overshoots: unbudgeted names, head, and footer + closing rule.
+
+    The banner is content. Counting only some of its parts overshot a 20,000-byte cap three
+    separate times (24,631 -> 20,401 -> 20,120), each invisible to reading and each caught only by
+    sweeping every view of every real handover. Long names make the banner's own list the dominant
+    cost, which is the condition under which every one of those regressions appeared.
+    """
+    reqs = [make_request(f"Calculation_{i}_{'N' * 60}") for i in range(180)]
+    path = write_slice(tmp_path, make_workbook(reqs))
+
+    for cap in (2000, 8000, 20000):
+        _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", str(cap)], capsys)
+
+        assert "TRUNCATED" in out, f"fixture failed to truncate at cap {cap}"
+        assert "more not named here" in out, f"fixture too small to overflow the name list at cap {cap}"
+        assert len(out.encode("utf-8")) <= cap, f"banner overshot its own cap at {cap}"
 
 
 # --------------------------------------------------------------------------------------------
