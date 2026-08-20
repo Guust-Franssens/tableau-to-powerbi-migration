@@ -432,6 +432,35 @@ repo. So:
   reference, not a GitHub closing keyword. The PR with the *best* per-issue write-up was the one that
   did not close anything.
 
+**A host crash with subagents in flight leaves no summary at all — do file-level forensics before
+re-dispatching.** Everything above assumes a subagent eventually reports back; a crashed host never
+gets that far. Real incident, 2026-08-19: the CLI hung and was restarted with 3 fix-subagents still
+running. Afterwards `list_agents` returned **ZERO** and no agent produced a final report. What each
+had actually accomplished could only be established by reading files on disk — and the outcome was
+not predictable from any agent's last known status:
+
+| subagent | last known status | what was actually on disk |
+|---|---|---|
+| ACMU | in progress | both fixes complete, already confirmed live in Desktop |
+| Active Work Order | in progress | 4 new, valid, non-orphaned visual files — further along than its status suggested |
+| Aircraft Installs | in progress | zero file changes — nothing lost, nothing gained |
+
+Three agents, three genuinely different outcomes, identical reported status. Any blanket assumption —
+"assume lost", "assume complete", "assume proportional to elapsed time" — is wrong for at least one of
+them. Re-dispatching blindly would have redone or overwritten ACMU's already-verified fixes.
+
+- **In-flight subagent progress is at risk until it lands on disk.** Treat a lost agent's work as
+  **UNKNOWN** — never as lost, never as complete — until you have checked.
+- **After a host restart with agents in flight, do file-level forensics BEFORE re-dispatching:**
+  `git status` / `git diff --stat` in the target worktree, plus file modification times against the
+  crash time. Agent status does not answer this question; the files do.
+- **Prefer briefs that land work incrementally over ones that hold everything until a final write.**
+  A brief that commits/saves as it goes turns a crash into a truncation of progress; a brief that
+  buffers everything for one final write turns the same crash into a total loss.
+- **Re-dispatch only after establishing current state.** Re-running a completed fix can overwrite a
+  verified-good artifact — ACMU's fixes above were already confirmed live in Desktop; blindly
+  re-dispatching that unit would have redone (and risked corrupting) work that was already done.
+
 ---
 
 ## Starting a migration — the DISPATCHER's job
