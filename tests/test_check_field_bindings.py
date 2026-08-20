@@ -398,6 +398,21 @@ def test_repeated_defects_collapse_but_keep_every_file(tmp_path) -> None:
     assert len(findings[0]["files"]) == 2
 
 
+def test_a_skipped_report_is_named_even_when_another_one_passes(tmp_path, capsys) -> None:
+    """Mutation killed: rendering only the graded reports.
+
+    "OK - 1 report(s)" on a two-report bundle reads as full coverage when half of it was never
+    checked; the skipped half must be named in the verdict, not only in the JSON.
+    """
+    bundle = _write_bundle(tmp_path, visuals=[_visual(_column("Sales", "Order Date"))])
+    orphan = bundle / "pbip" / "Book" / "Orphan.Report" / "definition" / "pages"
+    orphan.mkdir(parents=True)
+    assert cfb.main([str(bundle)]) == 0
+    out = capsys.readouterr().out
+    assert "OK" in out
+    assert "Orphan.Report" in out and "SKIPPED" in out
+
+
 def test_explicit_model_and_report_pair(tmp_path) -> None:
     """The `--model` / `--report` entry point, and its usage guard."""
     bundle = _write_bundle(tmp_path, visuals=[_visual(_column("Sales", "SLA_ACPU_Down_Duration"))])

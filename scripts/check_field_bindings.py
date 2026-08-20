@@ -451,12 +451,17 @@ def render(report: dict[str, Any]) -> str:
         reasons = "; ".join(s["reason"] for s in report.get("skipped", [])) or "no report found"
         return f"FIELD BINDING CHECK: SKIPPED - nothing to check ({reasons})"
     scanned = report["reports_scanned"]
+    # A skipped report is invisible in the pass count, so name it here too: "OK - 1 report(s)" on a
+    # two-report bundle reads as full coverage when half of it was never checked.
+    tail = _skipped_tail(report)
     if report["status"] == "OK":
-        return f"FIELD BINDING CHECK: OK - every PBIR field reference in {scanned} report(s) resolves in its model."
+        return (
+            f"FIELD BINDING CHECK: OK - every PBIR field reference in {scanned} report(s) resolves in its model.{tail}"
+        )
     lines = [
         f"FIELD BINDING CHECK: UNRESOLVED - {report['reports_unresolved']} of {scanned} report(s) "
         f"reference fields their model does not have "
-        f"({report['near_misses']} case-only near-miss(es), {report['missing']} missing)",
+        f"({report['near_misses']} case-only near-miss(es), {report['missing']} missing){tail}",
     ]
     for one in report["reports"]:
         if one["status"] != "UNRESOLVED":
@@ -469,6 +474,15 @@ def render(report: dict[str, Any]) -> str:
         "  PBIR spelling to the model's, do NOT rename the model back - the fold was deliberate."
     )
     return "\n".join(lines)
+
+
+def _skipped_tail(report: dict[str, Any]) -> str:
+    """Name the reports that were NOT graded, so a partial sweep cannot read as a full one."""
+    skipped = report.get("skipped") or []
+    if not skipped:
+        return ""
+    names = ", ".join(f"{Path(s['report']).name} ({s['reason']})" for s in skipped)
+    return f"\n  {len(skipped)} report(s) SKIPPED, not checked: {names}"
 
 
 def _render_findings(findings: list[dict[str, Any]], status: str) -> list[str]:
