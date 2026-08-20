@@ -519,7 +519,7 @@ and 2/5 reproduced by running the command:
 
 | exit | constant | meaning | what to do |
 |---|---|---|---|
-| `0` | `EXIT_OK` | `ESTATE: READY` — DoD not failed, no approval collisions, no empty models | proceed |
+| `0` | `EXIT_OK` | `ESTATE: READY` — DoD not failed, no approval collisions, no invalid reports, no report-referenced BLANK() placeholders, no empty models | proceed |
 | `1` | `EXIT_ENGINE_FAILED` | the engine itself exited non-zero | read the last 2000 chars it printed (the wrapper prints them to stderr) |
 | `2` | `EXIT_USAGE` | ✅ reproduced both shapes: `--input` missing without `--slice-only` prints `ERROR: --input is required…`; a missing `--output` is argparse's own exit 2 | fix the command |
 | `3` | `EXIT_DOD_FAILED` | engine's definition of done is `failed` | **§3 decision point** — do not deploy |
@@ -527,12 +527,13 @@ and 2/5 reproduced by running the command:
 | `5` | `EXIT_ENGINE_SOURCE` | **live** ✅ reproduced: a non-canonical `--engine` without `--allow-noncanonical-engine` | see §1.2 |
 | `6` | `EXIT_EMPTY_MODEL` | **live** — a model would open and load **zero rows** (an Import partition over a flat file that never landed) | read `<bundle>/empty-model-check.json`; see the block below |
 | `7` | `EXIT_INVALID_PBIR` | **live** ✅ reproduced — a shipped report FAILS the first-party `powerbi-report-author validate` (measured: `PBIR_ROLE_REQUIRED_MISSING` from a stubbed calc whose projection was dropped) | read `<bundle>/pbir-validity-check.json`; **bind the stub**, do not delete the visual |
+| `8` | `EXIT_BLANK_PLACEHOLDER` | **live** ✅ reproduced — a handover-backed `BLANK()` placeholder is consumed by a report filter or visual field binding | read `<bundle>/blank-placeholder-check.json`; translate the calc or remove the consuming report dependency knowingly |
 
 ❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
 §5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
 
 ⚠️ **One run, one exit code — but an estate can trip more than one gate.** `final_verdict()` returns
-the **first** blocking verdict in a fixed order (collision → DoD → invalid PBIR → empty model), so a
+the **first** blocking verdict in a fixed order (collision → DoD → invalid PBIR → BLANK() placeholder → empty model), so a
 bundle that is both `failed` **and** carries an empty model exits **3** and never mentions 6 in its
 exit status. Both quieter verdicts are **printed** before the exit code is chosen, so neither is ever
 hidden — read the text, not just `$LASTEXITCODE`.
@@ -1170,16 +1171,16 @@ Placeholders used in this document — and where the real value lives:
 
 `—` means that script cannot return that exit code.
 
-| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
-|---|---|---|---|---|---|---|---|---|
-| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — |
-| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — |
-| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** |
-| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — |
+| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — |
+| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — |
+| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** |
+| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — |
 
-One run returns **one** code, in the order collision → DoD → invalid PBIR → empty model — so a bundle
-can trip a gate the exit code never mentions. Read the log body, `pbir-validity-check.json` and
-`empty-model-check.json` too (§2 step 5).
+One run returns **one** code, in the order collision → DoD → invalid PBIR → BLANK() placeholder →
+empty model — so a bundle can trip a gate the exit code never mentions. Read the log body,
+`pbir-validity-check.json`, `blank-placeholder-check.json` and `empty-model-check.json` too (§2 step 5).
 
 **Where the truth lives**
 
