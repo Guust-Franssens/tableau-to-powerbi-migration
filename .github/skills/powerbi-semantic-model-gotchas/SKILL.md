@@ -853,3 +853,78 @@ Dismiss via `WindowPattern.Close()` on the `WindowsForms10.*` host — invoking 
 **Corollary — an idle `msmdsrv` is diagnostic.** During the "hang", the child `msmdsrv` had
 accumulated only ~16 s CPU over an hour. A blocked-on-modal refresh is *idle*, not busy; a genuinely
 slow refresh burns CPU. Check that before assuming you need to wait longer.
+
+## 8. The handover work queue is unreachable by a plain file read — and its decoy is not
+
+Measured 2026-08-20 on `_bundle-208`. This is not a Power BI defect; it is the reason three shipped
+customer workbooks each carried a bare `BLANK()` measure while **every branch measure it referenced
+was translated correctly**. It cost three independent debugging cycles before anyone measured it.
+
+### The mechanism
+
+A handover slice (`<bundle>/handover/<workbook>.json`) contains **two lists describing the same
+stubbed calculations**, and the useless one comes first:
+
+| list | byte offset (347 KB slice) | fields | what it is good for |
+|---|---|---|---|
+| `model_translation_handoff.needs_review[]` | 16,364 — **inside** a 20 KB read | 5: `category`, `fallback_reason`, `has_suggestion`, `name`, `role` | **reporting** a stub. Nothing else |
+| `model_translation_handoff.requests[]` | 31,934 — **outside** it | 9: adds **`formula`**, **`fields`**, **`target_table`**, `category_guidance` | the actual work order |
+
+```
+byte 0            16,364    20,480         31,934            355,259
+  |─────────────────|─────────|──────────────|──────────────────|
+    header/other   needs_review            requests[]
+                             ↑ a default file read STOPS here
+```
+
+So an agent told to "read the handover" reads it, is handed 20 KB, **gets no error**, sees a
+plausible 60-item list of exactly the right calculations, and never learns `requests[]` exists. It
+can then satisfy a "record every stub's fate" requirement completely — and repair nothing. The
+outcome is **compliant and blank**, which is far harder to notice than a crash.
+
+⚠️ **It degrades with workbook size, which is why testing missed it.** Measured across the same
+bundle: `requests[]` at byte 8,011 (all 3 requests readable ✅), 16,247 (~5 of 22), 19,717 (~1 of 30),
+31,934 (**0 of 60**). Small workbooks work perfectly. The customer estate's workbooks are the big
+ones.
+
+### The fix
+
+**Never read the slice directly. Use the reader:**
+
+```bash
+python scripts/read_handover.py <bundle> --workbook <name>            # the queue + counts
+python scripts/read_handover.py <bundle> --workbook <name> --category model_object_parameter
+python scripts/read_handover.py <bundle> --workbook <name> --name 'Selected Measure'
+```
+
+It hoists `category_guidance` out of the requests and prints it **once per category** — verified
+lossless across all 38 handovers in the bundle: there is exactly **one distinct guidance string per
+category estate-wide**, so a 60-request file carries 60 copies of an 886-character block (~53 KB of
+pure repetition), which is itself a large part of why the queue is pushed out of reach. It never
+truncates silently: over `--max-bytes` it names every omitted request and the command that prints it.
+
+### The idiom that keeps getting stubbed: a parameter-driven measure dispatcher
+
+`CASE [Parameters].[P] WHEN 1 THEN [MeasureA] WHEN 2 THEN [MeasureB] ... END`, driving a chart whose
+Y-axis swaps with a slicer. Confirmed on three unrelated workbooks (ACMU `_Measures.tmdl:87`
+`'Selected Measure'`, Airline Scorecard, Flight Phase `'Measure - All Phases'`).
+
+⚠️ **`_GUIDANCE[MODEL_OBJECT_PARAMETER]` routes to field parameters, and for this shape that is
+usually the heavier answer.** When every branch is **already a working measure** — which is the
+normal case, because the engine translates the branches fine and refuses only the dispatcher — a
+plain `SWITCH` is the lighter, faithful fix and needs no new model object:
+
+```dax
+Selected Measure =
+VAR _sel = SELECTEDVALUE('Measure Selector'[Key])
+RETURN SWITCH(_sel, "SLA", [SLA Availability], "VTP", [VTP Availability], BLANK())
+```
+
+Ground truth that this is the right call: the same ACMU model already shipped a **working** 8-branch
+`SWITCH` sibling (`'Selected Availability'`, line 520) over the same underlying measures — the
+pattern was proven in the file, next to the stub, the whole time. Reach for a field parameter when
+the swap must also change a **dimension**, or when the user must see the list as a slicer of field
+names; otherwise `SWITCH` over existing measures is correct and cheaper.
+
+Both are valid; only one was written down, which is its own lesson — when two routes work, say so
+and say when each applies, or the heavier one becomes the only one anybody finds.

@@ -552,3 +552,54 @@ distinct Tableau idiom**, cache the result, and reuse it:
 4. Only then encode, following the (B) precedence above.
 
 This is what makes the cookbook self-refreshing against Microsoft Learn rather than a frozen snapshot.
+
+## 10. Your work queue is buried ~93% into the handover file — read it with the reader
+
+Measured 2026-08-20 on `_bundle-208`. The model side has the same defect
+(`powerbi-semantic-model-gotchas` §8); the report side is **strictly worse**, because its queue is
+never reachable at any workbook size.
+
+### The measurement
+
+A default file read returns roughly the first 20 KB. In the six largest handover slices of that
+bundle, the report-side payloads sit at:
+
+| slice | size | `remediation_worklist` at byte | `viz_fidelity` at byte |
+|---|---|---|---|
+| `Admin_Insights_Starter.json` | 347 KB | 156,764 | **315,571** |
+| `Section_13_-_Tableau_63_Charts.json` | 174 KB | 16,746 | 154,295 |
+| `Sales___Customer_Dashboards.json` | 127 KB | 76,517 | 117,109 |
+| `Section_12_-_Row_Level_Calculations.json` | 89 KB | 56,792 | 82,910 |
+
+`viz_fidelity` is at ~93% depth in **every** file measured. There is no error, no warning and no
+truncation marker — the read simply returns earlier, unrelated keys and stops.
+
+### The fix
+
+```bash
+python scripts/read_handover.py <bundle> --workbook <name> --viz
+python scripts/read_handover.py <bundle> --workbook <name> --viz --severity blocking
+python scripts/read_handover.py <bundle> --list        # estate-wide triage, both queues
+```
+
+`--viz` leads with the payload nobody had been seeing at all: **emptied visuals**
+(`pbip_ref_drops[].emptied`) — visuals whose every field binding was dropped, so they render blank on
+a report that validates clean. The worked example above reports **15** of them in one workbook. It
+then prints `remediation_worklist` items grouped by category, with each distinct `remediation` text
+printed **once** rather than repeated per item, then the `viz_fidelity` tier counts.
+
+⚠️ `--severity` filters the worklist but **never hides emptied visuals** — a blank visual outranks
+any severity band the worklist assigns.
+
+### Still true: a `viz_fidelity` reason can be a deferral you must NOT reverse
+
+Reading the queue is necessary, not sufficient. Measured entry, quoted in full because the
+abbreviated form reads as a simple gap:
+
+> *"table-calc filter on 'Last' (LAST) is not reproduced: it runs after aggregation and HIDES marks,
+> which Power BI cannot express as a filter … 6 other table calc(s) share this view and would be
+> silently re-scoped if it were re-added as an ordinary filter."*
+
+Re-adding that as an ordinary filter would silently change six other visuals' numbers. The validator
+classifies each row as **fixable / accepted-limitation / false-claim**; repair only what it routes to
+you, and route a false claim back rather than fixing it quietly.

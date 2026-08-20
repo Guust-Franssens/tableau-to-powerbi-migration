@@ -133,24 +133,23 @@ report tells you where. Read these first, in this order:
 
 | source | what it gives you |
 |---|---|
-| `handover/<workbook>.json` → `workbook.viz_fidelity[]` | one entry per worksheet: `worksheet`, `visual_type`, `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`), `reason`, `additional_reasons[]` |
+| `read_handover.py <bundle> --workbook <name> --viz [--severity X]` | **your work queue**: `remediation_worklist` (per item `severity`, `category`, `reason`, `remediation`), **emptied** visuals, and `viz_fidelity[]` (`status`, `tier`, `reason`). ⚠️ **Never read `handover/<workbook>.json` directly** — the worklist sits ~93% in, past any read cutoff, and fails silently (`powerbi-report-gotchas` §10) |
 | `estate.pending_gates[]` | which gates must be OFFERED (e.g. `dashboard_audit`) — offer, never self-approve |
 | `migration-spec.json` | source intent the engine's input format cannot carry: `dashboards[].zones` (layout tree), `worksheets[].encodings`, `manual_sort`, `measure_names_values_pivot`, filter `note`s |
 | `migrations/<name>/reference/` | the Tableau screenshots — the only thing that can adjudicate *look and feel* |
 
 ⚠️ **Never repair a `viz_fidelity` row on its own say-so.** Some entries describe a deferral that
-**must not** be recreated — measured: *"table-calc filter on 'Last' (LAST) is not reproduced: it runs
-after aggregation and HIDES marks, which Power BI cannot express as a filter … 6 other table calc(s)
-share this view and would be silently re-scoped if it were re-added as an ordinary filter."*
-Re-adding that as a filter would change other visuals' numbers. **The validator classifies each row
+**must not** be recreated — e.g. a `LAST` table-calc filter that runs after aggregation and HIDES
+marks; re-adding it as an ordinary filter silently re-scopes the 6 other table calcs sharing that
+view and changes their numbers (`powerbi-report-gotchas` §10). **The validator classifies each row
 as fixable / accepted-limitation / false-claim; you repair only what it routes to you.**
 
 ⚠️ **Every PBIR edit must be re-runnable from `_build/`, not just present in the bundle.** There is no
 `--approved-viz` landing channel upstream, and a landing re-run (`--approved-dax`) **deletes and
 recreates** the whole `.Report` folder — so a bundle-only edit is one a later *legitimate* re-run
-silently discards. Write `_build/fix_<what>.py`, following the existing pattern in
-`examples/price-of-prosperity/_build/gen.py` (a re-runnable PBIR generator whose `emit` mode rewrites
-every `visual.json`). Three properties make it a patch rather than an edit:
+silently discards. Write `_build/fix_<what>.py`, following
+`examples/price-of-prosperity/_build/gen.py` (a re-runnable PBIR generator). Three properties make
+it a patch rather than an edit:
 
 - **finds its target semantically** — by worksheet name, page name or visual type; never by file
   path, array index or `lineageTag`. The engine rewrites whole files, so anything positional
@@ -262,9 +261,9 @@ it is slow, and `validate` will not catch a wrong encoding.
    **unrefreshed-model artifact, not a binding defect** — never "fix" bindings that are already correct.
    **Read the baseline before changing anything.** Open the rebuilt report and screenshot every page
    against `reference/`. **Judge the GESTALT first** - proportions, density, header/slicer bands,
-   where the eye lands - before looking at any single visual. This is the highest-value step and the
-   easiest to skip: measured on iteration 1, polishing visuals one at a time produced a page where
-   every visual was individually defensible and the page as a whole read nothing like the source. A
+   where the eye lands - before looking at any single visual. Highest-value step, easiest to skip:
+   measured, polishing visuals one at a time produced a page where every visual was individually
+   defensible and the page as a whole read nothing like the source. A
    whole-page mismatch is also the one defect class `viz_fidelity` structurally cannot report,
    because it is per-visual.
 2. **Take the validator's classification of `viz_fidelity`, not the raw list.** Repair only rows it
