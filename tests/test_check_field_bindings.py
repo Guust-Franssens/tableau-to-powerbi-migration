@@ -427,6 +427,31 @@ def test_a_path_that_does_not_exist_never_reports_ok(tmp_path, capsys) -> None:
         assert "OK" not in capsys.readouterr().out, argv
 
 
+def test_nothing_to_compare_is_skipped_never_ok(tmp_path, capsys) -> None:
+    """Mutation killed: grading an EMPTY pair as OK.
+
+    Review finding: with `--model` and `--report` transposed - a one-keystroke slip, both paths
+    perfectly real - no model tables parse and no references are found, and the gate used to print
+    "every PBIR field reference resolves" and exit 0 for a report it never opened.
+    """
+    bundle = _write_bundle(tmp_path, visuals=[_visual(_column("Sales", "Order Date"))])
+    model = bundle / "pbip" / "Book" / "Book.SemanticModel"
+    report = bundle / "pbip" / "Book" / "Book.Report"
+
+    transposed = cfb.check_pair(model, report)
+    assert transposed["status"] == "SKIPPED", transposed
+    assert cfb.main(["--model", str(report), "--report", str(model)]) == 0
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out and "resolves in its model" not in out
+
+    # An existing but empty report folder is the same shape: nothing was compared.
+    empty = tmp_path / "Empty.Report"
+    empty.mkdir()
+    assert cfb.check_pair(empty, model)["status"] == "SKIPPED"
+    merged = cfb._merge([cfb.check_pair(empty, model)], [])  # pylint: disable=protected-access
+    assert merged["status"] == "SKIPPED" and merged["reports_scanned"] == 0
+
+
 def test_warn_only_and_json_output(tmp_path) -> None:
     """`--warn-only` never gates; `--json` writes the same verdict a caller can act on."""
     bundle = _write_bundle(tmp_path, visuals=[_visual(_column("Sales", "Nope"))])

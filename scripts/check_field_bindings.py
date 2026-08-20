@@ -355,10 +355,29 @@ def find_reports(root: Path) -> list[Path]:
 
 
 def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
-    """Grade every reference in ONE report against ONE model."""
+    """Grade every reference in ONE report against ONE model.
+
+    A pair that yields NOTHING to compare - no model tables, or no field reference anywhere in the
+    report - is `SKIPPED`, never `OK`. Review finding: with `--model` and `--report` transposed (a
+    one-keystroke slip, both paths perfectly real) the old code parsed no model and found no
+    references, then printed "every PBIR field reference resolves" and exited 0 for a report it had
+    never opened. An affirmative verdict must mean something was actually checked.
+    """
     model = parse_model(model_dir)
     findings = [resolve_reference(model, ref) for ref in iter_references(report_dir)]
     unresolved = [f for f in findings if f["status"] != "resolved"]
+    if not findings or not model.tables:
+        reason = "no tables parsed from the model" if not model.tables else "no field reference found in the report"
+        return {
+            "report": str(report_dir),
+            "model": str(model_dir),
+            "status": "SKIPPED",
+            "reason": reason,
+            "references": len(findings),
+            "near_misses": 0,
+            "missing": 0,
+            "findings": [],
+        }
     return {
         "report": str(report_dir),
         "model": str(model_dir),
@@ -405,19 +424,23 @@ def scan(root: Path) -> dict[str, Any]:
 
 
 def _merge(pairs: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> dict[str, Any]:
-    """Fold per-report results into one verdict."""
-    unresolved = [p for p in pairs if p["status"] == "UNRESOLVED"]
-    if not pairs:
+    """Fold per-report results into one verdict, keeping ungraded pairs out of the pass count."""
+    graded = [p for p in pairs if p["status"] != "SKIPPED"]
+    skipped = list(skipped) + [
+        {"report": p["report"], "model": p["model"], "reason": p["reason"]} for p in pairs if p["status"] == "SKIPPED"
+    ]
+    unresolved = [p for p in graded if p["status"] == "UNRESOLVED"]
+    if not graded:
         status = "SKIPPED"
     else:
         status = "UNRESOLVED" if unresolved else "OK"
     return {
         "status": status,
-        "reports_scanned": len(pairs),
+        "reports_scanned": len(graded),
         "reports_unresolved": len(unresolved),
-        "near_misses": sum(p["near_misses"] for p in pairs),
-        "missing": sum(p["missing"] for p in pairs),
-        "reports": pairs,
+        "near_misses": sum(p["near_misses"] for p in graded),
+        "missing": sum(p["missing"] for p in graded),
+        "reports": graded,
         "skipped": skipped,
     }
 
@@ -436,7 +459,7 @@ def render(report: dict[str, Any]) -> str:
         f"({report['near_misses']} case-only near-miss(es), {report['missing']} missing)",
     ]
     for one in report["reports"]:
-        if one["status"] == "OK":
+        if one["status"] != "UNRESOLVED":
             continue
         lines.append(f"  {Path(one['report']).name}  (model: {Path(one['model']).name})")
         lines += _render_findings(one["findings"], "near_miss")
