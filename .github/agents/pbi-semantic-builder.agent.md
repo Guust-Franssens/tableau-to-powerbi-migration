@@ -159,13 +159,12 @@ enrich it, and hand it over refreshed.
 
 0. Invoke `powerbi-semantic-model-gotchas` before touching TMDL.
 1. **Read the queue with `python scripts/read_handover.py <bundle> --workbook <name>`**, then
-   `--category <X>` for each category's full detail. ⚠️ **Never read `handover/<workbook>.json`
-   directly — it silently hands you the wrong list.** `requests[]`, the only one carrying `formula`,
-   starts at byte 31,934 of a 347 KB slice, past any read cutoff; what comes back instead is
-   `needs_review[]` — same calcs, no formula. Enough to *report* a stub, not to *repair* one, which is
-   how three workbooks shipped a bare `BLANK()` dispatcher with every branch measure correct. Full
-   measurement: `powerbi-semantic-model-gotchas` §8. `openability_selfcheck` is what it proved about
-   shape.
+   `--category <X>` for each category's full detail. Reading the raw slice by hand works but costs a
+   round trip — a 60-stub slice is 347 KB and a file read refuses it — and most of that bulk is
+   `category_guidance` duplicated per request, which the reader prints once. ⚠️ **Whatever route you
+   take, work from `requests[]`, never `needs_review[]`** — the latter lists the same calcs with no
+   `formula`, so it is enough to *report* a stub and not to *repair* one. Background:
+   `powerbi-semantic-model-gotchas` §8. `openability_selfcheck` is what it proved about shape.
 2. **PROVE the live source is reachable BEFORE you change anything — ONE attempt, then ask.**
    `python scripts/probe_bundle.py <bundle> --check-only --spec <spec>` first (static, free), then the
    live probe. A refusal naming authentication, permissions or a sign-in prompt is a **final answer**:
@@ -324,8 +323,8 @@ throwing an error" is necessary but not sufficient:
    report states whether you landed DAX for it (and **whether you chose a visual calculation or a
    model measure, with the reason**), routed it back, or left it stubbed and why. A silent stub is
    indistinguishable from an overlooked one. ⚠️ **"Recorded" is not "addressed."** This item is
-   satisfiable from `needs_review[]` alone, and *was* — if your fate list did not come from
-   `read_handover.py --category`, you have not seen the queue.
+   satisfiable from `needs_review[]`, which has no `formula` — so a complete fate list proves you
+   enumerated the stubs, not that you could fix any of them. Say which you did.
 6. **Renames are grep-verified** — if a column or measure was renamed for any reason (collision
    avoidance, Title Case cleanup), every DAX expression that references it has been checked to use the
    new `name`, not left pointing at the old one or at `sourceColumn`.

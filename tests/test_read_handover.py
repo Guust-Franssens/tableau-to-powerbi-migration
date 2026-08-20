@@ -1,15 +1,21 @@
-"""Tests for scripts/read_handover.py - the reader that makes the engine's work queue readable.
+"""Tests for scripts/read_handover.py - the reader that makes the engine's work queue tractable.
 
-Every test names the mutation it kills. This tool exists because a queue was silently unreachable,
-so the tests that matter most are the ones that would catch it becoming unreachable again:
+Every test names the mutation it kills. The ones that matter most:
 
-* `test_reads_requests_not_the_needs_review_decoy` - the whole defect. `needs_review[]` and
-  `requests[]` describe the same calculations, and the reader must work from the one carrying the
-  formula. A mutation swapping the key would leave a plausible-looking, useless report.
-* `test_truncation_is_loud_and_names_every_omitted_item` - silent truncation IS the original bug.
-  A mutation dropping the banner must fail here.
-* `test_formula_is_never_abbreviated` - the formula is the entire payload; abbreviating it would
-  reintroduce "compliant and blank" repairs.
+* `test_reads_requests_not_the_needs_review_decoy` - `needs_review[]` and `requests[]` describe the
+  same calculations, and only `requests[]` carries the formula. A mutation swapping the key would
+  leave a plausible-looking, useless report.
+* `test_guidance_printed_once_not_once_per_request` - de-duplicating `category_guidance` is the
+  reader's main reason to exist (~53 KB of repetition in one real file); a regression here silently
+  restores the bloat.
+* `test_truncation_is_loud_and_names_every_omitted_item` - a tool that fits a large queue into a
+  small window is exactly where a silent cap would be easy to introduce.
+
+⚠️ Note on framing: an earlier version of this module claimed the reader fixed a *silent* failure in
+which a truncated file read returned `needs_review[]` unnoticed. That was measured to be false (the
+read refuses loudly; a control agent recovered by parsing and got everything) and was retracted. The
+reader is an ergonomics and triage improvement. These tests are unaffected - they always tested
+behaviour, not the rationale.
 
 No network, no Power BI Desktop, no engine: every fixture is written into `tmp_path`.
 """
@@ -119,7 +125,7 @@ def test_reads_requests_not_the_needs_review_decoy(tmp_path, capsys):
 
 
 def test_default_view_warns_that_needs_review_is_not_the_queue(tmp_path, capsys):
-    """Kills: dropping the decoy warning, which is what stops an agent 'reading the file' wrongly."""
+    """Kills: dropping the note that `needs_review[]` has no formula and is not the work queue."""
     path = write_slice(tmp_path, make_workbook([make_request("Selected Measure")]))
 
     _, out = run([str(path)], capsys)

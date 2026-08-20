@@ -553,28 +553,7 @@ distinct Tableau idiom**, cache the result, and reuse it:
 
 This is what makes the cookbook self-refreshing against Microsoft Learn rather than a frozen snapshot.
 
-## 10. Your work queue is buried ~93% into the handover file — read it with the reader
-
-Measured 2026-08-20 on `_bundle-208`. The model side has the same defect
-(`powerbi-semantic-model-gotchas` §8); the report side is **strictly worse**, because its queue is
-never reachable at any workbook size.
-
-### The measurement
-
-A default file read returns roughly the first 20 KB. In the six largest handover slices of that
-bundle, the report-side payloads sit at:
-
-| slice | size | `remediation_worklist` at byte | `viz_fidelity` at byte |
-|---|---|---|---|
-| `Admin_Insights_Starter.json` | 347 KB | 156,764 | **315,571** |
-| `Section_13_-_Tableau_63_Charts.json` | 174 KB | 16,746 | 154,295 |
-| `Sales___Customer_Dashboards.json` | 127 KB | 76,517 | 117,109 |
-| `Section_12_-_Row_Level_Calculations.json` | 89 KB | 56,792 | 82,910 |
-
-`viz_fidelity` is at ~93% depth in **every** file measured. There is no error, no warning and no
-truncation marker — the read simply returns earlier, unrelated keys and stops.
-
-### The fix
+## 10. Reading the report-side handover queue
 
 ```bash
 python scripts/read_handover.py <bundle> --workbook <name> --viz
@@ -582,14 +561,26 @@ python scripts/read_handover.py <bundle> --workbook <name> --viz --severity bloc
 python scripts/read_handover.py <bundle> --list        # estate-wide triage, both queues
 ```
 
-`--viz` leads with the payload nobody had been seeing at all: **emptied visuals**
-(`pbip_ref_drops[].emptied`) — visuals whose every field binding was dropped, so they render blank on
-a report that validates clean. The worked example above reports **15** of them in one workbook. It
-then prints `remediation_worklist` items grouped by category, with each distinct `remediation` text
-printed **once** rather than repeated per item, then the `viz_fidelity` tier counts.
+A handover slice is large (347 KB for a 60-stub workbook) and a file-read tool refuses it outright,
+so reading it by hand means parsing it programmatically and then filtering. The reader does that
+once and ranks the result.
 
-⚠️ `--severity` filters the worklist but **never hides emptied visuals** — a blank visual outranks
-any severity band the worklist assigns.
+### What `--viz` puts first, and why it matters
+
+**Emptied visuals** (`pbip_ref_drops[].emptied`) - visuals whose *every* field binding was dropped.
+They render blank on a report that validates clean, and nothing else ranks them: in the worked
+example there were **15**, sitting unremarked beside a 170-item `remediation_worklist`. This is the
+single highest-value thing the reader surfaces, and it is why `--severity` **never hides them** - a
+blank visual outranks any severity band the worklist assigns.
+
+Then `remediation_worklist` grouped by category, with each distinct `remediation` text printed
+**once** rather than repeated per item, then `viz_fidelity` tier counts.
+
+⚠️ **A previous version of this section claimed these payloads were "unreachable at any workbook
+size" because they sit ~93% into the file.** The offsets are real (`remediation_worklist` at byte
+156,764, `viz_fidelity` at 315,571 of a 347 KB slice); the conclusion drawn from them was **wrong and
+has been retracted** - see `powerbi-semantic-model-gotchas` §8 for the falsifying experiment and the
+lesson. A deep byte offset is evidence of a byte offset, not of unreachability.
 
 ### Still true: a `viz_fidelity` reason can be a deferral you must NOT reverse
 
@@ -597,7 +588,7 @@ Reading the queue is necessary, not sufficient. Measured entry, quoted in full b
 abbreviated form reads as a simple gap:
 
 > *"table-calc filter on 'Last' (LAST) is not reproduced: it runs after aggregation and HIDES marks,
-> which Power BI cannot express as a filter … 6 other table calc(s) share this view and would be
+> which Power BI cannot express as a filter ... 6 other table calc(s) share this view and would be
 > silently re-scoped if it were re-added as an ordinary filter."*
 
 Re-adding that as an ordinary filter would silently change six other visuals' numbers. The validator

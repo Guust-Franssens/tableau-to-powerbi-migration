@@ -1,7 +1,7 @@
 """
-purpose: print the engine's handover WORK QUEUE at a size an agent can actually read, because the
-         raw JSON buries it past every practical file-read cutoff and leaves a same-named lookalike
-         (``needs_review[]``) in its place.
+purpose: print the engine's handover work queue at a size that fits in an agent's context, with
+         each category's guidance de-duplicated and the report-side findings (including visuals
+         whose bindings were dropped entirely) surfaced instead of buried.
 usage:   python scripts/read_handover.py <bundle-or-handover.json>            # queue summary
          python scripts/read_handover.py <target> --category <category>       # full repair detail
          python scripts/read_handover.py <target> --name '<calc name>'        # one calc, in full
@@ -10,41 +10,46 @@ usage:   python scripts/read_handover.py <bundle-or-handover.json>            # 
 
 Why this exists
 ---------------
-The engine's per-workbook handover carries everything needed to finish a stubbed calculation: the
-original Tableau ``formula``, the ``fields`` it references, the ``target_table``, and per-category
-``category_guidance``. All of it lives in ``model_translation_handoff.requests[]``.
+A per-workbook handover slice is large - 347 KB for a 60-stub workbook - and most of that bulk is
+redundant. It carries everything needed to finish a stubbed calculation in
+``model_translation_handoff.requests[]``: the original Tableau ``formula``, the ``fields`` it
+references, the ``target_table``, and per-category ``category_guidance``.
 
-Measured on ``_bundle-208`` (2026-08-20), that array is unreachable by a plain file read:
+The problem is not that the data is unreachable. It is that reading it costs more than it should:
 
-    Admin_Insights_Starter.json   355,259 bytes   requests[] starts at byte 31,934   -> 0 of 60 read
-    Sales___Customer_Dashboards   129,690 bytes   requests[] starts at byte 19,717   -> ~1 of 30 read
-    Section_12_Row_Level           91,289 bytes   requests[] starts at byte 16,247   -> ~5 of 22 read
+* **The file is too large to open in one go.** A file-read tool refuses it outright (measured:
+  *"File too large to read at once (346.9 KB)"*), so every consumer has to recover - by parsing it
+  programmatically, or by hunting byte ranges. That recovery works, but it is a round trip every
+  agent pays on every workbook, and hunting ranges requires knowing offsets nobody has.
+* **Most of the size is duplication.** ``category_guidance`` is emitted per REQUEST, not per
+  category. Verified across all 38 handovers in ``_bundle-208``: there is exactly ONE distinct
+  guidance string per category estate-wide, so a 60-request file carries 60 copies of an
+  886-character block - about 53 KB of pure repetition. Printing it once per category present is
+  lossless by measurement, and costs 4,481 bytes for all seven categories.
+* **The genuinely alarming findings are not the ones a reader lands on.** ``pbip_ref_drops`` marks
+  visuals whose every field binding was dropped - they render blank on a report that validates
+  clean. There were **15** in the worked example and nobody had looked at them, because nothing
+  ranked them above the 170-item worklist they sit beside.
 
-A 20 KB read window instead lands squarely on ``model_translation_handoff.needs_review[]``, which
-lists the SAME calculations by name with only 5 fields (``category``, ``fallback_reason``,
-``has_suggestion``, ``name``, ``role``). That is enough to REPORT every stub and structurally
-insufficient to REPAIR any of them - so an agent reads the file, sees a plausible complete-looking
-list, is told no error, and ships a model full of ``BLANK()`` placeholders while believing it
-followed its instructions. Confirmed in the field on three independent workbooks, all of which had
-every branch measure translated correctly and only the dispatcher stubbed.
+⚠️ **What this tool is NOT.** An earlier version of this docstring claimed that reading the slice
+directly failed *silently* - that a truncated read returned ``needs_review[]`` (the same calcs with
+5 fields and no formula) while the consumer believed it had the whole queue. **That was wrong and
+was retracted.** Measured two ways: the read tool **refuses loudly** rather than truncating, and in a
+controlled A/B an agent given only the old "read the handover file" instruction hit that error,
+recovered by parsing the JSON, and returned the complete formula. There is no silent-decoy failure
+mode. This tool is an ergonomics and triage improvement; it is not a correctness fix, and it should
+not be described as one.
 
-The report side is worse and permanent: ``remediation_worklist`` (170 items with per-item
-``remediation`` text) sits at byte 156,764 and ``viz_fidelity`` at byte 315,571 in the same file -
-about 93% of the way in. Neither is ever readable by a default read, at any workbook size.
-
-Why it de-duplicates guidance
------------------------------
-``category_guidance`` is emitted per REQUEST, not per category. Verified across all 38 handovers in
-``_bundle-208``: there is exactly ONE distinct guidance string per category estate-wide, so 60
-requests in one file carry 60 copies of an 886-character block - roughly 53 KB of pure repetition,
-and a large part of why the queue is pushed out of reach. Printing it once per category present is
-lossless by measurement, not by assumption, and costs 4,481 bytes for all seven categories.
+``needs_review[]`` is still worth knowing about - it is a strict field-subset of ``requests[]``
+(``category``, ``fallback_reason``, ``has_suggestion``, ``name``, ``role``) and is sufficient to
+*report* a stub but not to *repair* one - so this tool always works from ``requests[]``.
 
 Why it never truncates silently
 -------------------------------
-Silent truncation is the defect this tool exists to fix, so it must not reintroduce it. When output
-would exceed ``--max-bytes``, the remaining items are named explicitly along with the exact command
-that prints them. A caller is never left believing it has seen the whole queue.
+Not because a silent truncation was ever observed here, but because a tool whose whole job is to fit
+a large queue into a small window is exactly the place that failure would be easy to introduce. When
+output would exceed ``--max-bytes``, the remaining items are named explicitly along with the command
+that prints them.
 
 What it will NOT tell you
 -------------------------
@@ -496,16 +501,14 @@ def render_viz(wb_name: str, wb: dict, severity: str | None, max_bytes: int) -> 
 
 
 DECOY_WARNING = """\
-!! DO NOT work from `model_translation_handoff.needs_review[]` in the raw JSON.
-!! It lists the SAME calculations by name but carries only 5 fields - no formula, no fields,
-!! no target_table, no guidance. It is enough to REPORT a stub and structurally insufficient to
-!! REPAIR one. It also sits EARLIER in the file than `requests[]`, so a plain file read finds it
-!! first and stops before the real queue. That is how three shipped workbooks got a BLANK()
-!! dispatcher while every branch measure was translated correctly."""
+NOTE: `model_translation_handoff.needs_review[]` in the raw JSON is NOT this queue.
+It lists the same calculations by name but carries only 5 fields - no formula, no fields,
+no target_table, no guidance. It is enough to REPORT a stub and structurally insufficient to
+REPAIR one, so this tool always works from `requests[]`."""
 
 
 def render_default(wb_name: str, wb: dict, target: Path) -> str:
-    """The landing view: both queues at a glance, plus the warning that stops the original defect."""
+    """The landing view: both queues at a glance, plus which list the detail came from."""
     reqs = requests_of(wb)
     out = _model_section(wb_name, wb, reqs, target)
     out += _report_section(wb)

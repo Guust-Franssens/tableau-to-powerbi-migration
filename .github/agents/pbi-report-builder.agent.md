@@ -133,7 +133,7 @@ report tells you where. Read these first, in this order:
 
 | source | what it gives you |
 |---|---|
-| `read_handover.py <bundle> --workbook <name> --viz [--severity X]` | **your work queue**: `remediation_worklist` (per item `severity`, `category`, `reason`, `remediation`), **emptied** visuals, and `viz_fidelity[]` (`status`, `tier`, `reason`). ⚠️ **Never read `handover/<workbook>.json` directly** — the worklist sits ~93% in, past any read cutoff, and fails silently (`powerbi-report-gotchas` §10) |
+| `read_handover.py <bundle> --workbook <name> --viz [--severity X]` | **your work queue**: `remediation_worklist` (per item `severity`, `category`, `reason`, `remediation`), **emptied** visuals — every binding dropped, so they render blank on a report that validates clean (15 in one measured workbook, previously unremarked) — and `viz_fidelity[]` (`status`, `tier`, `reason`). Reading the raw 347 KB slice by hand works but buries these; see `powerbi-report-gotchas` §10 |
 | `estate.pending_gates[]` | which gates must be OFFERED (e.g. `dashboard_audit`) — offer, never self-approve |
 | `migration-spec.json` | source intent the engine's input format cannot carry: `dashboards[].zones` (layout tree), `worksheets[].encodings`, `manual_sort`, `measure_names_values_pivot`, filter `note`s |
 | `migrations/<name>/reference/` | the Tableau screenshots — the only thing that can adjudicate *look and feel* |

@@ -854,65 +854,79 @@ Dismiss via `WindowPattern.Close()` on the `WindowsForms10.*` host — invoking 
 accumulated only ~16 s CPU over an hour. A blocked-on-modal refresh is *idle*, not busy; a genuinely
 slow refresh burns CPU. Check that before assuming you need to wait longer.
 
-## 8. The handover work queue is unreachable by a plain file read — and its decoy is not
+## 8. Reading the handover queue, and a retracted claim worth keeping
 
-Measured 2026-08-20 on `_bundle-208`. This is not a Power BI defect; it is the reason three shipped
-customer workbooks each carried a bare `BLANK()` measure while **every branch measure it referenced
-was translated correctly**. It cost three independent debugging cycles before anyone measured it.
-
-### The mechanism
-
-A handover slice (`<bundle>/handover/<workbook>.json`) contains **two lists describing the same
-stubbed calculations**, and the useless one comes first:
-
-| list | byte offset (347 KB slice) | fields | what it is good for |
-|---|---|---|---|
-| `model_translation_handoff.needs_review[]` | 16,364 — **inside** a 20 KB read | 5: `category`, `fallback_reason`, `has_suggestion`, `name`, `role` | **reporting** a stub. Nothing else |
-| `model_translation_handoff.requests[]` | 31,934 — **outside** it | 9: adds **`formula`**, **`fields`**, **`target_table`**, `category_guidance` | the actual work order |
-
-```
-byte 0            16,364    20,480         31,934            355,259
-  |─────────────────|─────────|──────────────|──────────────────|
-    header/other   needs_review            requests[]
-                             ↑ a default file read STOPS here
-```
-
-So an agent told to "read the handover" reads it, is handed 20 KB, **gets no error**, sees a
-plausible 60-item list of exactly the right calculations, and never learns `requests[]` exists. It
-can then satisfy a "record every stub's fate" requirement completely — and repair nothing. The
-outcome is **compliant and blank**, which is far harder to notice than a crash.
-
-⚠️ **It degrades with workbook size, which is why testing missed it.** Measured across the same
-bundle: `requests[]` at byte 8,011 (all 3 requests readable ✅), 16,247 (~5 of 22), 19,717 (~1 of 30),
-31,934 (**0 of 60**). Small workbooks work perfectly. The customer estate's workbooks are the big
-ones.
-
-### The fix
-
-**Never read the slice directly. Use the reader:**
+### Read it with the reader, not by hand
 
 ```bash
-python scripts/read_handover.py <bundle> --workbook <name>            # the queue + counts
+python scripts/read_handover.py <bundle> --workbook <name>            # queue + counts
 python scripts/read_handover.py <bundle> --workbook <name> --category model_object_parameter
 python scripts/read_handover.py <bundle> --workbook <name> --name 'Selected Measure'
+python scripts/read_handover.py <bundle> --list                       # estate-wide triage
 ```
 
-It hoists `category_guidance` out of the requests and prints it **once per category** — verified
-lossless across all 38 handovers in the bundle: there is exactly **one distinct guidance string per
-category estate-wide**, so a 60-request file carries 60 copies of an 886-character block (~53 KB of
-pure repetition), which is itself a large part of why the queue is pushed out of reach. It never
-truncates silently: over `--max-bytes` it names every omitted request and the command that prints it.
+Not because the raw slice is unreadable - it is not - but because reading it by hand costs a round
+trip every time and returns a lot of noise. A 60-stub slice is **347 KB**, and a file-read tool
+refuses it outright (*"File too large to read at once (346.9 KB)"*), so you recover by parsing it
+programmatically. That works. It is simply work you pay per workbook, on top of then filtering 9
+fields x 60 requests down to the one category you are about to author.
 
-### The idiom that keeps getting stubbed: a parameter-driven measure dispatcher
+The reader also de-duplicates `category_guidance`, which is emitted **per request** rather than per
+category. Verified across all 38 handovers of `_bundle-208`: exactly **one distinct guidance string
+per category, estate-wide**, so a 60-request file carries 60 copies of an 886-character block -
+about **53 KB of pure repetition**, and most of why the file is awkward in the first place. All
+seven categories together cost 4,481 bytes.
+
+`needs_review[]` is worth knowing about: it lists the same calcs with a strict subset of the fields
+(`category`, `fallback_reason`, `has_suggestion`, `name`, `role` - **no `formula`**). It is enough to
+*report* a stub and structurally insufficient to *repair* one. Always work from `requests[]`.
+
+### RETRACTED: "the queue is unreachable and fails silently"
+
+An earlier version of this section claimed that a truncated read silently returned `needs_review[]`
+while the consumer believed it had the full queue, and that this caused three shipped `BLANK()`
+dispatchers. **All of that was wrong**, and it is kept here rather than deleted because the way it
+was wrong is more instructive than the entry ever was.
+
+Falsified two ways, within hours of being written:
+
+1. **The read fails LOUDLY.** The file-read tool refuses oversized files with an explicit error and a
+   suggested remedy. There is no silent-truncation band - measured at both 20.7 KB and 346.9 KB.
+2. **A controlled A/B refuted the consequence.** Two fresh agents, same task ("quote the full Tableau
+   formula for the stubbed calc `Group Sort`"), one given the old *"read `handover/<workbook>.json`"*
+   instruction and one given the reader. **Both succeeded.** The control hit the size error,
+   recovered by parsing with `ConvertFrom-Json`, and returned the complete 3-branch `CASE`, the right
+   `target_table`, and correct queue totals. It reported afterwards that the recovery was *"reactive,
+   triggered by a size error"* - exactly the loud-failure-then-recover path.
+
+The measurements underneath were all correct - byte offsets, the field asymmetry, the duplication.
+What was wrong was the **consequence inferred from them**, and then a **cause asserted on top of that
+inference**: that this mechanism produced the three field `BLANK()` dispatchers. There was never any
+evidence of what those agents actually did.
+
+**The lesson, which is the part worth keeping:** a byte offset past a documented read limit *looks*
+like proof of unreachability, and it is not. It is proof of a byte offset. The distance between "I
+measured where this sits in the file" and "therefore a consumer cannot see it" is an untested
+assumption about the consumer - and it took one A/B test and one direct tool call to close. Run the
+experiment against the actual consumer before writing the consequence down, and never attach a
+field incident to a mechanism you have not reproduced.
+
+### Still open: what DID cause the three BLANK() dispatchers
+
+Unknown. Three workbooks (ACMU `_Measures.tmdl:87` `'Selected Measure'`, Airline Scorecard, Flight
+Phase `'Measure - All Phases'`) each shipped a bare `BLANK()` dispatcher while every branch measure
+it referenced was translated correctly. That pattern is real and reported from the field. The cause
+is not established. Do not fill the gap with a plausible story.
+
+### The idiom itself: a parameter-driven measure dispatcher
 
 `CASE [Parameters].[P] WHEN 1 THEN [MeasureA] WHEN 2 THEN [MeasureB] ... END`, driving a chart whose
-Y-axis swaps with a slicer. Confirmed on three unrelated workbooks (ACMU `_Measures.tmdl:87`
-`'Selected Measure'`, Airline Scorecard, Flight Phase `'Measure - All Phases'`).
+Y-axis swaps with a slicer.
 
 ⚠️ **`_GUIDANCE[MODEL_OBJECT_PARAMETER]` routes to field parameters, and for this shape that is
-usually the heavier answer.** When every branch is **already a working measure** — which is the
-normal case, because the engine translates the branches fine and refuses only the dispatcher — a
-plain `SWITCH` is the lighter, faithful fix and needs no new model object:
+usually the heavier answer.** When every branch is **already a working measure** - the normal case,
+because the engine translates the branches fine and refuses only the dispatcher - a plain `SWITCH` is
+the lighter, faithful fix and needs no new model object:
 
 ```dax
 Selected Measure =
@@ -920,11 +934,11 @@ VAR _sel = SELECTEDVALUE('Measure Selector'[Key])
 RETURN SWITCH(_sel, "SLA", [SLA Availability], "VTP", [VTP Availability], BLANK())
 ```
 
-Ground truth that this is the right call: the same ACMU model already shipped a **working** 8-branch
-`SWITCH` sibling (`'Selected Availability'`, line 520) over the same underlying measures — the
+Ground truth that this is the right call: the ACMU model already shipped a **working** 8-branch
+`SWITCH` sibling (`'Selected Availability'`, line 520) over the same underlying measures - the
 pattern was proven in the file, next to the stub, the whole time. Reach for a field parameter when
 the swap must also change a **dimension**, or when the user must see the list as a slicer of field
 names; otherwise `SWITCH` over existing measures is correct and cheaper.
 
-Both are valid; only one was written down, which is its own lesson — when two routes work, say so
+Both are valid; only one was written down, which is its own lesson - when two routes work, say so
 and say when each applies, or the heavier one becomes the only one anybody finds.
