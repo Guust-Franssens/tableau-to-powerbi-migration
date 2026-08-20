@@ -1,0 +1,44 @@
+name: Copilot setup steps
+
+# Pre-installs the environment the GitHub Copilot coding agent needs BEFORE it starts working, so a
+# cloud agent does not spend its run rediscovering that this repo is uv-based.
+#
+# The job name MUST be `copilot-setup-steps` - that exact name is what the coding agent looks for.
+#
+# Deliberately mirrors the `checks` job in checks.yml rather than inventing a second setup path: an
+# agent whose environment differs from CI will produce work that passes locally and fails in CI,
+# which is the whole failure mode this file exists to prevent.
+#
+# What a cloud agent CANNOT do here, and why it matters when picking issues to assign:
+#   - No Power BI Desktop, so nothing in the refresh / bridge / screenshot path can be verified.
+#   - No installed conversion-engine plugin, so no migration can actually be run.
+#   - No Snowflake / Databricks / live-source credentials, by design (see the credential rules in
+#     AGENTS.md - an agent must never obtain one).
+# Issues needing any of those are NOT cloud-agent work; assign only offline, fixture-testable ones.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+permissions:
+  contents: read
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # uv.lock is deliberately gitignored (it resolves to internal package-feed URLs), so this
+        # resolves fresh rather than restoring a committed lockfile - same as checks.yml.
+        run: uv sync --all-extras
