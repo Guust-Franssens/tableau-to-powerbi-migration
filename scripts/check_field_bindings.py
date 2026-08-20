@@ -482,6 +482,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--model and --report must be given together")
     if not args.paths and not args.model:
         parser.error("give a bundle/report path, or --model with --report")
+    # A path that does not exist must NEVER produce a verdict. `rglob` on a missing folder yields
+    # nothing, so without this a typo'd `--report` reads as "0 references, all resolved" and the
+    # gate prints OK and exits 0 for a report it never opened - the one failure mode that would
+    # make this check worse than not running it.
+    for label, path in (("--model", args.model), ("--report", args.report), *(("path", p) for p in args.paths)):
+        if path is not None and not path.is_dir():
+            parser.error(f"{label} {path} is not a directory")
 
     if args.model:
         merged = _pair_from_args(args)

@@ -408,6 +408,25 @@ def test_explicit_model_and_report_pair(tmp_path) -> None:
         cfb.main(["--model", str(model)])
 
 
+def test_a_path_that_does_not_exist_never_reports_ok(tmp_path, capsys) -> None:
+    """Mutation killed: skipping the existence guard, which turns a typo into a green gate.
+
+    `rglob` on a missing folder yields nothing, so an unchecked `--report` typo grades as
+    "0 references, all resolved" - indistinguishable from a genuinely clean bundle.
+    """
+    bundle = _write_bundle(tmp_path, visuals=[_visual(_column("Sales", "Order Date"))])
+    model = bundle / "pbip" / "Book" / "Book.SemanticModel"
+    for argv in (
+        ["--model", str(model), "--report", str(tmp_path / "Gone.Report")],
+        ["--model", str(tmp_path / "Gone.SemanticModel"), "--report", str(bundle / "pbip" / "Book" / "Book.Report")],
+        [str(tmp_path / "no-such-bundle")],
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cfb.main(argv)
+        assert exc.value.code != 0, argv
+        assert "OK" not in capsys.readouterr().out, argv
+
+
 def test_warn_only_and_json_output(tmp_path) -> None:
     """`--warn-only` never gates; `--json` writes the same verdict a caller can act on."""
     bundle = _write_bundle(tmp_path, visuals=[_visual(_column("Sales", "Nope"))])
