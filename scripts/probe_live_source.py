@@ -26,21 +26,18 @@ reaches it. Measured 2026-08-01: the `databricks` CLI could query the warehouse 
 BI had never authenticated to it at all.
 
 So the probe has to go *through* Power BI, and the smallest thing Power BI can execute is a model.
-Hence: one table, `Table.FirstN(..., 1)`, refresh, require a row. That IS the `SELECT 1` - it just
-has to be spelled as a partition instead of a shell command.
+Hence: for ordinary tables, one table, `Table.FirstN(..., 1)`, refresh, require a row. That IS
+Power BI's `SELECT 1` - it just has to be spelled as a partition instead of a shell command.
 
-Why not an M native query either
---------------------------------
-`Value.NativeQuery(db, "SELECT 1")` looks strictly better - no dependency on a real table, so no
-false failure from a wrong table name in the spec. It is rejected for two measured reasons:
+Why custom SQL stops before refresh
+-----------------------------------
+A Tableau relation of `type='text'` is already a hand-written query. Automatically wrapping it in
+`Value.NativeQuery` would lose both properties this probe exists for: folding is off, so the
+warehouse may run the full custom query, and Desktop can raise a native-query approval modal that
+looks like a false NO_CREDENTIAL. For custom SQL this script writes the same throwaway PBIP scaffold
+but returns OPERATOR_REQUIRED before opening Desktop; a human must decide whether to run it.
 
-1. **Desktop raises its own approval modal for native queries.** That is a second human-in-the-loop
-   dependency, on the one code path whose whole job is to tell "needs a human" apart from
-   "reachable". It would hang and land on a false NO_CREDENTIAL.
-2. **It may not exercise the same credential path.** Power BI can key credentials per connector
-   function, so a native query passing would not prove the model the builder generates can connect.
-
-The probe mirrors the builder on purpose: `pbi-semantic-builder` is instructed to emit
+The ordinary-table probe mirrors the builder on purpose: `pbi-semantic-builder` is instructed to emit
 `Databricks.Catalogs(host, httpPath, ...)` / `Sql.Database(server, db)`, and `build_m_query` below
 uses exactly those. A pass therefore predicts the real model rather than merely resembling it. If the
 builder's connector shape changes, change this with it - the alignment is the point, not a detail.
@@ -49,6 +46,7 @@ Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
 -------------------------------------------------------------
     PROBE: DATA_OK <n> row(s) from <table>     the source is genuinely reachable, build for real
     PROBE: SKIPPED <reason>                    not a live source - nothing to prove
+    PROBE: OPERATOR_REQUIRED <path>            custom SQL needs a human Desktop refresh; exit 4
     PROBE: NO_CREDENTIAL <detail>              a human must sign in; no retry can fix this
     PROBE: ACCESS_DENIED <detail>              permissions must change; signing in again is not enough
     PROBE: UNREACHABLE <detail>                refresh failed for a non-credential reason
@@ -126,6 +124,7 @@ PROBE_KILL_MARGIN_SECONDS = 60
 # construction" is false - the old 180s default sat only 13s (7.8%) above that cold success and would
 # report a healthy-but-cold source as a failure. 390s is comfortably clear of it.
 PROBE_TIMEOUT_SECONDS = REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS + PROBE_KILL_MARGIN_SECONDS
+EXIT_OPERATOR_REQUIRED = 4
 
 # A credential block does not surface as a clean "auth failed". Measured: the mashup engine raises
 # the credential exception and then crashes posting it back over the named pipe, so the client sees
@@ -218,11 +217,9 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
     entire point - the probe must exercise the SAME credential path the real model will use, or it
     proves nothing about the real model.
 
-    `custom_sql` is that principle applied to a Tableau relation of `type='text'` - a hand-written
-    SELECT that Tableau merely NAMES (e.g. `Flight_Level_Query`). No such table exists at the
-    source, so the generic `Kind="Table"` navigation below can never match it, and the resulting
-    failure says nothing about reachability. When it is present the probe runs the SQL itself, which
-    is also exactly what the migrated model will do.
+    `custom_sql` is that principle applied only to PBIP scaffold generation. The automated probe
+    must not refresh that scaffold, because doing so may run the full custom query and raise a
+    native-query approval modal that would masquerade as a credential failure.
     """
     klass = (conn.get("class") or "").lower()
     server = normalize_host(conn.get("server") or "")
@@ -243,7 +240,7 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
         )
         if native:
-            m = head + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1)\n' + "in\n    one"
+            m = head + f'    one = Value.NativeQuery(db, "{native}")\n' + "in\n    one"
             return m, f"Databricks {server}{http_path} :: {database} :: custom SQL '{table}'"
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
@@ -291,7 +288,7 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
         )
         if native:
-            m = head + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1)\n' + "in\n    one"
+            m = head + f'    one = Value.NativeQuery(db, "{native}")\n' + "in\n    one"
             return m, f"Snowflake {server} ({warehouse}) :: {database} :: custom SQL '{table}'"
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
@@ -905,6 +902,20 @@ def _print_verdict_directive(verdict: str) -> None:
             "################################################################"
         )
         return
+    if verdict == "OPERATOR_REQUIRED":
+        log.error(
+            "\n"
+            "################################################################\n"
+            "#  STOP - CUSTOM SQL PROBE NEEDS A HUMAN IN POWER BI DESKTOP.\n"
+            "################################################################\n"
+            "  The throwaway PBIP was written, but this script did not refresh it.\n"
+            "  A custom SQL refresh may run the full customer query and may show Desktop's\n"
+            "  native-query approval modal, so an automated verdict would be expensive and\n"
+            "  untrustworthy. The gate stays armed until the operator reports the Desktop\n"
+            "  refresh result.\n"
+            "################################################################"
+        )
+        return
     if verdict == "NO_CREDENTIAL":
         log.error(
             "\n"
@@ -1023,6 +1034,20 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
     pbip = _write_probe_model(migration, m_query, table, column) / "Probe.pbip"
     log.info("probe model built: %s", pbip.parent)
     log.info("target: %s", note)
+    if table_spec.get("custom_sql"):
+        log.error("PROBE: OPERATOR_REQUIRED %s", pbip.parent)
+        log.error(
+            "Open %s in Power BI Desktop, hit Refresh, and report whether rows came back; do NOT "
+            "use a SQL client such as DBeaver, Snowsight, or SSMS.",
+            pbip,
+        )
+        log.error(
+            "Reason: SQL clients authenticate as their own identity, while Power BI uses the "
+            "per-Windows-user Desktop DPAPI credential store. Measured 2026-08-01: the databricks "
+            "CLI could query the warehouse while Power BI had never authenticated to it."
+        )
+        _record_attempt(migration, "OPERATOR_REQUIRED", f"{table} -> OPERATOR_REQUIRED ({pbip.parent})")
+        return EXIT_OPERATOR_REQUIRED, "OPERATOR_REQUIRED"
 
     pid = None
     try:

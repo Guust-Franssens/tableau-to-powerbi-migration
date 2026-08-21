@@ -29,14 +29,14 @@ parse_tableau.py  ──►  GATE ARMED           writes are denied on <migratio
                        THE MEASUREMENT      sandbox, opens Power BI Desktop, refreshes, and
                               │             requires a real row back
                               ▼
-        ┌──────────────┬──────────────┬──────────────┬──────────────┐
-     DATA_OK       NO_CREDENTIAL   UNREACHABLE      ERROR        SKIPPED
-        │              │               │              │              │
-   gate lifts     STOP, ask a      STOP, report   STOP, local    no live source;
-   (probe-        human to sign    the address/   tooling fault  nothing to prove
-    cleared);     in. No retry     network fault  — not a claim
-   build for      conjures a       Nobody needs   about the
-   real           credential       to sign in     source
+        ┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
+     DATA_OK      OPERATOR_REQ   NO_CREDENTIAL   UNREACHABLE      ERROR        SKIPPED
+        │              │              │               │              │              │
+   gate lifts     STOP; run      STOP, ask a      STOP, report   STOP, local    no live source;
+   (probe-        the PBIP in    human to sign    the address/   tooling fault  nothing to prove
+    cleared);     Desktop       in. No retry     network fault  — not a claim
+   build for      manually       conjures a       Nobody needs   about the
+   real                          credential       to sign in     source
 ```
 
 **The probe must go *through* Power BI.** A shell query (`sqlcmd`, a Python driver) authenticates as
