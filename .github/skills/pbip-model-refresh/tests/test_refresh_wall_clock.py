@@ -204,7 +204,7 @@ def test_progress_current_prints_row_counts_without_percentages() -> None:
 
 
 def test_progress_liveness_replaces_the_legacy_duration_ceiling(monkeypatch, parked) -> None:
-    """With trace enabled, a lack of progress stops on liveness, not the old 300s-style ceiling."""
+    """With default tracing, no progress stops on liveness, not the old fixed-duration ceiling."""
     monitor = RefreshProgressMonitor(liveness_seconds=0.15, throttle_seconds=2)
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_args: monitor)
 
@@ -214,7 +214,6 @@ def test_progress_liveness_replaces_the_legacy_duration_ceiling(monkeypatch, par
             port=1234,
             tables=["Orders"],
             timeout_sec=5,
-            progress_enabled=True,
             progress_liveness_sec=0.15,
             absolute_timeout_sec=10,
         )
@@ -263,11 +262,28 @@ def test_progress_trace_failure_degrades_to_the_legacy_refresh_path(monkeypatch,
     assert ok is True
     assert "Orders" in message
     assert executed and executed[0][1] == 5
-    assert "[progress] unavailable" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "[progress] unavailable" in captured.err
+    assert "[progress] unavailable" not in captured.out
+
+
+def test_traced_refresh_supersedes_the_old_elapsed_only_heartbeat(monkeypatch, parked, capsys) -> None:
+    """Default progress uses row-count evidence, not the old identical 'still refreshing' signal."""
+    monitor = RefreshProgressMonitor(liveness_seconds=1, throttle_seconds=0.05)
+    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_args: monitor)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
+
+    with pytest.raises(TimeoutError, match="no refresh progress event"):
+        refresh(port=1234, tables=["Orders"], timeout_sec=5, progress_liveness_sec=1, absolute_timeout_sec=5)
+
+    out = capsys.readouterr().out
+    assert "[progress] waiting for first row-count event" in out
+    assert "still refreshing" not in out
+    parked[1].set()
 
 
 def test_progress_flags_are_exposed_with_safe_defaults() -> None:
-    """The CLI defaults to progress, exposes liveness, and keeps an explicit opt-out."""
+    """The CLI and direct API default to progress, expose liveness, and keep an explicit opt-out."""
     parser = refresh_pbip_model._build_arg_parser()
     defaults = parser.parse_args([])
     custom = parser.parse_args(
@@ -275,6 +291,7 @@ def test_progress_flags_are_exposed_with_safe_defaults() -> None:
     )
 
     assert defaults.no_progress is False
+    assert refresh_pbip_model.inspect.signature(refresh).parameters["progress_enabled"].default is True
     assert defaults.progress_liveness_seconds == REFRESH_PROGRESS_LIVENESS_SECONDS
     assert defaults.refresh_absolute_timeout_seconds == REFRESH_ABSOLUTE_TIMEOUT_SECONDS
     assert custom.no_progress is True

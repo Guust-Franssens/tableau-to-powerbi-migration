@@ -151,7 +151,6 @@ from _credential_modal import (
     join_with_credential_poll,
     print_indeterminate_state_notice,
     print_refresh_banner,
-    print_refresh_heartbeat,
     print_refresh_unknown_banner,
     source_hint_from_model,
 )
@@ -390,7 +389,7 @@ def _join_refresh_worker(
                 print_indeterminate_state_notice(desktop_pid, state.unknown_reason)
         elapsed = time.monotonic() - started
         if elapsed >= next_heartbeat and worker.is_alive():
-            print_refresh_heartbeat(elapsed, total_timeout)
+            progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
             next_heartbeat += REFRESH_HEARTBEAT_SECONDS
     if worker.is_alive():
         if progress_monitor.seconds_since_last_event() >= progress_monitor.liveness_seconds:
@@ -414,7 +413,7 @@ def refresh(
     desktop_pid: int | None = None,
     source_hint: str | None = None,
     initial_state: CredentialDetection | None = None,
-    progress_enabled: bool = False,
+    progress_enabled: bool = True,
     progress_liveness_sec: float = REFRESH_PROGRESS_LIVENESS_SECONDS,
     absolute_timeout_sec: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
@@ -477,6 +476,7 @@ def refresh(
             print(
                 f"[progress] unavailable ({type(exc).__name__}: {exc}); "
                 f"falling back to legacy {timeout_sec}s XMLA timeout",
+                file=sys.stderr,
                 flush=True,
             )
     if desktop_pid is not None:
@@ -705,6 +705,8 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         self._last_event_at = self._started_at
         self._last_event_label = "trace start"
         self._last_print_by_object: dict[str, float] = {}
+        self._latest_rows_by_object: dict[str, int] = {}
+        self._last_row_object: str | None = None
 
     def mark_refresh_started(self) -> None:
         """Start the liveness clock from the refresh request, not trace construction."""
@@ -724,13 +726,35 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
             self._last_event_at = now
             self._last_event_label = str(label)
             if event_class == "ProgressReportCurrent" and row_count is not None:
-                previous = self._last_print_by_object.get(str(label), -1.0e9)
-                if now - previous >= self.throttle_seconds:
-                    self._last_print_by_object[str(label)] = now
-                    elapsed = now - self._started_at
-                    message = f"[progress] {label}: {row_count:,} rows read ({elapsed:.1f}s)"
+                self._latest_rows_by_object[str(label)] = row_count
+                self._last_row_object = str(label)
+                message = self._format_row_progress_locked(str(label), row_count, now)
         if message:
             self.printer(message, flush=True)
+
+    def print_evidence_heartbeat(self, elapsed: float, total: float) -> None:
+        """Print the heartbeat for traced refreshes, using row-count evidence when available."""
+        now = self.clock()
+        with self._lock:
+            if self._last_row_object is not None:
+                row_count = self._latest_rows_by_object[self._last_row_object]
+                message = self._format_row_progress_locked(self._last_row_object, row_count, now)
+            else:
+                message = (
+                    f"[progress] waiting for first row-count event, {int(elapsed)}s / {int(total)}s "
+                    f"(liveness {self.liveness_seconds:.0f}s)"
+                )
+        if message:
+            self.printer(message, flush=True)
+
+    def _format_row_progress_locked(self, label: str, row_count: int, now: float) -> str | None:
+        """Return a throttled row-count progress line. Caller must hold ``_lock``."""
+        previous = self._last_print_by_object.get(label, -1.0e9)
+        if now - previous < self.throttle_seconds:
+            return None
+        self._last_print_by_object[label] = now
+        elapsed = now - self._started_at
+        return f"[progress] {label}: {row_count:,} rows read ({elapsed:.1f}s)"
 
     def handle_event(self, _sender, args) -> None:  # noqa: ANN001
         """AMO Trace.OnEvent handler."""
