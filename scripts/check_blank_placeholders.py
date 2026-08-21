@@ -43,7 +43,10 @@ down before any gate printed a verdict.
 
 Severity model
 --------------
-* OK: no correlated engine placeholders.
+* OK: no correlated engine placeholders, and every workbook owner in report.json had handoff data.
+* INCOMPLETE: no correlated engine placeholders were proven, but at least one workbook had a null or
+  absent ``model_translation_handoff`` or a model owner with BLANK() bodies had no ``workbooks[]``
+  entry. The standalone CLI exits 3 because this is an unmeasured region, not a clean bill of health.
 * UNREFERENCED: correlated placeholders exist, but no shipping PBIR report consumes them. This is a
   documented migration gap and the standalone CLI exits 1 so automation can notice it, but
   run_estate.py does not refuse the bundle for this alone.
@@ -67,12 +70,14 @@ REPORT_VERSION = 1
 REPORT_NAME = "blank-placeholder-check.json"
 
 STATUS_OK = "OK"
+STATUS_INCOMPLETE = "INCOMPLETE"
 STATUS_UNREFERENCED = "UNREFERENCED"
 STATUS_REFERENCED = "REFERENCED"
 
 EXIT_OK = 0
 EXIT_UNREFERENCED = 1
 EXIT_REFERENCED = 2
+EXIT_INCOMPLETE = 3
 EXIT_USAGE = 64
 
 _OBJECT_HEAD = re.compile(
@@ -106,6 +111,8 @@ class HandoverEvidence(NamedTuple):
 
     entries: list[dict]
     unreadable: list[str]
+    unchecked_workbooks: list[dict]
+    report_workbook_owners: list[str]
 
 
 def _unquote_tmdl_name(raw: str) -> str:
@@ -181,32 +188,44 @@ def _workbook_owner(workbook: dict) -> str:
     return str(workbook.get("name") or "")
 
 
-def _report_json_candidates(root: Path) -> tuple[list[dict] | None, list[str]]:
-    """Candidates from ``<bundle>/report.json``, or (None, ...) when it cannot answer.
+def _report_json_candidates(root: Path) -> HandoverEvidence | None:
+    """Candidates from ``<bundle>/report.json``, or None when it cannot answer.
 
-    None is deliberately NOT the same as []: a report that lists workbooks and no fallbacks is an
-    authoritative "there are none", and must not be topped up from `handover/` - those slices can
-    belong to a previous estate that reused this ``--output`` folder.
+    None is deliberately NOT the same as an empty candidate list: a report that lists workbooks whose
+    handoff sections are present and empty is an authoritative "there are none", and must not be
+    topped up from `handover/` - those slices can belong to a previous estate that reused this
+    ``--output`` folder. A workbook whose handoff section is null or absent is different: that
+    workbook was not checked, so it is reported as incomplete evidence instead of clean evidence.
     """
     path = root / "report.json"
     if not path.is_file():
-        return None, []
+        return None
     payload = _read_json_or_none(path)
     if payload is None:
-        return None, [path.name]
+        return HandoverEvidence([], [path.name], [], [])
     workbooks = payload.get("workbooks") if isinstance(payload, dict) else None
     if not isinstance(workbooks, list):
-        return None, []
+        return None
     entries: list[dict] = []
+    unchecked: list[dict] = []
+    owners: list[str] = []
     for workbook in workbooks:
         if not isinstance(workbook, dict):
             continue
         owner = _workbook_owner(workbook)
-        for item in _handover_items(workbook.get("model_translation_handoff")):
+        owners.append(owner)
+        if "model_translation_handoff" not in workbook:
+            unchecked.append({"owner": owner, "workbook": workbook.get("name") or owner, "reason": "missing"})
+            continue
+        handoff = workbook.get("model_translation_handoff")
+        if not isinstance(handoff, dict):
+            unchecked.append({"owner": owner, "workbook": workbook.get("name") or owner, "reason": "null"})
+            continue
+        for item in _handover_items(handoff):
             entry = _candidate_entry(owner, item, path.name)
             if entry:
                 entries.append(entry)
-    return entries, []
+    return HandoverEvidence(entries, [], unchecked, owners)
 
 
 def _handover_slice_candidates(root: Path) -> HandoverEvidence:
@@ -220,19 +239,25 @@ def _handover_slice_candidates(root: Path) -> HandoverEvidence:
     unreadable: list[str] = []
     handover = root / "handover"
     if not handover.is_dir():
-        return HandoverEvidence(entries, unreadable)
+        return HandoverEvidence(entries, unreadable, [], [])
     for path in sorted(handover.glob("*.json")):
         payload = _read_json_or_none(path)
         if payload is None:
             unreadable.append(path.relative_to(root).as_posix())
             continue
         workbook = payload.get("workbook") if isinstance(payload, dict) else None
-        handoff = workbook.get("model_translation_handoff") if isinstance(workbook, dict) else None
+        if not isinstance(workbook, dict) or "model_translation_handoff" not in workbook:
+            unreadable.append(path.relative_to(root).as_posix())
+            continue
+        handoff = workbook.get("model_translation_handoff")
+        if not isinstance(handoff, dict):
+            unreadable.append(path.relative_to(root).as_posix())
+            continue
         for item in _handover_items(handoff):
             entry = _candidate_entry(path.stem, item, path.relative_to(root).as_posix())
             if entry:
                 entries.append(entry)
-    return HandoverEvidence(entries, unreadable)
+    return HandoverEvidence(entries, unreadable, [], [])
 
 
 def handover_candidates(root: Path) -> HandoverEvidence:
@@ -241,11 +266,18 @@ def handover_candidates(root: Path) -> HandoverEvidence:
     `report.json` is the primary source and `handover/*.json` the fallback; see the module docstring
     for why that order is load-bearing rather than a preference.
     """
-    entries, unreadable = _report_json_candidates(root)
-    if entries is not None:
-        return HandoverEvidence(entries, unreadable)
-    slices = _handover_slice_candidates(root)
-    return HandoverEvidence(slices.entries, [*unreadable, *slices.unreadable])
+    report_json = _report_json_candidates(root)
+    if report_json is not None:
+        if report_json.unreadable:
+            slices = _handover_slice_candidates(root)
+            return HandoverEvidence(
+                slices.entries,
+                [*report_json.unreadable, *slices.unreadable],
+                slices.unchecked_workbooks,
+                slices.report_workbook_owners,
+            )
+        return report_json
+    return _handover_slice_candidates(root)
 
 
 def _blank_objects_in_tmdl(tmdl: Path, model_dir: Path, root: Path) -> list[dict]:
@@ -297,15 +329,18 @@ def _entry_matches_object(entry: dict, obj: dict) -> bool:
     return not target or target == obj["table"]
 
 
-def correlated_placeholders(root: Path, evidence: HandoverEvidence | None = None) -> list[dict]:
+def correlated_placeholders(
+    root: Path, evidence: HandoverEvidence | None = None, objects: list[dict] | None = None
+) -> list[dict]:
     """The handover/TMDL pairs that together prove an engine placeholder survived.
 
-    `evidence` is accepted so a caller that also needs the unreadable-input list does not read the
-    handover side twice.
+    `evidence` and `objects` are accepted so callers that also need scope counts do not read either
+    side twice.
     """
     if evidence is None:
         evidence = handover_candidates(root)
-    objects = blank_objects(root)
+    if objects is None:
+        objects = blank_objects(root)
     findings: list[dict] = []
     for entry in evidence.entries:
         for obj in objects:
@@ -451,14 +486,35 @@ def attach_dependencies(root: Path, findings: list[dict]) -> None:
         finding["severity"] = STATUS_REFERENCED if material else STATUS_UNREFERENCED
 
 
+def _owner_blank_summaries(objects: list[dict], owners: list[str]) -> list[dict]:
+    """Per-owner BLANK() counts for owners the handover evidence did not cover."""
+    summaries: list[dict] = []
+    for owner in owners:
+        blanks = [obj for obj in objects if obj["owner"] == owner]
+        summaries.append({"owner": owner, "blank_objects": len(blanks)})
+    return summaries
+
+
 def scan(root: Path) -> dict:
     """Scan a bundle and return the machine-readable report."""
     root = root.resolve()
     evidence = handover_candidates(root)
-    findings = correlated_placeholders(root, evidence)
+    objects = blank_objects(root)
+    findings = correlated_placeholders(root, evidence, objects)
     attach_dependencies(root, findings)
     referenced = [finding for finding in findings if finding["severity"] == STATUS_REFERENCED]
-    status = STATUS_REFERENCED if referenced else (STATUS_UNREFERENCED if findings else STATUS_OK)
+    unchecked_workbooks = []
+    for workbook in evidence.unchecked_workbooks:
+        blank_count = sum(1 for obj in objects if obj["owner"] == workbook["owner"])
+        unchecked_workbooks.append({**workbook, "blank_objects": blank_count})
+    skipped_owners = sorted({obj["owner"] for obj in objects} - set(evidence.report_workbook_owners))
+    skipped_datasources = _owner_blank_summaries(objects, skipped_owners) if evidence.report_workbook_owners else []
+    incomplete = bool(unchecked_workbooks or skipped_datasources)
+    status = (
+        STATUS_REFERENCED
+        if referenced
+        else (STATUS_UNREFERENCED if findings else (STATUS_INCOMPLETE if incomplete else STATUS_OK))
+    )
     return {
         "version": REPORT_VERSION,
         "root": str(root),
@@ -467,6 +523,13 @@ def scan(root: Path) -> dict:
         "placeholders_referenced": len(referenced),
         "handover_unreadable": len(evidence.unreadable),
         "handover_unreadable_paths": evidence.unreadable,
+        "workbooks_reported": len(evidence.report_workbook_owners),
+        "workbooks_unchecked": len(unchecked_workbooks),
+        "workbooks_unchecked_blank_objects": sum(item["blank_objects"] for item in unchecked_workbooks),
+        "workbooks_unchecked_details": unchecked_workbooks,
+        "skipped_shared_datasources": len(skipped_datasources),
+        "skipped_shared_datasource_blank_objects": sum(item["blank_objects"] for item in skipped_datasources),
+        "skipped_shared_datasource_details": skipped_datasources,
         "findings": findings,
     }
 
@@ -482,8 +545,33 @@ def render(report: dict) -> str:
             f"  WARNING: {len(unreadable)} handover input(s) could not be read, so any placeholder "
             f"they name is UNCORRELATED here: {', '.join(unreadable)}"
         )
+    unchecked = report.get("workbooks_unchecked_details") or []
+    if unchecked:
+        lines.append(
+            f"  WARNING: {report['workbooks_unchecked']} of {report['workbooks_reported']} workbook(s) carry "
+            "no model_translation_handoff - NOT CHECKED "
+            f"({report['workbooks_unchecked_blank_objects']} BLANK() body/bodies in those workbook(s))."
+        )
+        for item in unchecked:
+            lines.append(
+                f"    - {item['owner']}: {item['blank_objects']} BLANK() body/bodies; handoff {item['reason']}"
+            )
+    skipped = report.get("skipped_shared_datasource_details") or []
+    if skipped:
+        lines.append(
+            f"  WARNING: {report['skipped_shared_datasources']} owner(s) with no workbooks[] entry were "
+            "outside this handover check - NOT CHECKED "
+            f"({report['skipped_shared_datasource_blank_objects']} BLANK() body/bodies)."
+        )
+        for item in skipped:
+            lines.append(f"    - {item['owner']}: {item['blank_objects']} BLANK() body/bodies")
     if report["status"] == STATUS_OK:
         lines.append("  OK - no handover-backed BLANK() placeholder survived into the model.")
+        return "\n".join(lines)
+    if report["status"] == STATUS_INCOMPLETE and not report["findings"]:
+        lines.append(
+            "  INCOMPLETE - no handover-backed placeholders were proven, but part of the estate was not checked."
+        )
         return "\n".join(lines)
     lines.append(
         "  Severity model: unreferenced placeholders are documented gaps; references from filters or "
@@ -537,6 +625,13 @@ def main(argv: list[str] | None = None) -> int:
         "placeholders_referenced": 0,
         "handover_unreadable": 0,
         "handover_unreadable_paths": [],
+        "workbooks_reported": 0,
+        "workbooks_unchecked": 0,
+        "workbooks_unchecked_blank_objects": 0,
+        "workbooks_unchecked_details": [],
+        "skipped_shared_datasources": 0,
+        "skipped_shared_datasource_blank_objects": 0,
+        "skipped_shared_datasource_details": [],
         "findings": [],
     }
     for report in reports:
@@ -544,11 +639,19 @@ def main(argv: list[str] | None = None) -> int:
         merged["placeholders_referenced"] += report["placeholders_referenced"]
         merged["handover_unreadable"] += report["handover_unreadable"]
         merged["handover_unreadable_paths"].extend(report["handover_unreadable_paths"])
+        merged["workbooks_reported"] += report["workbooks_reported"]
+        merged["workbooks_unchecked"] += report["workbooks_unchecked"]
+        merged["workbooks_unchecked_blank_objects"] += report["workbooks_unchecked_blank_objects"]
+        merged["workbooks_unchecked_details"].extend(report["workbooks_unchecked_details"])
+        merged["skipped_shared_datasources"] += report["skipped_shared_datasources"]
+        merged["skipped_shared_datasource_blank_objects"] += report["skipped_shared_datasource_blank_objects"]
+        merged["skipped_shared_datasource_details"].extend(report["skipped_shared_datasource_details"])
         merged["findings"].extend(report["findings"])
+    incomplete = bool(merged["workbooks_unchecked"] or merged["skipped_shared_datasources"])
     merged["status"] = (
         STATUS_REFERENCED
         if merged["placeholders_referenced"]
-        else (STATUS_UNREFERENCED if merged["placeholders_found"] else STATUS_OK)
+        else (STATUS_UNREFERENCED if merged["placeholders_found"] else (STATUS_INCOMPLETE if incomplete else STATUS_OK))
     )
 
     if args.json:
@@ -558,7 +661,11 @@ def main(argv: list[str] | None = None) -> int:
         print(render(merged))
     if args.warn_only or merged["status"] == STATUS_OK:
         return EXIT_OK
-    return EXIT_REFERENCED if merged["status"] == STATUS_REFERENCED else EXIT_UNREFERENCED
+    if merged["status"] == STATUS_REFERENCED:
+        return EXIT_REFERENCED
+    if merged["status"] == STATUS_INCOMPLETE:
+        return EXIT_INCOMPLETE
+    return EXIT_UNREFERENCED
 
 
 if __name__ == "__main__":
