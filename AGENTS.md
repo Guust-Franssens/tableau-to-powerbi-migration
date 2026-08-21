@@ -461,6 +461,48 @@ them. Re-dispatching blindly would have redone or overwritten ACMU's already-ver
   verified-good artifact — ACMU's fixes above were already confirmed live in Desktop; blindly
   re-dispatching that unit would have redone (and risked corrupting) work that was already done.
 
+## Desktop concurrency budget: RAM, not addressability
+
+The shared cleanup rule below is still true: concurrent Power BI Desktop instances are addressable
+because the bridge and AS-port lookup are PID-scoped. The missing constraint is memory. ⚠️ Inferred
+from a 2026-08-19 field incident, not a controlled reproduction: Desktop crashed with
+`Microsoft.Mashup.Host.Document.PlatformDependentOptions` while 4–5 instances were open and the
+machine had about 3.1 GB free of 31.7 GB. Deleting the model's 313 MB `.pbi/cache.abf` and rebuilding
+it did not fix the crash, which argues against treating this signature as simple cache-file
+corruption; each instance's resident `msmdsrv` model is the RAM-pressure hypothesis. Confirming that
+mechanism would require a controlled reproduction varying free RAM and instance count. Until then,
+keep large-model concurrency low, check free RAM before opening another instance, and close instances
+as soon as their handoff is complete.
+
+**There is a SECOND concurrency budget, and it is a different resource entirely — the agent host.**
+Do not conflate the two: the one above is machine RAM consumed by Desktop's `msmdsrv` processes; this
+one is the **V8 heap of `copilot.exe` itself**, and it is reached with no Power BI Desktop running at
+all. ⚠️ **Observed 2026-08-20, three times in one session** — with **six concurrent `opus-5`
+subagents**, the CLI host died and wrote a crash dump into the repo root
+(`report.<yyyymmdd>.<hhmmss>.<pid>.0.001.json`) naming the cause:
+
+```json
+{ "event": "Allocation failed - JavaScript heap out of memory", "trigger": "OOMError" }
+```
+
+**Marked observed rather than measured, deliberately.** The dump was read at the time but not
+retained, so this is not reproducible from anything committed here. If it happens again, **keep the
+dump** (it is gitignored, not auto-deleted) and upgrade this claim.
+
+Equally, be careful what the number means. **Six failed. Four was run repeatedly the same night
+without incident — which is not the same as four being safe**, and no one has bisected it. Treat
+"keep the wave small" as the rule and any specific ceiling as unproven.
+
+Two consequences, both of which cost real work that night:
+
+- ⚠️ **Advice to "dispatch the whole wave at once" — common in delegation guidance, including the
+  user-level instruction files some runtimes load — optimises coordination cost and is silent about
+  host memory.** It is not in this document, and this document does not endorse it: cap the wave.
+- **A crash takes every subagent's UNPUSHED work.** Committing is not enough — one agent came one
+  crash away from losing four good commits it had never pushed. Brief agents to **`git push`
+  incrementally**, and read the crash dump first after a restart: it names the trigger and timestamps
+  the crash, which is the reference point the file-mtime forensics above depend on.
+
 ---
 
 ## Starting a migration — the DISPATCHER's job
