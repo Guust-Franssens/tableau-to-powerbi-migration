@@ -477,21 +477,29 @@ as soon as their handoff is complete.
 **There is a SECOND concurrency budget, and it is a different resource entirely — the agent host.**
 Do not conflate the two: the one above is machine RAM consumed by Desktop's `msmdsrv` processes; this
 one is the **V8 heap of `copilot.exe` itself**, and it is reached with no Power BI Desktop running at
-all. ✅ **Measured 2026-08-20**, not inferred: with **six concurrent `opus-5` subagents**, the CLI
-host died and wrote a crash dump into the repo root
-(`report.<yyyymmdd>.<hhmmss>.<pid>.0.001.json`) naming the cause exactly:
+all. ⚠️ **Observed 2026-08-20, three times in one session** — with **six concurrent `opus-5`
+subagents**, the CLI host died and wrote a crash dump into the repo root
+(`report.<yyyymmdd>.<hhmmss>.<pid>.0.001.json`) naming the cause:
 
 ```json
 { "event": "Allocation failed - JavaScript heap out of memory", "trigger": "OOMError" }
 ```
 
-It happened **three times in one session**. Practical budget: **~3–4 concurrent subagents**. Two
-consequences worth stating, because both cost real work that night:
+**Marked observed rather than measured, deliberately.** The dump was read at the time but not
+retained, so this is not reproducible from anything committed here. If it happens again, **keep the
+dump** (it is gitignored, not auto-deleted) and upgrade this claim.
 
-- ⚠️ **This section's own advice to "dispatch the whole wave at once" is what produces it.** That
-  advice optimises coordination cost and is silent about host memory. Cap the wave instead.
-- **A crash takes every subagent's unpushed work with it.** Committing is not enough — one agent came
-  one crash away from losing four good commits it had never pushed. Brief agents to **`git push`
+Equally, be careful what the number means. **Six failed. Four was run repeatedly the same night
+without incident — which is not the same as four being safe**, and no one has bisected it. Treat
+"keep the wave small" as the rule and any specific ceiling as unproven.
+
+Two consequences, both of which cost real work that night:
+
+- ⚠️ **Advice to "dispatch the whole wave at once" — common in delegation guidance, including the
+  user-level instruction files some runtimes load — optimises coordination cost and is silent about
+  host memory.** It is not in this document, and this document does not endorse it: cap the wave.
+- **A crash takes every subagent's UNPUSHED work.** Committing is not enough — one agent came one
+  crash away from losing four good commits it had never pushed. Brief agents to **`git push`
   incrementally**, and read the crash dump first after a restart: it names the trigger and timestamps
   the crash, which is the reference point the file-mtime forensics above depend on.
 
