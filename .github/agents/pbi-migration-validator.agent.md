@@ -235,6 +235,13 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
    time on aesthetic judgment.
    `powerbi-report-author preview-pages <report>` and `preview-visuals <report>` emit this inventory as
    structured JSON — use them instead of reading every `visual.json` by hand.
+   `python scripts/check_field_bindings.py <bundle>` is the matching **cross-layer** check: every PBIR
+   field reference resolved against the TMDL. Run it here — it is offline and sweeps a whole estate, so
+   it costs nothing next to opening Desktop. Report its two classes **separately, because they route to
+   different owners**: **case-only** mismatches (`Flight_Duration` in PBIR vs `FLIGHT_DURATION` in TMDL)
+   are a mechanical rename for `pbi-report-builder`; **genuinely missing** columns/measures are a
+   modelling gap for `pbi-semantic-builder`. A broken binding renders blank on a report that
+   `validate` passes clean, so no other pass you run will catch it.
 2. **Whole-dashboard pass** (do this *before* drilling into individual visuals, not after). Compare
    the full-page PBI screenshot against the full Tableau dashboard screenshot as a gestalt: overall
    layout density/proportions, visual hierarchy (what draws the eye first), color usage, spacing,
