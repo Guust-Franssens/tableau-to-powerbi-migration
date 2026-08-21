@@ -504,8 +504,9 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
         lines.append(
             f"  plus {ratio(report['column_stubs'], report['calculated_columns'])} calculated column(s) stubbed"
         )
+    labels = _labels(report["models"])
     for model in report["models"]:
-        lines += _render_model(model, verbose=verbose)
+        lines += _render_model(model, labels[model["path"]], verbose=verbose)
     lines.append(
         "  ACTIONABLE = the Tableau formula survived as `annotation TableauFormula`; translate it in place.\n"
         "  DEAD END   = nothing survived; recover the formula from the Tableau workbook before translating."
@@ -513,14 +514,35 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     return "\n".join(lines) + _skipped_tail(report)
 
 
-def _render_model(model: dict[str, Any], *, verbose: bool) -> list[str]:
-    """One model's block: its ratio, its worst tables, and its escalation list."""
+def _labels(models: list[dict[str, Any]]) -> dict[str, str]:
+    """Display name per model, disambiguated by its parent folder when the name is not unique.
+
+    An estate really does ship the same model name from several workbooks (measured on a 38-workbook
+    bundle: two `Meridian Sales (Live Snowflake).SemanticModel`, with DIFFERENT ratios). Rendering
+    both rows under one label invites the reader to treat one as a typo of the other.
+    """
+    seen: dict[str, int] = {}
+    for model in models:
+        seen[model["model"]] = seen.get(model["model"], 0) + 1
+    return {
+        m["path"]: (m["model"] if seen[m["model"]] == 1 else f"{Path(m['path']).parent.name}/{m['model']}")
+        for m in models
+    }
+
+
+def _render_model(model: dict[str, Any], label: str, *, verbose: bool) -> list[str]:
+    """One model's block: its ratios, its worst tables, and its escalation list.
+
+    BOTH ratios are printed when the model has calculated columns, because the actionable/dead-end
+    split covers every stub: printing `27/51` beside `actionable 60` reads as broken arithmetic when
+    the missing 33 are stubbed calculated columns.
+    """
     if model["status"] == STATUS_OK:
         return []
-    lines = [
-        f"  {model['model']}  {ratio(model['measure_stubs'], model['measures'])}   "
-        f"actionable {model['actionable']}, dead end {model['dead_end']}"
-    ]
+    ratios = f"measures {ratio(model['measure_stubs'], model['measures'])}"
+    if model["calculated_columns"]:
+        ratios += f", calc columns {ratio(model['column_stubs'], model['calculated_columns'])}"
+    lines = [f"  {label}  {ratios}   -> actionable {model['actionable']}, dead end {model['dead_end']}"]
     for row in model["tables"]:
         if row["stubs"]:
             lines.append(f"    {row['table']}  {ratio(row['stubs'], row['measures'])}")

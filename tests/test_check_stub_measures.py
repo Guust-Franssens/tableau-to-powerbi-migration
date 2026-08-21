@@ -478,6 +478,47 @@ def test_the_rendered_verdict_names_the_dead_ends(tmp_path):
     assert "DEAD END" in text
 
 
+def test_a_models_ratios_reconcile_with_its_split(tmp_path):
+    """Kills: printing the measure ratio beside a split that also counts calculated columns.
+
+    Measured on the real 38-workbook bundle: `Admin_Insights_Starter 27/51 -> actionable 60` reads
+    as broken arithmetic. The missing 33 were stubbed calculated columns, invisible on that line.
+    """
+    tmdl = (
+        "table Sales\n"
+        "\n"
+        "\tmeasure 'M Stub' = BLANK()\n"
+        "\t\tannotation TableauFormula = SUM([x])\n"
+        "\n"
+        "\tcolumn 'C Stub' = BLANK()\n"
+        "\t\tannotation TableauFormula = IIF([x], 1, 0)\n"
+        "\n"
+        "\tcolumn 'C Fine' = [x] * 2\n"
+    )
+    text = csm.render(csm.scan(_write_model(tmp_path, {"Sales": tmdl})))
+    assert "measures 1/1 (100%), calc columns 1/2 (50%)" in text
+    assert "actionable 2, dead end 0" in text
+
+
+def test_two_models_sharing_a_name_are_disambiguated(tmp_path):
+    """Kills: rendering two different models under one identical label.
+
+    Real shape from the 38-workbook bundle: two `Meridian Sales (Live Snowflake).SemanticModel`
+    under different workbook folders, with different ratios.
+    """
+    for owner in ("wb_a", "wb_b"):
+        _write_model(tmp_path / owner, {"_Measures": MEASURES_TMDL}, model_name="Shared.SemanticModel")
+    text = csm.render(csm.scan(tmp_path))
+    assert "wb_a/Shared.SemanticModel" in text
+    assert "wb_b/Shared.SemanticModel" in text
+
+
+def test_a_uniquely_named_model_keeps_its_plain_name(tmp_path):
+    """Kills: prefixing every label with a folder, which is noise on the common single-model case."""
+    text = csm.render(csm.scan(_write_model(tmp_path, {"_Measures": MEASURES_TMDL})))
+    assert "  Book.SemanticModel  " in text
+
+
 def test_verbose_lists_the_actionable_queue(tmp_path, capsys):
     """Kills: a `--verbose` that changes nothing, leaving the work queue JSON-only."""
     model = _write_model(tmp_path, {"_Measures": MEASURES_TMDL})
