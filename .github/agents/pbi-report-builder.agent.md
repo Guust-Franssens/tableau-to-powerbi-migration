@@ -162,32 +162,12 @@ every `visual.json`). Three properties make it a patch rather than an edit:
 Worth actually doing once per migration: re-run the engine, re-run your scripts, confirm you land on
 the same report. If you cannot, you do not have a patch — you have an edit.
 
-⚠️ **A `_build/` script is only half of it — DECLARE the edit, or sign-off blocks.** Every file under
-a `*.Report` folder is hash-baselined by the engine run, and the orchestrator's pre-sign-off
-`check_migration_progress.py --bundle <b> --tamper` exits **1** on any that changed without a matching
-declaration. `scripts/declare_generated_edit.py` is the **only** thing that writes one: it runs your
-script for you and records the before/after hashes into `_build/generated-edit-declarations.json`.
-
-```bash
-python scripts/declare_generated_edit.py --bundle <b> \
-  --target pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json \
-  --script <b>/_build/fix_axis_title.py \
-  -- --only pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json
-# DECLARE: RECORDED pbip/.../visual.json -> <b>/_build/generated-edit-declarations.json
-```
-
-Measured — each of these leaves the gate RED while looking like it worked:
-
-- **One `--target` per run.** A second run of an idempotent script prints `DECLARE: NO_CHANGE` and
-  records nothing, so a whole-tree emitter leaves every file but one UNDECLARED. Give the script an
-  `--only <bundle-relative path>` scope argument, pass it after `--`, and run the wrapper per target.
-- **Never hand-edit first.** The wrapper hashes the target *before* running your script and the gate
-  only accepts a declaration whose baseline is the engine's hash, so a retro-declaration is never
-  accepted. Restore the target by re-running the engine — `reports/` is a **different file**, not a
-  copy of `pbip/` (gotchas §3).
-- **Declare last.** Touching the target again afterwards invalidates its declaration.
-
-Self-check before reporting done: `--tamper` must exit 0 (`DECLARED_DRIFT` passes, `DRIFT` does not).
+⚠️ **A `_build/` script is only half of it — DECLARE the edit, or sign-off blocks.**
+`check_migration_progress.py --bundle <b> --tamper` exits **1** on any `*.Report` file that changed
+without a declaration, and `scripts/declare_generated_edit.py` is the only thing that writes one — it
+runs your script for you and records the before/after hashes. Its three failure modes (one `--target`
+per run, never hand-edit first, declare last) and the exact invocation are in
+`powerbi-report-gotchas` §3. Self-check: `--tamper` must exit 0.
 
 ### Visual encoding — only when you must change an encoding
 
@@ -260,6 +240,13 @@ it is slow, and `validate` will not catch a wrong encoding.
    minutes *before* the cache was written loaded an EMPTY model; and a refresh on a live source hits a
    modal credential prompt no automation can fill. Consequence for step 1: an empty render is then an
    **unrefreshed-model artifact, not a binding defect** — never "fix" bindings that are already correct.
+   When bindings genuinely **are** broken ("Fields that need to be fixed", blank visuals on a report
+   that validates clean), run `python scripts/check_field_bindings.py <bundle>` **before** any Desktop
+   archaeology. It splits **case-only** mismatches (`Flight_Duration` in PBIR vs `FLIGHT_DURATION` in
+   TMDL — a mechanical rename, yours to fix) from **genuinely missing** columns/measures (a modelling
+   gap — route to `pbi-semantic-builder`, never invent the field). Measured on a 12-workbook estate:
+   it replaced ~an afternoon of per-workbook Desktop archaeology and found the same defect on 4 items
+   nobody had opened.
    **Read the baseline before changing anything.** Open the rebuilt report and screenshot every page
    against `reference/`. **Judge the GESTALT first** - proportions, density, header/slicer bands,
    where the eye lands - before looking at any single visual. This is the highest-value step and the
