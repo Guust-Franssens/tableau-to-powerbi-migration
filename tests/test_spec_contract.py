@@ -231,6 +231,30 @@ def test_legitimate_appended_limitation_passes_and_is_not_rewritten(tmp_path: Pa
     assert path.read_text(encoding="utf-8") == original
 
 
+def test_duplicate_appended_limitation_is_collapsed_in_first_seen_order(tmp_path: Path) -> None:
+    """Validation keeps one copy of an exact append without rejecting the spec."""
+    spec = _fixture_spec()
+    first = {"item": "worksheet:profit", "issue": "duplicate downstream note", "severity": "high", "stage": "validate"}
+    second = {"item": "worksheet:loss", "issue": "later note", "severity": "low", "stage": "validate"}
+    spec["limitations_encountered"].extend([first, second, first])
+    path = tmp_path / "migration-spec.json"
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "validate_spec.py"), str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    limitations = json.loads(path.read_text(encoding="utf-8"))["limitations_encountered"]
+    assert limitations[-2:] == [first, second]
+    assert limitations.count(first) == 1
+
+
 def test_every_committed_spec_validates_against_the_schema() -> None:
     """The example corpus carries real appended limitations and must stay valid."""
     specs = sorted((REPO_ROOT / "examples").glob("*/migration-spec.json"))

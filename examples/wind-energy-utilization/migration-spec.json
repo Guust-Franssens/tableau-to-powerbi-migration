@@ -5666,12 +5666,6 @@
    "stage": "parse"
   },
   {
-   "item": "ws.on_off_donut",
-   "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2281636169638096927:qk",
-   "severity": "low",
-   "stage": "parse"
-  },
-  {
    "item": "ws.page_1",
    "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2281636172866494613:ok:3",
    "severity": "low",
@@ -5758,30 +5752,6 @@
   {
    "item": "ws.page_4_2",
    "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2281636170245734541:qk",
-   "severity": "low",
-   "stage": "parse"
-  },
-  {
-   "item": "ws.page_buttons",
-   "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2281636169658212394:qk",
-   "severity": "low",
-   "stage": "parse"
-  },
-  {
-   "item": "ws.page_buttons",
-   "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2281636169658212394:qk",
-   "severity": "low",
-   "stage": "parse"
-  },
-  {
-   "item": "ws.page_buttons",
-   "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2281636169658212394:qk",
-   "severity": "low",
-   "stage": "parse"
-  },
-  {
-   "item": "ws.page_buttons",
-   "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2281636169658212394:qk",
    "severity": "low",
    "stage": "parse"
   },

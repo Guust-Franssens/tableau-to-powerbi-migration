@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ LOGGER = logging.getLogger("validate_spec")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "docs" / "migration-spec.schema.json"
 SPEC_TREES = ("examples", "migrations/workbooks", "migrations/datasources")
+LIMITATION_IDENTITY_FIELDS = ("item", "issue", "severity", "stage")
 
 
 def collect_spec_validation_errors(spec_path: Path) -> list[str]:
@@ -33,6 +35,35 @@ def collect_spec_validation_errors(spec_path: Path) -> list[str]:
         return collect_in_memory_errors(spec, SCHEMA_PATH, require_jsonschema=True)
     except MigrationSpecValidationUnavailable as exc:
         return [f"<root>: validation unavailable: {exc}"]
+
+
+def dedupe_limitations(spec: dict) -> int:
+    """Remove exact valid limitation duplicates while preserving their first-seen order."""
+    limitations = spec.get("limitations_encountered")
+    if not isinstance(limitations, list):
+        return 0
+
+    seen: set[tuple[object, ...]] = set()
+    deduplicated = []
+    for limitation in limitations:
+        if not isinstance(limitation, dict) or set(limitation) != set(LIMITATION_IDENTITY_FIELDS):
+            deduplicated.append(limitation)
+            continue
+        identity = tuple(limitation[field] for field in LIMITATION_IDENTITY_FIELDS)
+        if identity not in seen:
+            seen.add(identity)
+            deduplicated.append(limitation)
+
+    removed = len(limitations) - len(deduplicated)
+    if removed:
+        limitations[:] = deduplicated
+    return removed
+
+
+def _spec_indent(source: str) -> int:
+    """Preserve a spec's existing JSON indentation when writing a de-duplicated copy."""
+    match = re.search(r'\n( +)"', source)
+    return len(match.group(1)) if match else 2
 
 
 def discover_specs() -> list[Path]:
@@ -70,15 +101,24 @@ def main(argv: list[str] | None = None) -> int:
             invalid_count += 1
             continue
         errors = collect_spec_validation_errors(spec_path)
-        if not errors:
-            LOGGER.info("ok       %s", spec_path)
+        if errors:
+            invalid_count += 1
+            LOGGER.error("INVALID  %s", spec_path)
+            for error in errors[:10]:
+                LOGGER.error("         %s", error)
+            if len(errors) > 10:
+                LOGGER.error("         ... and %d more", len(errors) - 10)
             continue
-        invalid_count += 1
-        LOGGER.error("INVALID  %s", spec_path)
-        for error in errors[:10]:
-            LOGGER.error("         %s", error)
-        if len(errors) > 10:
-            LOGGER.error("         ... and %d more", len(errors) - 10)
+        source = spec_path.read_text(encoding="utf-8")
+        spec = json.loads(source)
+        removed = dedupe_limitations(spec)
+        if removed:
+            spec_path.write_text(
+                json.dumps(spec, indent=_spec_indent(source), ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            LOGGER.info("deduped  %s (%d exact limitation duplicate(s) removed)", spec_path, removed)
+        else:
+            LOGGER.info("ok       %s", spec_path)
 
     if invalid_count:
         LOGGER.error(
