@@ -89,6 +89,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -200,6 +201,7 @@ COLUMN_DECL_RE = re.compile(r"^\s*column\s+(?:'([^']+)'|([^=\s]+))", re.MULTILIN
 MEASURE_DECL_RE = re.compile(r"^\s*measure\s+(?:'([^']+)'|([^=\s]+))", re.MULTILINE)
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
+GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
 
 
 # The credential arbiter that settles a refresh TIMEOUT (slow source vs. sign-in modal). Resolved
@@ -956,37 +958,39 @@ def _append_generated_edit_declaration(
     baseline_sha256: str,
     expected_sha256: str,
     reason: str,
-) -> None:
+) -> Path | None:
     """Declare this tool's intentional generated-artifact rewrite for ``--tamper``."""
     generated = _generated_artifact_run(bundle)
     if generated is None:
-        return
+        return None
     rel_target = target.relative_to(bundle).as_posix()
-    declaration_path = bundle / GENERATED_EDIT_DECLARATIONS
-    if declaration_path.is_file():
-        payload = json.loads(declaration_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("version") != 1:
-            payload = {"version": 1, "declarations": []}
-    else:
-        payload = {"version": 1, "declarations": []}
-    if not isinstance(payload.get("declarations"), list):
-        payload["declarations"] = []
-    payload.setdefault("declarations", []).append(
-        {
-            "version": 1,
-            "run_id": generated["run_id"],
-            "kind": "changed",
-            "target": rel_target,
-            "baseline_sha256": baseline_sha256,
-            "expected_sha256": expected_sha256,
-            "script_identity": "pbip-model-refresh/refresh_pbip_model.py",
-            "script_sha256": sha256_file(Path(__file__).resolve()),
-            "reason": reason,
-            "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
+    declaration = {
+        "version": 1,
+        "run_id": generated["run_id"],
+        "kind": "changed",
+        "target": rel_target,
+        "baseline_sha256": baseline_sha256,
+        "expected_sha256": expected_sha256,
+        "script_identity": "pbip-model-refresh/refresh_pbip_model.py",
+        "script_sha256": sha256_file(Path(__file__).resolve()),
+        "reason": reason,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    declaration_dir = bundle / GENERATED_EDIT_DECLARATIONS_DIR
+    declaration_dir.mkdir(parents=True, exist_ok=True)
+    safe_target = re.sub(r"[^A-Za-z0-9_.-]+", "_", rel_target)[-80:]
+    final_path = (
+        declaration_dir
+        / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}-{os.getpid()}-{safe_target}-{uuid.uuid4().hex}.json"
     )
-    declaration_path.parent.mkdir(parents=True, exist_ok=True)
-    declaration_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    staging_path = final_path.with_name(final_path.name + f".{uuid.uuid4().hex}.tmp")
+    try:
+        staging_path.write_text(json.dumps(declaration, indent=2) + "\n", encoding="utf-8")
+        os.replace(staging_path, final_path)
+    finally:
+        if staging_path.exists():
+            staging_path.unlink()
+    return final_path
 
 
 def read_declared_compatibility(model_dir: Path) -> tuple[int | None, Path | None]:
@@ -1010,7 +1014,12 @@ def align_declared_compatibility(path: Path, level: int) -> None:
     path.write_text(new_text, encoding="utf-8", newline="")
 
 
-def _align_compatibility(model_dir: Path | None, live_level: int) -> str | None:
+def _align_compatibility(
+    model_dir: Path | None,
+    live_level: int,
+    *,
+    defer_declaration: bool = False,
+) -> str | tuple[str | None, tuple[Path, Path, str, str, str] | None] | None:
     """Make ``database.tmdl`` declare the level the live database is actually running at.
 
     Returns a note describing the change, or ``None`` when nothing needed doing.
@@ -1027,39 +1036,32 @@ def _align_compatibility(model_dir: Path | None, live_level: int) -> str | None:
     fails, so a mid-failure never leaves ``database.tmdl`` bumped for a cache that was not written.
     """
     if model_dir is None:
-        return None
+        return (None, None) if defer_declaration else None
     declared, declared_path = read_declared_compatibility(model_dir)
     if declared is None or declared == live_level:
-        return None
+        return (None, None) if defer_declaration else None
     before_hash = sha256_file(declared_path)
     align_declared_compatibility(declared_path, live_level)
     after_hash = sha256_file(declared_path)
+    reason = f"Desktop raised compatibilityLevel {declared} -> {live_level} during ImageSave"
     bundle = _bundle_root_for(model_dir)
-    if bundle is not None:
-        _append_generated_edit_declaration(
-            bundle,
-            declared_path,
-            before_hash,
-            after_hash,
-            f"Desktop raised compatibilityLevel {declared} -> {live_level} during ImageSave",
-        )
-    return f"aligned {declared_path.name} {declared} -> {live_level} (Desktop runs the model at {live_level})"
+    pending = (bundle, declared_path, before_hash, after_hash, reason) if bundle is not None else None
+    if pending is not None and not defer_declaration:
+        _append_generated_edit_declaration(*pending)
+    note = f"aligned {declared_path.name} {declared} -> {live_level} (Desktop runs the model at {live_level})"
+    return (note, pending) if defer_declaration else note
 
 
 def _compat_rollback_paths(model_dir: Path | None) -> list[Path]:
     """The files an alignment can touch, so a failed persist can restore them exactly.
 
-    Two files: ``database.tmdl`` (its declared level) and the generated-edit declaration ledger
-    (``_build/generated-edit-declarations.json``). Rolling the level back without also dropping the
-    declaration would leave a record of a change that did not stick.
+    Only ``database.tmdl`` is provisional now. The generated-edit declaration is written after a
+    successful cache commit, so rollback must not snapshot a shared declaration directory and risk
+    deleting a sibling writer's record.
     """
     if model_dir is None:
         return []
-    paths = [model_dir / "definition" / "database.tmdl"]
-    bundle = _bundle_root_for(model_dir)
-    if bundle is not None:
-        paths.append(bundle / GENERATED_EDIT_DECLARATIONS)
-    return paths
+    return [model_dir / "definition" / "database.tmdl"]
 
 
 def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
@@ -1122,8 +1124,9 @@ def _persist_image_locked(cache_path: Path, model_dir: Path | None, live_level: 
     before = _cache_fingerprint(cache_path)
     swapped = False
     write_error: BaseException | None = None
+    pending_declaration: tuple[Path, Path, str, str, str] | None = None
     try:
-        aligned = _align_compatibility(model_dir, live_level)
+        aligned, pending_declaration = _align_compatibility(model_dir, live_level, defer_declaration=True)
         if aligned:
             print(f"  save   : {aligned}")
         swapped = _staged_image_write(cache_path, write_image, staging)
@@ -1132,6 +1135,8 @@ def _persist_image_locked(cache_path: Path, model_dir: Path | None, live_level: 
 
     if swapped or _cache_committed(cache_path, staging, before):
         _cleanup_staging(staging)
+        if pending_declaration is not None:
+            _append_generated_edit_declaration(*pending_declaration)
         try:
             size_note = f"{cache_path.stat().st_size / 1024:.1f} KB, "
         except OSError:

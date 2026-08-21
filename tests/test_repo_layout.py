@@ -282,6 +282,10 @@ def test_build_gitignore_keeps_scratch_ignored_but_tracks_tamper_audit_trail() -
     assert not _is_ignored("migrations/workbooks/foo/_build/generated-edit-declarations.json")
     assert "!**/_build/generated-edit-declarations.json" in ledger_out
 
+    declaration_out = _check_verbose("migrations/workbooks/foo/_build/generated-edit-declarations/one.json")
+    assert not _is_ignored("migrations/workbooks/foo/_build/generated-edit-declarations/one.json")
+    assert "!**/_build/generated-edit-declarations/*.json" in declaration_out
+
 
 def test_every_script_is_documented_in_the_scripts_readme() -> None:
     """`scripts/` is 20+ files; an undocumented one is a file nobody can find.
@@ -492,7 +496,9 @@ def test_newly_exposed_build_audit_files_are_absolute_path_clean() -> None:
     candidates = [
         REPO_ROOT / rel
         for rel in paths
-        if rel.match("**/_build/*.py") or rel.match("**/_build/generated-edit-declarations.json")
+        if rel.match("**/_build/*.py")
+        or rel.match("**/_build/generated-edit-declarations.json")
+        or rel.match("**/_build/generated-edit-declarations/*.json")
     ]
 
     leaks = []

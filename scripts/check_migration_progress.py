@@ -45,6 +45,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+try:
+    from generated_edit_declarations import load_generated_edit_declarations as _load_generated_edit_declarations
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from generated_edit_declarations import load_generated_edit_declarations as _load_generated_edit_declarations
+
 # Windows defaults stdout/stderr to the legacy cp1252 codec, which cannot encode the non-ASCII
 # characters (e.g. the warning glyph above) in this module's own docstring -- argparse's --help
 # crashes with UnicodeEncodeError before printing anything. Force UTF-8 so --help and any print()
@@ -64,6 +70,7 @@ SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp",
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
+GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 
 # A Desktop model load is 60-90s and a refresh + ImageSave was measured at 93s, so a window shorter
@@ -175,14 +182,7 @@ def load_generated_artifact_baseline(bundle: Path) -> dict[str, Any] | None:
 
 def load_generated_edit_declarations(bundle: Path) -> list[dict[str, Any]]:
     """Structured declarations written by refresh/fix tooling."""
-    path = bundle / GENERATED_EDIT_DECLARATIONS
-    if not path.is_file():
-        return []
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        return []
-    declarations = payload.get("declarations")
-    return declarations if isinstance(declarations, list) else []
+    return _load_generated_edit_declarations(bundle)
 
 
 def _artifact_drift(bundle: Path, baseline: dict[str, str]) -> list[tuple[str, str]]:
