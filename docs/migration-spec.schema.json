@@ -306,7 +306,7 @@
             "observed_at": {
               "type": "string",
               "format": "date-time",
-              "description": "RFC 3339 timestamp of when this count was READ. format:date-time is annotation-only under jsonschema without the format-nongpl extra, so parse_tableau._schema_contract_errors enforces it with datetime.fromisoformat instead."
+              "description": "RFC 3339 timestamp of when this count was READ. format:date-time is annotation-only under jsonschema without the format-nongpl extra, so parse_tableau._schema_contract_errors enforces it with a shape check plus datetime.fromisoformat instead. KNOWN EXCEPTION: a seconds field of 60 (a leap second, which RFC 3339 permits) is REJECTED. Python's datetime cannot represent one at all, so accepting it would mean recording a different instant than the one written; fixing it faithfully needs the rfc3339-validator dependency this fallback exists to work without. Disclosed here so the schema does not advertise a format it knowingly does not fully accept."
             }
           }
         },

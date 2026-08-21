@@ -157,24 +157,28 @@ def test_schema_accepts_a_real_rfc3339_observed_at(tmp_path: Path) -> None:
         assert errors == [], f"{good!r} was rejected: {errors}"
 
 
-def test_a_leap_second_is_rejected_with_an_HONEST_reason(tmp_path: Path) -> None:
+def test_a_seconds_field_of_60_is_rejected_WITHOUT_claiming_it_is_a_leap_second(tmp_path: Path) -> None:
     """A pre-existing stdlib ceiling, pinned so it stays documented rather than mysterious.
 
-    RFC 3339 permits `23:59:60`, so rejecting it IS a deviation from the advertised format. It is
-    not one this repo can fix: `datetime.fromisoformat` raises "second must be in 0..59", and
-    `datetime` has no leap-second representation, so there is nothing to store or compare even if
-    parsing succeeded. The previous `fromisoformat`-only check rejected it identically, so the
-    shape regex did not introduce this.
+    RFC 3339 permits `:60` at an actual leap second, so rejecting it IS a deviation from the
+    advertised format (now disclosed in the schema's own `observed_at` description). It is not one
+    this repo can fix: `datetime.fromisoformat` raises "second must be in 0..59", and `datetime` has
+    no leap-second representation, so there would be nothing to store or compare even if parsing
+    succeeded. The previous `fromisoformat`-only check rejected it identically, so the shape regex
+    did not introduce this.
 
-    What IS fixable is the message: a generic "not a valid RFC 3339 timestamp" sends the reader
-    hunting for a typo in a timestamp that is genuinely valid.
+    The message must NOT assert the value *is* a leap second. `23:58:60Z` is not one, and no
+    validator can tell without a leap-second table - so both are reported by naming the seconds
+    field, which is true of each.
     """
-    errors = _validation_errors_for_spec(
-        tmp_path,
-        _spec_with_first_table_row_count({"value": 42, "source": "hyper", "observed_at": "2026-12-31T23:59:60Z"}),
-    )
+    for value in ("2026-12-31T23:59:60Z", "2026-08-19T23:58:60Z"):
+        errors = _validation_errors_for_spec(
+            tmp_path,
+            _spec_with_first_table_row_count({"value": 42, "source": "hyper", "observed_at": value}),
+        )
 
-    assert any("leap second" in error for error in errors), f"expected a leap-second-specific reason, got {errors}"
+        assert any("seconds field of 60" in error for error in errors), f"{value!r}: got {errors}"
+        assert not any("is a leap second" in error for error in errors), f"{value!r} must not be CALLED a leap second"
 
 
 def test_malformed_appended_limitation_names_the_bad_field(tmp_path: Path) -> None:
