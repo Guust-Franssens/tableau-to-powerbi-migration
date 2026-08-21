@@ -30,6 +30,15 @@ SNOWFLAKE = {
     "powerbi_target": "live_source",
 }
 
+DATABRICKS = {
+    "class": "databricks",
+    "server": "https://adb.example.azuredatabricks.net/",
+    "http_path": "/sql/1.0/warehouses/abc",
+    "database": "hive_metastore",
+    "schema": "default",
+    "powerbi_target": "live_source",
+}
+
 
 def _source(tables: list[dict]) -> dict:
     return {
@@ -48,6 +57,18 @@ def test_custom_sql_scaffold_contains_the_sql_but_not_a_one_row_automatic_probe(
     assert 'Kind="Table"' not in m, "a custom-SQL relation has no table to navigate to"
     assert "SELECT a, b FROM raw.flights" in m
     assert "custom SQL" in note, "the operator must be told which path was scaffolded"
+
+
+def test_databricks_custom_sql_scaffold_uses_native_query_without_automatic_probe():
+    m, note = probe_live_source.build_m_query(
+        DATABRICKS, "Flight_Level_Query", "Col", custom_sql="SELECT a, b FROM raw.flights"
+    )
+    assert "Databricks.Catalogs" in m
+    assert "Value.NativeQuery" in m
+    assert "Table.FirstN(Value.NativeQuery" not in m
+    assert 'Kind="Schema"' not in m
+    assert "SELECT a, b FROM raw.flights" in m
+    assert "custom SQL" in note
 
 
 def test_a_real_table_still_navigates_and_is_unchanged_by_the_custom_sql_work():
@@ -158,6 +179,36 @@ def test_real_tables_are_probed_before_custom_sql_relations():
     )
     _, tables, _ = probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
     assert [t["name"] for t in tables] == ["REAL_TABLE", "Q"]
+
+
+def test_mixed_source_proves_credentials_but_still_requires_operator(tmp_path, caplog, monkeypatch):
+    source = _source(
+        [
+            {"name": "Q", "custom_sql": "SELECT * FROM huge.fact"},
+            {"name": "REAL_TABLE", "custom_sql": None},
+        ]
+    )
+    attempted = []
+
+    def _probe_table(_migration: Path, _conn: dict, target: tuple[dict, str], _opts: tuple[int, bool]):
+        table_spec, _column = target
+        attempted.append(table_spec["name"])
+        if table_spec.get("custom_sql"):
+            return probe_live_source.EXIT_OPERATOR_REQUIRED, "OPERATOR_REQUIRED"
+        return 0, "DATA_OK"
+
+    monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(probe_live_source, "_probe_one_table", _probe_table)
+    caplog.set_level("INFO", logger="probe_live_source")
+
+    rc, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 7, False)  # pylint: disable=protected-access
+
+    assert rc == probe_live_source.EXIT_OPERATOR_REQUIRED
+    assert verdict == "OPERATOR_REQUIRED"
+    assert attempted == ["REAL_TABLE", "Q"]
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "source credentials were proven by table 'REAL_TABLE'" in messages
+    assert "custom-SQL relation(s) still require Power BI Desktop operator refresh" in messages
 
 
 def test_the_custom_sql_relation_is_still_probed_when_it_is_the_only_candidate():

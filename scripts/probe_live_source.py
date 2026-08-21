@@ -463,8 +463,8 @@ def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict,
     Real tables are ordered FIRST and custom-SQL relations last. Both are probeable (see
     `build_m_query`), but a real table costs the source a catalog lookup and a one-row read, whereas
     a custom-SQL relation runs the workbook's own hand-written SELECT - which can be arbitrarily
-    expensive. Reachability is equally proven either way, so prefer the cheap proof when the spec
-    offers one.
+    expensive and can trigger Desktop's native-query approval modal. Prefer the cheap proof for
+    credentials, but never let it certify a later custom-SQL relation as DATA_OK.
     """
     if source_index >= len(sources):
         log.error("PROBE: ERROR source index %d out of range (%d sources)", source_index, len(sources))
@@ -1010,7 +1010,16 @@ def _probe_one(
     for i, table in enumerate(tables):
         rc, verdict = _probe_one_table(migration, conn, (table, column), (timeout_sec, keep))
         if rc == 0:
-            return 0, "DATA_OK"
+            custom_tables = [candidate for candidate in tables[i + 1 :] if candidate.get("custom_sql")]
+            if not custom_tables:
+                return 0, "DATA_OK"
+            log.error(
+                "PROBE: OPERATOR_REQUIRED source credentials were proven by table '%s', but %d "
+                "custom-SQL relation(s) still require Power BI Desktop operator refresh.",
+                table.get("name"),
+                len(custom_tables),
+            )
+            return _probe_one_table(migration, conn, (custom_tables[0], column), (timeout_sec, keep))
         if verdict != "BAD_TABLE" or i == len(tables) - 1:
             return rc, verdict
         log.warning("table '%s' not found at the source - trying the next one in the spec", table.get("name"))
