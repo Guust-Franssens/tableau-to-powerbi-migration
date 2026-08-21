@@ -543,6 +543,11 @@ table Config
 
 \tcolumn Config_Code
 \t\tdataType: string
+
+table Scrap
+
+\tcolumn Serial_Number
+\t\tdataType: string
 """
 
 AIRCRAFT_RELATIONSHIPS = """relationship Installs_Aircraft
@@ -601,6 +606,9 @@ def test_a_field_bound_to_the_wrong_table_of_the_same_name_is_caught(tmp_path, c
     assert finding["status"] == "unrelated_tables"
     assert sorted(sorted(g) for g in finding["table_groups"]) == [["Config"], ["Installs"]]
     # The ambiguity is itself the finding: name the tables the same column name also lives on.
+    # `Scrap` carries `Serial_Number` too and is deliberately NOT listed - it is as unreachable as
+    # `Config`, so rebinding there would not fix the visual. A "did you mean" list is only worth
+    # printing if every entry actually renders.
     assert finding["ambiguous"] == [{"report_spelling": "Config[Serial_Number]", "also_on": ["Aircraft", "Installs"]}]
 
     assert cfb.main([str(bundle)]) == 1, "a visual that cannot render must gate the bundle"
@@ -694,7 +702,7 @@ def test_a_measure_on_a_disconnected_table_never_constrains_the_visual(tmp_path)
         pytest.param(
             "\ntable Switcher\n\n\tcolumn Switcher\n\t\tsourceColumn: [Value1]\n"
             "\n\tpartition Switcher = calculated\n"
-            "\t\tsource = {(\"Installs\", NAMEOF(Installs[Install_Count]), 0)}\n",
+            '\t\tsource = {("Installs", NAMEOF(Installs[Install_Count]), 0)}\n',
             "field parameter",
             id="field-parameter",
         ),
@@ -775,6 +783,43 @@ def test_a_missing_field_and_an_unrelated_table_are_reported_in_the_SAME_run(tmp
     assert cfb.main([str(bundle)]) == 1
     out = capsys.readouterr().out
     assert "MISSING" in out and "UNRELATED TABLES" in out
+
+
+def test_a_field_that_does_not_EXIST_never_drags_its_table_into_the_agreement_test(tmp_path) -> None:
+    """A deliberate scope line, pinned so it stays a decision rather than an accident.
+
+    `Config[Nope]` is already reported as `missing`; letting it ALSO vote on the visual's table set
+    would speculate about where a field that does not exist was meant to live, and bill the user
+    twice for one fix. The run is red either way, so nothing is silently passing.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[_visual(_column("Aircraft", "Aircraft_Type"), _column("Config", "Nope"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "UNRESOLVED"
+    assert result["missing"] == 1
+    assert result["incoherent_visuals"] == 0, "a non-existent field must not also raise a table disagreement"
+
+
+def test_only_a_visual_json_is_a_visual(tmp_path) -> None:
+    """Mutation killed: widening the per-visual sweep to every JSON in the definition.
+
+    `iter_references` deliberately reads everything (a broken name is a broken name wherever it is
+    written), but table AGREEMENT is a property of the query one visual actually runs. A bookmark
+    or any other saved state that happens to carry a visual-shaped payload is not what renders, and
+    a finding against it would be unactionable.
+    """
+    bundle = _write_star(tmp_path, visuals=[_visual(_column("Installs", "Install_Count"))])
+    stowaway = bundle / "pbip" / "Book" / "Book.Report" / "definition" / "bookmarks"
+    stowaway.mkdir(parents=True)
+    (stowaway / "b1.json").write_text(
+        json.dumps(_visual(_column("Config", "Serial_Number"), _column("Installs", "Install_Count"))),
+        encoding="utf-8",
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", _coherence(result)
+    assert result["reports"][0]["visuals"] == 1, "exactly one visual.json, whatever else is lying around"
 
 
 def test_repeated_table_disagreements_collapse_but_keep_every_visual(tmp_path) -> None:
