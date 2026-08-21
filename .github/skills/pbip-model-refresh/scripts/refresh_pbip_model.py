@@ -149,6 +149,7 @@ from _credential_modal import (
     describe_modal,
     inspect_credential_modal,
     join_with_credential_poll,
+    print_indeterminate_state_notice,
     print_refresh_banner,
     print_refresh_unknown_banner,
     source_hint_from_model,
@@ -162,21 +163,20 @@ SAVE_TIMEOUT_SECONDS = 120
 # waited on). On timeout `_persist_image` raises `ModelLockTimeout` and `_refresh_and_save` REFUSES to
 # persist (`NOT_PERSISTED`), naming the concurrent run.
 PERSIST_LOCK_TIMEOUT_SECONDS = 120.0
-# The XMLA refresh ceiling. NOT agent-tunable on purpose - there is no CLI flag for it.
-#
-# 300s is chosen from measurement, not intuition. A 246,236-row, 11-table refresh took 38.8s on a
-# good run and over 87s on a slow one (2026-08-04), so the previous 90s ceiling left a ~3s margin and
-# duly false-positived on 2 of 5 Desktop instances opened on the SAME bundle. 5 minutes is
-# comfortably clear of that, and still far below the "agent looks busy but is permanently stuck"
-# territory this bound exists to prevent.
-#
-# Why no flag: a knob here is an attractive nuisance. An agent that hits a timeout will reach for a
-# bigger number - and the one case where waiting longer never helps is the credential wait, which
-# `refresh()` documents this ceiling cannot interrupt anyway. If a model legitimately needs longer,
-# the right lever is `--tables` (refresh only what is needed), not a longer wait.
+# Legacy XMLA refresh ceiling used when progress tracing is disabled or unavailable. Keep this path
+# intact as the safe degradation mode: a progress feature must never make refresh less reliable.
 REFRESH_TIMEOUT_SECONDS = 300
 
-# Grace on top of the XMLA ceiling before the outer wall clock gives up. The XMLA layer honours
+# A server-level AMO trace observes ProgressReport* events from the separate ADOMD refresh session.
+# Liveness is deliberately NON-FATAL: local CSV refreshes showed ~2.1s gaps, but we have no evidence
+# for remote first-row latency. Killing on this timer would false-positive a healthy slow source.
+REFRESH_PROGRESS_LIVENESS_SECONDS = 120.0
+REFRESH_PROGRESS_THROTTLE_SECONDS = 2.0
+# The traced-mode fatal backstop. It must be comfortably above measured 700-750s customer Snowflake
+# refreshes; liveness only reports silence before this backstop fires.
+REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0
+
+# Grace on top of the XMLA ceiling before the legacy outer wall clock gives up. The XMLA layer honours
 # `CommandTimeout` precisely for a genuinely slow *query*, so letting it fire first yields a far
 # better error ("The XML for Analysis request timed out ... Timeout value: N sec") than a generic
 # wall-clock abort. The outer bound only exists to catch the case XMLA provably cannot interrupt:
@@ -305,7 +305,67 @@ def _catalog_id(conn) -> str:
         reader.Close()
 
 
-# pylint: disable=too-many-arguments,too-many-statements
+# pylint: disable=too-many-arguments,too-many-branches,too-many-locals,too-many-statements
+def _join_refresh_worker(
+    worker: threading.Thread,
+    *,
+    desktop_pid: int | None,
+    source_hint: str | None,
+    initial_state: CredentialDetection | None,
+    total_timeout: float,
+    progress_monitor: RefreshProgressMonitor | None,
+) -> bool:
+    """Wait for the refresh thread, with credential polling and optional progress liveness."""
+    if progress_monitor is None:
+        if desktop_pid is None:
+            worker.join(total_timeout)
+            return not worker.is_alive()
+        return join_with_credential_poll(
+            worker,
+            pid=desktop_pid,
+            total_timeout=total_timeout,
+            heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
+            poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
+            source_hint=source_hint,
+            detector=_credential_state,
+            initial_state=initial_state,
+        )
+
+    started = time.monotonic()
+    next_heartbeat = REFRESH_HEARTBEAT_SECONDS
+    latched_unknown = initial_state.unknown_reason if initial_state else None
+    latched_desktop_unready = initial_state.desktop_unready if initial_state else None
+    while worker.is_alive():
+        elapsed = time.monotonic() - started
+        absolute_remaining = max(0.0, total_timeout - elapsed)
+        if absolute_remaining <= 0:
+            break
+        progress_monitor.print_liveness_warning_if_due()
+        wait_for = min(
+            absolute_remaining,
+            progress_monitor.seconds_until_liveness_warning(),
+            REFRESH_CREDENTIAL_POLL_SECONDS,
+            max(0.0, next_heartbeat - elapsed),
+        )
+        worker.join(max(0.01, wait_for))
+        if desktop_pid is not None:
+            state = _credential_state(desktop_pid)
+            _raise_if_blocked(desktop_pid, state, source_hint)
+            if state.desktop_unready and latched_desktop_unready is None:
+                latched_desktop_unready = state.desktop_unready
+            if state.unknown_reason and latched_unknown is None:
+                latched_unknown = state.unknown_reason
+                print_indeterminate_state_notice(desktop_pid, state.unknown_reason)
+        elapsed = time.monotonic() - started
+        if elapsed >= next_heartbeat and worker.is_alive():
+            progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
+            next_heartbeat += REFRESH_HEARTBEAT_SECONDS
+    if worker.is_alive():
+        return False
+    return True
+
+
+# pylint: disable=too-many-arguments,too-many-locals,too-many-statements
 def refresh(
     port: int,
     tables: list[str] | None,
@@ -314,13 +374,18 @@ def refresh(
     desktop_pid: int | None = None,
     source_hint: str | None = None,
     initial_state: CredentialDetection | None = None,
+    progress_enabled: bool = True,
+    progress_liveness_sec: float = REFRESH_PROGRESS_LIVENESS_SECONDS,
+    absolute_timeout_sec: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
     """Send a TMSL refresh over XMLA. Returns (ok, message).
 
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
-    minutes on a large table that no report even uses.
+    minutes on a large table that no report even uses. When enabled, the server-level AMO progress
+    trace reports row-count evidence and non-fatal silence warnings; if it cannot start, this
+    function falls back to the legacy XMLA timeout path below.
 
-    **The timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
+    **The legacy timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
     both halves, each with the timeout verified on readback:
 
     - ✅ It works at the XMLA layer. An expensive `EVALUATE` under `CommandTimeout = 1` / `5` raised
@@ -351,17 +416,52 @@ def refresh(
     as STALE.
     """
     result: dict[str, tuple[bool, str] | BaseException] = {}
+    progress_monitor: RefreshProgressMonitor | None = None
+    command_timeout = timeout_sec
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
     if desktop_pid is not None:
         state = initial_state or _credential_state(desktop_pid)
         _raise_if_blocked(desktop_pid, state, source_hint)
         initial_state = state
-        if state.unknown_reason:
-            print_refresh_unknown_banner(
-                desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
+    if progress_enabled:
+        try:
+            progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec)
+            command_timeout = max(1, int(absolute_timeout_sec))
+            total_timeout = absolute_timeout_sec
+            print(
+                f"[progress] enabled: no progress event for {progress_liveness_sec:.1f}s prints a warning "
+                f"(absolute backstop {absolute_timeout_sec:.0f}s)",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            print(
+                f"[progress] unavailable ({type(exc).__name__}: {exc}); "
+                f"falling back to legacy {timeout_sec}s XMLA timeout",
+                file=sys.stderr,
+                flush=True,
+            )
+    if desktop_pid is not None:
+        state = initial_state or CredentialDetection()
+        if progress_monitor is None:
+            if state.unknown_reason:
+                print_refresh_unknown_banner(
+                    desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
+                )
+            else:
+                print_refresh_banner(desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS)
+        elif state.unknown_reason:
+            print(
+                f"Blocking-dialog check on PID {desktop_pid} is UNKNOWN ({state.unknown_reason}). "
+                f"Refreshing with progress liveness {progress_liveness_sec:.1f}s and absolute "
+                f"backstop {absolute_timeout_sec:.0f}s.",
+                flush=True,
             )
         else:
-            print_refresh_banner(desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS)
+            print(
+                f"No blocking dialog on PID {desktop_pid}. Refreshing with progress liveness "
+                f"{progress_liveness_sec:.1f}s and absolute backstop {absolute_timeout_sec:.0f}s.",
+                flush=True,
+            )
 
     def _run() -> None:
         conn = None
@@ -377,7 +477,7 @@ def refresh(
             tmsl = json.dumps({"refresh": {"type": "full", "objects": objects}})
             cmd = conn.CreateCommand()
             cmd.CommandText = tmsl
-            cmd.CommandTimeout = timeout_sec
+            cmd.CommandTimeout = command_timeout
             cmd.ExecuteNonQuery()
             result["ok"] = (True, f"refreshed {'/'.join(tables) if tables else 'entire database'} (catalog {catalog})")
         except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
@@ -393,28 +493,29 @@ def refresh(
                     pass
 
     worker = threading.Thread(target=_run, name="xmla-refresh", daemon=True)
-    worker.start()
-    if desktop_pid is None:
-        worker.join(total_timeout)
-    else:
-        join_with_credential_poll(
+    try:
+        worker.start()
+        if progress_monitor is not None:
+            progress_monitor.mark_refresh_started()
+        _join_refresh_worker(
             worker,
-            pid=desktop_pid,
-            total_timeout=total_timeout,
-            heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
-            poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
+            desktop_pid=desktop_pid,
             source_hint=source_hint,
-            detector=_credential_state,
             initial_state=initial_state,
+            total_timeout=total_timeout,
+            progress_monitor=progress_monitor,
         )
-    if worker.is_alive():
-        if desktop_pid is not None:
-            _raise_if_blocked(desktop_pid, _credential_state(desktop_pid), source_hint)
-        raise TimeoutError(
-            f"refresh did not return within {total_timeout}s "
-            f"(XMLA CommandTimeout was {timeout_sec}s and did not fire, which is the signature of a "
-            f"mashup engine parked on a sign-in modal rather than a slow query)"
-        )
+        if worker.is_alive():
+            if desktop_pid is not None:
+                _raise_if_blocked(desktop_pid, _credential_state(desktop_pid), source_hint)
+            raise TimeoutError(
+                f"refresh did not return within {total_timeout}s "
+                f"(XMLA CommandTimeout was {command_timeout}s and did not fire, which is the signature of a "
+                f"mashup engine parked on a sign-in modal rather than a slow query)"
+            )
+    finally:
+        if progress_monitor is not None:
+            progress_monitor.close()
 
     outcome = result.get("ok")
     if isinstance(outcome, BaseException):
@@ -487,6 +588,317 @@ def _load_amo():
     from Microsoft.AnalysisServices.Tabular import Server  # noqa: PLC0415
 
     return Server
+
+
+PROGRESS_TRACE_COLUMNS = [
+    "EventClass",
+    "CurrentTime",
+    "IntegerData",
+    "ProgressTotal",
+    "ObjectName",
+    "ObjectPath",
+    "DatabaseName",
+    "SessionID",
+    "ConnectionID",
+    "RequestID",
+    "TextData",
+]
+PROGRESS_TRACE_EVENTS = [
+    "ProgressReportBegin",
+    "ProgressReportCurrent",
+    "ProgressReportEnd",
+    "ProgressReportError",
+]
+_TRACE_REJECTION_RE = re.compile(r"event Id=(\d+) does not contain the column Id=(\d+)")
+_TABLE_TEXT_RE = re.compile(r"Reading data for the '([^']+)' table")
+
+
+def _enum_int(member) -> int | None:
+    """Best-effort integer value for a pythonnet enum member."""
+    for attempt in (lambda: int(member), lambda: int(member.value__)):
+        try:
+            return attempt()
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            continue
+    return None
+
+
+def _amo_events(trace):
+    """Return AMO Trace.Events by declared type, avoiding Component.Events shadowing."""
+    for prop in trace.GetType().GetProperties():
+        if prop.Name == "Events" and "TraceEventCollection" in prop.PropertyType.Name:
+            return prop.GetValue(trace, None)
+    raise RuntimeError("no TraceEventCollection-typed Events property on " + str(trace.GetType()))
+
+
+def _trace_column_value(args, trace_column, name: str) -> str | None:
+    """Read one trace column, tolerating events that do not carry it."""
+    try:
+        value = args[getattr(trace_column, name)]
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        return None
+    return None if value is None else str(value)
+
+
+class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
+    """Server-level AMO progress trace with throttled human-readable row-count output."""
+
+    def __init__(  # pylint: disable=too-many-arguments
+        self,
+        trace=None,
+        server=None,
+        trace_column=None,
+        *,
+        liveness_seconds: float = REFRESH_PROGRESS_LIVENESS_SECONDS,
+        throttle_seconds: float = REFRESH_PROGRESS_THROTTLE_SECONDS,
+        clock=time.monotonic,
+        printer=print,
+        current_event_values: set[str] | None = None,
+    ) -> None:
+        self.trace = trace
+        self.server = server
+        self.trace_column = trace_column
+        self.liveness_seconds = liveness_seconds
+        self.throttle_seconds = throttle_seconds
+        self.clock = clock
+        self.printer = printer
+        self._lock = threading.Lock()
+        self._started_at = clock()
+        self._last_event_at = self._started_at
+        self._last_event_label = "trace start"
+        self._last_print_by_object: dict[str, float] = {}
+        self._latest_rows_by_object: dict[str, int] = {}
+        self._last_row_object: str | None = None
+        self._last_liveness_warning_at: float | None = None
+        self._current_event_values = current_event_values or {"ProgressReportCurrent"}
+
+    def mark_refresh_started(self) -> None:
+        """Start the liveness clock from the refresh request, not trace construction."""
+        with self._lock:
+            self._started_at = self.clock()
+            self._last_event_at = self._started_at
+            self._last_event_label = "refresh start"
+
+    def record_trace_event(self, values: dict[str, str | None]) -> None:
+        """Record one ProgressReport* event and emit a coalesced row-count line when useful."""
+        now = self.clock()
+        label = values.get("ObjectName") or _object_from_text(values.get("TextData")) or "refresh"
+        event_class = values.get("EventClass") or "ProgressReport"
+        row_count = _positive_int(values.get("IntegerData"))
+        message = None
+        with self._lock:
+            self._last_event_at = now
+            self._last_event_label = str(label)
+            self._last_liveness_warning_at = None
+            if str(event_class) in self._current_event_values and row_count is not None:
+                self._latest_rows_by_object[str(label)] = row_count
+                self._last_row_object = str(label)
+                message = self._format_row_progress_locked(str(label), row_count, now)
+        if message:
+            self.printer(message, flush=True)
+
+    def seconds_until_liveness_warning(self) -> float:
+        """Seconds until the next non-fatal liveness warning should be emitted."""
+        with self._lock:
+            since_event = self.clock() - self._last_event_at
+            if since_event < self.liveness_seconds:
+                return self.liveness_seconds - since_event
+            if self._last_liveness_warning_at is None:
+                return 0.0
+            return max(0.0, self.liveness_seconds - (self.clock() - self._last_liveness_warning_at))
+
+    def print_liveness_warning_if_due(self) -> None:
+        """Warn, but never abort, when trace events go quiet beyond the liveness window."""
+        now = self.clock()
+        message = None
+        with self._lock:
+            quiet_for = now - self._last_event_at
+            last_warned = self._last_liveness_warning_at
+            if quiet_for >= self.liveness_seconds and (
+                last_warned is None or now - last_warned >= self.liveness_seconds
+            ):
+                self._last_liveness_warning_at = now
+                message = (
+                    f"[progress] no progress event for {quiet_for:.1f}s — still waiting "
+                    f"(last event: {self._last_event_label}; absolute backstop still applies)"
+                )
+        if message:
+            self.printer(message, flush=True)
+
+    def print_evidence_heartbeat(self, elapsed: float, total: float) -> None:
+        """Print the heartbeat for traced refreshes, using row-count evidence when available."""
+        now = self.clock()
+        with self._lock:
+            if self._last_row_object is not None:
+                row_count = self._latest_rows_by_object[self._last_row_object]
+                message = self._format_row_progress_locked(self._last_row_object, row_count, now)
+            else:
+                message = (
+                    f"[progress] waiting for first row-count event, {int(elapsed)}s / {int(total)}s "
+                    f"(liveness {self.liveness_seconds:.0f}s)"
+                )
+        if message:
+            self.printer(message, flush=True)
+
+    def _format_row_progress_locked(self, label: str, row_count: int, now: float) -> str | None:
+        """Return a throttled row-count progress line. Caller must hold ``_lock``."""
+        previous = self._last_print_by_object.get(label, -1.0e9)
+        if now - previous < self.throttle_seconds:
+            return None
+        self._last_print_by_object[label] = now
+        elapsed = now - self._started_at
+        return f"[progress] {label}: {row_count:,} rows read ({elapsed:.1f}s)"
+
+    def handle_event(self, _sender, args) -> None:  # noqa: ANN001
+        """AMO Trace.OnEvent handler."""
+        values = {column: _trace_column_value(args, self.trace_column, column) for column in PROGRESS_TRACE_COLUMNS}
+        self.record_trace_event(values)
+
+    def seconds_since_last_event(self) -> float:
+        """Seconds since any ProgressReport* event was observed."""
+        with self._lock:
+            return self.clock() - self._last_event_at
+
+    def last_event_label(self) -> str:
+        """Object or phase named by the most recent progress trace event."""
+        with self._lock:
+            return self._last_event_label
+
+    def close(self) -> None:
+        """Stop and drop the trace without masking the refresh outcome."""
+        if self.trace is not None:
+            try:
+                self.trace.Stop()
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                print(f"[progress] trace stop failed ({type(exc).__name__}: {exc})")
+            try:
+                self.trace.Drop()
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                print(f"[progress] trace drop failed ({type(exc).__name__}: {exc})")
+        if self.server is not None:
+            try:
+                self.server.Disconnect()
+            except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                pass
+
+
+def _object_from_text(text: str | None) -> str | None:
+    """Extract the table name from Desktop's progress text."""
+    if not text:
+        return None
+    match = _TABLE_TEXT_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _positive_int(value: str | None) -> int | None:
+    """Return a positive integer trace value, or None for missing/zero/non-numeric values."""
+    try:
+        parsed = int(value) if value is not None else 0
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _load_amo_trace_types():
+    """Load AMO and return the trace types used for server-level progress monitoring."""
+    server_type = _load_amo()
+    from Microsoft.AnalysisServices import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
+        TraceColumn,
+        TraceEventClass,
+    )
+    from Microsoft.AnalysisServices.Tabular import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
+        TraceEvent,
+    )
+
+    return server_type, TraceColumn, TraceEventClass, TraceEvent
+
+
+def _progress_event_values(trace_event_class, event_name: str) -> set[str]:
+    """Accepted EventClass wire values for one AMO trace event."""
+    values = {event_name}
+    enum_value = _enum_int(getattr(trace_event_class, event_name))
+    if enum_value is not None:
+        values.add(str(enum_value))
+    return values
+
+
+def _add_progress_events(
+    trace, trace_event_class, trace_column, trace_event_type, wanted: dict[str, list[str]]
+) -> None:
+    """Populate a trace with the current per-event candidate columns."""
+    events = _amo_events(trace)
+    events.Clear()
+    for event_name in PROGRESS_TRACE_EVENTS:
+        event = trace_event_type(getattr(trace_event_class, event_name))
+        for column in wanted[event_name]:
+            event.Columns.Add(getattr(trace_column, column))
+        events.Add(event)
+
+
+def _negotiate_progress_trace_columns(trace, trace_event_class, trace_column, trace_event_type) -> None:
+    """Drop only the trace columns the server rejects, then update the trace."""
+    column_ids = {}
+    event_ids = {}
+    for column in PROGRESS_TRACE_COLUMNS:
+        value = _enum_int(getattr(trace_column, column, None))
+        if value is not None:
+            column_ids[column] = value
+    for event_name in PROGRESS_TRACE_EVENTS:
+        value = _enum_int(getattr(trace_event_class, event_name))
+        if value is not None:
+            event_ids[event_name] = value
+    wanted = {event_name: list(PROGRESS_TRACE_COLUMNS) for event_name in PROGRESS_TRACE_EVENTS}
+    for _attempt in range(len(PROGRESS_TRACE_COLUMNS) * len(PROGRESS_TRACE_EVENTS) + 5):
+        _add_progress_events(trace, trace_event_class, trace_column, trace_event_type, wanted)
+        try:
+            trace.Update()
+            return
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            dropped = False
+            for event_id_text, column_id_text in _TRACE_REJECTION_RE.findall(str(exc)):
+                event_name = next((name for name, value in event_ids.items() if value == int(event_id_text)), None)
+                column = next((name for name, value in column_ids.items() if value == int(column_id_text)), None)
+                if event_name is None or column is None or column not in wanted[event_name]:
+                    continue
+                wanted[event_name].remove(column)
+                dropped = True
+            if not dropped:
+                raise
+    raise RuntimeError("progress trace column negotiation did not converge")
+
+
+def _start_refresh_progress_trace(port: int, liveness_seconds: float) -> RefreshProgressMonitor:
+    """Start a server-level progress trace, or raise so the caller can safely degrade."""
+    server_type, trace_column, trace_event_class, trace_event_type = _load_amo_trace_types()
+    server = server_type()
+    trace = None
+    try:
+        server.Connect(f"Data Source=localhost:{port}")
+        name = f"pbip-refresh-progress-{os.getpid()}-{int(time.time())}"
+        trace = server.Traces.Add(name, name)
+        _negotiate_progress_trace_columns(trace, trace_event_class, trace_column, trace_event_type)
+        monitor = RefreshProgressMonitor(
+            trace,
+            server,
+            trace_column,
+            liveness_seconds=liveness_seconds,
+            current_event_values=_progress_event_values(trace_event_class, "ProgressReportCurrent"),
+        )
+        trace.OnEvent += monitor.handle_event
+        setattr(trace, "_py_progress_handler", monitor.handle_event)  # noqa: B010
+        trace.Start()
+        return monitor
+    except Exception:
+        if trace is not None:
+            try:
+                trace.Drop()
+            except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                pass
+        try:
+            server.Disconnect()
+        except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            pass
+        raise
 
 
 _COMPAT_RE = re.compile(r"^(?P<indent>\s*)compatibilityLevel:\s*(?P<level>\d+)\s*$", re.M)
@@ -1124,7 +1536,7 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
         conn.Close()
 
 
-def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches
+def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
     pid: int,
     port: int,
     cache: Path | None,
@@ -1144,6 +1556,12 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
             refresh_kwargs = {"desktop_pid": pid, "source_hint": source_hint}
             if "initial_state" in parameters:
                 refresh_kwargs["initial_state"] = initial_state
+            if "progress_enabled" in parameters:
+                refresh_kwargs["progress_enabled"] = not args.no_progress
+            if "progress_liveness_sec" in parameters:
+                refresh_kwargs["progress_liveness_sec"] = args.progress_liveness_seconds
+            if "absolute_timeout_sec" in parameters:
+                refresh_kwargs["absolute_timeout_sec"] = args.refresh_absolute_timeout_seconds
             ok, message = refresh(
                 port,
                 args.tables,
@@ -1339,10 +1757,33 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable AMO progress tracing and use the legacy XMLA timeout path",
+    )
+    parser.add_argument(
+        "--progress-liveness-seconds",
+        type=float,
+        default=REFRESH_PROGRESS_LIVENESS_SECONDS,
+        help=(
+            "Seconds without a ProgressReport event before a traced refresh is considered stuck "
+            f"(default: {REFRESH_PROGRESS_LIVENESS_SECONDS:.0f})"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-absolute-timeout-seconds",
+        type=float,
+        default=REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
+        help=(
+            "Absolute backstop for traced refreshes; liveness warnings are non-fatal "
+            f"(default: {REFRESH_ABSOLUTE_TIMEOUT_SECONDS:.0f})"
+        ),
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-statements
     """CLI entry point: refresh, save, and prove data is really there."""
     args = _build_arg_parser().parse_args(argv)
 
