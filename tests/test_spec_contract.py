@@ -110,6 +110,8 @@ def test_existing_spec_without_row_count_still_validates(tmp_path: Path) -> None
         "2026-02-30T00:00:00Z",
         "2026-08-19",
         "2026-08-19T10:04:00",
+        "2026-08-19 10:04:00+00:00",
+        "20260819T100400+00:00",
     ],
 )
 def test_schema_rejects_an_observed_at_that_is_not_a_real_utc_timestamp(tmp_path: Path, bad: str) -> None:
@@ -119,8 +121,13 @@ def test_schema_rejects_an_observed_at_that_is_not_a_real_utc_timestamp(tmp_path
     date/email/idn-email/idn-hostname/ipv4/ipv6/regex - `date-time` is absent because
     `rfc3339-validator` is not installed (pyproject declares `jsonschema>=4.22` with no
     `format-nongpl` extra). Passing `format_checker=` would accept every value below while looking
-    like a fix. The last two cases are why a shape regex is not enough either: a date-only value and
-    a naive local time are both well-formed and both ambiguous.
+    like a fix. `2026-08-19` and `2026-08-19T10:04:00` are why a shape regex is not enough either: a
+    date-only value and a naive local time are both well-formed and both ambiguous.
+
+    The last two are the converse - why `fromisoformat` alone is not enough. It is far broader than
+    RFC 3339: it accepts a SPACE separator and the basic (hyphen-less) format, neither of which is
+    the `full-date "T" full-time` the schema advertises. Accepting them would let the fallback
+    silently weaken the very contract it exists to make deterministic.
     """
     errors = _validation_errors_for_spec(
         tmp_path, _spec_with_first_table_row_count({"value": 42, "source": "hyper", "observed_at": bad})
@@ -130,8 +137,19 @@ def test_schema_rejects_an_observed_at_that_is_not_a_real_utc_timestamp(tmp_path
 
 
 def test_schema_accepts_a_real_rfc3339_observed_at(tmp_path: Path) -> None:
-    """Both a Z suffix and an explicit offset are valid; the stdlib check must not over-reject."""
-    for good in ("2026-08-19T10:04:00Z", "2026-08-19T10:04:00+02:00", "2026-08-19T10:04:00.123456Z"):
+    """Both a Z suffix and an explicit offset are valid; the stdlib check must not over-reject.
+
+    Lowercase `t`/`z` are explicitly permitted by RFC 3339, but `datetime.fromisoformat` rejects
+    them - so the shape check and the semantic check disagree unless the value is normalised
+    between them. Pinned here because getting it wrong fails a VALID timestamp, which is worse
+    than the over-acceptance this pair of checks was added to fix.
+    """
+    for good in (
+        "2026-08-19T10:04:00Z",
+        "2026-08-19T10:04:00+02:00",
+        "2026-08-19T10:04:00.123456Z",
+        "2026-08-19t10:04:00z",
+    ):
         errors = _validation_errors_for_spec(
             tmp_path, _spec_with_first_table_row_count({"value": 42, "source": "hyper", "observed_at": good})
         )
