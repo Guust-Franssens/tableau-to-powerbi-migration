@@ -429,14 +429,14 @@ def print_refresh_banner(
     cannot re-arm the landmine.
     """
     total = timeout_sec + grace_sec
-    wait_note = (
-        "this mode recalculates formulas without reading source rows, so long waits are unusual. "
-        if operation == "calculate"
-        else "a long wait here is expected for a serverless cold start. "
-    )
+    if operation == "calculate":
+        prefix = f"No blocking dialog on PID {pid}. Calculate in progress, bounded at "
+        wait_note = "this mode recalculates formulas without reading source rows, so long waits are unusual. "
+    else:
+        prefix = f"No blocking dialog on PID {pid}. Refreshing, bounded at "
+        wait_note = "a long wait here is expected for a serverless cold start. "
     print(
-        f"No blocking dialog on PID {pid}. {operation.capitalize()} in progress, bounded at "
-        f"{timeout_sec}s XMLA + {grace_sec}s grace ({total}s total); {wait_note}"
+        f"{prefix}{timeout_sec}s XMLA + {grace_sec}s grace ({total}s total); {wait_note}"
         "DO NOT kill this process - at the deadline it re-checks and prints one final machine-readable "
         "verdict line. Killing it early yields NO verdict.",
         flush=True,

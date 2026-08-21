@@ -1157,19 +1157,14 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     source_hint = source_hint_from_model(cache.parent.parent if cache else None)
     try:
         parameters = inspect.signature(refresh).parameters
+        refresh_kwargs = {}
+        if "refresh_type" in parameters:
+            refresh_kwargs["refresh_type"] = args.refresh_type
         if "desktop_pid" in parameters:
-            refresh_kwargs = {"desktop_pid": pid, "source_hint": source_hint}
+            refresh_kwargs.update({"desktop_pid": pid, "source_hint": source_hint})
             if "initial_state" in parameters:
                 refresh_kwargs["initial_state"] = initial_state
-            ok, message = refresh(
-                port,
-                args.tables,
-                REFRESH_TIMEOUT_SECONDS,
-                refresh_type=args.refresh_type,
-                **refresh_kwargs,
-            )
-        else:
-            ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS, refresh_type=args.refresh_type)
+        ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS, **refresh_kwargs)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         if isinstance(exc, CredentialMissingError):
             _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
