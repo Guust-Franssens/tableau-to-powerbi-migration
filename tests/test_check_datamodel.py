@@ -112,6 +112,10 @@ def test_json_style_quote_escape_before_keyword_prefix_is_caught() -> None:
     assert "INVALID_STRING_ESCAPE" in _kinds('let Source = "foo\\"inside\\" stuff" in Source')
 
 
+def test_json_style_quote_escape_outside_a_string_is_caught() -> None:
+    assert "INVALID_STRING_ESCAPE" in _kinds('let Source = "foo\\" & \\"bar" in Source')
+
+
 def test_transform_column_types_extra_pair_braces_are_caught() -> None:
     assert "INVALID_TRANSFORM_COLUMN_TYPE_PAIR" in _kinds(
         'let Source = Table.TransformColumnTypes(T, {{{"Amount", type number}}}) in Source'
@@ -148,6 +152,10 @@ def test_transform_column_types_empty_pair_list_is_allowed() -> None:
 
 def test_windows_path_before_otherwise_is_allowed() -> None:
     assert _check_expression(DUMMY, 'let Source = try "C:\\" otherwise "fallback" in Source') == []
+
+
+def test_windows_path_before_null_coalescing_is_allowed() -> None:
+    assert _check_expression(DUMMY, 'let Source = "C:\\" ?? "fallback" in Source') == []
 
 
 def test_delimiters_inside_strings_and_comments_are_ignored() -> None:

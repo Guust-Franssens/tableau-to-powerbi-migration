@@ -232,7 +232,7 @@ def _is_string_terminator(text: str, index: int) -> bool:
     """Whether text after a quote can legally follow an M string literal."""
     while index < len(text) and text[index].isspace():
         index += 1
-    if index == len(text) or text[index] in ",)]}&+-*/=<>&|":
+    if index == len(text) or text[index] in ",)]}&+-*/=<>&|?":
         return True
     for word in ("as", "catch", "else", "in", "is", "meta", "or", "otherwise", "then"):
         end = index + len(word)
@@ -262,6 +262,10 @@ def _tokenize(text: str) -> tuple[list[Token], list[tuple[str, int, int]]]:
                 break
             tokens.append(token)
             continue
+        if text.startswith('\\"', scanner.pos):
+            scanner.errors.append(
+                ('invalid JSON-style \\" escape; Power Query M uses doubled quotes ("")', scanner.line, scanner.col)
+            )
         match = _NUMBER_RE.match(text, scanner.pos) if ch.isdigit() else None
         if match is None and (ch.isalpha() or ch == "_"):
             # A dotted path (Table.TransformColumnTypes, Int64.Type) is ONE token, so the
