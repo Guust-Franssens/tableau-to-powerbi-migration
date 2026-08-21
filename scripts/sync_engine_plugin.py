@@ -46,17 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # pylint: disable-next=wrong-import-position
-from engine_source import ENGINE_SKILL, PLUGIN_ENGINE_ROOT, engine_version, is_engine_tree  # noqa: E402
-
-
-def _version_tuple(version: str | None) -> tuple[int, ...]:
-    """Parse a dotted VERSION into comparable ints; anything unparseable sorts lowest."""
-    if not version:
-        return ()
-    try:
-        return tuple(int(part) for part in version.split("."))
-    except ValueError:
-        return ()
+from engine_source import ENGINE_SKILL, PLUGIN_ENGINE_ROOT, engine_version, is_engine_tree, version_tuple  # noqa: E402
 
 
 def _is_noise(rel: Path) -> bool:
@@ -119,7 +109,7 @@ def validate_endpoints(source_root: Path, allow_downgrade: bool) -> int:
     installed = engine_version(PLUGIN_ENGINE_ROOT)
     incoming = engine_version(source_root)
     print(f"SYNC: installed={installed or 'unknown'}  incoming={incoming or 'unknown'}  ({source_root})")
-    if _version_tuple(incoming) < _version_tuple(installed) and not allow_downgrade:
+    if version_tuple(incoming) < version_tuple(installed) and not allow_downgrade:
         print(f"SYNC: REFUSED - {incoming} is OLDER than the installed {installed}")
         print("      An older engine changes real output (2.113.0 emits deprecated Bing maps and drops")
         print("      a density-map worksheet where 2.126.0 emits azureMap). Pass --allow-downgrade if")

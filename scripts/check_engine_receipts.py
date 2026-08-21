@@ -9,7 +9,7 @@ import argparse
 import json
 from pathlib import Path
 
-from engine_source import engine_root, engine_version
+from engine_source import engine_root, engine_version, version_tuple
 from migration_bundle import ENGINE_RECEIPT
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -34,8 +34,17 @@ def check_receipts(search_root: Path) -> list[str]:
         receipt_version = engine.get("version") if isinstance(engine, dict) else None
         if receipt_version != installed_version:
             shown_version = receipt_version if isinstance(receipt_version, str) and receipt_version else "missing"
+            receipt_order = version_tuple(receipt_version if isinstance(receipt_version, str) else None)
+            installed_order = version_tuple(installed_version)
+            if receipt_order < installed_order:
+                relation = "older than"
+            elif receipt_order > installed_order:
+                relation = "newer than"
+            else:
+                relation = "different from"
             warnings.append(
-                f"{bundle}: receipt engine.version {shown_version}, installed canonical engine {installed_version}"
+                f"{bundle}: receipt engine.version {shown_version} is {relation} "
+                f"installed canonical engine {installed_version}"
             )
     return warnings
 

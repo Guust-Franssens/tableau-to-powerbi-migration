@@ -29,7 +29,19 @@ def test_a_stale_synthetic_bundle_names_the_bundle_and_both_engine_versions(tmp_
 
     warnings = receipts.check_receipts(tmp_path)
 
-    assert warnings == [f"{bundle}: receipt engine.version 2.141.0, installed canonical engine 2.260.0"]
+    assert warnings == [f"{bundle}: receipt engine.version 2.141.0 is older than installed canonical engine 2.260.0"]
+
+
+def test_version_order_uses_numeric_segments_not_lexicographic_strings(tmp_path: Path, monkeypatch) -> None:
+    """2.113.0 is newer than 2.72.0 even though string ordering says the opposite."""
+    bundle = tmp_path / "stale-bundle"
+    _write_receipt(bundle, "2.72.0")
+    monkeypatch.setattr(receipts, "engine_root", lambda: tmp_path / "canonical-engine")
+    monkeypatch.setattr(receipts, "engine_version", lambda _: "2.113.0")
+
+    warnings = receipts.check_receipts(tmp_path)
+
+    assert warnings == [f"{bundle}: receipt engine.version 2.72.0 is older than installed canonical engine 2.113.0"]
 
 
 def test_matching_receipts_are_silent(tmp_path: Path, monkeypatch) -> None:
