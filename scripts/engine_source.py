@@ -75,6 +75,16 @@ class NonCanonicalEngineError(RuntimeError):
     """A caller asked for an engine that is not the canonical plugin."""
 
 
+def version_tuple(version: str | None) -> tuple[int, ...]:
+    """Parse a dotted VERSION into comparable ints; anything unparseable sorts lowest."""
+    if not version:
+        return ()
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return ()
+
+
 def is_engine_tree(root: Path) -> bool:
     """Whether `root` looks like a `tableau-fabric-skills` checkout/plugin (has the engine skill)."""
     return (root / ENGINE_SKILL / "VERSION").is_file() or (root / ENGINE_SKILL / "scripts").is_dir()
