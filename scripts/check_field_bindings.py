@@ -541,7 +541,10 @@ def iter_visual_queries(report_dir: Path) -> list[VisualQuery]:
         if not isinstance(state, dict):
             continue
         refs: list[FieldRef] = []
-        _walk(state, {}, path, refs)
+        # `From` is a SIBLING of `queryState`, not inside it, so a walk started at `queryState`
+        # never sees it and every aliased projection resolves to None -- silently contributing
+        # zero tables to agreement. Seed the scope from the parent `query` node.
+        _walk(state, _source_scope(query, {}), path, refs)
         if refs:
             name = payload.get("name") if isinstance(payload.get("name"), str) else path.parent.name
             visual_type = visual.get("visualType") if isinstance(visual.get("visualType"), str) else "unknown"

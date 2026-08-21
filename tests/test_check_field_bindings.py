@@ -70,6 +70,29 @@ def _visual(*fields: dict) -> dict:
     }
 
 
+def _aliased_visual(*pairs: tuple[str, str, str]) -> dict:
+    """A visual whose projections reach their tables through `query.From` ALIASES.
+
+    `(alias, entity, property)` per projection. PBIR usually inlines `SourceRef.Entity` -- measured
+    0 of 357 committed example visuals use the aliased form -- but it is equally valid, and the
+    per-field walker already resolves it, so the agreement pass must too.
+    """
+    entries = [{"Name": alias, "Entity": entity} for alias, entity, _ in pairs]
+    fields = [
+        {"Column": {"Expression": {"SourceRef": {"Source": alias}}, "Property": prop}} for alias, _, prop in pairs
+    ]
+    return {
+        "name": "v1",
+        "visual": {
+            "visualType": "clusteredColumnChart",
+            "query": {
+                "From": entries,
+                "queryState": {"Y": {"projections": [{"field": f} for f in fields]}},
+            },
+        },
+    }
+
+
 def _write_bundle(
     root: Path,
     *,
@@ -783,6 +806,27 @@ def test_a_missing_field_and_an_unrelated_table_are_reported_in_the_SAME_run(tmp
     assert cfb.main([str(bundle)]) == 1
     out = capsys.readouterr().out
     assert "MISSING" in out and "UNRELATED TABLES" in out
+
+
+def test_aliased_projections_still_VOTE_on_table_agreement(tmp_path) -> None:
+    """Regression: an aliased visual was silently skipped, so a real disagreement printed OK.
+
+    `From` is a SIBLING of `queryState`, not a child, so a walk started at `queryState` never met
+    the alias map. Every aliased projection resolved to `None`, was dropped, and the visual
+    contributed ZERO tables -- `visuals: 0`, `incoherent_visuals: 0`, exit 0. The per-field walker
+    resolved the very same references correctly, so the two passes disagreed with each other.
+
+    This is the identical Config/Installs disagreement asserted above, written in the aliased form.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[_aliased_visual(("c", "Config", "Serial_Number"), ("i", "Installs", "Install_Count"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["reports"][0]["visuals"] > 0, "an aliased visual must be JUDGED, not silently skipped"
+    assert result["incoherent_visuals"] == 1, "two unrelated tables disagree whether or not aliases are used"
+    assert result["status"] == "INCOHERENT"
+    assert cfb.main([str(bundle)]) == 1
 
 
 def test_a_field_that_does_not_EXIST_never_drags_its_table_into_the_agreement_test(tmp_path) -> None:
