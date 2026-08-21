@@ -82,7 +82,7 @@ def test_a_command_that_never_returns_still_yields_a_verdict(parked) -> None:
     _conn, _released = parked
     started = time.monotonic()
     with pytest.raises(TimeoutError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=1)
+        refresh(port=1234, tables=["Orders"], timeout_sec=1, progress_enabled=False)
     elapsed = time.monotonic() - started
 
     assert elapsed < 15, f"refresh took {elapsed:.1f}s - the wall clock did not bound it"
@@ -95,7 +95,7 @@ def test_the_worker_is_a_daemon_so_a_parked_engine_cannot_outlive_the_process(pa
     """A non-daemon worker would keep the interpreter alive after the verdict, re-hanging the caller."""
     _conn, _released = parked
     with pytest.raises(TimeoutError):
-        refresh(port=1234, tables=["Orders"], timeout_sec=1)
+        refresh(port=1234, tables=["Orders"], timeout_sec=1, progress_enabled=False)
 
     workers = [t for t in threading.enumerate() if t.name == "xmla-refresh"]
     assert workers, "expected the parked worker to still be running - that is the scenario"
@@ -369,8 +369,8 @@ def test_progress_liveness_warns_but_does_not_kill_a_quiet_refresh(monkeypatch, 
     assert "[progress] no progress event" in capsys.readouterr().out
 
 
-def test_progress_trace_failure_degrades_to_the_legacy_refresh_path(monkeypatch, capsys) -> None:
-    """A trace setup failure must not break refresh; it falls back to the old CommandTimeout path."""
+def test_amo_trace_import_failure_keeps_the_absolute_backstop(monkeypatch, capsys) -> None:
+    """AMO trace loss removes progress evidence, not the long timeout that replaced the 300s ceiling."""
     executed: list[tuple[str, int]] = []
 
     class _Cmd:  # pylint: disable=too-few-public-methods,invalid-name
@@ -397,19 +397,26 @@ def test_progress_trace_failure_degrades_to_the_legacy_refresh_path(monkeypatch,
             """Match the ADOMD API surface."""
 
     def trace_denied(*_args):
-        raise RuntimeError("trace denied")
+        raise ImportError("No module named Microsoft.AnalysisServices")
 
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", trace_denied)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
     monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
 
-    ok, message = refresh(port=1234, tables=["Orders"], timeout_sec=5, progress_enabled=True)
+    ok, message = refresh(port=1234, tables=["Orders"], progress_enabled=True, absolute_timeout_sec=17.2)
 
     assert ok is True
     assert "Orders" in message
-    assert executed and executed[0][1] == 5
+    assert executed and executed[0][1] == 17
+    assert executed[0][1] != REFRESH_TIMEOUT_SECONDS
     captured = capsys.readouterr()
     assert "[progress] unavailable" in captured.err
+    assert "Row counts and the liveness warning are OFF" in captured.err
+    assert "you cannot tell a slow refresh from a stuck one" in captured.err
+    assert "The 17s absolute backstop still applies" in captured.err
+    assert "restore the AMO package (Microsoft.AnalysisServices.NetCore.retail.amd64)" in captured.err
+    assert "operator refresh strategy" in captured.err
+    assert "legacy" not in captured.err
     assert "[progress] unavailable" not in captured.out
 
 

@@ -31,6 +31,8 @@ import deploy_estate as de  # noqa: E402  # pylint: disable=wrong-import-positio
 
 TENANT_CHECK = "Fabric token tenant"
 DESKTOP_PIN_CHECK = "PBI_DESKTOP_PATH (bridge exe pin)"
+AMO_CHECK = "AMO/TOM client (Desktop progress/ImageSave)"
+ADOMD_CHECK = "ADOMD.NET client (Desktop probe/refresh)"
 
 
 def _preflight_source() -> str:
@@ -98,6 +100,49 @@ def test_the_desktop_pin_warns_rather_than_blocking_a_run_that_never_opens_it() 
     auto-updates, the bridge can no longer find the exe) is real.
     """
     _assert_add_check_tier(_preflight_source(), DESKTOP_PIN_CHECK, "recommended")
+
+
+def test_amo_warns_rather_than_blocking_a_run_that_never_opens_desktop() -> None:
+    """AMO/TOM absence affects Desktop refresh/save, not the parse/convert estate pipeline (#283).
+
+    This mirrors the #124 Desktop-pin decision: the failure is real and must be visible, but not every
+    migration phase opens Desktop. ``recommended`` keeps the line in the WARN summary without spending
+    preflight's exit 1 on a dependency that is needed later.
+    """
+    _assert_add_check_tier(_preflight_source(), AMO_CHECK, "recommended")
+
+
+def test_amo_is_checked_by_dll_presence_not_by_the_dotnet_cli() -> None:
+    """`dotnet` on PATH is not proof that the AMO/TOM package exists in the active cache (#283)."""
+    source = _preflight_source()
+    amo_block = source[source.index("# --- AMO/TOM client assembly") : source.index("# --- ADOMD.NET")]
+    assert "Add-Cli 'dotnet'" not in amo_block, "AMO must be a file check, not another CLI check"
+    assert "microsoft.analysisservices.netcore.retail.amd64*" in amo_block
+    assert "Microsoft.AnalysisServices.Tabular.dll" in amo_block
+    assert "$env:NUGET_PACKAGES" in amo_block and "Join-Path $HOME '.nuget\\packages'" in amo_block
+    assert "console text is not proof" in amo_block
+
+
+def test_amo_warning_names_the_runtime_consequence_after_the_timeout_fix() -> None:
+    """The message must move the decision before work: scripted is blind; operator is visible."""
+    source = _preflight_source()
+    amo_block = source[source.index(f"Add-Check '{AMO_CHECK}'") : source.index("# --- ADOMD.NET")]
+    assert "progress reporting and liveness are unavailable" in amo_block
+    assert "scripted refresh runs blind" in amo_block
+    assert "ImageSave falls back to UI" in amo_block
+    assert "3600s absolute refresh backstop remains active" in amo_block
+    assert "operator refresh strategy" in amo_block
+    assert "Desktop''s own row counter" in amo_block
+    assert "falling back to legacy" not in amo_block
+
+
+def test_adomd_remains_separate_from_amo() -> None:
+    """The new AMO check must not weaken or replace the existing ADOMD gate."""
+    source = _preflight_source()
+    _assert_add_check_tier(source, ADOMD_CHECK, "critical")
+    adomd_block = source[source.index("# --- ADOMD.NET") : source.index("Add-Cli 'uv'")]
+    assert "microsoft.analysisservices.adomdclient.netcore*" in adomd_block
+    assert "Microsoft.AnalysisServices.AdomdClient.dll" in adomd_block
 
 
 def test_the_desktop_pin_hint_is_actionable_in_the_shell_that_reads_it() -> None:
