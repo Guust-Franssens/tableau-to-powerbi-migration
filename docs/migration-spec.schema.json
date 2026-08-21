@@ -80,7 +80,11 @@
                 "id": { "type": "string" },
                 "name": { "type": "string" },
                 "source_relation": { "type": "string", "enum": ["table", "custom-sql", "join", "text", "pivot", "collection", "union"] },
-                "custom_sql": { "type": ["string", "null"] }
+                "custom_sql": { "type": ["string", "null"] },
+                "row_count": {
+                  "$ref": "#/definitions/rowCountHint",
+                  "description": "Best-effort volume hint for this physical/logical table. Hyper counts are credential-free but reflect Tableau's cached extract as of its refresh time; live counts are current but credentialed; unknown is a normal outcome for sources with no credential-free count."
+                }
               }
             }
           },
@@ -289,6 +293,34 @@
     }
   },
   "definitions": {
+    "rowCountHint": {
+      "description": "Provenance-tagged row-count hint. Unknown deliberately has no value so consumers cannot mistake absence for zero/small. observed_at is when WE READ the count, not when it became true - the underlying extract may be far older, and nothing here records its refresh time.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["value", "source", "observed_at"],
+          "additionalProperties": false,
+          "properties": {
+            "value": { "type": "integer", "minimum": 0 },
+            "source": { "type": "string", "enum": ["hyper", "live"] },
+            "observed_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "RFC 3339 timestamp of when this count was READ. format:date-time is annotation-only under jsonschema without the format-nongpl extra, so parse_tableau._schema_contract_errors enforces it with a shape check plus datetime.fromisoformat instead. KNOWN EXCEPTION: a seconds field of 60 (a leap second, which RFC 3339 permits) is REJECTED. Python's datetime cannot represent one at all, so accepting it would mean recording a different instant than the one written; fixing it faithfully needs the rfc3339-validator dependency this fallback exists to work without. Disclosed here so the schema does not advertise a format it knowingly does not fully accept."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["source"],
+          "additionalProperties": false,
+          "properties": {
+            "source": { "type": "string", "const": "unknown" }
+          },
+          "not": { "required": ["value"] }
+        }
+      ]
+    },
     "shelfField": {
       "type": "object",
       "properties": {
@@ -320,3 +352,5 @@
     }
   }
 }
+
+
