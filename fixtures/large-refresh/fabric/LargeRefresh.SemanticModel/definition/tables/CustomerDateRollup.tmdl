@@ -1,0 +1,61 @@
+/// Aggregated scan by customer/date/status. Grouping a large local CSV is the first intentional
+/// refresh-cost amplifier for issue #262.
+table CustomerDateRollup
+	lineageTag: aed8454b-44be-4996-ac81-4742f19d0262
+
+	measure 'Rollup Rows' = COUNTROWS ( 'CustomerDateRollup' )
+		formatString: #,##0
+		lineageTag: 3e69830b-7d20-44c6-9d03-44b5b7950262
+
+	column CustomerID
+		dataType: string
+		lineageTag: 1e1f8b2b-24c8-41d5-a231-d085f6960262
+		summarizeBy: none
+		sourceColumn: CustomerID
+
+	column OrderDate
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 1f101646-673c-436f-96df-9e4d04cf0262
+		summarizeBy: none
+		sourceColumn: OrderDate
+
+	column Status
+		dataType: string
+		lineageTag: 8ccf60b5-d57e-4efa-a53c-43da0ccf0262
+		summarizeBy: none
+		sourceColumn: Status
+
+	column OrderCount
+		dataType: int64
+		formatString: #,##0
+		lineageTag: c11951d5-7169-4d8b-9b66-d14df46e0262
+		summarizeBy: sum
+		sourceColumn: OrderCount
+
+	column Quantity
+		dataType: int64
+		formatString: #,##0
+		lineageTag: be602032-481b-460b-a424-09dbbf440262
+		summarizeBy: sum
+		sourceColumn: Quantity
+
+	column 'Net Amount'
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: 28039426-4f33-4d3d-a6d1-1daf11ca0262
+		summarizeBy: sum
+		sourceColumn: Net Amount
+
+	partition CustomerDateRollup = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(SourceFolder & "orders.csv"), [Delimiter=",", Columns=15, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Types" = Table.TransformColumnTypes(#"Promoted Headers", {{"OrderDate", type date}, {"CustomerID", type text}, {"Status", type text}, {"Quantity", Int64.Type}, {"UnitPrice", Currency.Type}, {"Discount", type number}}, "en-US"),
+					#"Added Net Amount" = Table.AddColumn(#"Changed Types", "Net Amount", each [Quantity] * [UnitPrice] * (1 - [Discount]), Currency.Type),
+					#"Grouped Rows" = Table.Group(#"Added Net Amount", {"CustomerID", "OrderDate", "Status"}, {{"OrderCount", each Table.RowCount(_), Int64.Type}, {"Quantity", each List.Sum([Quantity]), Int64.Type}, {"Net Amount", each List.Sum([Net Amount]), Currency.Type}})
+				in
+					#"Grouped Rows"
+

@@ -1,0 +1,70 @@
+/// Two grouped scans joined on CustomerID. The fan-out is bounded by category/status cardinality, but
+/// it is large enough to make local refresh duration visible without bloating git history.
+table CustomerStatusMerge
+	lineageTag: 7964558a-b03a-460f-84c1-a541dcc60262
+
+	measure 'Merged Rows' = COUNTROWS ( 'CustomerStatusMerge' )
+		formatString: #,##0
+		lineageTag: 0f8a138a-ce82-45b9-ad18-39456b1d0262
+
+	column CustomerID
+		dataType: string
+		lineageTag: 118127ca-9424-4b4c-814f-d9529ff20262
+		summarizeBy: none
+		sourceColumn: CustomerID
+
+	column Category
+		dataType: string
+		lineageTag: e1e731ea-d586-40b2-9f0c-0e12f6f10262
+		summarizeBy: none
+		sourceColumn: Category
+
+	column Status
+		dataType: string
+		lineageTag: 9664dd50-48e7-4aef-b041-adb113410262
+		summarizeBy: none
+		sourceColumn: Status
+
+	column CategoryRows
+		dataType: int64
+		formatString: #,##0
+		lineageTag: 9085c98d-5652-4c64-b04f-414d24620262
+		summarizeBy: sum
+		sourceColumn: CategoryRows
+
+	column StatusRows
+		dataType: int64
+		formatString: #,##0
+		lineageTag: fa479c90-5e1f-485d-af89-b36150ea0262
+		summarizeBy: sum
+		sourceColumn: StatusRows
+
+	column CategoryAmount
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: d1221881-89de-47cf-a7bf-b94147260262
+		summarizeBy: sum
+		sourceColumn: CategoryAmount
+
+	column StatusAmount
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: d3e5063c-a407-466c-9558-40c068420262
+		summarizeBy: sum
+		sourceColumn: StatusAmount
+
+	partition CustomerStatusMerge = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(SourceFolder & "orders.csv"), [Delimiter=",", Columns=15, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Types" = Table.TransformColumnTypes(#"Promoted Headers", {{"CustomerID", type text}, {"Category", type text}, {"Status", type text}, {"Quantity", Int64.Type}, {"UnitPrice", Currency.Type}, {"Discount", type number}}, "en-US"),
+					#"Added Net Amount" = Table.AddColumn(#"Changed Types", "Net Amount", each [Quantity] * [UnitPrice] * (1 - [Discount]), Currency.Type),
+					CategoryGroups = Table.Group(#"Added Net Amount", {"CustomerID", "Category"}, {{"CategoryRows", each Table.RowCount(_), Int64.Type}, {"CategoryAmount", each List.Sum([Net Amount]), Currency.Type}}),
+					StatusGroups = Table.Group(#"Added Net Amount", {"CustomerID", "Status"}, {{"StatusRows", each Table.RowCount(_), Int64.Type}, {"StatusAmount", each List.Sum([Net Amount]), Currency.Type}}),
+					Merged = Table.NestedJoin(CategoryGroups, {"CustomerID"}, StatusGroups, {"CustomerID"}, "StatusJoin", JoinKind.Inner),
+					Expanded = Table.ExpandTableColumn(Merged, "StatusJoin", {"Status", "StatusRows", "StatusAmount"}, {"Status", "StatusRows", "StatusAmount"})
+				in
+					Expanded
+
