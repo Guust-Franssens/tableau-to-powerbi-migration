@@ -329,7 +329,7 @@ def _raise_progress_timeout(
     )
 
 
-# pylint: disable=too-many-arguments,too-many-locals,too-many-statements
+# pylint: disable=too-many-arguments,too-many-branches,too-many-locals,too-many-statements
 def _join_refresh_worker(
     worker: threading.Thread,
     *,
@@ -679,10 +679,10 @@ def _trace_column_value(args, trace_column, name: str) -> str | None:
     return None if value is None else str(value)
 
 
-class RefreshProgressMonitor:
+class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
     """Server-level AMO progress trace with throttled human-readable row-count output."""
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         trace=None,
         server=None,
@@ -785,8 +785,13 @@ def _positive_int(value: str | None) -> int | None:
 def _load_amo_trace_types():
     """Load AMO and return the trace types used for server-level progress monitoring."""
     server_type = _load_amo()
-    from Microsoft.AnalysisServices import TraceColumn, TraceEventClass  # noqa: PLC0415
-    from Microsoft.AnalysisServices.Tabular import TraceEvent  # noqa: PLC0415
+    from Microsoft.AnalysisServices import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
+        TraceColumn,
+        TraceEventClass,
+    )
+    from Microsoft.AnalysisServices.Tabular import (  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
+        TraceEvent,
+    )
 
     return server_type, TraceColumn, TraceEventClass, TraceEvent
 
@@ -1499,7 +1504,7 @@ def row_counts(port: int, tables: list[str] | None) -> tuple[list[tuple[str, int
         conn.Close()
 
 
-def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches
+def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
     pid: int,
     port: int,
     cache: Path | None,
@@ -1755,7 +1760,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-statements
     """CLI entry point: refresh, save, and prove data is really there."""
     args = _build_arg_parser().parse_args(argv)
 
