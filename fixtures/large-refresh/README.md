@@ -39,4 +39,4 @@ Record your local timing here when you refresh; hardware and Desktop build matte
 
 | Date | Desktop | Rows | CSV size | Refresh time | Notes |
 |---|---|---:|---:|---:|---|
-| 2026-08-20 | 2.157.828.0 | pending | pending | pending | Landing fixture; update after measured refresh. |
+| 2026-08-20 | 2.157.828.0 | 2,000,000 | 469.9 MB | 124.3 s | Full `refresh_pbip_model.py --pid 39500 --canaries Orders OrdersTypedAgain CustomerDateRollup CustomerStatusMerge`; cache persisted at 198,523.6 KB. |
