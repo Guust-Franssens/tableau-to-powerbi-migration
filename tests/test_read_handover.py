@@ -1,21 +1,23 @@
-"""Tests for scripts/read_handover.py - the reader that makes the engine's work queue tractable.
+"""Tests for scripts/read_handover.py - the reader that projects the engine's work queue.
 
-Every test names the mutation it kills. The ones that matter most:
+What the tool is actually for, stated narrowly so the tests are not asked to defend more than the
+evidence supports:
 
-* `test_reads_requests_not_the_needs_review_decoy` - `needs_review[]` and `requests[]` describe the
-  same calculations, and only `requests[]` carries the formula. A mutation swapping the key would
-  leave a plausible-looking, useless report.
-* `test_guidance_printed_once_not_once_per_request` - de-duplicating `category_guidance` is the
-  reader's main reason to exist (~53 KB of repetition in one real file); a regression here silently
-  restores the bloat.
-* `test_truncation_is_loud_and_names_every_omitted_item` - a tool that fits a large queue into a
-  small window is exactly where a silent cap would be easy to introduce.
+* it surfaces ``pbip_ref_drops[].emptied`` - visuals whose every field binding was dropped, which
+  render blank on a report that validates clean - instead of leaving them buried;
+* it gives a stable, schema-aware projection of both queues (model-side ``requests[]`` and
+  report-side ``remediation_worklist``/``viz_fidelity``);
+* it de-duplicates ``category_guidance``, which the engine emits per REQUEST rather than per
+  category (measured: 44,775 bytes, 12.6%, of a 347 KB file);
+* it saves every consumer a parse-and-filter round trip.
 
-⚠️ Note on framing: an earlier version of this module claimed the reader fixed a *silent* failure in
-which a truncated file read returned `needs_review[]` unnoticed. That was measured to be false (the
-read refuses loudly; a control agent recovered by parsing and got everything) and was retracted. The
-reader is an ergonomics and triage improvement. These tests are unaffected - they always tested
-behaviour, not the rationale.
+It does NOT prevent any known class of shipped defect, and no test here should be read as claiming
+that it does. An earlier version of this module described a "silent decoy" mechanism - a truncated
+read quietly returning ``needs_review[]`` - and attributed shipped defects to it. That claim was
+measured to be false and was retracted: the file-read tool refuses an oversized file loudly, there
+is no silent-truncation band, and the asserted downstream cause was never evidenced.
+
+Every test names the mutation it kills, because a test that cannot fail is worse than no test.
 
 No network, no Power BI Desktop, no engine: every fixture is written into `tmp_path`.
 """
@@ -23,12 +25,15 @@ No network, no Power BI Desktop, no engine: every fixture is written into `tmp_p
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPTS))
 
 import read_handover as rh  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -37,7 +42,8 @@ GUIDANCE = (
     "single expression. Identify the usage: a dimension swap maps to field parameters."
 )
 
-# A real dispatcher, glyphs included - this exact shape shipped as BLANK() on three workbooks.
+# A real dispatcher, glyphs included. U+25B2 is three bytes in UTF-8 and unencodable in cp1252,
+# which is what makes it load-bearing for both the byte-budget and the stdout-encoding tests.
 DISPATCHER = """CASE [Parameters].[Parameter 9]
     WHEN 1 THEN [Calculation_844424952101298176]
     WHEN 2 THEN SUM([Number of Records 1])
@@ -67,7 +73,8 @@ def make_workbook(requests: list[dict], name: str = "Admin_Insights_Starter") ->
     return {
         "name": name,
         "model_translation_handoff": {
-            # Deliberately the DECOY: same names, 5 fields, no formula. Listed FIRST, as on disk.
+            # `needs_review[]` is a strict field-subset of `requests[]` - same calcs, no formula -
+            # and it is listed FIRST on disk, so it is the easy wrong key to read from.
             "needs_review": [
                 {
                     "category": r["category"],
@@ -102,17 +109,30 @@ def run(argv: list[str], capsys: pytest.CaptureFixture) -> tuple[int, str]:
     return code, capsys.readouterr().out
 
 
+def run_err(argv: list[str], capsys: pytest.CaptureFixture) -> tuple[int, str, str]:
+    """Same, but keeps stderr - the cap-floor rejection says nothing on stdout."""
+    code = rh.main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
 # --------------------------------------------------------------------------------------------
-# The defect this tool exists to fix
+# Reading the right key
 # --------------------------------------------------------------------------------------------
 
 
-def test_reads_requests_not_the_needs_review_decoy(tmp_path, capsys):
+def test_reads_requests_not_needs_review(tmp_path, capsys):
     """Kills: sourcing the queue from `needs_review[]`, which has no formula to repair from."""
     wb = make_workbook([make_request("Selected Measure")])
-    # Make the decoy distinguishable: it names a calc that is NOT in the real queue.
+    # Make the two keys distinguishable: this names a calc that is NOT in the real queue.
     wb["model_translation_handoff"]["needs_review"].append(
-        {"category": "x", "fallback_reason": "y", "has_suggestion": False, "name": "DECOY ONLY", "role": "measure"}
+        {
+            "category": "x",
+            "fallback_reason": "y",
+            "has_suggestion": False,
+            "name": "NEEDS-REVIEW ONLY",
+            "role": "measure",
+        }
     )
     path = write_slice(tmp_path, wb)
 
@@ -120,7 +140,7 @@ def test_reads_requests_not_the_needs_review_decoy(tmp_path, capsys):
 
     assert code == 0
     assert "Selected Measure" in out
-    assert "DECOY ONLY" not in out
+    assert "NEEDS-REVIEW ONLY" not in out
     assert "CASE [Parameters].[Parameter 9]" in out
 
 
@@ -151,7 +171,7 @@ def test_formula_is_never_abbreviated(tmp_path, capsys):
 
 
 def test_guidance_printed_once_not_once_per_request(tmp_path, capsys):
-    """Kills: echoing `category_guidance` per request - 60 copies is what buried the queue."""
+    """Kills: echoing `category_guidance` per request - the 44,775-byte, 12.6% repetition."""
     path = write_slice(tmp_path, make_workbook([make_request(f"M{i}") for i in range(12)]))
 
     _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "500000"], capsys)
@@ -171,15 +191,24 @@ def test_guidance_dedup_keeps_the_longest_variant(tmp_path):
 
 
 # --------------------------------------------------------------------------------------------
-# Truncation must never be silent - silent truncation IS the original bug
+# --max-bytes is a strict cap
+#
+# `_capped()` clamps the assembled text as a last-resort net, so asserting `len(out) <= cap` ALONE
+# would pass even with every renderer's budgeting removed. Every test below therefore also asserts
+# that `HARD CAP` is absent: that string means the net fired, which is a budgeting defect.
 # --------------------------------------------------------------------------------------------
+
+
+def assert_within_cap(out: str, cap: int) -> None:
+    assert len(out.encode("utf-8")) <= cap, f"output {len(out.encode('utf-8'))} B exceeded cap {cap}"
+    assert "HARD CAP" not in out, "the last-resort clamp fired, so a renderer's own budgeting is broken"
 
 
 def test_truncation_is_loud_and_names_every_omitted_item(tmp_path, capsys):
     """Kills: any silent cap. Omitted names must be recoverable from the output alone."""
     path = write_slice(tmp_path, make_workbook([make_request(f"Measure {i}") for i in range(8)]))
 
-    _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "1200"], capsys)
+    _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "1600"], capsys)
 
     assert "TRUNCATED" in out
     assert "You have NOT seen the whole queue" in out
@@ -201,27 +230,25 @@ def test_untruncated_output_carries_no_truncation_banner(tmp_path, capsys):
 def test_one_oversized_request_is_named_rather_than_silently_dropped(tmp_path, capsys):
     """Kills: a budget that returns zero items AND says nothing, which reads as an empty queue.
 
-    The original form of this test asserted the request was *inlined* (`[1/1] Huge` in the body).
-    That encoded a real defect - a first-item bypass that let one request blow any cap, including
-    a 100-byte one - which a blind review caught. The caller's legitimate need is to never be left
-    with a silently empty view; that is now met by naming the item and handing over a command that
-    retrieves it, so the assertion moved to the contract rather than the old behaviour.
+    The original form asserted the request was *inlined* (`[1/1] Huge` in the body). That encoded a
+    first-item bypass that let one request blow any cap, so the assertion moved to the contract:
+    never silently empty, always named, always with a command that retrieves it.
     """
     path = write_slice(tmp_path, make_workbook([make_request("Huge", formula="X" * 5000)]))
 
-    _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "100"], capsys)
+    _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "1500"], capsys)
 
     assert "TRUNCATED" in out, "a dropped request must never be silent"
     assert "Huge" in out, "the omitted request was not named anywhere"
     assert "[1/1] Huge" not in out, "an oversized request must not be inlined past the cap"
+    assert_within_cap(out, 1500)
 
 
 def test_the_named_escape_hatch_actually_returns_the_oversized_request(tmp_path, capsys):
     """Kills: a banner that points at `--name`, while `--name` is itself truncated.
 
-    `render_named` is deliberately unbudgeted, and that is precisely what makes the strict cap in
-    `render_category` acceptable - there is always a way to get the full text. If this ever starts
-    truncating, the cap becomes a real data-loss bug rather than a triage aid.
+    An EXACT `--name` is the one documented exception to the cap, and that is precisely what makes
+    the strict cap elsewhere acceptable - there is always a way to get the full text.
     """
     path = write_slice(tmp_path, make_workbook([make_request("Huge", formula="X" * 5000)]))
 
@@ -235,9 +262,8 @@ def test_the_truncation_banner_itself_fits_inside_max_bytes(tmp_path, capsys):
     """Kills all three measured overshoots: unbudgeted names, head, and footer + closing rule.
 
     The banner is content. Counting only some of its parts overshot a 20,000-byte cap three
-    separate times (24,631 -> 20,401 -> 20,120), each invisible to reading and each caught only by
-    sweeping every view of every real handover. Long names make the banner's own list the dominant
-    cost, which is the condition under which every one of those regressions appeared.
+    separate times (24,631 -> 20,401 -> 20,120), each invisible to reading. Long names make the
+    banner's own list the dominant cost, which is when every one of those regressions appeared.
     """
     reqs = [make_request(f"Calculation_{i}_{'N' * 60}") for i in range(180)]
     path = write_slice(tmp_path, make_workbook(reqs))
@@ -247,7 +273,140 @@ def test_the_truncation_banner_itself_fits_inside_max_bytes(tmp_path, capsys):
 
         assert "TRUNCATED" in out, f"fixture failed to truncate at cap {cap}"
         assert "more not named here" in out, f"fixture too small to overflow the name list at cap {cap}"
-        assert len(out.encode("utf-8")) <= cap, f"banner overshot its own cap at {cap}"
+        assert_within_cap(out, cap)
+
+
+def test_a_cap_too_small_to_hold_the_banner_is_rejected_not_silently_exceeded(tmp_path, capsys):
+    """Kills: accepting an unhonourable cap.
+
+    Measured on the repo's own fixture before the fix: `--max-bytes 100` printed 738 bytes of
+    truncation banner and reported that the cap held. The banner costs ~540 bytes before it names
+    anything, so the only honest answers are 'reject' or 'emit more than you asked for'.
+    """
+    path = write_slice(tmp_path, make_workbook([make_request("A")]))
+
+    code, out, err = run_err([str(path), "--category", "model_object_parameter", "--max-bytes", "100"], capsys)
+
+    assert code == 2
+    assert out == "", "a rejected cap must print nothing at all on stdout"
+    assert str(rh.MIN_MAX_BYTES) in err, "the error must name the minimum the caller has to raise to"
+
+
+def test_oversized_category_guidance_is_withheld_rather_than_emitted_past_the_cap(tmp_path, capsys):
+    """Kills: emitting `category_guidance` BEFORE budgeting.
+
+    Measured before the fix: an 8,000-byte cap with 9,000 bytes of guidance emitted 9,523 bytes -
+    and still printed a truncation banner claiming the cap had been honoured.
+    """
+    req = make_request("A")
+    req["category_guidance"] = "G" * 9000
+    path = write_slice(tmp_path, make_workbook([req]))
+
+    _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "8000"], capsys)
+
+    assert_within_cap(out, 8000)
+    assert "GUIDANCE WITHHELD" in out, "guidance that does not fit must say so, not vanish"
+    assert "--max-bytes" in out, "the withheld guidance must come with the command that prints it"
+    assert "G" * 9000 not in out
+
+
+def test_emptied_visual_block_is_budgeted_and_keeps_its_full_count(tmp_path, capsys):
+    """Kills: the unconditional emptied-block bypass.
+
+    It was documented as deliberately outside `max_bytes`, justified by a 1,014-byte measurement on
+    one real workbook - a property of that sample, not a bound. Measured before the fix: 100 emptied
+    visuals emitted 21,937 bytes against a 20,000 cap and 1,000 emitted 219,038, neither with a
+    banner. Priority (it is claimed from the budget first) is not exemption.
+    """
+    wb = _report_workbook()
+    wb["pbip_ref_drops"] = [
+        {"visual": f"v-page-{i:04d}-with-a-realistically-long-identifier", "emptied": True, "dropped": ["Values:x"]}
+        for i in range(1000)
+    ]
+    path = write_slice(tmp_path, wb)
+
+    _, out = run([str(path), "--viz", "--max-bytes", "20000"], capsys)
+
+    assert_within_cap(out, 20000)
+    assert "EMPTIED VISUALS (1000)" in out, "the count of blank visuals must survive even when the names do not"
+    assert "more emptied visual(s) not named here" in out
+
+
+@pytest.mark.parametrize("cap", [1500, 2500, 6000, 20000, 60000])
+@pytest.mark.parametrize("mode", [[], ["--viz"], ["--fidelity"], ["--category", "model_object_parameter"]])
+def test_every_view_honours_the_cap_at_every_size(tmp_path, capsys, mode, cap):
+    """Kills: budgeting that holds for one view or one cap. Three paths were unbounded at once."""
+    path = write_slice(tmp_path, _fat_workbook())
+
+    _, out = run([str(path), *mode, "--max-bytes", str(cap)], capsys)
+
+    assert_within_cap(out, cap)
+
+
+@pytest.mark.parametrize("mode", [[], ["--viz"], ["--fidelity"], ["--category", "model_object_parameter"]])
+def test_a_pathological_workbook_name_cannot_spend_the_whole_cap_on_a_heading(tmp_path, capsys, mode):
+    """Kills: `_clip` reverting to identity.
+
+    Headings are built from payload text, so a heading is only as short as the estate lets it be. A
+    400-character workbook name spent an entire 1,500-byte cap on the title alone and left every
+    section below budgeting against nothing - measured as a `HARD CAP` fire at caps 1500-1777.
+    """
+    wb = _fat_workbook()
+    wb["name"] = "Workbook_" + "N" * 400
+    path = write_slice(tmp_path, wb, "Pathological.json")
+
+    _, out = run([str(path), *mode, "--max-bytes", "1500"], capsys)
+
+    assert_within_cap(out, 1500)
+
+
+def test_list_view_honours_the_cap(tmp_path, capsys):
+    """Kills: `--list` rows emitted unbudgeted - a wide estate is the one that overflows."""
+    (tmp_path / "handover").mkdir()
+    for i in range(300):
+        wb = make_workbook([make_request("A")], name=f"Workbook_{i:03d}_{'L' * 40}")
+        write_slice(tmp_path / "handover", wb, f"W{i:03d}.json")
+
+    _, out = run([str(tmp_path), "--list", "--max-bytes", "4000"], capsys)
+
+    assert_within_cap(out, 4000)
+    assert "300 workbook(s)" in out, "the total must survive even when most rows do not"
+    assert "more workbook(s) not listed here" in out
+
+
+def test_default_max_bytes_is_the_size_an_agent_read_tool_accepts(tmp_path, capsys):
+    """Kills: raising DEFAULT_MAX_BYTES back to 40,000.
+
+    Behavioural on purpose: a fixture sized between the two values truncates at the default and does
+    not at an explicit 40,000, so restoring the old constant flips both assertions.
+    """
+    path = write_slice(tmp_path, make_workbook([make_request(f"Measure {i}") for i in range(60)]))
+
+    _, out_default = run([str(path), "--category", "model_object_parameter"], capsys)
+    _, out_wide = run([str(path), "--category", "model_object_parameter", "--max-bytes", "40000"], capsys)
+
+    assert "TRUNCATED" in out_default, "the fixture must exceed the default cap for this test to mean anything"
+    assert_within_cap(out_default, 20000)
+    assert "TRUNCATED" not in out_wide, "the fixture must fit inside 40,000 for this test to mean anything"
+    assert len(out_wide.encode("utf-8")) > 20000, "fixture too small to distinguish 20,000 from 40,000"
+
+
+def test_budget_is_measured_in_bytes_not_characters(tmp_path, capsys):
+    """Kills: `_blen` reverting to `len()`.
+
+    A cap is a byte cap because that is what a read tool enforces. Counting characters under-counts
+    every multibyte glyph, so a formula-heavy queue full of U+25B2 quietly exceeds it.
+    """
+    assert rh._blen("\u25b2") == 3, "U+25B2 is three bytes in UTF-8"  # pylint: disable=protected-access
+    assert rh._blen("abc") == 3  # pylint: disable=protected-access
+
+    glyphs = "\u25b2" * 400
+    reqs = [make_request(f"M{i}", formula=f"[# Members {glyphs}]") for i in range(40)]
+    path = write_slice(tmp_path, make_workbook(reqs))
+
+    _, out = run([str(path), "--category", "model_object_parameter", "--max-bytes", "20000"], capsys)
+
+    assert_within_cap(out, 20000)
 
 
 # --------------------------------------------------------------------------------------------
@@ -255,14 +414,21 @@ def test_the_truncation_banner_itself_fits_inside_max_bytes(tmp_path, capsys):
 # --------------------------------------------------------------------------------------------
 
 
-def test_non_cp1252_glyph_in_a_formula_does_not_crash(tmp_path, capsys):
-    """Kills: the UnicodeEncodeError measured on a real Tableau formula containing U+25B2."""
+def test_non_cp1252_console_does_not_kill_the_run(tmp_path):
+    """Kills: removing `_force_utf8_stdout()`.
+
+    Must be a SUBPROCESS: in-process, pytest's capture replaces `sys.stdout` with a UTF-8 buffer, so
+    an in-process assertion passes with the call removed - false coverage. Reproduced by mutation
+    under `PYTHONIOENCODING=cp1252`: exit 0 with the call, exit 1 with `UnicodeEncodeError` without.
+    """
     path = write_slice(tmp_path, make_workbook([make_request("Group Sort")]))
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    cmd = [sys.executable, str(SCRIPTS / "read_handover.py"), str(path), "--category", "model_object_parameter"]
 
-    code, out = run([str(path), "--category", "model_object_parameter"], capsys)
+    proc = subprocess.run(cmd, env=env, capture_output=True, check=False)
 
-    assert code == 0
-    assert "# Members" in out
+    assert proc.returncode == 0, f"cp1252 console killed the run: {proc.stderr.decode('utf-8', 'replace')[-400:]}"
+    assert "\u25b2".encode("utf-8") in proc.stdout, "the glyph was lost rather than written as UTF-8"
 
 
 def test_null_model_translation_handoff_is_not_a_crash(tmp_path, capsys):
@@ -356,8 +522,43 @@ def _report_workbook() -> dict:
     return wb
 
 
+def _fat_workbook() -> dict:
+    """Every queue populated well past any cap, with multibyte glyphs in the bulk."""
+    wb = make_workbook([make_request(f"Calculation_{i}_\u25b2_{'N' * 40}") for i in range(120)])
+    wb["model_translation_handoff"]["triage"]["cascadable"] = [f"Cascade_{i}_\u25b2" for i in range(60)]
+    wb["remediation_worklist"] = {
+        "items": [
+            {
+                "category": f"category_{i % 7}",
+                "severity": ("blocking", "high", "medium", "low")[i % 4],
+                "reason": f"reason \u25b2 {i} " + "R" * 60,
+                "remediation": f"Rebuild by hand ({i % 7}). " + "F" * 40,
+                "worksheet": f"Sheet \u25b2 {i} " + "W" * 30,
+            }
+            for i in range(150)
+        ],
+        "summary": {},
+        "visuals": [],
+    }
+    wb["pbip_ref_drops"] = [
+        {"visual": f"v-page-{i:04d}-\u25b2-{'V' * 30}", "emptied": True, "dropped": [f"Values:col {i}"]}
+        for i in range(120)
+    ]
+    wb["viz_fidelity"] = [
+        {
+            "tier": ("full", "degraded", "rebuilt")[i % 3],
+            "status": "warned" if i % 3 else "ok",
+            "visual_type": "card",
+            "worksheet": f"Fidelity \u25b2 {i}",
+            "reason": f"deferral \u25b2 {i % 9} " + "D" * 40 if i % 3 else "",
+        }
+        for i in range(99)
+    ]
+    return wb
+
+
 def test_viz_dedupes_remediation_text_within_a_category(tmp_path, capsys):
-    """Kills: repeating identical fix text per item - the same bloat that buried `requests[]`."""
+    """Kills: repeating identical fix text per item - the same bloat as the guidance repetition."""
     path = write_slice(tmp_path, _report_workbook())
 
     _, out = run([str(path), "--viz"], capsys)
@@ -385,8 +586,48 @@ def test_severity_filter_actually_filters(tmp_path, capsys):
     assert "Trend" not in out
 
 
+def test_viz_truncation_is_loud_and_the_queue_stays_inside_the_cap(tmp_path, capsys):
+    """Kills two mutations at once: disabling `--viz` budgeting, and removing its banner.
+
+    Without budgeting the last-resort clamp fires (`HARD CAP`); without the banner a caller is left
+    believing a 150-item queue was 20 items long.
+    """
+    path = write_slice(tmp_path, _fat_workbook())
+
+    _, out = run([str(path), "--viz", "--max-bytes", "8000"], capsys)
+
+    assert_within_cap(out, 8000)
+    assert "OUTPUT TRUNCATED" in out, "a cut worklist must say so"
+    assert "NOT shown" in out
+    shown = sum(1 for i in range(150) if f"Sheet \u25b2 {i} " in out)
+    assert shown < 150, "fixture too small to trigger truncation"
+    assert f"of {150 + 120} item(s) shown" in out or "item(s) shown" in out
+
+
+def test_worklist_does_not_resume_after_omitting_an_item(tmp_path):
+    """Kills: `if _blen(line) + 1 > budget` without the `omitted or` guard.
+
+    A queue that skips item 40 and then prints item 41 reads as if 40 does not exist, which is the
+    exact failure the banner's "N of M shown" wording is meant to rule out. Measured before the fix:
+    an oversized first item was omitted and a small second item printed anyway.
+    """
+    grouped = {
+        "cat": [
+            {"severity": "blocking", "worksheet": "BIG", "reason": "R" * 4000},
+            {"severity": "low", "worksheet": "small", "reason": "s"},
+        ]
+    }
+
+    lines, omitted, shown = rh._budgeted_worklist(grouped, 500)  # pylint: disable=protected-access
+
+    body = "\n".join(lines)
+    assert shown == 0
+    assert "small" not in body, "the view resumed after an omission"
+    assert len(omitted) == 2, "both items must be named in the banner"
+
+
 def test_default_view_surfaces_the_report_queue(tmp_path, capsys):
-    """Kills: a model-only summary. `viz_fidelity`/`remediation_worklist` are even deeper in the file."""
+    """Kills: a model-only summary. `viz_fidelity`/`remediation_worklist` are deeper in the file."""
     path = write_slice(tmp_path, _report_workbook())
 
     _, out = run([str(path)], capsys)
@@ -394,6 +635,136 @@ def test_default_view_surfaces_the_report_queue(tmp_path, capsys):
     assert "REPORT:" in out
     assert "EMPTIED" in out
     assert "--viz" in out
+
+
+# --------------------------------------------------------------------------------------------
+# --fidelity
+# --------------------------------------------------------------------------------------------
+
+
+def test_fidelity_is_its_own_view_and_is_actually_dispatched(tmp_path, capsys):
+    """Kills: dropping the `--fidelity` branch, which silently falls through to the default view."""
+    path = write_slice(tmp_path, _report_workbook())
+
+    code, out = run([str(path), "--fidelity"], capsys)
+
+    assert code == 0
+    assert "- VISUAL FIDELITY (1 visual(s)) ===" in out, "the --fidelity view header is missing"
+    assert "HANDOVER QUEUE" not in out, "--fidelity fell through to the default view"
+
+
+def test_fidelity_prints_rows_with_no_reason_instead_of_only_counting_them(tmp_path, capsys):
+    """Kills: dropping the clean-row group.
+
+    `--fidelity` claims to print `viz_fidelity[]` in full. Measured on a real file: 99 rows, of
+    which 30 carry no reason - and those 30 appeared only inside an aggregate tier count.
+    """
+    wb = _report_workbook()
+    wb["viz_fidelity"] = [
+        {"tier": "degraded", "status": "warned", "visual_type": "card", "worksheet": "HasReason", "reason": "deferred"},
+        {"tier": "full", "status": "ok", "visual_type": "card", "worksheet": "NoReasonRecorded"},
+    ]
+    path = write_slice(tmp_path, wb)
+
+    _, out = run([str(path), "--fidelity"], capsys)
+
+    assert "HasReason" in out
+    assert "NoReasonRecorded" in out, "a row without a reason must still be listed individually"
+    assert rh.CLEAN_FIDELITY_GROUP in out
+
+
+# --------------------------------------------------------------------------------------------
+# The truncation banner's recovery command must match the view it is printed under
+# --------------------------------------------------------------------------------------------
+
+
+def test_recovery_hint_is_per_view_not_a_shared_severity_guess(tmp_path, capsys):
+    """Kills: the hard-coded `--severity` recovery line.
+
+    `--severity` only affects `--viz`: `--fidelity --severity blocking` is byte-identical to
+    `--fidelity`, and `--category` printed a correct `--name` hint and a useless `--severity` one
+    side by side.
+    """
+    path = write_slice(tmp_path, _fat_workbook())
+    cap = ["--max-bytes", "4000"]
+
+    _, cat = run([str(path), "--category", "model_object_parameter", *cap], capsys)
+    _, viz = run([str(path), "--viz", *cap], capsys)
+    _, fid = run([str(path), "--fidelity", *cap], capsys)
+
+    for name, out in (("category", cat), ("viz", viz), ("fidelity", fid)):
+        assert "OUTPUT TRUNCATED" in out, f"{name} fixture failed to truncate"
+
+    assert "--name '<name>'" in cat and "--severity" not in cat
+    assert "--severity <blocking|high|medium|low>" in viz
+    assert "--json <file>" in fid and "--severity" not in fid
+
+
+def test_severity_is_a_no_op_outside_viz(tmp_path, capsys):
+    """Pins the reason the shared `--severity` hint was wrong, so the finding cannot silently rot."""
+    path = write_slice(tmp_path, _report_workbook())
+
+    _, plain = run([str(path), "--fidelity"], capsys)
+    _, filtered = run([str(path), "--fidelity", "--severity", "blocking"], capsys)
+
+    assert plain == filtered
+
+
+# --------------------------------------------------------------------------------------------
+# --name
+# --------------------------------------------------------------------------------------------
+
+
+def test_name_lookup_returns_one_calc_with_its_guidance(tmp_path, capsys):
+    path = write_slice(tmp_path, make_workbook([make_request("Selected Measure"), make_request("Other")]))
+
+    _, out = run([str(path), "--name", "Selected Measure"], capsys)
+
+    assert "Selected Measure" in out
+    assert "[1/1]" in out
+    assert GUIDANCE in out
+    assert "] Other" not in out
+
+
+def test_ambiguous_name_lists_candidates_instead_of_dumping_every_body(tmp_path, capsys):
+    """Kills: substring matching that recreates bulk output through the one uncapped view.
+
+    Measured on a real file: `--name a` matched 47 calculations and returned 66,075 bytes, which
+    contradicts the 'one calculation in full' contract the truncation banner points at.
+    """
+    reqs = [make_request(f"Measure Alpha {i}") for i in range(47)]
+    path = write_slice(tmp_path, make_workbook(reqs))
+
+    code, out = run([str(path), "--name", "a", "--max-bytes", "20000"], capsys)
+
+    assert code == 0
+    assert "AMBIGUOUS" in out
+    assert "47 calculation(s) match" in out
+    assert "Measure Alpha 0" in out, "the candidate names are the whole point of the ambiguous view"
+    assert "source formula:" not in out, "an ambiguous --name must print no bodies at all"
+    assert_within_cap(out, 20000)
+
+
+def test_an_exact_name_still_wins_over_a_substring_collision(tmp_path, capsys):
+    """Kills: routing an exact match into the ambiguous branch when it is also a substring."""
+    reqs = [make_request("Sales"), make_request("Sales YoY"), make_request("Sales YTD")]
+    path = write_slice(tmp_path, make_workbook(reqs))
+
+    _, out = run([str(path), "--name", "Sales"], capsys)
+
+    assert "AMBIGUOUS" not in out
+    assert "source formula:" in out
+    assert "] Sales YoY" not in out
+
+
+def test_a_single_substring_match_is_still_printed_in_full(tmp_path, capsys):
+    """Kills: forcing every inexact match into the candidate list, which would break the hatch."""
+    path = write_slice(tmp_path, make_workbook([make_request("Huge", formula="X" * 5000), make_request("Other")]))
+
+    _, out = run([str(path), "--name", "Hug"], capsys)
+
+    assert "AMBIGUOUS" not in out
+    assert "X" * 5000 in out
 
 
 # --------------------------------------------------------------------------------------------
@@ -412,17 +783,6 @@ def test_cascadable_stubs_are_called_out_with_ordering_advice(tmp_path, capsys):
     assert "CASCADABLE" in out
     assert "% Diff Sales per Customers" in out
     assert "dependency order" in out
-
-
-def test_name_lookup_returns_one_calc_with_its_guidance(tmp_path, capsys):
-    path = write_slice(tmp_path, make_workbook([make_request("Selected Measure"), make_request("Other")]))
-
-    _, out = run([str(path), "--name", "Selected Measure"], capsys)
-
-    assert "Selected Measure" in out
-    assert "[1/1]" in out
-    assert GUIDANCE in out
-    assert "] Other" not in out
 
 
 def test_json_output_hoists_guidance_out_of_the_requests(tmp_path, capsys):
@@ -449,6 +809,29 @@ def test_list_shows_every_workbook_with_its_queue_size(tmp_path, capsys):
     assert code == 0
     assert "One" in out and "Two" in out
     assert "2 workbook(s)" in out
+
+
+def test_list_ranks_by_urgency_not_alphabetically(tmp_path, capsys):
+    """Kills: restoring the alphabetical `--list` order.
+
+    Measured on `_bundle-208`: `Meridian_Hostile_Identifiers` has an emptied visual but zero calc
+    requests and zero worklist items, so a name-sorted `N calc / N report` line rendered it as
+    `0 / 0` - the least urgent-looking row in the estate, and the most urgent one in fact.
+    """
+    (tmp_path / "handover").mkdir()
+    busy = make_workbook([make_request(f"M{i}") for i in range(9)], name="Aaa_Busy_But_Fine")
+    blank = make_workbook([], name="Zzz_Blank_Visual")
+    blank["pbip_ref_drops"] = [{"visual": "v-1", "emptied": True, "dropped": ["Values:x"]}]
+    write_slice(tmp_path / "handover", busy, "Aaa.json")
+    write_slice(tmp_path / "handover", blank, "Zzz.json")
+
+    _, out = run([str(tmp_path), "--list"], capsys)
+
+    lines = out.splitlines()
+    urgent = next(i for i, line in enumerate(lines) if "Zzz_Blank_Visual" in line)
+    routine = next(i for i, line in enumerate(lines) if "Aaa_Busy_But_Fine" in line)
+    assert urgent < routine, "an emptied visual must outrank an alphabetically-earlier busy workbook"
+    assert "EMPTIED" in lines[urgent], "the emptied count must be visible on the row itself"
 
 
 def test_unknown_category_lists_what_is_actually_present(tmp_path, capsys):
