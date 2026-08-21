@@ -234,7 +234,7 @@ def _is_string_terminator(text: str, index: int) -> bool:
         index += 1
     if index == len(text) or text[index] in ",)]}&+-*/=<>&|":
         return True
-    for word in ("as", "catch", "else", "in", "is", "meta", "or", "then"):
+    for word in ("as", "catch", "else", "in", "is", "meta", "or", "otherwise", "then"):
         end = index + len(word)
         if text.startswith(word, index) and (end == len(text) or not (text[end].isalnum() or text[end] == "_")):
             return True
@@ -397,10 +397,10 @@ def _check_transform_column_type_pairs(tokens: list[Token], add: Callable[[str, 
         if not entries:
             continue
         for entry in _split_top_level(entries):
-            if len(entry) < 2 or entry[0].text != "{" or entry[-1].text != "}":
-                _add_invalid_transform_pair(
-                    add, entry[0] if entry else pairs[0], "each entry must be a `{columnName, type}` pair"
-                )
+            if not entry or entry[0].text != "{":
+                continue
+            if len(entry) < 2 or entry[-1].text != "}":
+                _add_invalid_transform_pair(add, entry[0], "each literal entry must be a `{columnName, type}` pair")
                 continue
             values = _split_top_level(entry[1:-1])
             if len(values) != 2 or any(not value or value[0].text == "{" for value in values):

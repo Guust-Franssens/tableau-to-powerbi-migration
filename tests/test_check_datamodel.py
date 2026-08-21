@@ -133,8 +133,21 @@ def test_transform_column_types_variable_pairs_are_allowed() -> None:
     )
 
 
+def test_transform_column_types_variable_pair_entry_is_allowed() -> None:
+    assert (
+        _check_expression(
+            DUMMY, 'let Pair = {"Amount", type number}, Source = Table.TransformColumnTypes(T, {Pair}) in Source'
+        )
+        == []
+    )
+
+
 def test_transform_column_types_empty_pair_list_is_allowed() -> None:
     assert _check_expression(DUMMY, "let Source = Table.TransformColumnTypes(T, {}) in Source") == []
+
+
+def test_windows_path_before_otherwise_is_allowed() -> None:
+    assert _check_expression(DUMMY, 'let Source = try "C:\\" otherwise "fallback" in Source') == []
 
 
 def test_delimiters_inside_strings_and_comments_are_ignored() -> None:
