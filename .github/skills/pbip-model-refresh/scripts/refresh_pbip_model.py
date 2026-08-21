@@ -169,8 +169,8 @@ REFRESH_TYPE_FULL = "full"
 REFRESH_TYPE_CALCULATE = "calculate"
 REFRESH_TYPES = {REFRESH_TYPE_FULL, REFRESH_TYPE_CALCULATE}
 
-# Legacy XMLA refresh ceiling used when progress tracing is disabled or unavailable. Keep this path
-# intact as the safe degradation mode: a progress feature must never make refresh less reliable.
+# Legacy XMLA refresh ceiling used when progress tracing is explicitly disabled or for calculate-only
+# refreshes. Trace setup failures keep the absolute wall-clock backstop instead of returning here.
 REFRESH_TIMEOUT_SECONDS = 300
 
 # A server-level AMO trace observes ProgressReport* events from the separate ADOMD refresh session.
@@ -392,7 +392,8 @@ def refresh(
     minutes on a large table that no report even uses. ``refresh_type='calculate'`` is an opt-in
     DAX-only path: it recalculates formulas/relationships/hierarchies without re-reading source rows.
     For full refreshes, the server-level AMO progress trace reports row-count evidence and non-fatal
-    silence warnings; if it cannot start, this function falls back to the legacy XMLA timeout path.
+    silence warnings; if it cannot start, this function keeps the absolute wall-clock backstop and
+    loses only trace-dependent row-count and liveness output.
 
     **The legacy timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
     both halves, each with the timeout verified on readback:
@@ -431,15 +432,18 @@ def refresh(
     progress_monitor: RefreshProgressMonitor | None = None
     command_timeout = timeout_sec
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
+    untraced_absolute_backstop = False
     if desktop_pid is not None:
         state = initial_state or _credential_state(desktop_pid)
         _raise_if_blocked(desktop_pid, state, source_hint)
         initial_state = state
     if progress_enabled and refresh_type == REFRESH_TYPE_FULL:
+        command_timeout = max(1, int(absolute_timeout_sec))
+        total_timeout = absolute_timeout_sec
+        untraced_absolute_backstop = True
         try:
             progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec)
-            command_timeout = max(1, int(absolute_timeout_sec))
-            total_timeout = absolute_timeout_sec
+            untraced_absolute_backstop = False
             print(
                 f"[progress] enabled: no progress event for {progress_liveness_sec:.1f}s prints a warning "
                 f"(absolute backstop {absolute_timeout_sec:.0f}s)",
@@ -447,15 +451,36 @@ def refresh(
             )
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             print(
-                f"[progress] unavailable ({type(exc).__name__}: {exc}); "
-                f"falling back to legacy {timeout_sec}s XMLA timeout",
+                f"[progress] unavailable ({type(exc).__name__}: {exc}). Row counts and the liveness "
+                "warning are OFF for this run; you cannot tell a slow refresh from a stuck one. "
+                f"The {absolute_timeout_sec:.0f}s absolute backstop still applies. To regain visibility: "
+                "restore the AMO package (Microsoft.AnalysisServices.NetCore.retail.amd64), or use "
+                "the operator refresh strategy and watch Desktop's own row counter.",
                 file=sys.stderr,
                 flush=True,
             )
     if desktop_pid is not None:
         state = initial_state or CredentialDetection()
         if progress_monitor is None:
-            if state.unknown_reason:
+            if untraced_absolute_backstop:
+                if state.unknown_reason:
+                    print(
+                        f"Blocking-dialog check on PID {desktop_pid} is UNKNOWN ({state.unknown_reason}). "
+                        f"Refreshing without progress trace, bounded by absolute backstop "
+                        f"{absolute_timeout_sec:.0f}s. DO NOT kill this process - at the deadline it "
+                        "re-checks and prints one final machine-readable verdict line. Killing it early "
+                        "yields NO verdict.",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"No blocking dialog on PID {desktop_pid}. Refreshing without progress trace, "
+                        f"bounded by absolute backstop {absolute_timeout_sec:.0f}s. DO NOT kill this "
+                        "process - at the deadline it re-checks and prints one final machine-readable "
+                        "verdict line. Killing it early yields NO verdict.",
+                        flush=True,
+                    )
+            elif state.unknown_reason:
                 print_refresh_unknown_banner(
                     desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
                 )
@@ -1618,10 +1643,7 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         # So: report the observation, offer both hypotheses, and name the arbiter that settles it.
         # Never emit a stop-word instruction from an unverified heuristic.
         if "timeout" in text.lower() or "timed out" in text.lower():
-            print(
-                f"REFRESH: TIMEOUT - no result within "
-                f"{REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS}s ({text})"
-            )
+            print(f"REFRESH: TIMEOUT - no result within configured refresh deadline ({text})")
             print(
                 "  CAUSE UNKNOWN - this script cannot distinguish these two, and they need\n"
                 "  opposite responses:\n"

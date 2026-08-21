@@ -481,16 +481,35 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # --- .NET SDK (builds scripts/tmdl_validate for offline TMDL deserialization) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
 # ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
-# check could never pass. TOM now comes from the NuGet package Microsoft.AnalysisServices.NetCore.retail.amd64,
-# restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
+# check could never pass. The .NET SDK is still needed to build/run the offline validator, but it does
+# NOT prove AMO/TOM or ADOMD assemblies exist in the NuGet cache; those file checks live below.
 Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
 
+# --- AMO/TOM client assembly (the pbip-model-refresh skill's progress trace + ImageSave persist) ---
+# `dotnet` being on PATH proves only that a restore COULD run. It does not prove the restored package is
+# already present on a firewalled machine. Mirror the ADOMD lesson below: console text is not proof;
+# presence of the DLL on disk is. Hence a file check, not a restore attempt.
+#
+# Severity: RECOMMENDED, not critical. AMO/TOM is needed for the Desktop refresh/save phase: without it
+# scripted refresh loses row-count progress and non-fatal liveness warnings, and ImageSave falls back
+# to the UI save path. The estate pipeline's parse/convert steps never open Desktop, so failing the
+# whole run here would recreate #124's false-blocker shape for a Desktop-only dependency. After #283,
+# the refresh still keeps its 3600s absolute backstop when AMO trace setup fails; the missing
+# capability is scripted observability and AMO ImageSave, not the timeout fix. This warning exists so
+# the operator chooses before work starts: restore AMO first, or choose the operator refresh strategy.
+$nugetPackagesRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $HOME '.nuget\packages' }
+$amoDll = Get-ChildItem -Path (Join-Path $nugetPackagesRoot 'microsoft.analysisservices.netcore.retail.amd64*') `
+    -Recurse -Filter 'Microsoft.AnalysisServices.Tabular.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+Add-Check 'AMO/TOM client (Desktop progress/ImageSave)' 'recommended' ([bool]$amoDll) `
+    $(if ($amoDll) { $amoDll.FullName } else { 'not in the nuget cache - progress reporting and liveness are unavailable, so scripted refresh runs blind; ImageSave falls back to UI; the 3600s absolute refresh backstop remains active' }) `
+    'Before a scripted refresh, restore AMO/TOM into the active NuGet global-packages cache, or prefer the operator refresh strategy and watch Desktop''s own row counter: dotnet new console -o $env:TEMP\amo --framework net8.0; dotnet add $env:TEMP\amo package Microsoft.AnalysisServices.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the cache this preflight and refresh_pbip_model.py read).'
+
 # --- ADOMD.NET client assembly (the pbip-model-refresh skill's live-Desktop probe + refresh) --------
-# The .NET-SDK check above covers TOM/AMO (Microsoft.AnalysisServices.NetCore.retail.amd64). ADOMD.NET
-# is a SEPARATE nuget package (Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64) - a machine
-# can have TOM and still be missing ADOMD. That was the silent field failure this check exists for: on
-# a colleague's box the AdomdClient assembly was absent, so probe_desktop_query.py could not run a live
-# EVALUATE, and nothing flagged it up front. `dotnet add package` had even printed "Restored ... 0
+# AMO/TOM (Microsoft.AnalysisServices.NetCore.retail.amd64) and ADOMD.NET
+# (Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64) are SEPARATE nuget packages - a machine
+# can have one and still be missing the other. That was the silent field failure this check exists for:
+# on a colleague's box the AdomdClient assembly was absent, so probe_desktop_query.py could not run a
+# live EVALUATE, and nothing flagged it up front. `dotnet add package` had even printed "Restored ... 0
 # Errors" while landing ZERO PackageReference (a net10.0 scratch project silently no-op'd the add) - so
 # console text is not proof; presence of the DLL on disk is. Hence a file check, not a restore attempt.
 #
