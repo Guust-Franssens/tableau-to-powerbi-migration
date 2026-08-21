@@ -148,6 +148,32 @@ def test_a_comment_inside_a_string_literal_is_not_a_comment():
     assert csm.is_stub_expression('"-- not a comment" & BLANK()') is False
 
 
+def test_the_comment_stripper_leaves_string_literals_alone():
+    """Kills: dropping string-literal awareness from `strip_comments`.
+
+    Measured by mutation: at VERDICT level this guard is unreachable - deleting a string's tail can
+    only shorten the text, and the opening quote always survives, so the residue can never be
+    exactly `BLANK()`. It is asserted here at helper level because `strip_comments` is public,
+    documents this behaviour, and becomes load-bearing the moment the full-match anchor is relaxed.
+    """
+    assert csm.strip_comments('"//x" & [a]') == '"//x" & [a]'
+    assert csm.strip_comments('"a""--b" & [c]') == '"a""--b" & [c]'
+    assert csm.strip_comments("[a] // tail").strip() == "[a]"
+    assert csm.strip_comments("[a] /* mid */ [b]").split() == ["[a]", "[b]"]
+
+
+def test_the_paren_stripper_respects_balance():
+    """Kills: a paren stripper that peels any `(...)` pair without checking it wraps the whole text.
+
+    Same mutation note as above: unreachable at verdict level (peeling one character from each end
+    can only reach `BLANK()` from `(BLANK())`), asserted here because it is the documented contract
+    of a public helper.
+    """
+    assert csm.strip_outer_parens("(a) + (b)") == "(a) + (b)"
+    assert csm.strip_outer_parens("(a + b)") == "a + b"
+    assert csm.strip_outer_parens("((BLANK()))") == "BLANK()"
+
+
 def test_an_empty_expression_is_not_a_stub():
     """Kills: `not expr` folded into the stub test - an unparsed expression would count as a stub."""
     assert csm.is_stub_expression("") is False
@@ -450,7 +476,9 @@ def test_a_bundle_is_scanned_through_pbip_only(tmp_path):
 def test_several_models_are_merged_and_ranked(tmp_path):
     """Kills: reporting only the first model, or losing the per-model breakdown in the merge."""
     _write_model(tmp_path / "a", {"_Measures": MEASURES_TMDL}, model_name="A.SemanticModel")
-    _write_model(tmp_path / "b", {"Sales": "table Sales\n\n\tmeasure 'Total' = SUM(Sales[x])\n"}, model_name="B.SemanticModel")
+    _write_model(
+        tmp_path / "b", {"Sales": "table Sales\n\n\tmeasure 'Total' = SUM(Sales[x])\n"}, model_name="B.SemanticModel"
+    )
     report = csm.scan(tmp_path)
     assert report["models_scanned"] == 2
     assert [m["model"] for m in report["models"]] == ["A.SemanticModel", "B.SemanticModel"]

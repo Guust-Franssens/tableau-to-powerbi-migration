@@ -199,7 +199,7 @@ def _copy_string_literal(expr: str, start: int, out: list[str]) -> int:
     return i
 
 
-def _strip_outer_parens(expr: str) -> str:
+def strip_outer_parens(expr: str) -> str:
     """Drop parentheses that wrap the WHOLE expression, e.g. `(BLANK())`.
 
     Only when the outermost `(` closes at the very last character - otherwise `([a]) + (BLANK())`
@@ -227,7 +227,7 @@ def is_stub_expression(expr: str) -> bool:
     """
     text = " ".join(strip_comments(expr).split())
     if '"' not in text:
-        text = _strip_outer_parens(text)
+        text = strip_outer_parens(text)
     return bool(_BLANK_RE.fullmatch(text))
 
 
@@ -449,9 +449,7 @@ def merge(models: list[dict[str, Any]]) -> dict[str, Any]:
     """Fold per-model censuses into one verdict, keeping ungraded models out of the totals."""
     graded = [m for m in models if m["status"] != STATUS_SKIPPED]
     skipped = [
-        {"model": m["model"], "path": m["path"], "reason": m["reason"]}
-        for m in models
-        if m["status"] == STATUS_SKIPPED
+        {"model": m["model"], "path": m["path"], "reason": m["reason"]} for m in models if m["status"] == STATUS_SKIPPED
     ]
     total = _totals(graded)
     if not graded:
