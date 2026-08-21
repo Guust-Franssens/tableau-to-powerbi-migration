@@ -376,7 +376,7 @@ def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
 
     started = time.monotonic()
     with pytest.raises(CredentialMissingError):
-        refresh(port=1234, tables=["Orders"], timeout_sec=10, desktop_pid=111)
+        refresh(port=1234, tables=["Orders"], timeout_sec=10, desktop_pid=111, progress_enabled=False)
 
     assert time.monotonic() - started < 1.0, "shortened test poll interval should catch the modal quickly"
     assert calls["count"] >= 2

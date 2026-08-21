@@ -179,6 +179,13 @@ def test_collection_relation_descends_to_leaf_tables():
     assert all(t["source_relation"] == "table" for t in tables if t["name"] in {"Cities", "Regions"})
 
 
+def test_parser_emits_unknown_table_row_count_without_guessing_zero():
+    """Parse is offline and does not open .hyper files, so the normal generated hint is unknown."""
+    table = parse_workbook(FIXTURE)["data_sources"][0]["tables"][0]
+    assert table["row_count"] == {"source": "unknown"}
+    assert "value" not in table["row_count"]
+
+
 def test_metadata_only_physical_column_recovered():
     """Physical/extract columns that appear only in <metadata-records> (no <column> element) must be
     recovered into fields[] with from_metadata_record=True, deduped against existing <column> fields,

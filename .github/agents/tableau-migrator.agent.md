@@ -175,10 +175,12 @@ PBIR files yourself.
    `SOURCE_COLLAPSED` (fewer endpoints reached than declared: clean refresh, **wrong** data). Route it
    before probing live; no bundle (parser path) → 6b-ii.
    **6b-ii — the live query:** `python scripts/probe_live_source.py --spec <spec>` or `--bundle
-   <engine-bundle>` builds a one-table model, opens Desktop, refreshes, and requires a row back — the
-   `SELECT 1`, executed *through Power BI*. It probes every live source, and refuses rather than
-   fabricate when the bundle carries no genuine table/column evidence.
+   <engine-bundle>` builds a one-table model. Ordinary tables refresh in Desktop and require a row.
+   Custom SQL writes PBIP and stops with `OPERATOR_REQUIRED` (cost/modal risk). It probes every
+   live source and refuses to fabricate missing table/column evidence.
    - **`DATA_OK`** → it lifts the credential gate itself. Continue to step 7.
+   - **`OPERATOR_REQUIRED`** → **HARD STOP.** Open `_probe\...\Probe.pbip` in Power BI Desktop and hit
+     Refresh. Do **not** accept SQL-client proof; it uses a different credential path than Power BI.
    - **`NO_CREDENTIAL`** → **HARD STOP.** Name host/database, say Power BI needs a credential you
      **cannot supply**, offer: sign in once in Desktop, or authorize a build-only migration
      (`credential_gate.py authorize <dir> --who <name>` — a human, from a plain terminal). Then

@@ -568,6 +568,33 @@ named pipe** — the real error text is destroyed in transit. Consequences:
   as an unrelated agent's mysterious failure at the same timestamp. Check event 1026 before blaming
   their model.
 
+### ⚠️ Inferred RAM-pressure Desktop crash: `PlatformDependentOptions`
+
+Crash signature to grep for:
+
+```text
+Something went wrong
+The type initializer for 'Microsoft.Mashup.Host.Document.PlatformDependentOptions' threw an exception
+```
+
+Field evidence from 2026-08-19: the crash happened during a customer migration sweep with 4–5 Power BI
+Desktop instances open and about 3.1 GB free RAM out of 31.7 GB total. Each open Desktop instance owns
+an `msmdsrv` child with the loaded model resident, so large-model estates can exhaust the machine well
+before `--pid` addressability becomes a problem.
+
+✅ Confirmed negative result: deleting the model's 313 MB `.pbi/cache.abf` and letting Desktop rebuild
+it did **not** fix the crash, which argues against treating this signature as simple cache-file
+corruption.
+
+⚠️ Leading hypothesis, not proven cause: RAM pressure from too many loaded Desktop models. No
+controlled reproduction varied free RAM and instance count while holding the model and machine
+constant. To confirm this mechanism, reproduce the crash across controlled free-RAM / instance-count
+levels and show it disappears with otherwise identical conditions and more available RAM.
+
+Practical rule until then: before opening another Desktop instance, check free RAM and count live
+`PBIDesktop`/`msmdsrv` processes. On large models, keep concurrency low and close each Desktop
+instance as soon as its verification handoff is complete.
+
 ### ⚠️ `powerbi-desktop open` can return the WRONG pid
 
 Measured 2026-08-01, with two Desktop instances open: `open` reported a `pid` belonging to a **sibling
