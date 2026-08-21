@@ -168,12 +168,12 @@ PERSIST_LOCK_TIMEOUT_SECONDS = 120.0
 REFRESH_TIMEOUT_SECONDS = 300
 
 # A server-level AMO trace observes ProgressReport* events from the separate ADOMD refresh session.
-# Measured max gap during a live CSV refresh was 2.105s, so 120s is ~57x headroom while still surfacing
-# a dead refresh far earlier than the old 300s wall-clock wait.
+# Liveness is deliberately NON-FATAL: local CSV refreshes showed ~2.1s gaps, but we have no evidence
+# for remote first-row latency. Killing on this timer would false-positive a healthy slow source.
 REFRESH_PROGRESS_LIVENESS_SECONDS = 120.0
 REFRESH_PROGRESS_THROTTLE_SECONDS = 2.0
-# Backstop only: liveness is the primary bound when progress is available, but a stuck trace or engine
-# should still be finite. This must be comfortably above measured 700-750s customer Snowflake refreshes.
+# The traced-mode fatal backstop. It must be comfortably above measured 700-750s customer Snowflake
+# refreshes; liveness only reports silence before this backstop fires.
 REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0
 
 # Grace on top of the XMLA ceiling before the legacy outer wall clock gives up. The XMLA layer honours
@@ -305,29 +305,6 @@ def _catalog_id(conn) -> str:
         reader.Close()
 
 
-def _raise_progress_timeout(
-    monitor: RefreshProgressMonitor,
-    desktop_pid: int | None,
-    source_hint: str | None,
-    latched_unknown: str | None,
-    latched_desktop_unready: str | None,
-) -> None:
-    """Raise the right terminal verdict when progress liveness expires."""
-    if desktop_pid is not None:
-        state = _credential_state(desktop_pid)
-        _raise_if_blocked(desktop_pid, state, source_hint)
-        latched_desktop_unready = latched_desktop_unready or state.desktop_unready
-        if latched_desktop_unready is not None:
-            raise DesktopUnreadyError(desktop_pid, latched_desktop_unready)
-        latched_unknown = latched_unknown or state.unknown_reason
-        if latched_unknown is not None:
-            raise CredentialUnknownError(desktop_pid, latched_unknown)
-    raise TimeoutError(
-        f"no refresh progress event for {monitor.seconds_since_last_event():.1f}s "
-        f"(liveness window {monitor.liveness_seconds:.1f}s; last event: {monitor.last_event_label()})"
-    )
-
-
 # pylint: disable=too-many-arguments,too-many-branches,too-many-locals,too-many-statements
 def _join_refresh_worker(
     worker: threading.Thread,
@@ -361,20 +338,12 @@ def _join_refresh_worker(
     while worker.is_alive():
         elapsed = time.monotonic() - started
         absolute_remaining = max(0.0, total_timeout - elapsed)
-        liveness_remaining = progress_monitor.liveness_seconds - progress_monitor.seconds_since_last_event()
         if absolute_remaining <= 0:
             break
-        if liveness_remaining <= 0:
-            _raise_progress_timeout(
-                progress_monitor,
-                desktop_pid,
-                source_hint,
-                latched_unknown,
-                latched_desktop_unready,
-            )
+        progress_monitor.print_liveness_warning_if_due()
         wait_for = min(
             absolute_remaining,
-            max(0.0, liveness_remaining),
+            progress_monitor.seconds_until_liveness_warning(),
             REFRESH_CREDENTIAL_POLL_SECONDS,
             max(0.0, next_heartbeat - elapsed),
         )
@@ -392,14 +361,6 @@ def _join_refresh_worker(
             progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
             next_heartbeat += REFRESH_HEARTBEAT_SECONDS
     if worker.is_alive():
-        if progress_monitor.seconds_since_last_event() >= progress_monitor.liveness_seconds:
-            _raise_progress_timeout(
-                progress_monitor,
-                desktop_pid,
-                source_hint,
-                latched_unknown,
-                latched_desktop_unready,
-            )
         return False
     return True
 
@@ -421,8 +382,8 @@ def refresh(
 
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
     minutes on a large table that no report even uses. When enabled, the server-level AMO progress
-    trace is the primary liveness signal; if it cannot start, this function falls back to the legacy
-    XMLA timeout path below.
+    trace reports row-count evidence and non-fatal silence warnings; if it cannot start, this
+    function falls back to the legacy XMLA timeout path below.
 
     **The legacy timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
     both halves, each with the timeout verified on readback:
@@ -468,7 +429,7 @@ def refresh(
             command_timeout = max(1, int(absolute_timeout_sec))
             total_timeout = absolute_timeout_sec
             print(
-                f"[progress] enabled: no progress event for {progress_liveness_sec:.1f}s stops the refresh "
+                f"[progress] enabled: no progress event for {progress_liveness_sec:.1f}s prints a warning "
                 f"(absolute backstop {absolute_timeout_sec:.0f}s)",
                 flush=True,
             )
@@ -708,6 +669,7 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         self._last_print_by_object: dict[str, float] = {}
         self._latest_rows_by_object: dict[str, int] = {}
         self._last_row_object: str | None = None
+        self._last_liveness_warning_at: float | None = None
         self._current_event_values = current_event_values or {"ProgressReportCurrent"}
 
     def mark_refresh_started(self) -> None:
@@ -727,10 +689,39 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         with self._lock:
             self._last_event_at = now
             self._last_event_label = str(label)
+            self._last_liveness_warning_at = None
             if str(event_class) in self._current_event_values and row_count is not None:
                 self._latest_rows_by_object[str(label)] = row_count
                 self._last_row_object = str(label)
                 message = self._format_row_progress_locked(str(label), row_count, now)
+        if message:
+            self.printer(message, flush=True)
+
+    def seconds_until_liveness_warning(self) -> float:
+        """Seconds until the next non-fatal liveness warning should be emitted."""
+        with self._lock:
+            since_event = self.clock() - self._last_event_at
+            if since_event < self.liveness_seconds:
+                return self.liveness_seconds - since_event
+            if self._last_liveness_warning_at is None:
+                return 0.0
+            return max(0.0, self.liveness_seconds - (self.clock() - self._last_liveness_warning_at))
+
+    def print_liveness_warning_if_due(self) -> None:
+        """Warn, but never abort, when trace events go quiet beyond the liveness window."""
+        now = self.clock()
+        message = None
+        with self._lock:
+            quiet_for = now - self._last_event_at
+            last_warned = self._last_liveness_warning_at
+            if quiet_for >= self.liveness_seconds and (
+                last_warned is None or now - last_warned >= self.liveness_seconds
+            ):
+                self._last_liveness_warning_at = now
+                message = (
+                    f"[progress] no progress event for {quiet_for:.1f}s — still waiting "
+                    f"(last event: {self._last_event_label}; absolute backstop still applies)"
+                )
         if message:
             self.printer(message, flush=True)
 
@@ -1608,15 +1599,6 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         #
         # So: report the observation, offer both hypotheses, and name the arbiter that settles it.
         # Never emit a stop-word instruction from an unverified heuristic.
-        if "no refresh progress event" in text.lower():
-            print(f"REFRESH: NO_PROGRESS ({text})")
-            print(
-                "  The refresh worker is still alive, but Desktop stopped emitting AMO ProgressReport\n"
-                "  events inside the liveness window. This usually means the mashup engine is blocked\n"
-                "  or the data source stopped returning rows; rerun with --no-progress only if you need\n"
-                "  the legacy fixed-duration behavior for comparison."
-            )
-            return 3
         if "timeout" in text.lower() or "timed out" in text.lower():
             print(
                 f"REFRESH: TIMEOUT - no result within "
@@ -1794,7 +1776,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
         help=(
-            "Absolute backstop for traced refreshes; liveness is the primary bound "
+            "Absolute backstop for traced refreshes; liveness warnings are non-fatal "
             f"(default: {REFRESH_ABSOLUTE_TIMEOUT_SECONDS:.0f})"
         ),
     )

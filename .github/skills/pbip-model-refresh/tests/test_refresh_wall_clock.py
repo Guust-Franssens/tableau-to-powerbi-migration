@@ -233,24 +233,45 @@ def test_progress_current_name_form_is_tolerated() -> None:
     assert lines and "10,000 rows read" in lines[0]
 
 
-def test_progress_liveness_replaces_the_legacy_duration_ceiling(monkeypatch, parked) -> None:
-    """With default tracing, no progress stops on liveness, not the old fixed-duration ceiling."""
-    monitor = RefreshProgressMonitor(liveness_seconds=0.15, throttle_seconds=2)
+def test_progress_liveness_warns_but_does_not_kill_a_quiet_refresh(monkeypatch, capsys) -> None:
+    """A slow first row can be healthy; liveness reports silence but only the backstop kills."""
+    executed: list[tuple[str, int]] = []
+
+    class _SlowCmd:  # pylint: disable=too-few-public-methods,invalid-name
+        """A command that finishes after the liveness window without emitting trace events."""
+
+        CommandText = ""  # noqa: N815
+        CommandTimeout = 0  # noqa: N815
+
+        def ExecuteNonQuery(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+            """Sleep past liveness, then succeed."""
+            time.sleep(0.25)
+            executed.append((self.CommandText, self.CommandTimeout))
+
+    class _Conn:
+        """A connection with one slow successful command."""
+
+        def Open(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+            """Match the ADOMD API surface."""
+
+        def CreateCommand(self):  # noqa: N802  # pylint: disable=invalid-name
+            """Match the ADOMD API surface."""
+            return _SlowCmd()
+
+        def Close(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+            """Match the ADOMD API surface."""
+
+    monitor = RefreshProgressMonitor(liveness_seconds=0.1, throttle_seconds=2)
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_args: monitor)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
+    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
 
-    started = time.monotonic()
-    with pytest.raises(TimeoutError, match="no refresh progress event"):
-        refresh(
-            port=1234,
-            tables=["Orders"],
-            timeout_sec=5,
-            progress_liveness_sec=0.15,
-            absolute_timeout_sec=10,
-        )
-    elapsed = time.monotonic() - started
+    ok, message = refresh(port=1234, tables=["Orders"], timeout_sec=1, progress_liveness_sec=0.1)
 
-    assert elapsed < 2, f"liveness timeout took {elapsed:.1f}s instead of stopping promptly"
-    parked[1].set()
+    assert ok is True
+    assert "Orders" in message
+    assert executed and executed[0][1] == REFRESH_ABSOLUTE_TIMEOUT_SECONDS
+    assert "[progress] no progress event" in capsys.readouterr().out
 
 
 def test_progress_trace_failure_degrades_to_the_legacy_refresh_path(monkeypatch, capsys) -> None:
@@ -298,16 +319,16 @@ def test_progress_trace_failure_degrades_to_the_legacy_refresh_path(monkeypatch,
 
 
 def test_traced_refresh_supersedes_the_old_elapsed_only_heartbeat(monkeypatch, parked, capsys) -> None:
-    """Default progress uses row-count evidence, not the old identical 'still refreshing' signal."""
-    monitor = RefreshProgressMonitor(liveness_seconds=1, throttle_seconds=0.05)
+    """Default progress uses trace evidence/warnings, not the old identical 'still refreshing' signal."""
+    monitor = RefreshProgressMonitor(liveness_seconds=0.05, throttle_seconds=0.05)
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_args: monitor)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
 
-    with pytest.raises(TimeoutError, match="no refresh progress event"):
-        refresh(port=1234, tables=["Orders"], timeout_sec=5, progress_liveness_sec=1, absolute_timeout_sec=5)
+    with pytest.raises(TimeoutError, match="did not return within"):
+        refresh(port=1234, tables=["Orders"], timeout_sec=5, progress_liveness_sec=0.05, absolute_timeout_sec=0.2)
 
     out = capsys.readouterr().out
-    assert "[progress] waiting for first row-count event" in out
+    assert "[progress] no progress event" in out
     assert "still refreshing" not in out
     parked[1].set()
 
