@@ -2,7 +2,8 @@
 purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"] [--no-save]
+             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
+             [--calculate-only] [--no-save]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -163,6 +164,10 @@ SAVE_TIMEOUT_SECONDS = 120
 # waited on). On timeout `_persist_image` raises `ModelLockTimeout` and `_refresh_and_save` REFUSES to
 # persist (`NOT_PERSISTED`), naming the concurrent run.
 PERSIST_LOCK_TIMEOUT_SECONDS = 120.0
+REFRESH_TYPE_FULL = "full"
+REFRESH_TYPE_CALCULATE = "calculate"
+REFRESH_TYPES = {REFRESH_TYPE_FULL, REFRESH_TYPE_CALCULATE}
+
 # Legacy XMLA refresh ceiling used when progress tracing is disabled or unavailable. Keep this path
 # intact as the safe degradation mode: a progress feature must never make refresh less reliable.
 REFRESH_TIMEOUT_SECONDS = 300
@@ -371,6 +376,7 @@ def refresh(
     tables: list[str] | None,
     timeout_sec: int = REFRESH_TIMEOUT_SECONDS,
     *,
+    refresh_type: str = REFRESH_TYPE_FULL,
     desktop_pid: int | None = None,
     source_hint: str | None = None,
     initial_state: CredentialDetection | None = None,
@@ -381,9 +387,10 @@ def refresh(
     """Send a TMSL refresh over XMLA. Returns (ok, message).
 
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
-    minutes on a large table that no report even uses. When enabled, the server-level AMO progress
-    trace reports row-count evidence and non-fatal silence warnings; if it cannot start, this
-    function falls back to the legacy XMLA timeout path below.
+    minutes on a large table that no report even uses. ``refresh_type='calculate'`` is an opt-in
+    DAX-only path: it recalculates formulas/relationships/hierarchies without re-reading source rows.
+    For full refreshes, the server-level AMO progress trace reports row-count evidence and non-fatal
+    silence warnings; if it cannot start, this function falls back to the legacy XMLA timeout path.
 
     **The legacy timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
     both halves, each with the timeout verified on readback:
@@ -415,6 +422,9 @@ def refresh(
     90 s" because there was no 90. Never take a timing measurement against a bundle preflight reports
     as STALE.
     """
+    if refresh_type not in REFRESH_TYPES:
+        raise ValueError(f"unsupported refresh type {refresh_type!r}; expected one of {sorted(REFRESH_TYPES)}")
+
     result: dict[str, tuple[bool, str] | BaseException] = {}
     progress_monitor: RefreshProgressMonitor | None = None
     command_timeout = timeout_sec
@@ -423,7 +433,7 @@ def refresh(
         state = initial_state or _credential_state(desktop_pid)
         _raise_if_blocked(desktop_pid, state, source_hint)
         initial_state = state
-    if progress_enabled:
+    if progress_enabled and refresh_type == REFRESH_TYPE_FULL:
         try:
             progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec)
             command_timeout = max(1, int(absolute_timeout_sec))
@@ -448,7 +458,12 @@ def refresh(
                     desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
                 )
             else:
-                print_refresh_banner(desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS)
+                print_refresh_banner(
+                    desktop_pid,
+                    timeout_sec,
+                    REFRESH_WALL_CLOCK_GRACE_SECONDS,
+                    operation=refresh_type,
+                )
         elif state.unknown_reason:
             print(
                 f"Blocking-dialog check on PID {desktop_pid} is UNKNOWN ({state.unknown_reason}). "
@@ -474,12 +489,14 @@ def refresh(
                 objects = [{"database": catalog, "table": t} for t in tables]
             else:
                 objects = [{"database": catalog}]
-            tmsl = json.dumps({"refresh": {"type": "full", "objects": objects}})
+            tmsl = json.dumps({"refresh": {"type": refresh_type, "objects": objects}})
             cmd = conn.CreateCommand()
             cmd.CommandText = tmsl
             cmd.CommandTimeout = command_timeout
             cmd.ExecuteNonQuery()
-            result["ok"] = (True, f"refreshed {'/'.join(tables) if tables else 'entire database'} (catalog {catalog})")
+            target = "/".join(tables) if tables else "entire database"
+            verb = "calculated" if refresh_type == REFRESH_TYPE_CALCULATE else "refreshed"
+            result["ok"] = (True, f"{verb} {target} (catalog {catalog})")
         except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             # Everything the worker can raise has to be handed back, not left to die on the thread:
             # `main` classifies on the exception text, and an unhandled thread exception would reach
@@ -1552,24 +1569,20 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     source_hint = source_hint_from_model(cache.parent.parent if cache else None)
     try:
         parameters = inspect.signature(refresh).parameters
+        refresh_kwargs = {}
+        if "refresh_type" in parameters:
+            refresh_kwargs["refresh_type"] = args.refresh_type
         if "desktop_pid" in parameters:
-            refresh_kwargs = {"desktop_pid": pid, "source_hint": source_hint}
+            refresh_kwargs.update({"desktop_pid": pid, "source_hint": source_hint})
             if "initial_state" in parameters:
                 refresh_kwargs["initial_state"] = initial_state
-            if "progress_enabled" in parameters:
-                refresh_kwargs["progress_enabled"] = not args.no_progress
-            if "progress_liveness_sec" in parameters:
-                refresh_kwargs["progress_liveness_sec"] = args.progress_liveness_seconds
-            if "absolute_timeout_sec" in parameters:
-                refresh_kwargs["absolute_timeout_sec"] = args.refresh_absolute_timeout_seconds
-            ok, message = refresh(
-                port,
-                args.tables,
-                REFRESH_TIMEOUT_SECONDS,
-                **refresh_kwargs,
-            )
-        else:
-            ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
+        if "progress_enabled" in parameters:
+            refresh_kwargs["progress_enabled"] = not args.no_progress
+        if "progress_liveness_sec" in parameters:
+            refresh_kwargs["progress_liveness_sec"] = args.progress_liveness_seconds
+        if "absolute_timeout_sec" in parameters:
+            refresh_kwargs["absolute_timeout_sec"] = args.refresh_absolute_timeout_seconds
+        ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS, **refresh_kwargs)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         if isinstance(exc, CredentialMissingError):
             _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
@@ -1736,6 +1749,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "refresh whose canaries all return rows earns the model-level DATA_OK. Defaults to --tables "
         "when only that is given; with neither, the first queryable table is probed and the verdict "
         "is downgraded to name that single table",
+    )
+    parser.set_defaults(refresh_type=REFRESH_TYPE_FULL)
+    parser.add_argument(
+        "--calculate-only",
+        "--measures-only",
+        dest="refresh_type",
+        action="store_const",
+        const=REFRESH_TYPE_CALCULATE,
+        help=(
+            "Opt-in DAX-only refresh: send TMSL refresh type 'calculate' instead of 'full'. "
+            "This recalculates formulas without re-reading source rows; use only after measure-only "
+            "edits, because data-affecting changes need the default full refresh"
+        ),
     )
     parser.add_argument(
         "--save",
