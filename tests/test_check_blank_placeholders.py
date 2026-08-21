@@ -380,6 +380,38 @@ def test_a_previous_estates_slices_cannot_outlive_the_report_json_that_replaced_
     assert report["placeholders_found"] == 0
 
 
+def test_null_model_translation_handoff_with_blank_body_is_incomplete_not_clean(tmp_path: Path) -> None:
+    """A null handoff means the workbook was not checked, not that it has no engine placeholders (#276)."""
+    bundle = tmp_path / "bundle"
+    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": None}])
+    _write_model(bundle, "Workbook", "Sales", _column_table())
+
+    report = cbp.scan(bundle)
+
+    assert report["status"] == cbp.STATUS_INCOMPLETE
+    assert report["placeholders_found"] == 0
+    assert report["workbooks_unchecked"] == 1
+    assert report["workbooks_unchecked_blank_objects"] == 1
+    assert "NOT CHECKED" in cbp.render(report)
+    assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_INCOMPLETE
+
+
+def test_blank_bodies_under_owners_without_workbook_entries_are_reported_as_skipped(tmp_path: Path) -> None:
+    """Shared datasources have no workbooks[] handoff entry, so their BLANK() bodies are explicitly out of scope."""
+    bundle = tmp_path / "bundle"
+    _write_report_json(bundle, [{"name": "Workbook", "model_translation_handoff": {"requests": []}}])
+    _write_model(bundle, "Workbook", "Sales", _column_table(expr="1"))
+    _write_model(bundle, "DS_Flight_Level", "Flights", _column_table(table="Flights"))
+
+    report = cbp.scan(bundle)
+
+    assert report["status"] == cbp.STATUS_INCOMPLETE
+    assert report["skipped_shared_datasources"] == 1
+    assert report["skipped_shared_datasource_blank_objects"] == 1
+    assert report["skipped_shared_datasource_details"] == [{"owner": "DS_Flight_Level", "blank_objects": 1}]
+    assert "outside this handover check - NOT CHECKED" in cbp.render(report)
+
+
 def test_a_bundle_without_a_usable_report_json_still_reads_the_handover_slices(tmp_path: Path) -> None:
     """Backward compatibility: a bundle produced before the coordinator wrote a report.json."""
     bundle = _bundle(tmp_path)
@@ -440,10 +472,13 @@ def test_an_unreadable_input_alone_does_not_invent_a_placeholder(tmp_path: Path)
     assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_OK
 
 
-def test_cli_exit_codes_distinguish_clean_gap_and_material_dependency(tmp_path: Path) -> None:
-    """The process status is the gate: clean, documented gap, material PBIR dependency."""
+def test_cli_exit_codes_distinguish_clean_gap_incomplete_and_material_dependency(tmp_path: Path) -> None:
+    """The process status is the gate: clean, documented gap, incomplete scope, material dependency."""
     clean = _bundle(tmp_path / "clean")
     _write_model(clean, "Workbook", "Sales", _column_table())
+    incomplete = tmp_path / "incomplete"
+    _write_report_json(incomplete, [{"name": "Workbook", "model_translation_handoff": None}])
+    _write_model(incomplete, "Workbook", "Sales", _column_table())
     gap = _bundle(tmp_path / "gap")
     _write_handover(
         gap,
@@ -480,5 +515,6 @@ def test_cli_exit_codes_distinguish_clean_gap_and_material_dependency(tmp_path: 
 
     assert cbp.main([str(clean), "--quiet"]) == cbp.EXIT_OK
     assert cbp.main([str(gap), "--quiet"]) == cbp.EXIT_UNREFERENCED
+    assert cbp.main([str(incomplete), "--quiet"]) == cbp.EXIT_INCOMPLETE
     assert cbp.main([str(material), "--quiet"]) == cbp.EXIT_REFERENCED
     assert cbp.main(["--bundle", str(clean), "--quiet"]) == cbp.EXIT_OK

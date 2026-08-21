@@ -118,6 +118,25 @@ def test_the_desktop_pin_hint_is_actionable_in_the_shell_that_reads_it() -> None
         )
 
 
+def test_a_dead_desktop_pin_is_named_as_a_dead_pin_not_as_an_unset_pin() -> None:
+    """A stale PBI_DESKTOP_PATH is worse than unset because the bridge honours it first (#86)."""
+    source = _preflight_source()
+    assert "$desktopPathDead = $desktopPathConfigured -and -not $desktopPathValid" in source
+    assert "MSIX discovery (PBI_DESKTOP_PATH is set but dead)" in source
+    assert "PBI_DESKTOP_PATH points at" in source
+    assert "which is not on disk" in source
+    assert "The bridge honours this variable and will fail to launch" in source
+
+
+def test_a_dead_desktop_pin_is_still_recommended_not_critical() -> None:
+    """The dead-pin warning is louder, but #124's no-false-blocker severity decision still holds."""
+    source = _preflight_source()
+    _assert_add_check_tier(source, DESKTOP_PIN_CHECK, "recommended")
+    desktop_block = source[source.index("$desktopPathConfigured") : source.index("# --- Privacy Levels")]
+    critical_lines = [line for line in desktop_block.splitlines() if "'critical'" in line]
+    assert critical_lines == ["Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `"]
+
+
 def test_the_correctness_floor_says_where_report_version_at_import_belongs() -> None:
     """The floor's justification is load-bearing prose, and stating it imprecisely produced a bug (#129).
 

@@ -398,11 +398,17 @@ if ($CheckUpstream) {
 #    makes Desktop auto-updates a non-event for every downstream call.
 $desktop = $null
 $desktopVia = ''
-if ($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH; $desktopVia = 'PBI_DESKTOP_PATH' }
+$desktopPathConfigured = [bool]$env:PBI_DESKTOP_PATH
+$desktopPathValid = $desktopPathConfigured -and (Test-Path $env:PBI_DESKTOP_PATH)
+$desktopPathDead = $desktopPathConfigured -and -not $desktopPathValid
+if ($desktopPathValid) { $desktop = $env:PBI_DESKTOP_PATH; $desktopVia = 'PBI_DESKTOP_PATH' }
 $appx = Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop -ErrorAction SilentlyContinue
 if (-not $desktop) {
     $loc = $appx.InstallLocation
-    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) { $desktop = (Join-Path $loc 'bin\PBIDesktop.exe'); $desktopVia = 'MSIX discovery' }
+    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) {
+        $desktop = (Join-Path $loc 'bin\PBIDesktop.exe')
+        $desktopVia = if ($desktopPathDead) { 'MSIX discovery (PBI_DESKTOP_PATH is set but dead)' } else { 'MSIX discovery' }
+    }
 }
 if (-not $desktop) {
     $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
@@ -437,13 +443,21 @@ if ($appx) {
 # Desktop auto-updates and the bridge then cannot find the exe. The phase that actually needs it -
 # report authoring / Desktop verification - is where it must be resolved, and `powerbi-desktop open`
 # fails loudly there rather than silently.
-$pathPinned = [bool]($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH))
+$pathPinned = $desktopPathValid
+$installedDesktop = if ($desktop -and $appx) { "$($appx.Version) at $desktop" } elseif ($desktop) { $desktop } else { 'not found' }
+$pinDetail = if ($pathPinned) {
+    $env:PBI_DESKTOP_PATH
+} elseif ($desktopPathDead) {
+    "PBI_DESKTOP_PATH points at `"$env:PBI_DESKTOP_PATH`" which is not on disk; installed Desktop: $installedDesktop. The bridge honours this variable and will fail to launch until it is re-pinned."
+} else {
+    'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline'
+}
 # The hint must work IN THE SHELL THAT READS IT. `setx` writes the user profile and is inherited only
 # by processes started LATER - and an agent's tool shells inherit the environment of a parent that is
 # already running, so "then reopen the shell" is advice they cannot act on. `$env:` is the fix that
 # takes effect immediately; `setx` is offered second, for persistence, correctly labelled.
 Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
-    $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline' }) `
+    $pinDetail `
     $(if ($desktop) { "THIS shell (takes effect now): `$env:PBI_DESKTOP_PATH = `"$desktop`"   |   persist for NEW shells only (does NOT affect this one): setx PBI_DESKTOP_PATH `"$desktop`"" } else { 'install Power BI Desktop first' })
 
 # --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
