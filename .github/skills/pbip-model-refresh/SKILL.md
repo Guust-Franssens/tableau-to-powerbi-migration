@@ -293,6 +293,28 @@ easy to miss precisely because the reload reports success, so **verify a model e
 `EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "Name", [Name], "Expr", [Expression])` before trusting any
 number you read back.
 
+⚠️ **A stale Desktop session can also SAVE the old model back over same-day file edits.** Customer
+report: Hemang Patel (SES), 2026-08-21, found a verified fix silently reverted overnight, with every
+file in the affected workbook's `.Report` and `.SemanticModel` folders sharing one timestamp burst.
+Measured by us the same day: while Desktop held the pre-edit in-memory model, a disk-only sentinel
+measure was added to TMDL. `powerbi-desktop reload` returned success and **did not overwrite** the
+file; `refresh_pbip_model.py --pid` **refused safely** with `REFRESH: WRONG_MODEL`, exit 2; Desktop's
+own UI **Save** overwrote the file silently, removed the sentinel, and reverted the TMDL hash exactly
+to the pre-edit value.
+
+**Forensic signature:** many files in one workbook folder sharing a single modified time to the
+second. Hemang's customer evidence showed ~30+ files rewritten together; our fixture-scale
+reproduction rewrote all 18 files under `.Report` + `.SemanticModel` in one burst (15 at
+`2026-08-21 12:10:52`, 3 at `12:10:53`). That signature is how to diagnose this after the fact when
+no Desktop process remains to inspect.
+
+**Boundary of the measurement:** we reproduced an immediate, explicit Desktop UI Save. We did **not**
+reproduce an overnight/idle autosave, and we did **not** evaluate the "Apply external changes" prompt.
+Do not cite this as proof of either. The operational rule is still binding: **if you edited files on
+disk, do not Save from a Desktop instance that was already open before the edit; close and reopen it
+first.** The guarded script path is safer than the human Save path precisely because it fails closed
+on `WRONG_MODEL` instead of writing stale state.
+
 ## How persistence actually works
 
 | Path | What it is | Status |
