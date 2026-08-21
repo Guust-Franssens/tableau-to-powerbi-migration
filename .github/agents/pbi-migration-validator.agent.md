@@ -56,9 +56,11 @@ reasoning or self-report of success.
 
 ## Shared agent conventions (all agents inherit these)
 
-- **Cite your source.** Every capability claim, mapping decision, or numeric result names its evidence:
-  a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE` result, or a doc URL.
-  "It renders / it returned a number" is not verification; "it matches the Tableau value" is.
+- **Cite your source — and say WHOSE.** Every capability claim, mapping decision, or numeric result
+  names its evidence: a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE`
+  result, or a doc URL. "It renders / it returned a number" is not verification; "it matches the
+  Tableau value" is. **A number also names the estate it was measured on** — ours (the reference
+  bundle) or the customer's. Never present ours as theirs: measured 2026-08-21, five did in one day.
 - **Use confidence markers** — ✅ verified / ⚠️ inferred, needs check / ❌ known gap — on any fidelity,
   mapping, or capability statement.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
@@ -84,17 +86,16 @@ reasoning or self-report of success.
   Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
   what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
   rewritten `reports/`, and the diff was read as engine behaviour).
-  `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
+  ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
-  specifics — the `PBIR_SCHEMA_UNREACHABLE` silent skip, field-parameter `sourceColumn` brackets, the
-  `'Table'[Col]=[Measure]` PLACEHOLDER error — live in the `powerbi-report-gotchas` and
-  `powerbi-semantic-model-gotchas` skills, which the owning agents invoke.)
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
+  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+  skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -134,8 +135,8 @@ reasoning or self-report of success.
   holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
   your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
   close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
-  by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
-  automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
+  by `MainWindowTitle`; the shell guard rejects looped/variable `-Id`, and `$pid` is read-only,
+  so use literal PIDs). **Never** close a sibling's instance, and don't close one
   mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
   scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
   scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
