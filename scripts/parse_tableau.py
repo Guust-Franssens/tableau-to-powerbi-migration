@@ -1717,6 +1717,16 @@ def _observed_at_errors(spec: dict[str, Any]) -> list[str]:
                 # in lowercase.
                 parsed = datetime.fromisoformat(raw.upper())
             except ValueError as exc:
+                # RFC 3339 permits a leap second (`23:59:60`), and Python's `datetime` cannot
+                # represent one at all ("second must be in 0..59") - so this is a stdlib ceiling,
+                # not a choice, and it predates the shape check. Name it, or the generic message
+                # sends the reader hunting for a typo in a timestamp that is actually valid.
+                if raw[17:19] == "60":
+                    errors.append(
+                        f"{location}: {raw!r} is a leap second; Python's datetime cannot represent "
+                        "one, so it cannot be stored or compared here"
+                    )
+                    continue
                 errors.append(f"{location}: {raw!r} is not a valid RFC 3339 timestamp ({exc})")
                 continue
             if parsed.tzinfo is None:

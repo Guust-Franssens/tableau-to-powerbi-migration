@@ -157,6 +157,26 @@ def test_schema_accepts_a_real_rfc3339_observed_at(tmp_path: Path) -> None:
         assert errors == [], f"{good!r} was rejected: {errors}"
 
 
+def test_a_leap_second_is_rejected_with_an_HONEST_reason(tmp_path: Path) -> None:
+    """A pre-existing stdlib ceiling, pinned so it stays documented rather than mysterious.
+
+    RFC 3339 permits `23:59:60`, so rejecting it IS a deviation from the advertised format. It is
+    not one this repo can fix: `datetime.fromisoformat` raises "second must be in 0..59", and
+    `datetime` has no leap-second representation, so there is nothing to store or compare even if
+    parsing succeeded. The previous `fromisoformat`-only check rejected it identically, so the
+    shape regex did not introduce this.
+
+    What IS fixable is the message: a generic "not a valid RFC 3339 timestamp" sends the reader
+    hunting for a typo in a timestamp that is genuinely valid.
+    """
+    errors = _validation_errors_for_spec(
+        tmp_path,
+        _spec_with_first_table_row_count({"value": 42, "source": "hyper", "observed_at": "2026-12-31T23:59:60Z"}),
+    )
+
+    assert any("leap second" in error for error in errors), f"expected a leap-second-specific reason, got {errors}"
+
+
 def test_malformed_appended_limitation_names_the_bad_field(tmp_path: Path) -> None:
     """The observed failure was an appended severity outside the schema enum."""
     spec = _fixture_spec()
