@@ -692,6 +692,7 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         throttle_seconds: float = REFRESH_PROGRESS_THROTTLE_SECONDS,
         clock=time.monotonic,
         printer=print,
+        current_event_values: set[str] | None = None,
     ) -> None:
         self.trace = trace
         self.server = server
@@ -707,6 +708,7 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         self._last_print_by_object: dict[str, float] = {}
         self._latest_rows_by_object: dict[str, int] = {}
         self._last_row_object: str | None = None
+        self._current_event_values = current_event_values or {"ProgressReportCurrent"}
 
     def mark_refresh_started(self) -> None:
         """Start the liveness clock from the refresh request, not trace construction."""
@@ -725,7 +727,7 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         with self._lock:
             self._last_event_at = now
             self._last_event_label = str(label)
-            if event_class == "ProgressReportCurrent" and row_count is not None:
+            if str(event_class) in self._current_event_values and row_count is not None:
                 self._latest_rows_by_object[str(label)] = row_count
                 self._last_row_object = str(label)
                 message = self._format_row_progress_locked(str(label), row_count, now)
@@ -820,6 +822,15 @@ def _load_amo_trace_types():
     return server_type, TraceColumn, TraceEventClass, TraceEvent
 
 
+def _progress_event_values(trace_event_class, event_name: str) -> set[str]:
+    """Accepted EventClass wire values for one AMO trace event."""
+    values = {event_name}
+    enum_value = _enum_int(getattr(trace_event_class, event_name))
+    if enum_value is not None:
+        values.add(str(enum_value))
+    return values
+
+
 def _add_progress_events(
     trace, trace_event_class, trace_column, trace_event_type, wanted: dict[str, list[str]]
 ) -> None:
@@ -875,7 +886,13 @@ def _start_refresh_progress_trace(port: int, liveness_seconds: float) -> Refresh
         name = f"pbip-refresh-progress-{os.getpid()}-{int(time.time())}"
         trace = server.Traces.Add(name, name)
         _negotiate_progress_trace_columns(trace, trace_event_class, trace_column, trace_event_type)
-        monitor = RefreshProgressMonitor(trace, server, trace_column, liveness_seconds=liveness_seconds)
+        monitor = RefreshProgressMonitor(
+            trace,
+            server,
+            trace_column,
+            liveness_seconds=liveness_seconds,
+            current_event_values=_progress_event_values(trace_event_class, "ProgressReportCurrent"),
+        )
         trace.OnEvent += monitor.handle_event
         setattr(trace, "_py_progress_handler", monitor.handle_event)  # noqa: B010
         trace.Start()

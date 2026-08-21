@@ -182,25 +182,55 @@ def test_progress_current_prints_row_counts_without_percentages() -> None:
     def record(message: str, **_kwargs) -> None:
         lines.append(message)
 
-    monitor = RefreshProgressMonitor(liveness_seconds=120, throttle_seconds=2, clock=clock.monotonic, printer=record)
+    monitor = RefreshProgressMonitor(
+        liveness_seconds=120,
+        throttle_seconds=2,
+        clock=clock.monotonic,
+        printer=record,
+        current_event_values={"ProgressReportCurrent", "7"},
+    )
     monitor.mark_refresh_started()
-    monitor.record_trace_event(
-        {"EventClass": "ProgressReportCurrent", "ObjectName": "Flight Activity", "IntegerData": "240000"}
-    )
+    monitor.record_trace_event({"EventClass": "7", "ObjectName": "Flight Activity", "IntegerData": "240000"})
     clock.now = 1.0
-    monitor.record_trace_event(
-        {"EventClass": "ProgressReportCurrent", "ObjectName": "Flight Activity", "IntegerData": "250000"}
-    )
+    monitor.record_trace_event({"EventClass": "7", "ObjectName": "Flight Activity", "IntegerData": "250000"})
     clock.now = 2.1
-    monitor.record_trace_event(
-        {"EventClass": "ProgressReportCurrent", "ObjectName": "Flight Activity", "IntegerData": "260000"}
-    )
+    monitor.record_trace_event({"EventClass": "7", "ObjectName": "Flight Activity", "IntegerData": "260000"})
 
     assert lines == [
         "[progress] Flight Activity: 240,000 rows read (0.0s)",
         "[progress] Flight Activity: 260,000 rows read (2.1s)",
     ]
     assert all("%" not in line and "ETA" not in line for line in lines)
+
+
+def test_progress_event_values_include_the_numeric_wire_value() -> None:
+    """Production derives the numeric EventClass value from TraceEventClass."""
+
+    class _TraceEventClass:  # pylint: disable=too-few-public-methods
+        ProgressReportCurrent = 7
+
+    assert refresh_pbip_model._progress_event_values(_TraceEventClass, "ProgressReportCurrent") == {
+        "ProgressReportCurrent",
+        "7",
+    }
+
+
+def test_progress_current_name_form_is_tolerated() -> None:
+    """The real wire value is numeric, but name-form test doubles remain accepted."""
+    lines: list[str] = []
+    monitor = RefreshProgressMonitor(
+        liveness_seconds=120,
+        throttle_seconds=2,
+        printer=lambda message, **_kwargs: lines.append(message),
+        current_event_values={"ProgressReportCurrent", "7"},
+    )
+    monitor.mark_refresh_started()
+
+    monitor.record_trace_event(
+        {"EventClass": "ProgressReportCurrent", "ObjectName": "Flight Activity", "IntegerData": "10000"}
+    )
+
+    assert lines and "10,000 rows read" in lines[0]
 
 
 def test_progress_liveness_replaces_the_legacy_duration_ceiling(monkeypatch, parked) -> None:
