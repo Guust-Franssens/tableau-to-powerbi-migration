@@ -232,6 +232,17 @@ else {
         'Install Python 3.11+, then re-run. The engine single-source rule is enforced by scripts/engine_source.py --json.'
 }
 
+# --- Engine receipt drift: bundles retain their provenance, so read it back --------------------------
+# A bundle built before the plugin updated is structurally indistinguishable from one built today until
+# its receipt is compared. This is advisory: the timing rule forbids an engine upgrade mid-migration,
+# so an actionable warning must never block the run that discovers it.
+if ($engineStatus -and $engineStatus.present -and $py) {
+    $receiptOutput = & python (Join-Path $repoRoot 'scripts\check_engine_receipts.py') --root $repoRoot 2>&1 | Out-String
+    Add-Check 'engine: bundle receipt versions' 'optional' ($LASTEXITCODE -eq 0) `
+        $receiptOutput.Trim() `
+        'A listed bundle was built with a different engine version. Between migrations, re-run it with the installed canonical engine; do not upgrade the engine mid-migration.'
+}
+
 # --- Skill plugins ---
 # `powerbi-authoring` is still checked by configured plugin identity, because it supplies the official
 # planning/design/authoring/semantic-model skills the builder personas chain.

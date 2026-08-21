@@ -2,7 +2,10 @@
 purpose: sync a semantic model's AI instructions (an editable markdown file) into the model's
          culture linguisticMetadata.CustomInstructions key. That key is what Power BI Copilot and
          Fabric data agents read as model-level AI instructions ("Prep data for AI" > AI instructions).
-         Writing the TMDL directly avoids an XMLA refresh (and the LCID-4096 refresh bug on this box).
+         Writing the TMDL directly needs no XMLA call to land (and dodges the LCID-4096 refresh bug
+         on this box). That is about the WRITE only: it does not update an already-open Desktop
+         model, and whether it invalidates .pbi/cache.abf is UNMEASURED. Stamp BEFORE the final
+         reopen + refresh + save, not after.
 usage:   python .github/skills/powerbi-ai-readiness/scripts/set_ai_instructions.py
              --model <*.SemanticModel> [--md <file.md>]
              --all             # stamp every migration that has an ai-instructions.md

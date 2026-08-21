@@ -4112,25 +4112,7 @@
       "stage": "parse"
     },
     {
-      "item": "ws.1_design",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.10_avg",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.10_avg",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.2_raw",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
       "severity": "low",
       "stage": "parse"
@@ -4148,18 +4130,6 @@
       "stage": "parse"
     },
     {
-      "item": "ws.4_manufac",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.5_transport",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.5_transport",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
       "severity": "low",
@@ -4172,25 +4142,7 @@
       "stage": "parse"
     },
     {
-      "item": "ws.6_retail",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.7_use",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.7_use",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.8_end_of_use",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_782781928617705474:qk",
       "severity": "low",
       "stage": "parse"

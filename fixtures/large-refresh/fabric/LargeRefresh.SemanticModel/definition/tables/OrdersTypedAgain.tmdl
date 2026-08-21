@@ -1,0 +1,64 @@
+/// Second full CSV scan with additional row-level calculations. This deliberately makes refresh
+/// duration observable without credentials or network calls.
+table OrdersTypedAgain
+	lineageTag: ec015354-c54b-4376-b869-1d5129130262
+
+	measure 'Typed Again Rows' = COUNTROWS ( 'OrdersTypedAgain' )
+		formatString: #,##0
+		lineageTag: 279de2b6-fc70-45bc-9d5d-c4a8b2b90262
+
+	column CustomerID
+		dataType: string
+		lineageTag: 90735d03-dd81-4fe9-bb2f-d45072e00262
+		summarizeBy: none
+		sourceColumn: CustomerID
+
+	column Status
+		dataType: string
+		lineageTag: c477aa76-e6f4-4869-a4c2-96e8871d0262
+		summarizeBy: none
+		sourceColumn: Status
+
+	column 'Order Month'
+		dataType: dateTime
+		formatString: mmm yyyy
+		lineageTag: 6d1737ea-ee04-43ca-ac13-2a1361440262
+		summarizeBy: none
+		sourceColumn: Order Month
+
+	column 'Customer Bucket'
+		dataType: int64
+		formatString: 0
+		lineageTag: 85f8ffeb-2cb0-4691-893e-7e26f4680262
+		summarizeBy: sum
+		sourceColumn: Customer Bucket
+
+	column 'Net Amount'
+		dataType: decimal
+		formatString: $#,##0.00
+		lineageTag: bb1483c2-978c-4128-8834-4abcecd40262
+		summarizeBy: sum
+		sourceColumn: Net Amount
+
+	column 'Delay Score'
+		dataType: int64
+		formatString: #,##0
+		lineageTag: 5ef6c114-94cc-42fc-af35-5927f8c90262
+		summarizeBy: sum
+		sourceColumn: Delay Score
+
+	partition OrdersTypedAgain = m
+		mode: import
+		source =
+				let
+					Source = Csv.Document(File.Contents(SourceFolder & "orders.csv"), [Delimiter=",", Columns=15, Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
+					#"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+					#"Changed Types" = Table.TransformColumnTypes(#"Promoted Headers", {{"OrderDate", type date}, {"CustomerID", type text}, {"Status", type text}, {"Quantity", Int64.Type}, {"UnitPrice", Currency.Type}, {"Discount", type number}, {"ShipDays", Int64.Type}}, "en-US"),
+					#"Added Net Amount" = Table.AddColumn(#"Changed Types", "Net Amount", each [Quantity] * [UnitPrice] * (1 - [Discount]), Currency.Type),
+					#"Added Order Month" = Table.AddColumn(#"Added Net Amount", "Order Month", each Date.StartOfMonth([OrderDate]), type date),
+					#"Added Customer Bucket" = Table.AddColumn(#"Added Order Month", "Customer Bucket", each Number.Mod(Number.FromText(Text.AfterDelimiter([CustomerID], "-")), 1000), Int64.Type),
+					#"Added Delay Score" = Table.AddColumn(#"Added Customer Bucket", "Delay Score", each [ShipDays] * (1 + Number.Mod([Customer Bucket], 11)), Int64.Type),
+					#"Selected Columns" = Table.SelectColumns(#"Added Delay Score", {"CustomerID", "Status", "Order Month", "Customer Bucket", "Net Amount", "Delay Score"})
+				in
+					#"Selected Columns"
+

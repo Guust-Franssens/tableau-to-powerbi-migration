@@ -1798,12 +1798,6 @@
       "stage": "parse"
     },
     {
-      "item": "ws.doughnuts",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_175077503786336257:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.pointer_needle",
       "issue": "could not resolve shelf reference UNRESOLVED:Longitude (generated)",
       "severity": "low",

@@ -280,6 +280,16 @@ def _describe_named_connection(conn_el: etree._Element, mode: str) -> dict[str, 
 _CONTAINER_RELATION_TYPES = {"collection", "join", "union"}
 
 
+def _unknown_row_count() -> dict[str, str]:
+    """Return the normal no-volume-yet marker.
+
+    Parse remains offline and fast: it records table-level unknowns rather than opening packaged
+    `.hyper` files. `extract_hyper_data.py --enrich-spec` is the opt-in step that replaces these
+    with `{value, source: "hyper", observed_at}` hints after it pays the Hyper-read cost.
+    """
+    return {"source": "unknown"}
+
+
 def _published_ds_name(repo: etree._Element, connection: dict[str, Any]) -> tuple[str | None, str]:
     """Resolve the published datasource's real name, and say which attribute it came from.
 
@@ -398,6 +408,7 @@ def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]
                     "name": name,
                     "source_relation": "custom-sql" if rel_type == "text" else rel_type,
                     "custom_sql": rel.text if rel_type == "text" else None,
+                    "row_count": _unknown_row_count(),
                 }
             )
     return tables
@@ -1594,6 +1605,47 @@ _SPEC_CONTRACT_BAD_CANARIES: tuple[tuple[str, dict[str, Any]], ...] = (
             ],
         },
     ),
+    (
+        "bare integer row_count",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [
+                {
+                    "id": "ds.sales",
+                    "connection": {"class": "hyper", "mode": "extract"},
+                    "tables": [{"id": "tbl.sales", "name": "Sales", "source_relation": "table", "row_count": 42}],
+                    "fields": [],
+                }
+            ],
+            "worksheets": [],
+            "dashboards": [],
+        },
+    ),
+    (
+        "unknown row_count with value",
+        {
+            "migration_spec_version": "1.0",
+            "source": {"file_name": "canary.twb"},
+            "data_sources": [
+                {
+                    "id": "ds.sales",
+                    "connection": {"class": "hyper", "mode": "extract"},
+                    "tables": [
+                        {
+                            "id": "tbl.sales",
+                            "name": "Sales",
+                            "source_relation": "table",
+                            "row_count": {"source": "unknown", "value": 0},
+                        }
+                    ],
+                    "fields": [],
+                }
+            ],
+            "worksheets": [],
+            "dashboards": [],
+        },
+    ),
 )
 
 
@@ -1615,6 +1667,73 @@ def _unavailable_schema_result(message: str, require_jsonschema: bool, cause: Ex
         raise MigrationSpecValidationUnavailable(message) from cause
     logger.warning("%s - skipping validation", message)
     return []
+
+
+_RFC3339_DATE_TIME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$",
+)
+
+
+def _observed_at_errors(spec: dict[str, Any]) -> list[str]:
+    """Return errors for row_count.observed_at values jsonschema's format:date-time cannot catch.
+
+    `"format": "date-time"` is ANNOTATION-ONLY unless jsonschema is installed with the
+    `format-nongpl` extra (which pulls `rfc3339-validator`). Measured in this venv: FORMAT_CHECKER
+    enforces only date/email/idn-email/idn-hostname/ipv4/ipv6/regex, so `observed_at: "yesterday"`,
+    `""` and `"2026-13-45T99:99:99Z"` are all ACCEPTED even with `format_checker=` passed. Adding
+    that kwarg would look like a fix, pass every gate, and change nothing.
+
+    Two checks, because neither alone matches the advertised contract:
+
+    * **Shape** (`_RFC3339_DATE_TIME`) - `datetime.fromisoformat` is much broader than RFC 3339. It
+      accepts a SPACE separator (`2026-08-19 10:04:00+00:00`) and the basic format
+      (`20260819T100400+00:00`); RFC 3339's ABNF is `full-date "T" full-time`, extended format only.
+      Silently accepting them weakens the contract the schema advertises, in the very fallback whose
+      job is to make that contract deterministic. Lowercase `t`/`z` ARE valid RFC 3339.
+    * **Semantics** (`datetime.fromisoformat`) - strictly stronger than any shape pattern: it
+      rejects month 13 and 30 February, which a regex happily matches. It needs no dependency and
+      requires Python 3.11+ to accept a trailing `Z`, which `requires-python` already guarantees.
+    """
+    errors = []
+    for ds_index, data_source in enumerate(spec.get("data_sources") or []):
+        for tbl_index, table in enumerate((data_source or {}).get("tables") or []):
+            row_count = (table or {}).get("row_count")
+            if not isinstance(row_count, dict) or "observed_at" not in row_count:
+                continue
+            location = f"$.data_sources[{ds_index}].tables[{tbl_index}].row_count.observed_at"
+            raw = row_count["observed_at"]
+            if not isinstance(raw, str):
+                errors.append(f"{location}: expected an RFC 3339 string, got {type(raw).__name__}")
+                continue
+            if not _RFC3339_DATE_TIME.match(raw):
+                errors.append(
+                    f"{location}: {raw!r} is not RFC 3339 date-time (expected YYYY-MM-DDThh:mm:ss[.fff](Z|±hh:mm))"
+                )
+                continue
+            try:
+                # Safe because the regex above already constrained `raw` to digits and
+                # `- : . + T t Z z`: upper-casing cannot alter a digit or a separator, and
+                # `fromisoformat` accepts only the uppercase `T`/`Z` that RFC 3339 also allows
+                # in lowercase.
+                parsed = datetime.fromisoformat(raw.upper())
+            except ValueError as exc:
+                # RFC 3339 permits a seconds field of 60 only at an ACTUAL leap second, and Python's
+                # `datetime` cannot represent one either way ("second must be in 0..59"). So this is
+                # a stdlib ceiling, not a choice, and it predates the shape check. Deliberately does
+                # NOT assert the value IS a leap second: `23:58:60Z` is not one, and no validator can
+                # tell without a leap-second table. Name the seconds field instead of guessing.
+                if raw[17:19] == "60":
+                    errors.append(
+                        f"{location}: {raw!r} has a seconds field of 60. RFC 3339 allows that only at "
+                        "a leap second, and Python's datetime cannot represent one, so it cannot be "
+                        "stored or compared here"
+                    )
+                    continue
+                errors.append(f"{location}: {raw!r} is not a valid RFC 3339 timestamp ({exc})")
+                continue
+            if parsed.tzinfo is None:
+                errors.append(f"{location}: {raw!r} has no UTC offset; a bare local time is ambiguous")
+    return errors
 
 
 def collect_spec_validation_errors(
@@ -1644,7 +1763,7 @@ def collect_spec_validation_errors(
         context = _limitation_context(spec, path_parts)
         expectation = _expectation(error)
         errors.append(f"{location}{context}: {error.message};{expectation}")
-    return errors
+    return errors + _observed_at_errors(spec)
 
 
 def validate_spec(spec: dict[str, Any], schema_path: Path) -> None:

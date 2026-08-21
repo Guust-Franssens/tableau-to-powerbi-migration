@@ -552,7 +552,7 @@ def _flag_name_collisions(by_key: dict[str, list[dict[str, Any]]], survey: Surve
     for key, rows in by_key.items():
         entry = survey.datasources.get(key)
         survey_projects = sorted(entry.projects) if entry and entry.ambiguous else []
-        if len(rows) < 2 and not survey_projects:
+        if len(rows) < 2 and not (entry and entry.ambiguous):
             continue
         projects = sorted({str(row["project"]) for row in rows if row["project"]} | set(survey_projects))
         for row in rows:

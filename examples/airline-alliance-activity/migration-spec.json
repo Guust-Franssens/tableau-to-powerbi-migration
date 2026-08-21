@@ -22810,12 +22810,6 @@
     },
     {
       "item": "ws.aircraft_summary_1",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674805269:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.aircraft_summary_1",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283267704742013:qk",
       "severity": "low",
       "stage": "parse"
@@ -22829,12 +22823,6 @@
     {
       "item": "ws.aircraft_summary_2",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283267704795262:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.aircraft_summary_2",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674805269:qk",
       "severity": "low",
       "stage": "parse"
     },
@@ -22858,12 +22846,6 @@
     },
     {
       "item": "ws.aircraft_summary_3",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674805269:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.aircraft_summary_3",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283267704877185:qk",
       "severity": "low",
       "stage": "parse"
@@ -22882,24 +22864,6 @@
     },
     {
       "item": "ws.airline_summary_1",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674805269:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.airline_summary_1",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674850326:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.airline_summary_1",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674805269:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.airline_summary_1",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674850326:qk",
       "severity": "low",
       "stage": "parse"
@@ -22913,24 +22877,6 @@
     {
       "item": "ws.airline_summary_2",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265677840415:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.airline_summary_2",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674805269:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.airline_summary_2",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674850326:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.airline_summary_2",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_1527283265674805269:qk",
       "severity": "low",
       "stage": "parse"
     },
@@ -23051,12 +22997,6 @@
     {
       "item": "ws.load_factor_circles",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2009731371944992841:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.mishandling",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_2945072720990650369:qk",
       "severity": "low",
       "stage": "parse"
     },

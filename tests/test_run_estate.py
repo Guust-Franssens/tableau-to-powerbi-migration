@@ -406,6 +406,175 @@ def test_the_empty_model_verdict_is_persisted_for_later_steps(tmp_path: Path) ->
 
 
 # ---------------------------------------------------------------------------
+# The blank-placeholder gate: a bundle whose report consumes a calc the engine refused
+# ---------------------------------------------------------------------------
+
+_REFUSED_CALC = {
+    "category": "type_or_shape_mismatch",
+    "fallback_reason": "IFNULL arguments return inconsistent types",
+    "has_suggestion": False,
+    "name": "Last Usage Filter",
+    "role": "dimension",
+    "target_table": "UDP_SF",
+}
+
+
+def _placeholder_report(dod_status: str = "warn", workbook: str = "Alpha") -> dict:
+    """A report.json in the engine's real shape whose one workbook carries a refused calc.
+
+    `pbip_folder` is the engine's own name for the folder the workbook built, and is what the
+    checker keys the correlation on; it is carried here because a fixture that omits it would test
+    a shape the engine does not emit.
+    """
+    wb = _workbook(workbook, workbook, requests=[dict(_REFUSED_CALC)])
+    wb["pbip_folder"] = f"pbip/{workbook}/{workbook}.pbip"
+    return _report(workbooks=[wb], dod_status=dod_status)
+
+
+def _placeholder_model(out: Path, workbook: str = "Alpha") -> None:
+    """The other half of the correlation: the BLANK()-only column the engine emitted instead."""
+    tables = out / "pbip" / workbook / f"{workbook}.SemanticModel" / "definition" / "tables"
+    _write(tables / "UDP_SF.tmdl", "table UDP_SF\n\n\tcolumn 'Last Usage Filter' = BLANK()\n\t\tsummarizeBy: none\n")
+
+
+def _report_consuming_placeholder(out: Path, workbook: str = "Alpha") -> None:
+    """A shipping PBIR page whose filter depends on the placeholder - the blocking case."""
+    page = out / "pbip" / workbook / f"{workbook}.Report" / "definition" / "pages" / "p1"
+    _write(page / "page.json", json.dumps({"name": "p1", "displayName": "Overview"}))
+    _write(
+        page / "visuals" / "v1" / "visual.json",
+        json.dumps(
+            {
+                "name": "v1",
+                "visual": {"visualType": "tableEx"},
+                "filterConfig": {
+                    "filters": [
+                        {
+                            "name": "f1",
+                            "field": {
+                                "Column": {
+                                    "Expression": {"SourceRef": {"Entity": "UDP_SF"}},
+                                    "Property": "Last Usage Filter",
+                                }
+                            },
+                            "type": "Categorical",
+                        }
+                    ]
+                },
+            }
+        ),
+    )
+
+
+def _without_pbir_validator(monkeypatch) -> None:
+    """Run as if Node/the first-party validator were absent, which `check_pbir_valid` supports.
+
+    Not a convenience: PBIR validity OUTRANKS this gate, and these fixtures are hand-written PBIR
+    fragments rather than whole reports, so on a machine that has the CLI the run would stop at
+    EXIT_INVALID_PBIR and never reach the branch under test. Patching `find_cli` exercises the real
+    `scan` down its real SKIPPED path instead of substituting a fake verdict.
+    """
+    import check_pbir_valid  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setattr(check_pbir_valid, "find_cli", lambda *_args, **_kwargs: None)
+
+
+def test_a_report_referenced_blank_placeholder_blocks_a_bundle_on_its_first_run(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The FRESH-RUN case, and the one that matters: no `handover/` folder exists yet.
+
+    `<bundle>/handover/` is not engine output - `slice_handovers` writes it in phase 3, while this
+    gate runs in phase 2. A gate that reads the slices therefore sees nothing on a first run and
+    passes the bundle, then blocks on a SECOND run over the same `--output` folder. Measured on
+    identical bytes: exit 0 / "OK - 0 placeholder(s)" first, exit 8 second.
+
+    So the assertion that the folder is absent BEFORE the run and present after is the test, not
+    scenery: it pins the phase ordering that made the evidence unreadable, and it is what forces
+    the correlation to come from `report.json`.
+    """
+    _without_pbir_validator(monkeypatch)
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_placeholder_report()))
+    _placeholder_model(out)
+    _report_consuming_placeholder(out)
+    assert not (out / "handover").exists(), "fixture is not a fresh run if the slices already exist"
+
+    code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_BLANK_PLACEHOLDER
+    assert (out / "handover").is_dir(), "phase 3 writes the slices AFTER the gate that needed them"
+    printed = capsys.readouterr().out
+    assert "BLANK-PLACEHOLDER CHECK: REFERENCED" in printed
+    assert "Last Usage Filter" in printed
+
+
+def test_the_blank_placeholder_verdict_is_printed_even_when_the_definition_of_done_already_failed(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """Precedence is DoD-first, but the reader must still be told about both."""
+    _without_pbir_validator(monkeypatch)
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_placeholder_report(dod_status="failed")))
+    _placeholder_model(out)
+    _report_consuming_placeholder(out)
+
+    code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_DOD_FAILED
+    assert "BLANK-PLACEHOLDER CHECK: REFERENCED" in capsys.readouterr().out
+
+
+def test_the_blank_placeholder_verdict_is_persisted_for_later_steps(tmp_path: Path, monkeypatch) -> None:
+    """The triage step runs in a different process and must not have to re-derive this."""
+    _without_pbir_validator(monkeypatch)
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_placeholder_report()))
+    _placeholder_model(out)
+    _report_consuming_placeholder(out)
+
+    run_estate.main(_slice_only_argv(out))
+
+    verdict = json.loads((out / "blank-placeholder-check.json").read_text(encoding="utf-8"))
+    assert verdict["status"] == "REFERENCED"
+    assert verdict["placeholders_referenced"] == 1
+    assert verdict["findings"][0]["owner"] == "Alpha"
+    assert verdict["findings"][0]["name"] == "Last Usage Filter"
+
+
+def test_an_unreadable_handover_input_cannot_silence_the_other_gates(tmp_path: Path, monkeypatch, capsys) -> None:
+    """One truncated JSON file used to take the whole coordinator down, with the wrong exit code.
+
+    `GateResults(...)` evaluates this gate before the empty-model one and prints all three verdicts
+    afterwards, so an exception here meant NO verdict was printed at all and Python exited 1 - which
+    in this script's vocabulary is EXIT_ENGINE_FAILED, "the engine itself exited non-zero".
+
+    The report.json here deliberately does not carry the engine's `workbooks` list, which is what
+    sends the checker to its `handover/` fallback and so makes the corrupt slice reachable at all.
+    """
+    _without_pbir_validator(monkeypatch)
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps({"tool": "tableau-fabric-skills"}))
+    _write(
+        out / "handover" / "Alpha.json",
+        json.dumps({"workbook": {"model_translation_handoff": {"requests": [dict(_REFUSED_CALC)]}}}),
+    )
+    _write(out / "handover" / "Truncated.json", '{"workbook": {')
+    _placeholder_model(out)
+    _report_consuming_placeholder(out)
+
+    code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_BLANK_PLACEHOLDER, "the readable slice's evidence was lost with the corrupt one"
+    printed = capsys.readouterr().out
+    assert "EMPTY-MODEL CHECK" in printed, "a corrupt input silenced a sibling gate"
+    assert "handover/Truncated.json" in printed
+    verdict = json.loads((out / "blank-placeholder-check.json").read_text(encoding="utf-8"))
+    assert verdict["handover_unreadable"] == 1
+    assert verdict["handover_unreadable_paths"] == ["handover/Truncated.json"]
+
+
+# ---------------------------------------------------------------------------
 # Slicing: the estate report must never enter a per-workbook agent's context
 # ---------------------------------------------------------------------------
 
