@@ -626,15 +626,18 @@ source was reachable.
 
 | strategy | who drives it | ceiling | you can see progress |
 |---|---|---|---|
-| **`scripted`** (default) | `refresh_pbip_model.py` | **hard 300 s** (330 s with grace), not configurable | ⚠️ an elapsed-time heartbeat only — `still refreshing, 42s / 300s` |
+| **`scripted`** (default) | `refresh_pbip_model.py` | **hard 300 s** (330 s with grace), not configurable | ⚠️ an elapsed-time heartbeat only — `still refreshing, 42s / 330s` |
 | `operator` | the agent prepares everything, stops, and asks **you** to hit Refresh in Desktop | none | ✅ per-table row counts, live in the UI |
 | `xmla` | manual XMLA/TOM against the live instance | none | ⚠️ partial |
 
 **Why it earns a slot in the intake instead of being discovered mid-run.** A refresh is the only
 routine step where *"still working"* and *"hung"* produce an identical signal — the scripted path's
 heartbeat reports **elapsed time, not work done** (`print_refresh_heartbeat` is documented as
-printing "an elapsed/total countdown *without claiming progress*"), so it ticks the same whether the
-engine is reading rows or wedged on a credential prompt — so the decision lands at the worst possible
+printing "an elapsed/total countdown *without claiming progress*"), so a slow refresh and a stuck one
+print the same line. Be precise about what it does catch: a **detected** credential modal does not
+heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see —
+and the script says so itself on timeout: *"CAUSE UNKNOWN - this script cannot distinguish these two,
+and they need opposite responses"* — so the decision lands at the worst possible
 moment: mid-flight, under uncertainty, on the
 agent. Worse, the two governing rules **point in opposite directions** there. The general rule says
 time-box an unresponsive external system at ~2 minutes or 3 attempts; the carve-out says *don't*, if
