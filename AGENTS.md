@@ -587,7 +587,7 @@ not exist yet. Getting a finished model/report into a Fabric workspace is a manu
 Desktop publish. So the target question is not "local or Fabric?" but *"note the destination
 workspace in the brief so the manual publish is unambiguous."* Do not imply an automated deploy.
 
-### Step 2 — four questions, asked ONCE, in one message
+### Step 2 — five questions, asked ONCE, in one message
 
 **The problem was never that we ask too little. It is that every question arrived too late.** Before
 this section existed, the orchestrator had four ask-moments and **all four were mid-flight**: the
@@ -607,6 +607,7 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 | 2 | **Autonomy** — see the table below. Default `standard`. | The failure modes are symmetric: too autonomous and a run spends 105 minutes saying nothing; too interactive and an overnight run stops on question 1 and achieves nothing. |
 | 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | It decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it. |
 | 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
+| 5 | **Who drives the data refreshes?** — see the table below. Default `scripted`. | A refresh is the one long operation with **no progress signal**, so an agent cannot tell "working" from "hung" *while it is happening*. Only you know how big the source is and whether you will be at the keyboard. |
 
 **Autonomy levels, defined by behaviour at a decision point — not by vibe:**
 
@@ -620,6 +621,43 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 modal sign-in dialog no automation can fill. Question 4 pre-authorises the *fallback* (build
 model-only under `credential_gate.py authorize`, artifacts marked unvalidated) — never pretending a
 source was reachable.
+
+**Refresh strategies, and why this is a question rather than a default:**
+
+| strategy | who drives it | ceiling | you can see progress |
+|---|---|---|---|
+| **`scripted`** (default) | `refresh_pbip_model.py` | **hard 300 s** (330 s with grace), not configurable | ⚠️ an elapsed-time heartbeat only — `still refreshing, 42s / 330s` |
+| `operator` | the agent prepares everything, stops, and asks **you** to hit Refresh in Desktop | none | ✅ per-table row counts, live in the UI |
+| `xmla` | manual XMLA/TOM against the live instance | none | ⚠️ partial |
+
+**Why it earns a slot in the intake instead of being discovered mid-run.** A refresh is the only
+routine step where *"still working"* and *"hung"* produce an identical signal — the scripted path's
+heartbeat reports **elapsed time, not work done** (`print_refresh_heartbeat` is documented as
+printing "an elapsed/total countdown *without claiming progress*"), so a slow refresh and a stuck one
+print the same line. Be precise about what it does catch: a **detected** credential modal does not
+heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see —
+and the script says so itself on timeout: *"CAUSE UNKNOWN - this script cannot distinguish these two,
+and they need opposite responses"* — so the decision lands at the worst possible
+moment: mid-flight, under uncertainty, on the
+agent. Worse, the two governing rules **point in opposite directions** there. The general rule says
+time-box an unresponsive external system at ~2 minutes or 3 attempts; the carve-out says *don't*, if
+the tool announces its own deadline — and `refresh_pbip_model.py` is exactly such a tool. An agent
+that resolves that tension wrongly either kills a legitimately-running refresh (recording **no
+verdict at all** — measured) or waits indefinitely (129 minutes / 298 tool calls — also measured).
+
+And the default's ceiling is **known to be too low for real sources**: measured against Snowflake,
+one table family took **~700–750 s** and another **~452 s**, both over the 330 s ceiling. Narrowing
+with `--tables` does **not** rescue it when a *single table* is the bottleneck rather than cumulative
+cost (proven twice, identical timeout both times). See #253.
+
+So: if the source is large or the run is unattended, say so **now**. `operator` trades start-latency
+for a refresh that cannot silently time out and that you can watch. Picking it up front costs one
+line in the brief; discovering it at 330 s costs the refresh.
+
+⚠️ `xmla` has a scope constraint worth stating in the brief: it must be **whole-database** scope if a
+calculated table depends on a refreshed table (e.g. a `Date` table built with
+`CALENDAR(MINX(...), MAXX(...))` over the fact). Refresh the fact alone and the calculated object
+does not recompute in the same transaction.
 
 ### Step 3 — write the brief, then dispatch
 
