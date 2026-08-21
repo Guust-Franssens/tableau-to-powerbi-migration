@@ -2,6 +2,13 @@
 purpose: Re-validate migration-spec.json after agents append limitations_encountered entries.
 usage:   python scripts/validate_spec.py migrations/workbooks/<slug>/migration-spec.json
          python scripts/validate_spec.py --all
+         python scripts/validate_spec.py --all --check     # CI: fail on duplicates, repair nothing
+
+Two modes on purpose. The default REPAIRS exact `limitations_encountered` duplicates in place,
+because that is what an agent appending entries wants. CI must not use that mode: GitHub Actions
+never commits the rewrite back, so a mutating run leaves the duplicate in the proposed content and
+still exits 0 -- a green gate for exactly the defect it exists to catch (#75). `--check` reports
+duplicates as a failure and writes nothing.
 """
 
 from __future__ import annotations
@@ -88,6 +95,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("spec", nargs="*", type=Path, help="migration-spec.json path(s) to validate")
     parser.add_argument("--all", action="store_true", help="validate every spec under examples/ and migrations/")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="report exact limitation duplicates as a FAILURE instead of repairing them in place (for CI)",
+    )
     args = parser.parse_args(argv)
 
     targets = _targets(args)
@@ -95,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("give one or more specs, or pass --all")
 
     invalid_count = 0
+    duplicate_count = 0
     for spec_path in targets:
         if not spec_path.exists():
             LOGGER.error("MISSING  %s", spec_path)
@@ -112,7 +125,14 @@ def main(argv: list[str] | None = None) -> int:
         source = spec_path.read_text(encoding="utf-8")
         spec = json.loads(source)
         removed = dedupe_limitations(spec)
-        if removed:
+        if removed and args.check:
+            duplicate_count += 1
+            LOGGER.error(
+                "DUPLICATE  %s (%d exact limitation duplicate(s); re-run without --check to repair)",
+                spec_path,
+                removed,
+            )
+        elif removed:
             spec_path.write_text(
                 json.dumps(spec, indent=_spec_indent(source), ensure_ascii=False) + "\n", encoding="utf-8"
             )
@@ -125,6 +145,17 @@ def main(argv: list[str] | None = None) -> int:
             "%d of %d spec(s) violate docs/migration-spec.schema.json. Fix the offending append; "
             "do not re-parse, because that discards downstream limitations.",
             invalid_count,
+            len(targets),
+        )
+        return 1
+    if duplicate_count:
+        # Deliberately a SEPARATE message: an exact duplicate is schema-VALID (that is the whole
+        # point of #75), so reporting it as a schema violation would send the reader to the wrong
+        # file looking for a constraint that does not exist.
+        LOGGER.error(
+            "%d of %d spec(s) carry exact limitation duplicates. These are schema-valid, so the "
+            "schema will never catch them; re-run without --check to repair, and commit the result.",
+            duplicate_count,
             len(targets),
         )
         return 1
