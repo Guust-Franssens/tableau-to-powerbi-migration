@@ -508,3 +508,122 @@ def test_committed_examples_still_resolve() -> None:
         result = cfb.check_pair(pbir, model)
         assert result["status"] == "OK", f"{pbir.name}: {result['findings']}"
     assert checked >= 10, "the sweep must actually have found the committed examples"
+
+
+# ---------------------------------------------------------------------------------------------
+# Issue #258 - table agreement. Every reference below RESOLVES; the defect is which table it
+# resolves ON, which the pre-#258 gate could not see.
+# ---------------------------------------------------------------------------------------------
+
+# The customer's shape, reduced: `Serial_Number` exists on THREE tables. `Installs` and `Aircraft`
+# are joined; `Config` is a stranded lookup that nothing relates to. Binding the grouping column to
+# `Config` still resolves, so the old gate said OK - and Desktop said InvalidUnconstrainedJoin.
+AIRCRAFT_TMDL = """table Installs
+
+\tcolumn Serial_Number
+\t\tdataType: string
+
+\tcolumn Install_Count
+\t\tdataType: int64
+
+\tmeasure 'Total Installs' = SUM(Installs[Install_Count])
+
+table Aircraft
+
+\tcolumn Serial_Number
+\t\tdataType: string
+
+\tcolumn Aircraft_Type
+\t\tdataType: string
+
+table Config
+
+\tcolumn Serial_Number
+\t\tdataType: string
+
+\tcolumn Config_Code
+\t\tdataType: string
+"""
+
+AIRCRAFT_RELATIONSHIPS = """relationship Installs_Aircraft
+\tfromColumn: Installs.Serial_Number
+\ttoColumn: Aircraft.Serial_Number
+"""
+
+
+def _write_star(
+    root: Path,
+    *,
+    visuals: list[dict],
+    model_tmdl: str = AIRCRAFT_TMDL,
+    relationships: str | None = AIRCRAFT_RELATIONSHIPS,
+) -> Path:
+    """A `pbip/` bundle whose model has several tables and a relationships file."""
+    pbip = root / "pbip" / "Book"
+    model = pbip / "Book.SemanticModel"
+    (model / "definition" / "tables").mkdir(parents=True)
+    (model / "definition" / "tables" / "model-tables.tmdl").write_text(model_tmdl, encoding="utf-8")
+    if relationships is not None:
+        (model / "definition" / "relationships.tmdl").write_text(relationships, encoding="utf-8")
+    report = pbip / "Book.Report"
+    (report / "definition.pbir").parent.mkdir(parents=True, exist_ok=True)
+    (report / "definition.pbir").write_text(
+        json.dumps({"datasetReference": {"byPath": {"path": "../Book.SemanticModel"}}}), encoding="utf-8"
+    )
+    for index, visual in enumerate(visuals):
+        folder = report / "definition" / "pages" / "p1" / "visuals" / f"v{index}"
+        folder.mkdir(parents=True)
+        (folder / "visual.json").write_text(json.dumps(visual), encoding="utf-8")
+    return root
+
+
+def _coherence(result: dict) -> list[dict]:
+    """Every table-agreement finding in the merged verdict."""
+    return [f for report in result["reports"] for f in report["coherence"]]
+
+
+def test_a_field_bound_to_the_wrong_table_of_the_same_name_is_caught(tmp_path, capsys) -> None:
+    """THE issue #258 reproduction: every field resolves, and the visual still cannot render.
+
+    Verbatim from the field report on `IA_Aircraft_Installs`: "a field existing under the identical
+    name on BOTH the referenced table and the correct table produces no gate warning - it only
+    surfaces later as InvalidUnconstrainedJoin". Pre-#258 this bundle graded `OK`, exit 0.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[_visual(_column("Config", "Serial_Number"), _column("Installs", "Install_Count"))],
+    )
+    result = cfb.scan(bundle)
+
+    assert result["status"] == "INCOHERENT", result
+    assert result["missing"] == 0 and result["near_misses"] == 0, "every reference resolves - that is the point"
+    finding = _coherence(result)[0]
+    assert finding["status"] == "unrelated_tables"
+    assert sorted(sorted(g) for g in finding["table_groups"]) == [["Config"], ["Installs"]]
+    # The ambiguity is itself the finding: name the tables the same column name also lives on.
+    assert finding["ambiguous"] == [{"report_spelling": "Config[Serial_Number]", "also_on": ["Aircraft", "Installs"]}]
+
+    assert cfb.main([str(bundle)]) == 1, "a visual that cannot render must gate the bundle"
+    out = capsys.readouterr().out
+    assert "UNRELATED TABLES" in out
+    assert "Config" in out and "Installs" in out
+    assert "Serial_Number" in out
+
+
+def test_a_star_schema_visual_spanning_fact_and_dimension_stays_silent(tmp_path, capsys) -> None:
+    """The false-positive that would destroy trust: a measure plus a related dimension attribute.
+
+    This is the single most common visual in any star schema. If it warns, the gate is worse than
+    useless - people will switch it off and lose the real finding with it.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[
+            _visual(_column("Aircraft", "Aircraft_Type"), _measure("Installs", "Total Installs")),
+            _visual(_column("Aircraft", "Aircraft_Type"), _column("Installs", "Install_Count")),
+        ],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", _coherence(result)
+    assert cfb.main([str(bundle)]) == 0
+    assert "UNRELATED TABLES" not in capsys.readouterr().out
