@@ -234,7 +234,11 @@ def _is_string_terminator(text: str, index: int) -> bool:
         index += 1
     if index == len(text) or text[index] in ",)]}&+-*/=<>&|":
         return True
-    return any(text.startswith(f"{word}", index) for word in ("as", "catch", "else", "in", "is", "meta", "or", "then"))
+    for word in ("as", "catch", "else", "in", "is", "meta", "or", "then"):
+        end = index + len(word)
+        if text.startswith(word, index) and (end == len(text) or not (text[end].isalnum() or text[end] == "_")):
+            return True
+    return False
 
 
 def _tokenize(text: str) -> tuple[list[Token], list[tuple[str, int, int]]]:
@@ -389,14 +393,17 @@ def _check_transform_column_type_pairs(tokens: list[Token], add: Callable[[str, 
         pairs = arguments[1]
         if len(pairs) < 2 or pairs[0].text != "{" or pairs[-1].text != "}":
             continue
-        for entry in _split_top_level(pairs[1:-1]):
+        entries = pairs[1:-1]
+        if not entries:
+            continue
+        for entry in _split_top_level(entries):
             if len(entry) < 2 or entry[0].text != "{" or entry[-1].text != "}":
                 _add_invalid_transform_pair(
                     add, entry[0] if entry else pairs[0], "each entry must be a `{columnName, type}` pair"
                 )
                 continue
             values = _split_top_level(entry[1:-1])
-            if len(values) != 2 or not values[0] or not values[1]:
+            if len(values) != 2 or any(not value or value[0].text == "{" for value in values):
                 _add_invalid_transform_pair(add, entry[0], "each entry must contain a column name and one type")
 
 

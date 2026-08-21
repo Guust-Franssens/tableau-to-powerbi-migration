@@ -108,9 +108,19 @@ def test_json_style_quote_escape_before_punctuation_is_caught() -> None:
     assert "INVALID_STRING_ESCAPE" in _kinds('let Source = "Say \\"!\\"" in Source')
 
 
+def test_json_style_quote_escape_before_keyword_prefix_is_caught() -> None:
+    assert "INVALID_STRING_ESCAPE" in _kinds('let Source = "foo\\"inside\\" stuff" in Source')
+
+
 def test_transform_column_types_extra_pair_braces_are_caught() -> None:
     assert "INVALID_TRANSFORM_COLUMN_TYPE_PAIR" in _kinds(
         'let Source = Table.TransformColumnTypes(T, {{{"Amount", type number}}}) in Source'
+    )
+
+
+def test_transform_column_types_multiple_pairs_in_extra_braces_are_caught() -> None:
+    assert "INVALID_TRANSFORM_COLUMN_TYPE_PAIR" in _kinds(
+        'let Source = Table.TransformColumnTypes(T, {{{"Amount", type number}, {"Count", Int64.Type}}}) in Source'
     )
 
 
@@ -121,6 +131,10 @@ def test_transform_column_types_variable_pairs_are_allowed() -> None:
         )
         == []
     )
+
+
+def test_transform_column_types_empty_pair_list_is_allowed() -> None:
+    assert _check_expression(DUMMY, "let Source = Table.TransformColumnTypes(T, {}) in Source") == []
 
 
 def test_delimiters_inside_strings_and_comments_are_ignored() -> None:
