@@ -1,0 +1,60 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<workbook source-build='2019.2.2 (20192.19.0718.1543)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource hasconnection='false' inline='true' name='Parameters' version='18.1'>
+      <column caption='Select KPI' datatype='string' name='[Parameter 1]' param-domain-type='list' role='measure' type='nominal' value='&quot;Sales&quot;'>
+        <calculation class='tableau' formula='&quot;Sales&quot;' />
+        <members>
+          <member value='&quot;Sales&quot;' />
+          <member value='&quot;Profit&quot;' />
+          <member value='&quot;Quantity&quot;' />
+          <member value='&quot;Bad Branch&quot;' />
+        </members>
+      </column>
+    </datasource>
+    <datasource caption='Orders' inline='true' name='federated.casefixture' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='orders' name='excel-direct.orders'>
+            <connection class='excel-direct' />
+          </named-connection>
+        </named-connections>
+        <relation connection='excel-direct.orders' name='Orders' table='[Orders$]' type='table' />
+      </connection>
+      <column caption='Category' datatype='string' name='[CATEGORY]' role='dimension' type='nominal' />
+      <column caption='Sales' datatype='real' name='[SALES]' role='measure' type='quantitative' />
+      <column caption='Profit' datatype='real' name='[PROFIT]' role='measure' type='quantitative' />
+      <column caption='Quantity' datatype='integer' name='[QUANTITY]' role='measure' type='quantitative' />
+      <column caption='Selected KPI' datatype='real' name='[Selected KPI]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='CASE [Parameters].[Parameter 1] WHEN &quot;Sales&quot; THEN SUM([SALES]) WHEN &quot;Profit&quot; THEN SUM([PROFIT]) WHEN &quot;Quantity&quot; THEN SUM([QUANTITY]) WHEN &quot;Bad Branch&quot; THEN SUM([MISSING_METRIC]) END' />
+      </column>
+      <column-instance column='[CATEGORY]' derivation='None' name='[none:CATEGORY:nk]' pivot='key' type='nominal' />
+      <column-instance column='[Selected KPI]' derivation='Sum' name='[sum:Selected KPI:qk]' pivot='key' type='quantitative' />
+      <metadata-records>
+        <metadata-record class='column'><remote-name>CATEGORY</remote-name><local-name>[CATEGORY]</local-name><parent-name>[Orders]</parent-name><local-type>string</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>SALES</remote-name><local-name>[SALES]</local-name><parent-name>[Orders]</parent-name><local-type>real</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>PROFIT</remote-name><local-name>[PROFIT]</local-name><parent-name>[Orders]</parent-name><local-type>real</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>QUANTITY</remote-name><local-name>[QUANTITY]</local-name><parent-name>[Orders]</parent-name><local-type>integer</local-type></metadata-record>
+      </metadata-records>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Selected KPI by Category'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Orders' name='federated.casefixture' />
+            <datasource name='Parameters' />
+          </datasources>
+        </view>
+        <panes><pane><mark class='Bar' /><encodings /></pane></panes>
+        <rows>[federated.casefixture].[sum:Selected KPI:qk]</rows>
+        <cols>[federated.casefixture].[none:CATEGORY:nk]</cols>
+      </table>
+      <simple-id uuid='{16800000-0000-0000-0000-000000000001}' />
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Dashboard'><size maxheight='800' maxwidth='1000' /><zones><zone h='100000' id='1' name='Selected KPI by Category' w='100000' x='0' y='0' /></zones></dashboard>
+  </dashboards>
+</workbook>

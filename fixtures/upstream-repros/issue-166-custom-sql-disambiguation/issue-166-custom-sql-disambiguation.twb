@@ -1,0 +1,50 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<workbook source-build='2019.2.2 (20192.19.0718.1543)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource caption='Aircraft Installs' inline='true' name='federated.customsql' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='Snowflake' name='snowflake.aircraft'>
+            <connection authentication='Username Password' class='snowflake' dbname='AIRCRAFT' schema='PUBLIC' server='example.snowflakecomputing.com' username='TABLEAU_SVC' warehouse='COMPUTE_WH' />
+          </named-connection>
+        </named-connections>
+        <relation type='collection'>
+          <relation connection='snowflake.aircraft' name='Custom SQL Query' type='text'>SELECT tail, technology, install_status FROM base_installs</relation>
+          <relation connection='snowflake.aircraft' name='Custom SQL Query (Upgrade Aircraft Installs)' type='text'>SELECT tail, technology AS new_technology, old_technology FROM upgrade_installs</relation>
+        </relation>
+      </connection>
+      <column caption='TAIL' datatype='string' name='[TAIL]' role='dimension' type='nominal' />
+      <column caption='TECHNOLOGY' datatype='string' name='[TECHNOLOGY]' role='dimension' type='nominal' />
+      <column caption='INSTALL_STATUS' datatype='string' name='[INSTALL_STATUS]' role='dimension' type='nominal' />
+      <column caption='TAIL (Custom SQL Query (Upgrade Aircraft Installs))' datatype='string' name='[TAIL (Custom SQL Query (Upgrade Aircraft Installs))]' role='dimension' type='nominal' />
+      <column caption='NEW_TECHNOLOGY' datatype='string' name='[NEW_TECHNOLOGY]' role='dimension' type='nominal' />
+      <column caption='OLD_TECHNOLOGY' datatype='string' name='[OLD_TECHNOLOGY]' role='dimension' type='nominal' />
+      <column-instance column='[TAIL]' derivation='None' name='[none:TAIL:nk]' pivot='key' type='nominal' />
+      <column-instance column='[TECHNOLOGY]' derivation='None' name='[none:TECHNOLOGY:nk]' pivot='key' type='nominal' />
+      <column-instance column='[TAIL (Custom SQL Query (Upgrade Aircraft Installs))]' derivation='None' name='[none:TAIL (Custom SQL Query (Upgrade Aircraft Installs)):nk]' pivot='key' type='nominal' />
+      <column-instance column='[NEW_TECHNOLOGY]' derivation='None' name='[none:NEW_TECHNOLOGY:nk]' pivot='key' type='nominal' />
+      <metadata-records>
+        <metadata-record class='column'><remote-name>TAIL</remote-name><local-name>[TAIL]</local-name><parent-name>[Custom SQL Query]</parent-name><local-type>string</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>TECHNOLOGY</remote-name><local-name>[TECHNOLOGY]</local-name><parent-name>[Custom SQL Query]</parent-name><local-type>string</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>INSTALL_STATUS</remote-name><local-name>[INSTALL_STATUS]</local-name><parent-name>[Custom SQL Query]</parent-name><local-type>string</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>TAIL</remote-name><local-name>[TAIL (Custom SQL Query (Upgrade Aircraft Installs))]</local-name><parent-name>[Custom SQL Query (Upgrade Aircraft Installs)]</parent-name><local-type>string</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>NEW_TECHNOLOGY</remote-name><local-name>[NEW_TECHNOLOGY]</local-name><parent-name>[Custom SQL Query (Upgrade Aircraft Installs)]</parent-name><local-type>string</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>OLD_TECHNOLOGY</remote-name><local-name>[OLD_TECHNOLOGY]</local-name><parent-name>[Custom SQL Query (Upgrade Aircraft Installs)]</parent-name><local-type>string</local-type></metadata-record>
+      </metadata-records>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Upgrade Aircraft Installs'>
+      <table>
+        <view><datasources><datasource caption='Aircraft Installs' name='federated.customsql' /></datasources></view>
+        <panes><pane><mark class='Bar' /><encodings><color column='[federated.customsql].[none:NEW_TECHNOLOGY:nk]' /></encodings></pane></panes>
+        <rows>[federated.customsql].[none:TAIL (Custom SQL Query (Upgrade Aircraft Installs)):nk]</rows>
+        <cols>[federated.customsql].[none:NEW_TECHNOLOGY:nk]</cols>
+      </table>
+      <simple-id uuid='{16600000-0000-0000-0000-000000000001}' />
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Dashboard'><size maxheight='800' maxwidth='1000' /><zones><zone h='100000' id='1' name='Upgrade Aircraft Installs' w='100000' x='0' y='0' /></zones></dashboard>
+  </dashboards>
+</workbook>
