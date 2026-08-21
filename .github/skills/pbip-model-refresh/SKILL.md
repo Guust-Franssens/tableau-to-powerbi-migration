@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. For DAX-only edits, opt into `--calculate-only` / `--measures-only` to recalculate formulas without re-reading source rows. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -48,8 +48,17 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
-                                     [--no-save] [--verify-only] [--ui-save]
+                                     [--calculate-only|--measures-only] [--no-save] [--verify-only]
+                                     [--ui-save]
 ```
+
+**`--calculate-only` / `--measures-only` is an opt-in DAX-only shortcut, not the default.** It sends
+TMSL refresh type `calculate`, which recalculates formulas, relationships and hierarchies without
+re-reading source rows. Use it only when the caller knows the pending edit was measure/DAX-only; after
+an M, partition, relationship or data-shape change, `calculate` can leave stale data wearing a fresh
+verdict, so the default remains the safe full refresh. This recipe is credited to SES field use
+(Sandeep Munagala, 2026-08-21), where the proven sequence was live measure edit -> Calculate ->
+ExportToTmdlFolder -> cache persist across ~6 workbooks in one day.
 
 **Persisting is the DEFAULT** — that is this script's stated purpose, *"so the next agent (and the
 next Desktop open) sees real data instead of an empty model"*. Pass **`--no-save`** for read-only

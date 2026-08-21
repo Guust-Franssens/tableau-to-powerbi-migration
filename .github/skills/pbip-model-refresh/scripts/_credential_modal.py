@@ -411,7 +411,12 @@ def source_hint_from_model(model_dir: Path | None) -> str | None:
     return None
 
 
-def print_refresh_banner(pid: int, timeout_sec: int, grace_sec: int | float) -> None:
+def print_refresh_banner(
+    pid: int,
+    timeout_sec: int,
+    grace_sec: int | float,
+    operation: str = "refresh",
+) -> None:
     """Print the no-dialog, self-bounded refresh warning before the wait starts.
 
     Deliberately does NOT name the verdict tokens it may later print, and interpolates NO caller-supplied
@@ -424,9 +429,14 @@ def print_refresh_banner(pid: int, timeout_sec: int, grace_sec: int | float) -> 
     cannot re-arm the landmine.
     """
     total = timeout_sec + grace_sec
+    wait_note = (
+        "this mode recalculates formulas without reading source rows, so long waits are unusual. "
+        if operation == "calculate"
+        else "a long wait here is expected for a serverless cold start. "
+    )
     print(
-        f"No blocking dialog on PID {pid}. Refreshing, bounded at {timeout_sec}s XMLA + "
-        f"{grace_sec}s grace ({total}s total); a long wait here is expected for a serverless cold start. "
+        f"No blocking dialog on PID {pid}. {operation.capitalize()} in progress, bounded at "
+        f"{timeout_sec}s XMLA + {grace_sec}s grace ({total}s total); {wait_note}"
         "DO NOT kill this process - at the deadline it re-checks and prints one final machine-readable "
         "verdict line. Killing it early yields NO verdict.",
         flush=True,

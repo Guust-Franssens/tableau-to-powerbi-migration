@@ -2,7 +2,8 @@
 purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, so the next agent
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
-             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"] [--no-save]
+             [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
+             [--calculate-only] [--no-save]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -162,6 +163,10 @@ SAVE_TIMEOUT_SECONDS = 120
 # waited on). On timeout `_persist_image` raises `ModelLockTimeout` and `_refresh_and_save` REFUSES to
 # persist (`NOT_PERSISTED`), naming the concurrent run.
 PERSIST_LOCK_TIMEOUT_SECONDS = 120.0
+REFRESH_TYPE_FULL = "full"
+REFRESH_TYPE_CALCULATE = "calculate"
+REFRESH_TYPES = {REFRESH_TYPE_FULL, REFRESH_TYPE_CALCULATE}
+
 # The XMLA refresh ceiling. NOT agent-tunable on purpose - there is no CLI flag for it.
 #
 # 300s is chosen from measurement, not intuition. A 246,236-row, 11-table refresh took 38.8s on a
@@ -311,6 +316,7 @@ def refresh(
     tables: list[str] | None,
     timeout_sec: int = REFRESH_TIMEOUT_SECONDS,
     *,
+    refresh_type: str = REFRESH_TYPE_FULL,
     desktop_pid: int | None = None,
     source_hint: str | None = None,
     initial_state: CredentialDetection | None = None,
@@ -318,7 +324,8 @@ def refresh(
     """Send a TMSL refresh over XMLA. Returns (ok, message).
 
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
-    minutes on a large table that no report even uses.
+    minutes on a large table that no report even uses. ``refresh_type='calculate'`` is an opt-in
+    DAX-only path: it recalculates formulas/relationships/hierarchies without re-reading source rows.
 
     **The timeout is real, but it does NOT bound the case it was added for.** Measured 2026-08-01,
     both halves, each with the timeout verified on readback:
@@ -350,6 +357,9 @@ def refresh(
     90 s" because there was no 90. Never take a timing measurement against a bundle preflight reports
     as STALE.
     """
+    if refresh_type not in REFRESH_TYPES:
+        raise ValueError(f"unsupported refresh type {refresh_type!r}; expected one of {sorted(REFRESH_TYPES)}")
+
     result: dict[str, tuple[bool, str] | BaseException] = {}
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
     if desktop_pid is not None:
@@ -361,7 +371,12 @@ def refresh(
                 desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS, state.unknown_reason
             )
         else:
-            print_refresh_banner(desktop_pid, timeout_sec, REFRESH_WALL_CLOCK_GRACE_SECONDS)
+            print_refresh_banner(
+                desktop_pid,
+                timeout_sec,
+                REFRESH_WALL_CLOCK_GRACE_SECONDS,
+                operation=refresh_type,
+            )
 
     def _run() -> None:
         conn = None
@@ -374,12 +389,14 @@ def refresh(
                 objects = [{"database": catalog, "table": t} for t in tables]
             else:
                 objects = [{"database": catalog}]
-            tmsl = json.dumps({"refresh": {"type": "full", "objects": objects}})
+            tmsl = json.dumps({"refresh": {"type": refresh_type, "objects": objects}})
             cmd = conn.CreateCommand()
             cmd.CommandText = tmsl
             cmd.CommandTimeout = timeout_sec
             cmd.ExecuteNonQuery()
-            result["ok"] = (True, f"refreshed {'/'.join(tables) if tables else 'entire database'} (catalog {catalog})")
+            target = "/".join(tables) if tables else "entire database"
+            verb = "calculated" if refresh_type == REFRESH_TYPE_CALCULATE else "refreshed"
+            result["ok"] = (True, f"{verb} {target} (catalog {catalog})")
         except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             # Everything the worker can raise has to be handed back, not left to die on the thread:
             # `main` classifies on the exception text, and an unhandled thread exception would reach
@@ -1148,10 +1165,11 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
                 port,
                 args.tables,
                 REFRESH_TIMEOUT_SECONDS,
+                refresh_type=args.refresh_type,
                 **refresh_kwargs,
             )
         else:
-            ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS)
+            ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS, refresh_type=args.refresh_type)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         if isinstance(exc, CredentialMissingError):
             _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
@@ -1318,6 +1336,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "refresh whose canaries all return rows earns the model-level DATA_OK. Defaults to --tables "
         "when only that is given; with neither, the first queryable table is probed and the verdict "
         "is downgraded to name that single table",
+    )
+    parser.set_defaults(refresh_type=REFRESH_TYPE_FULL)
+    parser.add_argument(
+        "--calculate-only",
+        "--measures-only",
+        dest="refresh_type",
+        action="store_const",
+        const=REFRESH_TYPE_CALCULATE,
+        help=(
+            "Opt-in DAX-only refresh: send TMSL refresh type 'calculate' instead of 'full'. "
+            "This recalculates formulas without re-reading source rows; use only after measure-only "
+            "edits, because data-affecting changes need the default full refresh"
+        ),
     )
     parser.add_argument(
         "--save",

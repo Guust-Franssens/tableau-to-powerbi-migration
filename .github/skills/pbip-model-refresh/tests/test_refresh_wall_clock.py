@@ -12,6 +12,7 @@ a bound - it failed on this repo's own agent. These tests pin the bound into the
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -137,7 +138,57 @@ def test_a_normal_refresh_is_unaffected(monkeypatch) -> None:
     ok, message = refresh(port=1234, tables=["Orders"], timeout_sec=5)
     assert ok is True
     assert "Orders" in message
-    assert executed and "refresh" in executed[0]
+    assert executed
+    assert json.loads(executed[0]) == {
+        "refresh": {"type": "full", "objects": [{"database": "catalog-1", "table": "Orders"}]}
+    }
+
+
+def test_default_refresh_type_is_full() -> None:
+    """A DAX-only shortcut must stay opt-in; data-affecting edits need the full default."""
+    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "1"])
+    assert args.refresh_type == "full"
+
+
+def test_calculate_only_aliases_select_tmsl_calculate(monkeypatch) -> None:
+    """Both documented flag names send TMSL type 'calculate', not a full source re-read."""
+    executed: list[str] = []
+
+    class _Cmd:  # pylint: disable=too-few-public-methods,invalid-name
+        CommandText = ""  # noqa: N815
+        CommandTimeout = 0  # noqa: N815
+
+        def ExecuteNonQuery(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+            executed.append(self.CommandText)
+
+    class _Conn:
+        def Open(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+            pass
+
+        def CreateCommand(self):  # noqa: N802  # pylint: disable=invalid-name
+            return _Cmd()
+
+        def Close(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+            pass
+
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _Conn())
+    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
+
+    for flag in ("--calculate-only", "--measures-only"):
+        args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "1", flag])
+        ok, message = refresh(port=1234, tables=None, timeout_sec=5, refresh_type=args.refresh_type)
+        assert ok is True
+        assert message.startswith("calculated entire database")
+
+    assert [json.loads(command)["refresh"]["type"] for command in executed] == ["calculate", "calculate"]
+    assert all(json.loads(command)["refresh"]["objects"] == [{"database": "catalog-1"}] for command in executed)
+
+
+def test_refresh_rejects_unknown_refresh_type_before_xmla(monkeypatch) -> None:
+    """The mode guard must fire before any ADOMD connection is opened."""
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: pytest.fail("XMLA should not be opened"))
+    with pytest.raises(ValueError, match="unsupported refresh type"):
+        refresh(port=1234, tables=None, timeout_sec=5, refresh_type="Calculate")
 
 
 def test_an_error_from_the_worker_reaches_the_caller_unchanged(monkeypatch) -> None:
