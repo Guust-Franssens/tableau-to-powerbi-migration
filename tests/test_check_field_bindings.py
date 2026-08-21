@@ -70,6 +70,29 @@ def _visual(*fields: dict) -> dict:
     }
 
 
+def _aliased_visual(*pairs: tuple[str, str, str]) -> dict:
+    """A visual whose projections reach their tables through `query.From` ALIASES.
+
+    `(alias, entity, property)` per projection. PBIR usually inlines `SourceRef.Entity` -- measured
+    0 of 357 committed example visuals use the aliased form -- but it is equally valid, and the
+    per-field walker already resolves it, so the agreement pass must too.
+    """
+    entries = [{"Name": alias, "Entity": entity} for alias, entity, _ in pairs]
+    fields = [
+        {"Column": {"Expression": {"SourceRef": {"Source": alias}}, "Property": prop}} for alias, _, prop in pairs
+    ]
+    return {
+        "name": "v1",
+        "visual": {
+            "visualType": "clusteredColumnChart",
+            "query": {
+                "From": entries,
+                "queryState": {"Y": {"projections": [{"field": f} for f in fields]}},
+            },
+        },
+    }
+
+
 def _write_bundle(
     root: Path,
     *,
@@ -508,3 +531,471 @@ def test_committed_examples_still_resolve() -> None:
         result = cfb.check_pair(pbir, model)
         assert result["status"] == "OK", f"{pbir.name}: {result['findings']}"
     assert checked >= 10, "the sweep must actually have found the committed examples"
+
+
+# ---------------------------------------------------------------------------------------------
+# Issue #258 - table agreement. Every reference below RESOLVES; the defect is which table it
+# resolves ON, which the pre-#258 gate could not see.
+# ---------------------------------------------------------------------------------------------
+
+# The customer's shape, reduced: `Serial_Number` exists on THREE tables. `Installs` and `Aircraft`
+# are joined; `Config` is a stranded lookup that nothing relates to. Binding the grouping column to
+# `Config` still resolves, so the old gate said OK - and Desktop said InvalidUnconstrainedJoin.
+AIRCRAFT_TMDL = """table Installs
+
+\tcolumn Serial_Number
+\t\tdataType: string
+
+\tcolumn Install_Count
+\t\tdataType: int64
+
+\tmeasure 'Total Installs' = SUM(Installs[Install_Count])
+
+table Aircraft
+
+\tcolumn Serial_Number
+\t\tdataType: string
+
+\tcolumn Aircraft_Type
+\t\tdataType: string
+
+table Config
+
+\tcolumn Serial_Number
+\t\tdataType: string
+
+\tcolumn Config_Code
+\t\tdataType: string
+
+table Scrap
+
+\tcolumn Serial_Number
+\t\tdataType: string
+"""
+
+AIRCRAFT_RELATIONSHIPS = """relationship Installs_Aircraft
+\tfromColumn: Installs.Serial_Number
+\ttoColumn: Aircraft.Serial_Number
+"""
+
+
+def _write_star(
+    root: Path,
+    *,
+    visuals: list[dict],
+    model_tmdl: str = AIRCRAFT_TMDL,
+    relationships: str | None = AIRCRAFT_RELATIONSHIPS,
+) -> Path:
+    """A `pbip/` bundle whose model has several tables and a relationships file."""
+    pbip = root / "pbip" / "Book"
+    model = pbip / "Book.SemanticModel"
+    (model / "definition" / "tables").mkdir(parents=True)
+    (model / "definition" / "tables" / "model-tables.tmdl").write_text(model_tmdl, encoding="utf-8")
+    if relationships is not None:
+        (model / "definition" / "relationships.tmdl").write_text(relationships, encoding="utf-8")
+    report = pbip / "Book.Report"
+    (report / "definition.pbir").parent.mkdir(parents=True, exist_ok=True)
+    (report / "definition.pbir").write_text(
+        json.dumps({"datasetReference": {"byPath": {"path": "../Book.SemanticModel"}}}), encoding="utf-8"
+    )
+    for index, visual in enumerate(visuals):
+        folder = report / "definition" / "pages" / "p1" / "visuals" / f"v{index}"
+        folder.mkdir(parents=True)
+        (folder / "visual.json").write_text(json.dumps(visual), encoding="utf-8")
+    return root
+
+
+def _coherence(result: dict) -> list[dict]:
+    """Every table-agreement finding in the merged verdict."""
+    return [f for report in result["reports"] for f in report["coherence"]]
+
+
+def test_a_field_bound_to_the_wrong_table_of_the_same_name_is_caught(tmp_path, capsys) -> None:
+    """THE issue #258 reproduction: every field resolves, and the visual still cannot render.
+
+    Verbatim from the field report on `IA_Aircraft_Installs`: "a field existing under the identical
+    name on BOTH the referenced table and the correct table produces no gate warning - it only
+    surfaces later as InvalidUnconstrainedJoin". Pre-#258 this bundle graded `OK`, exit 0.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[_visual(_column("Config", "Serial_Number"), _column("Installs", "Install_Count"))],
+    )
+    result = cfb.scan(bundle)
+
+    assert result["status"] == "INCOHERENT", result
+    assert result["missing"] == 0 and result["near_misses"] == 0, "every reference resolves - that is the point"
+    finding = _coherence(result)[0]
+    assert finding["status"] == "unrelated_tables"
+    assert sorted(sorted(g) for g in finding["table_groups"]) == [["Config"], ["Installs"]]
+    # The ambiguity is itself the finding: name the tables the same column name also lives on.
+    # `Scrap` carries `Serial_Number` too and is deliberately NOT listed - it is as unreachable as
+    # `Config`, so rebinding there would not fix the visual. A "did you mean" list is only worth
+    # printing if every entry actually renders.
+    assert finding["ambiguous"] == [{"report_spelling": "Config[Serial_Number]", "also_on": ["Aircraft", "Installs"]}]
+
+    assert cfb.main([str(bundle)]) == 1, "a visual that cannot render must gate the bundle"
+    out = capsys.readouterr().out
+    assert "UNRELATED TABLES" in out
+    assert "Config" in out and "Installs" in out
+    assert "Serial_Number" in out
+
+
+def test_a_star_schema_visual_spanning_fact_and_dimension_stays_silent(tmp_path, capsys) -> None:
+    """The false-positive that would destroy trust: a measure plus a related dimension attribute.
+
+    This is the single most common visual in any star schema. If it warns, the gate is worse than
+    useless - people will switch it off and lose the real finding with it.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[
+            _visual(_column("Aircraft", "Aircraft_Type"), _measure("Installs", "Total Installs")),
+            _visual(_column("Aircraft", "Aircraft_Type"), _column("Installs", "Install_Count")),
+        ],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", _coherence(result)
+    assert cfb.main([str(bundle)]) == 0
+    assert "UNRELATED TABLES" not in capsys.readouterr().out
+
+
+def test_a_transitive_relationship_path_is_still_one_table_set(tmp_path) -> None:
+    """Mutation killed: adjacency instead of reachability.
+
+    `Installs -> Aircraft -> Manufacturer` is ordinary snowflake shape. Checking only DIRECT joins
+    would report the two ends as unrelated and cry wolf on a correct visual.
+    """
+    tmdl = AIRCRAFT_TMDL + "\ntable Manufacturer\n\n\tcolumn Aircraft_Type\n\t\tdataType: string\n"
+    rels = AIRCRAFT_RELATIONSHIPS + (
+        "\nrelationship Aircraft_Manufacturer\n"
+        "\tfromColumn: Aircraft.Aircraft_Type\n"
+        "\ttoColumn: Manufacturer.Aircraft_Type\n"
+    )
+    bundle = _write_star(
+        tmp_path,
+        model_tmdl=tmdl,
+        relationships=rels,
+        visuals=[_visual(_column("Manufacturer", "Aircraft_Type"), _column("Installs", "Install_Count"))],
+    )
+    assert cfb.scan(bundle)["status"] == "OK"
+
+
+def test_an_inactive_relationship_does_not_make_a_visual_renderable(tmp_path, capsys) -> None:
+    """Mutation killed: reading `isActive: false` as a join. Power BI does not, and neither can we.
+
+    Called out separately because the fix is different from every other case here: activate it, or
+    reach it with USERELATIONSHIP - not rebind the field.
+    """
+    bundle = _write_star(
+        tmp_path,
+        relationships=(
+            "relationship Installs_Config\n"
+            "\tfromColumn: Installs.Serial_Number\n"
+            "\ttoColumn: Config.Serial_Number\n"
+            "\tisActive: false\n"
+        ),
+        visuals=[_visual(_column("Config", "Config_Code"), _column("Installs", "Install_Count"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "INCOHERENT"
+    assert _coherence(result)[0]["inactive_only"] is True
+    assert cfb.main([str(bundle)]) == 1
+    assert "INACTIVE" in capsys.readouterr().out
+
+
+def test_a_measure_on_a_disconnected_table_never_constrains_the_visual(tmp_path) -> None:
+    """A measure's home table is an organisational choice, not a join - see `_grouping_tables`.
+
+    Mutation killed: treating `Measure` refs as grouping columns, which fires on every model that
+    parks its measures on a deliberately disconnected `_Measures` table.
+    """
+    tmdl = AIRCRAFT_TMDL + "\ntable _Measures\n\n\tmeasure 'Install Rate' = 1\n"
+    bundle = _write_star(
+        tmp_path,
+        model_tmdl=tmdl,
+        visuals=[_visual(_column("Aircraft", "Aircraft_Type"), _measure("_Measures", "Install Rate"))],
+    )
+    assert cfb.scan(bundle)["status"] == "OK"
+
+
+@pytest.mark.parametrize(
+    ("suffix", "why"),
+    [
+        pytest.param(
+            "\ntable Switcher\n\n\tcolumn Switcher\n\t\tsourceColumn: [Value1]\n"
+            "\n\tpartition Switcher = calculated\n"
+            '\t\tsource = {("Installs", NAMEOF(Installs[Install_Count]), 0)}\n',
+            "field parameter",
+            id="field-parameter",
+        ),
+        pytest.param(
+            "\ntable Switcher\n\n\tcalculationGroup\n\n\t\tcalculationItem Current = SELECTEDMEASURE()\n"
+            "\n\tcolumn Switcher\n\t\tdataType: string\n",
+            "calculation group",
+            id="calculation-group",
+        ),
+    ],
+)
+def test_tables_that_are_disconnected_by_design_are_exempt(tmp_path, suffix, why) -> None:
+    """Both are substituted at query generation, so neither can raise InvalidUnconstrainedJoin.
+
+    Mutation killed: dropping `_classify_detached`, which turns every field-parameter switcher into
+    a false positive - and one of those ships in `examples/broadway-stage-to-screen` today.
+    """
+    bundle = _write_star(
+        tmp_path,
+        model_tmdl=AIRCRAFT_TMDL + suffix,
+        visuals=[_visual(_column("Switcher", "Switcher"), _column("Installs", "Install_Count"))],
+    )
+    model = cfb.parse_model(bundle / "pbip" / "Book" / "Book.SemanticModel")
+    assert model.detached_ok == {"Switcher": why}
+    assert cfb.scan(bundle)["status"] == "OK"
+
+
+def test_a_plain_disconnected_slicer_table_is_NOT_exempt(tmp_path) -> None:
+    """The exemption must stay narrow.
+
+    `examples/superstore-sales-performance` ships BOTH shapes: `X-Axis` is a real field parameter,
+    while `Region Parameter` is a plain single-select list table. Exempting anything disconnected
+    would swallow the genuine defect, so only the two query-time-substituted shapes qualify.
+    """
+    tmdl = AIRCRAFT_TMDL + "\ntable 'Region Parameter'\n\n\tcolumn Region\n\t\tdataType: string\n"
+    bundle = _write_star(
+        tmp_path,
+        model_tmdl=tmdl,
+        visuals=[_visual(_column("Region Parameter", "Region"), _column("Installs", "Install_Count"))],
+    )
+    model = cfb.parse_model(bundle / "pbip" / "Book" / "Book.SemanticModel")
+    assert model.detached_ok == {}
+    assert cfb.scan(bundle)["status"] == "INCOHERENT"
+
+
+def test_only_grouping_columns_count_not_filters_or_conditional_formatting(tmp_path) -> None:
+    """Mutation killed: folding every reference in the visual into the agreement test.
+
+    A visual-level filter or a `FillRule` input on an unrelated table renders fine - it simply
+    filters nothing. Only `queryState` projections become grouping columns, and only grouping
+    columns can raise InvalidUnconstrainedJoin, so anything wider invents findings Desktop never
+    raises.
+    """
+    payload = _visual(_column("Installs", "Install_Count"))
+    payload["filterConfig"] = {"filters": [{"field": _column("Config", "Config_Code")}]}
+    bundle = _write_star(tmp_path, visuals=[payload])
+    assert cfb.scan(bundle)["status"] == "OK"
+
+
+def test_a_missing_field_and_an_unrelated_table_are_reported_in_the_SAME_run(tmp_path, capsys) -> None:
+    """The ordering property the field report is actually about.
+
+    "it only surfaces later ... and only after the genuinely-missing fields are fixed" - a user
+    fixes the real errors, re-runs, gets a clean bill of health, and only then finds the report
+    still does not render. Both defects must land in one pass, so the second is never masked.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[
+            _visual(_column("Installs", "Nope")),
+            _visual(_column("Config", "Serial_Number"), _column("Installs", "Install_Count")),
+        ],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "UNRESOLVED", "a name that does not exist has to be fixed first"
+    assert result["missing"] == 1
+    assert result["incoherent_visuals"] == 1, "the table disagreement must NOT wait for the next run"
+    assert cfb.main([str(bundle)]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and "UNRELATED TABLES" in out
+
+
+def test_aliased_projections_still_VOTE_on_table_agreement(tmp_path) -> None:
+    """Regression: an aliased visual was silently skipped, so a real disagreement printed OK.
+
+    `From` is a SIBLING of `queryState`, not a child, so a walk started at `queryState` never met
+    the alias map. Every aliased projection resolved to `None`, was dropped, and the visual
+    contributed ZERO tables -- `visuals: 0`, `incoherent_visuals: 0`, exit 0. The per-field walker
+    resolved the very same references correctly, so the two passes disagreed with each other.
+
+    This is the identical Config/Installs disagreement asserted above, written in the aliased form.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[_aliased_visual(("c", "Config", "Serial_Number"), ("i", "Installs", "Install_Count"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["reports"][0]["visuals"] > 0, "an aliased visual must be JUDGED, not silently skipped"
+    assert result["incoherent_visuals"] == 1, "two unrelated tables disagree whether or not aliases are used"
+    assert result["status"] == "INCOHERENT"
+    assert cfb.main([str(bundle)]) == 1
+
+
+def test_a_field_that_does_not_EXIST_never_drags_its_table_into_the_agreement_test(tmp_path) -> None:
+    """A deliberate scope line, pinned so it stays a decision rather than an accident.
+
+    `Config[Nope]` is already reported as `missing`; letting it ALSO vote on the visual's table set
+    would speculate about where a field that does not exist was meant to live, and bill the user
+    twice for one fix. The run is red either way, so nothing is silently passing.
+    """
+    bundle = _write_star(
+        tmp_path,
+        visuals=[_visual(_column("Aircraft", "Aircraft_Type"), _column("Config", "Nope"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "UNRESOLVED"
+    assert result["missing"] == 1
+    assert result["incoherent_visuals"] == 0, "a non-existent field must not also raise a table disagreement"
+
+
+def test_only_a_visual_json_is_a_visual(tmp_path) -> None:
+    """Mutation killed: widening the per-visual sweep to every JSON in the definition.
+
+    `iter_references` deliberately reads everything (a broken name is a broken name wherever it is
+    written), but table AGREEMENT is a property of the query one visual actually runs. A bookmark
+    or any other saved state that happens to carry a visual-shaped payload is not what renders, and
+    a finding against it would be unactionable.
+    """
+    bundle = _write_star(tmp_path, visuals=[_visual(_column("Installs", "Install_Count"))])
+    stowaway = bundle / "pbip" / "Book" / "Book.Report" / "definition" / "bookmarks"
+    stowaway.mkdir(parents=True)
+    (stowaway / "b1.json").write_text(
+        json.dumps(_visual(_column("Config", "Serial_Number"), _column("Installs", "Install_Count"))),
+        encoding="utf-8",
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", _coherence(result)
+    assert result["reports"][0]["visuals"] == 1, "exactly one visual.json, whatever else is lying around"
+
+
+def test_repeated_table_disagreements_collapse_but_keep_every_visual(tmp_path) -> None:
+    """One copy-pasted broken visual is one fix, not N lines of verdict."""
+    broken = _visual(_column("Config", "Serial_Number"), _column("Installs", "Install_Count"))
+    result = cfb.scan(_write_star(tmp_path, visuals=[broken, broken, broken]))
+    findings = _coherence(result)
+    assert len(findings) == 1 and findings[0]["occurrences"] == 3
+    assert len(findings[0]["files"]) == 3
+    assert result["incoherent_visuals"] == 3
+
+
+def test_warn_only_and_json_carry_the_table_agreement_verdict(tmp_path) -> None:
+    """`INCOHERENT` gates by EXIT CODE; `--warn-only` still suppresses it like any other finding."""
+    bundle = _write_star(
+        tmp_path, visuals=[_visual(_column("Config", "Serial_Number"), _column("Installs", "Install_Count"))]
+    )
+    out = tmp_path / "verdict.json"
+    assert cfb.main([str(bundle), "--warn-only", "--quiet", "--json", str(out)]) == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "INCOHERENT"
+    assert payload["incoherent_visuals"] == 1
+    assert payload["reports"][0]["coherence"][0]["status"] == "unrelated_tables"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("'Sample Superstore'.'Order Date 2017'", ("Sample Superstore", "Order Date 2017")),
+        ("Date.Date", ("Date", "Date")),
+        ("'Sondheim''s Work'.Id", ("Sondheim's Work", "Id")),
+        ("Table.'Col.With.Dots'", ("Table", "Col.With.Dots")),
+        ("'unterminated.Id", None),
+        ("NoDotAtAll", None),
+    ],
+)
+def test_relationship_endpoints_split_on_the_right_dot(endpoint, expected) -> None:
+    """Mutation killed: `value.partition('.')`, which mis-splits every quoted name with a dot."""
+    assert cfb._split_qualified(endpoint) == expected  # pylint: disable=protected-access
+
+
+def test_relationships_declared_after_a_table_in_ONE_file_are_not_swallowed(tmp_path) -> None:
+    """Mutation killed: treating `relationship` as part of the table block above it.
+
+    The committed examples keep joins in their own `relationships.tmdl`, but TMDL does not require
+    that - and a relationship filed under the last table declared is a relationship that vanishes.
+    """
+    combined = AIRCRAFT_TMDL + "\n" + AIRCRAFT_RELATIONSHIPS
+    bundle = _write_star(
+        tmp_path,
+        model_tmdl=combined,
+        relationships=None,
+        visuals=[_visual(_column("Aircraft", "Aircraft_Type"), _column("Installs", "Install_Count"))],
+    )
+    model = cfb.parse_model(bundle / "pbip" / "Book" / "Book.SemanticModel")
+    assert len(model.relationships) == 1
+    assert model.tables["Config"].columns == {"Serial_Number", "Config_Code"}, "the tables must survive too"
+    assert cfb.scan(bundle)["status"] == "OK"
+
+
+# ---------------------------------------------------------------------------------------------
+# Controlled experiments against the COMMITTED corpus. These exist because "0 findings over 357
+# visuals" is only evidence if the check can fire at all - a rule that never fires would produce
+# exactly the same number.
+# ---------------------------------------------------------------------------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _corpus_pairs() -> list[tuple[Path, Path]]:
+    """Every committed example report with the model it ships with."""
+    pairs = []
+    for report_dir in sorted(REPO.glob("examples/*/fabric/*.Report")):
+        model_dir = cfb.model_for_report(report_dir)
+        if model_dir is not None:
+            pairs.append((report_dir, model_dir))
+    return pairs
+
+
+def _multi_table_visuals(model: cfb.ModelFields, report_dir: Path) -> list[cfb.VisualQuery]:
+    """The committed visuals that actually group by more than one table."""
+    return [
+        query
+        for query in cfb.iter_visual_queries(report_dir)
+        if len(cfb._grouping_tables(model, query)) >= 2  # pylint: disable=protected-access
+    ]
+
+
+def test_the_corpus_contains_a_real_multi_table_visual_and_it_stays_silent() -> None:
+    """Anti-vacuity: a rule that never fires would also score "no false positives".
+
+    Measured: exactly ONE of the corpus's 357 shipping visuals groups by two tables -
+    `airline-alliance-activity`'s `pivotTable dfd1e77aeb6fb4408e5e` over `Date` + `Flight
+    Activity`. So the sweep is narrow evidence, and this test pins the one case it does cover:
+    a genuine fact+dimension visual, silent because an ACTIVE relationship joins them.
+    """
+    exercised = 0
+    for report_dir, model_dir in _corpus_pairs():
+        model = cfb.parse_model(model_dir)
+        exercised += len(_multi_table_visuals(model, report_dir))
+        assert cfb.check_pair(report_dir, model_dir)["coherence"] == [], report_dir.name
+    assert exercised >= 1, "the corpus no longer exercises the table-agreement rule at all"
+
+
+def test_deleting_the_committed_relationship_makes_that_same_visual_fire() -> None:
+    """The other half of the anti-vacuity proof, on committed data rather than a fixture.
+
+    Same bytes, same visual: with the model's relationships removed IN MEMORY, the star-schema
+    pivotTable above is reported. That is what proves the silence is caused by the relationship
+    graph and not by dead code.
+    """
+    fired = 0
+    for report_dir, model_dir in _corpus_pairs():
+        model = cfb.parse_model(model_dir)
+        stripped = cfb.ModelFields(tables=model.tables, detached_ok=model.detached_ok)
+        for query in cfb.iter_visual_queries(report_dir):
+            if cfb.check_visual_coherence(stripped, query):
+                fired += 1
+    assert fired >= 1, "removing every relationship changed nothing - the graph is not consulted"
+
+
+def test_a_committed_field_parameter_would_be_a_false_positive_without_the_exemption() -> None:
+    """`examples/broadway-stage-to-screen` pivotTable `19cadb01cc2a2a180fd5` is the live proof.
+
+    It groups by `3 Accolades[Original]` + `Breakdown by[Breakdown by]`, and `Breakdown by` is a
+    field parameter joined to nothing. Shipping, correct, renders - and would be reported broken if
+    `_classify_detached` were dropped.
+    """
+    report_dir = next(REPO.glob("examples/broadway-stage-to-screen/fabric/*.Report"))
+    model = cfb.parse_model(cfb.model_for_report(report_dir))
+    assert model.detached_ok == {"Breakdown by": "field parameter"}
+    unexempt = cfb.ModelFields(tables=model.tables, relationships=model.relationships)
+    would_fire = [q for q in cfb.iter_visual_queries(report_dir) if cfb.check_visual_coherence(unexempt, q)]
+    assert len(would_fire) == 1, "the exemption is no longer load-bearing on committed data"
+    assert cfb.check_pair(report_dir, cfb.model_for_report(report_dir))["coherence"] == []
