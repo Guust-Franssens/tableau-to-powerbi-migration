@@ -231,6 +231,81 @@ def test_legitimate_appended_limitation_passes_and_is_not_rewritten(tmp_path: Pa
     assert path.read_text(encoding="utf-8") == original
 
 
+def test_duplicate_appended_limitation_is_collapsed_in_first_seen_order(tmp_path: Path) -> None:
+    """Validation keeps one copy of an exact append without rejecting the spec."""
+    spec = _fixture_spec()
+    first = {"item": "worksheet:profit", "issue": "duplicate downstream note", "severity": "high", "stage": "validate"}
+    second = {"item": "worksheet:loss", "issue": "later note", "severity": "low", "stage": "validate"}
+    spec["limitations_encountered"].extend([first, second, first])
+    path = tmp_path / "migration-spec.json"
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "validate_spec.py"), str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    limitations = json.loads(path.read_text(encoding="utf-8"))["limitations_encountered"]
+    assert limitations[-2:] == [first, second]
+    assert limitations.count(first) == 1
+
+
+def test_check_mode_FAILS_on_a_duplicate_and_repairs_nothing(tmp_path: Path) -> None:
+    """CI must not use the repairing mode, or the gate greenlights the defect it exists to catch.
+
+    GitHub Actions never commits a rewrite back to the PR, so a mutating run "fixes" the spec in a
+    throwaway checkout, exits 0, and leaves the duplicate in the proposed content. That is a green
+    gate for exactly the shape of #75. `--check` therefore reports and writes nothing.
+
+    Both halves are asserted because either alone is passable by a wrong implementation: exiting 1
+    while still rewriting would corrupt a PR, and leaving the file alone while exiting 0 is the bug.
+    """
+    spec = _fixture_spec()
+    entry = {"item": "worksheet:profit", "issue": "duplicate downstream note", "severity": "high", "stage": "validate"}
+    spec["limitations_encountered"].extend([entry, entry])
+    path = tmp_path / "migration-spec.json"
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "validate_spec.py"), str(path), "--check"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert proc.returncode == 1, "a duplicate must FAIL --check, not be quietly repaired"
+    assert path.read_text(encoding="utf-8") == before, "--check must not rewrite the file"
+    combined = proc.stdout + proc.stderr
+    assert "DUPLICATE" in combined
+    assert "schema-valid" in combined, "the reason must not be mislabelled as a schema violation"
+
+
+def test_check_mode_is_quiet_when_there_is_nothing_to_repair(tmp_path: Path) -> None:
+    """Negative control: a gate that always fires gets muted, which is worse than no gate."""
+    spec = _fixture_spec()
+    path = tmp_path / "migration-spec.json"
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "validate_spec.py"), str(path), "--check"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+
+
 def test_every_committed_spec_validates_against_the_schema() -> None:
     """The example corpus carries real appended limitations and must stay valid."""
     specs = sorted((REPO_ROOT / "examples").glob("*/migration-spec.json"))

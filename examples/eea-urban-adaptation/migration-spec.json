@@ -5220,12 +5220,6 @@
       "stage": "parse"
     },
     {
-      "item": "ws.2_sealed_surface_in_the_city",
-      "issue": "could not resolve shelf reference UNRESOLVED:sum:Pivot Field Values:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.3_land_uses_umz_potencially",
       "issue": "could not resolve shelf reference UNRESOLVED:sum:Pivot Field Values:vtnone:qk",
       "severity": "low",

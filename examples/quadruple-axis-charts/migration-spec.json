@@ -9176,12 +9176,6 @@
       "stage": "parse"
     },
     {
-      "item": "ws.on_time_ship_pies",
-      "issue": "could not resolve shelf reference UNRESOLVED:sum:Calculation_3496482225477316658:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.ship_mode_test_sheet",
       "issue": "Tableau 'Measure Names/Measure Values' virtual pivot - no direct Power BI equivalent. Bind each resolved field in pivoted_field_ids directly as its own field on the target visual (e.g. one Y-axis field per measure on a clustered column chart), rather than trying to recreate a literal pivot column. (axis: columns, resolved fields: 3)",
       "severity": "medium",
