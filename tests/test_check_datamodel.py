@@ -104,9 +104,22 @@ def test_json_style_quote_escape_is_caught() -> None:
     assert "INVALID_STRING_ESCAPE" in _kinds('let Source = "a \\"quoted\\" value" in Source')
 
 
+def test_json_style_quote_escape_before_punctuation_is_caught() -> None:
+    assert "INVALID_STRING_ESCAPE" in _kinds('let Source = "Say \\"!\\"" in Source')
+
+
 def test_transform_column_types_extra_pair_braces_are_caught() -> None:
     assert "INVALID_TRANSFORM_COLUMN_TYPE_PAIR" in _kinds(
         'let Source = Table.TransformColumnTypes(T, {{{"Amount", type number}}}) in Source'
+    )
+
+
+def test_transform_column_types_variable_pairs_are_allowed() -> None:
+    assert (
+        _check_expression(
+            DUMMY, 'let Types = {{"Amount", type number}}, Source = Table.TransformColumnTypes(T, Types) in Source'
+        )
+        == []
     )
 
 

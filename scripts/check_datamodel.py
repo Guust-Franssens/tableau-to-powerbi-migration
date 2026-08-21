@@ -211,10 +211,7 @@ class _Scanner:
             if j == -1:
                 self.errors.append(("unterminated string literal", start_line, start_col))
                 return None
-            is_json_escape = (
-                j > i and text[j - 1] == "\\" and j + 1 < len(text) and (text[j + 1].isalnum() or text[j + 1] == "_")
-            )
-            if is_json_escape:
+            if j > i and text[j - 1] == "\\" and not _is_string_terminator(text, j + 1):
                 self.errors.append(
                     (
                         'invalid JSON-style \\" escape; Power Query M uses doubled quotes ("")',
@@ -229,6 +226,15 @@ class _Scanner:
         token = Token("string", text[i : j + 1], start_line, start_col)
         self.advance(j + 1 - i)
         return token
+
+
+def _is_string_terminator(text: str, index: int) -> bool:
+    """Whether text after a quote can legally follow an M string literal."""
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index == len(text) or text[index] in ",)]}&+-*/=<>&|":
+        return True
+    return any(text.startswith(f"{word}", index) for word in ("as", "catch", "else", "in", "is", "meta", "or", "then"))
 
 
 def _tokenize(text: str) -> tuple[list[Token], list[tuple[str, int, int]]]:
@@ -382,7 +388,6 @@ def _check_transform_column_type_pairs(tokens: list[Token], add: Callable[[str, 
             continue
         pairs = arguments[1]
         if len(pairs) < 2 or pairs[0].text != "{" or pairs[-1].text != "}":
-            _add_invalid_transform_pair(add, pairs[0] if pairs else token, "second argument must be a list of pairs")
             continue
         for entry in _split_top_level(pairs[1:-1]):
             if len(entry) < 2 or entry[0].text != "{" or entry[-1].text != "}":
@@ -391,8 +396,8 @@ def _check_transform_column_type_pairs(tokens: list[Token], add: Callable[[str, 
                 )
                 continue
             values = _split_top_level(entry[1:-1])
-            if len(values) != 2 or values[0][0].kind != "string" or not values[1]:
-                _add_invalid_transform_pair(add, entry[0], "each entry must contain a text column name and one type")
+            if len(values) != 2 or not values[0] or not values[1]:
+                _add_invalid_transform_pair(add, entry[0], "each entry must contain a column name and one type")
 
 
 def _function_arguments(tokens: list[Token], open_index: int) -> list[list[Token]]:
