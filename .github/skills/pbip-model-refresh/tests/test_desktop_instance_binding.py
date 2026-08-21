@@ -728,8 +728,9 @@ def test_compatibility_alignment_declares_generated_edit(tmp_path: Path) -> None
 
     note = refresh_pbip_model._align_compatibility(model_dir, int(FakeDatabase.CompatibilityLevel))
 
-    declarations = json.loads((tmp_path / "_build" / "generated-edit-declarations.json").read_text(encoding="utf-8"))
-    declaration = declarations["declarations"][0]
+    declaration_files = list((tmp_path / "_build" / "generated-edit-declarations").glob("*.json"))
+    assert len(declaration_files) == 1
+    declaration = json.loads(declaration_files[0].read_text(encoding="utf-8"))
     assert "1604 -> 1702" in note
     assert declaration["run_id"] == "engine-run"
     assert declaration["target"] == "MyMigration.SemanticModel/definition/database.tmdl"

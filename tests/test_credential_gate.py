@@ -1236,6 +1236,57 @@ def test_rearming_after_a_BARE_clear_still_arms(tmp_path: Path) -> None:
         run_gate("clear", str(mig), "--reason", "test-teardown")
 
 
+def test_source_specific_clear_keeps_gate_for_still_pending_sources(tmp_path: Path) -> None:
+    """Clearing one source from a multi-source marker must not open writes for the rest."""
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(mig), "--sources", "orders", "customers")
+
+    run_gate("clear", str(mig), "--reason", "orders probe ok", "--earned", "--sources", "orders")
+
+    marker = json.loads((mig / ".credential-gate-BLOCKED.json").read_text(encoding="utf-8"))
+    assert marker["sources"] == ["customers"]
+    assert run_gate("status", str(mig)).returncode == 1
+
+    run_gate("clear", str(mig), "--reason", "customers probe ok", "--earned", "--sources", "customers")
+    assert not (mig / ".credential-gate-BLOCKED.json").exists()
+
+
+def test_a_sibling_block_does_not_discard_another_source_clearance(tmp_path: Path) -> None:
+    """A bundle shared by sibling agents must remember each source's earned clearance independently."""
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(mig), "--sources", "orders")
+    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "orders")
+
+    run_gate("block", str(mig), "--sources", "customers")
+    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "customers")
+    run_gate("block", str(mig), "--sources", "orders")
+
+    assert not (mig / ".credential-gate-BLOCKED.json").exists(), "orders clearance must survive a sibling block"
+    assert _audit_actions(mig)[-1] == "block-skipped"
+
+
+def test_a_sibling_manual_clear_does_not_launder_an_unproven_source(tmp_path: Path) -> None:
+    """Source-aware state must not turn one earned source into a pass for another source."""
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(mig), "--sources", "orders")
+    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "orders")
+    run_gate("block", str(mig), "--sources", "customers")
+    run_gate("clear", str(mig), "--reason", "manual teardown")
+    (mig / "fabric" / "model.tmdl").write_text("table Customers")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 1, out
+    assert "UNEARNED CLEAR" in out
+
+
 def test_rearming_with_a_NEW_source_still_arms(tmp_path: Path) -> None:
     """Control: a source that was never probed must still be gated.
 

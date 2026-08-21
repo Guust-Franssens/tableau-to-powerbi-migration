@@ -145,7 +145,60 @@ def _audit(migration: Path, action: str, detail: str) -> None:
         pass
 
 
-def _clear_was_earned(migration: Path) -> str | None:
+def _parse_sources_detail(detail: str) -> list[str] | None:
+    """Parse a ``sources=[...]`` audit detail, returning None when absent or malformed."""
+    marker = "sources="
+    if not detail.startswith(marker):
+        return None
+    source_text = detail[len(marker) :].split(";", 1)[0].strip()
+    try:
+        parsed = ast.literal_eval(source_text)
+    except (ValueError, SyntaxError):
+        return None
+    return [str(source) for source in parsed] if isinstance(parsed, list) else None
+
+
+def _parse_legacy_probe_source(detail: str) -> list[str] | None:
+    """Source name from pre-source-aware ``probe-cleared: DATA_OK from ...`` audit details."""
+    marker = "probe-cleared: DATA_OK from "
+    return [detail[len(marker) :]] if detail.startswith(marker) and detail[len(marker) :] else None
+
+
+def _earned_sources(migration: Path) -> tuple[dict[str, str | None], bool]:
+    """Source-level gate evidence from the append-only audit log.
+
+    A later block invalidates only the sources it names. This is the concurrency fix for sibling
+    agents sharing one bundle: source Y being re-armed must not erase source X's previously earned
+    proof, because those are independent reachability facts.
+    """
+    states: dict[str, tuple[str | None, str]] = {}
+    authorized = False
+    last_block_sources: list[str] = []
+    try:
+        for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            action = entry.get("action")
+            ts = str(entry.get("ts") or "")
+            detail = str(entry.get("detail") or "")
+            if action in BLOCK_ACTIONS:
+                sources = _parse_sources_detail(detail)
+                last_block_sources = sources or []
+                for source in last_block_sources:
+                    states[source] = (None, ts)
+            elif action == "authorize":
+                authorized = True
+            elif action == "probe-cleared":
+                sources = _parse_sources_detail(detail) or _parse_legacy_probe_source(detail) or last_block_sources
+                for source in sources:
+                    _earned, blocked_at = states.get(source, (None, ""))
+                    if ts >= blocked_at:
+                        states[source] = ("probe-cleared", blocked_at)
+    except (OSError, ValueError):
+        return {}, False
+    return {source: earned for source, (earned, _blocked_at) in states.items()}, authorized
+
+
+def _clear_was_earned(migration: Path, sources: list[str] | None = None) -> str | None:
     """Return the action that legitimately lifted the gate, or None if nothing did.
 
     Only two things earn a lift: a successful reachability probe, or an audit-backed human
@@ -156,28 +209,23 @@ def _clear_was_earned(migration: Path) -> str | None:
     proceeded with no probe ever run. That is the whole guarantee gone, via the front door.
 
     ⚠️ KNOWN LIMIT, stated plainly: the audit log is a text file, so at same-user privilege an agent
-    can append a fake `probe-cleared` entry - measured, and it passed. Ordering below (evidence must
-    post-date the most recent `block`, by timestamp as well as position) defeats naive forgery, but
-    not a careful one. No file-based receipt can be unforgeable here.
+    can append a fake `probe-cleared` entry - measured, and it passed. Ordering below is per-source:
+    a later `block` invalidates only the source(s) it names, which preserves sibling clearances but
+    still makes each source earn its own post-block proof. No file-based receipt can be unforgeable.
 
     **The real oracle is the source system.** A genuine probe leaves a `... limit 1` query in the
     warehouse's query history; a forged receipt leaves nothing. `verify` prints the recorded
     timestamp precisely so that claim is cheap to check externally. Treat the audit log as an
     accountability trail, not as proof.
     """
-    try:
-        earned: str | None = None
-        blocked_at = ""
-        for line in (migration / AUDIT).read_text(encoding="utf-8").splitlines():
-            entry = json.loads(line)
-            action, ts = entry.get("action"), entry.get("ts", "")
-            if action in BLOCK_ACTIONS:
-                earned, blocked_at = None, ts  # a re-arm invalidates any earlier evidence
-            elif action in {"probe-cleared", "authorize"} and ts >= blocked_at:
-                earned = action
-        return earned
-    except (OSError, ValueError):
+    states, authorized = _earned_sources(migration)
+    if authorized:
+        return "authorize"
+    if sources is not None:
+        return "probe-cleared" if sources and all(states.get(source) for source in sources) else None
+    if not states:
         return None
+    return "probe-cleared" if all(states.values()) else None
 
 
 def _icacls(args: list[str]) -> tuple[int, str]:
@@ -431,20 +479,14 @@ def _redundant_rearm(migration: Path, sources: list[str]) -> str | None:
     * **The gate must be currently EARNED** (`_clear_was_earned`), not merely cleared. A bare
       `manual-clear` earns nothing, so a migration cleared that way still gets re-armed - otherwise
       this helper would launder an unearned clear into permanent immunity.
-    * **The source list must be IDENTICAL to the one that was proven.** If the spec gained a new
-      live source, that source has never been probed, and skipping the re-arm would let a model be
-      built against it unproven. Comparison is order-insensitive (the classifier's ordering is an
-      implementation detail) but membership-exact.
+    * **Each incoming source must be proven.** If the spec gained a new live source, that source has
+      never been probed, and skipping the re-arm would let a model be built against it unproven. A
+      sibling's later block no longer erases previously proven sources, but it also cannot borrow
+      their clearance.
 
     Anything it cannot parse or compare falls through to a normal re-arm: fail closed.
     """
-    earned = _clear_was_earned(migration)
-    if earned is None:
-        return None
-    previous = _last_block_sources(migration)
-    if previous is None or sorted(previous) != sorted(sources):
-        return None
-    return earned
+    return _clear_was_earned(migration, sources)
 
 
 def apply_block(migration: Path, sources: list[str], force_scope: bool = False) -> int:
@@ -490,12 +532,20 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
     already = _redundant_rearm(migration, sources)
     if already:
         log.warning(
-            "Gate NOT re-applied: these exact sources were already proven by '%s'. Re-arming a gate "
+            "Gate NOT re-applied: these sources were already proven by '%s'. Re-arming a gate "
             "that a probe has satisfied is what invited a real bypass (see _redundant_rearm). "
             "Re-probe explicitly if you need to re-verify reachability.",
             already,
         )
         _audit(migration, "block-skipped", f"already earned by {already}; sources={sources}")
+        return 0
+
+    pending_sources = sources
+    if sources:
+        states, authorized = _earned_sources(migration)
+        pending_sources = [] if authorized else [source for source in sources if not states.get(source)]
+    if sources and not pending_sources:
+        _audit(migration, "block-skipped", f"already earned by source state; sources={sources}")
         return 0
 
     (migration / MARKER).write_text(
@@ -517,7 +567,7 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
                     "UNREACHABLE) decide. Only the probe can tell a missing credential (a human must "
                     "act) from a wrong hostname (nobody needs to sign in)."
                 ),
-                "sources": sources,
+                "sources": pending_sources,
                 "applied": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             },
             indent=2,
@@ -535,7 +585,7 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
         # Same `sources=` detail as the enforced path. Without it `_last_block_sources` cannot read
         # this entry, so the redundant-re-arm check fails closed forever on non-Windows.
-        _audit(migration, "block-marker-only", f"sources={sources}")
+        _audit(migration, "block-marker-only", f"sources={pending_sources}")
         return 0
 
     failed = 0
@@ -548,11 +598,21 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
             log.info("ENFORCED: write denied on %s", d)
 
     log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
-    _audit(migration, "block", f"sources={sources}")
+    _audit(migration, "block", f"sources={pending_sources}")
     return 1 if failed else 0
 
 
-def clear_block(migration: Path, reason: str, earned: bool = False) -> int:
+def _marker_sources(migration: Path) -> list[str]:
+    """Source list currently named by the blocking marker, or an empty list when unreadable."""
+    try:
+        payload = json.loads((migration / MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    marker_sources = payload.get("sources") if isinstance(payload, dict) else None
+    return [str(source) for source in marker_sources] if isinstance(marker_sources, list) else []
+
+
+def clear_block(migration: Path, reason: str, earned: bool = False, sources: list[str] | None = None) -> int:
     """Remove the ACL and marker.
 
     `earned=True` is for the probe only: it records `probe-cleared`, which is the evidence `verify`
@@ -560,6 +620,20 @@ def clear_block(migration: Path, reason: str, earned: bool = False) -> int:
     after one are reported as UNVALIDATED. The verb has to keep existing for teardown, but it must
     never quietly confer the guarantee.
     """
+    marker = migration / MARKER
+    detail = reason
+    earned_sources = sources if sources is not None else _last_block_sources(migration)
+    if earned and earned_sources:
+        detail = f"sources={earned_sources}; reason={reason}"
+        remaining_sources = [source for source in _marker_sources(migration) if source not in set(earned_sources)]
+        if remaining_sources:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            payload["sources"] = remaining_sources
+            marker.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            log.info("credential gate PARTIALLY CLEARED (%s); still blocked: %s", reason, remaining_sources)
+            _audit(migration, "probe-cleared", detail)
+            return 0
+
     if platform.system() == "Windows":
         for d in denied_dirs(migration):
             code, out = _icacls([str(d), "/remove:d", _user()])
@@ -567,11 +641,10 @@ def clear_block(migration: Path, reason: str, earned: bool = False) -> int:
                 log.error("Could not clear deny ACE on %s: %s", d, out)
                 return 1
             log.info("cleared write-deny on %s", d)
-    marker = migration / MARKER
     if marker.exists():
         marker.unlink()
     log.info("credential gate CLEARED (%s)", reason)
-    _audit(migration, "probe-cleared" if earned else "manual-clear", reason)
+    _audit(migration, "probe-cleared" if earned else "manual-clear", detail)
     return 0
 
 
@@ -837,6 +910,7 @@ def main(argv: list[str] | None = None) -> int:
         if name == "clear":
             p.add_argument("--reason", default="manual")
             p.add_argument("--earned", action="store_true", help=argparse.SUPPRESS)
+            p.add_argument("--sources", nargs="*", help="source(s) proven by this earned clear")
         if name == "authorize":
             p.add_argument("--who", required=True, help="who is authorizing this unvalidated build")
     args = parser.parse_args(argv)
@@ -849,7 +923,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "block":
         return apply_block(migration, args.sources, force_scope=args.force_scope)
     if args.cmd == "clear":
-        return clear_block(migration, args.reason, earned=args.earned)
+        return clear_block(migration, args.reason, earned=args.earned, sources=args.sources)
     if args.cmd == "authorize":
         return authorize(migration, args.who)
     if args.cmd == "verify":

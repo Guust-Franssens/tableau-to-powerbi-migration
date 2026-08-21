@@ -322,6 +322,36 @@ def test_tamper_allows_a_generated_edit_declared_by_a_fix_script(tmp_path):
     assert any("fix_orders_navigation.py" in note for note in notes)
 
 
+def test_tamper_reads_append_only_declaration_files(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    baseline_hash = cmp_mod.sha256_file(generated)
+    target = "M.SemanticModel/definition/tables/Orders.tmdl"
+    _write_manifest(tmp_path, {target: baseline_hash})
+    generated.write_text("changed by append-only declaration", encoding="utf-8")
+    declaration_dir = tmp_path / "_build" / "generated-edit-declarations"
+    declaration_dir.mkdir(parents=True)
+    (declaration_dir / "one.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "run_id": "run-1",
+                "kind": "changed",
+                "target": target,
+                "baseline_sha256": baseline_hash,
+                "expected_sha256": cmp_mod.sha256_file(generated),
+                "script_identity": "_build/fix_orders_navigation.py",
+                "script_sha256": "script-hash",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "DECLARED_DRIFT"
+    assert any("fix_orders_navigation.py" in note for note in notes)
+
+
 def test_tamper_rejects_a_source_comment_without_structured_hash_evidence(tmp_path):
     generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
     target = "M.SemanticModel/definition/tables/Orders.tmdl"
@@ -391,7 +421,75 @@ def test_declare_wrapper_records_a_composed_path_fix_script(tmp_path):
     assert any("fix_post_engine.py" in note for note in notes)
 
 
-def test_tamper_rejects_a_manifest_without_current_run_identity(tmp_path):
+def test_declare_wrapper_concurrent_writers_keep_both_declarations(tmp_path):
+    """Two wrapper processes released by one barrier must not erase each other's declaration."""
+    first = Path("M.SemanticModel") / "definition" / "tables" / "Orders.tmdl"
+    second = Path("M.SemanticModel") / "definition" / "tables" / "Customers.tmdl"
+    first_file = _touch(tmp_path / first)
+    second_file = _touch(tmp_path / second)
+    _write_manifest(
+        tmp_path,
+        {
+            first.as_posix(): cmp_mod.sha256_file(first_file),
+            second.as_posix(): cmp_mod.sha256_file(second_file),
+        },
+    )
+    go = tmp_path / "_build" / "go.signal"
+    processes = []
+    for target in (first, second):
+        script = tmp_path / "_build" / f"fix_{target.stem.lower()}.py"
+        ready = script.with_suffix(".ready")
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(
+            "\n".join(
+                [
+                    "import sys, time",
+                    "from pathlib import Path",
+                    "root = Path.cwd()",
+                    f"ready = root / {str(ready.relative_to(tmp_path)).replace(chr(92), '/').__repr__()}",
+                    f"go = root / {str(go.relative_to(tmp_path)).replace(chr(92), '/').__repr__()}",
+                    "ready.write_text('ready', encoding='utf-8')",
+                    "deadline = time.monotonic() + 10",
+                    "while not go.exists():",
+                    "    if time.monotonic() > deadline:",
+                    "        sys.exit(97)",
+                    "    time.sleep(0.01)",
+                    f"(root / {target.as_posix().__repr__()}).write_text('fixed {target.stem}', encoding='utf-8')",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        processes.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(DECLARE_SCRIPT),
+                    "--bundle",
+                    str(tmp_path),
+                    "--target",
+                    target.as_posix(),
+                    "--script",
+                    str(script),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        )
+    deadline = time.monotonic() + 10
+    while len(list((tmp_path / "_build").glob("*.ready"))) < 2:
+        assert time.monotonic() < deadline, "both declaration writers must reach the barrier"
+        time.sleep(0.01)
+    go.write_text("go", encoding="utf-8")
+    completed = [process.communicate(timeout=15) + (process.returncode,) for process in processes]
+
+    assert all(returncode == 0 for _stdout, _stderr, returncode in completed), completed
+    declarations = cmp_mod.load_generated_edit_declarations(tmp_path)
+    assert {declaration["target"] for declaration in declarations} == {first.as_posix(), second.as_posix()}
+    state, notes = cmp_mod.tamper_check(tmp_path)
+    assert state == "DECLARED_DRIFT"
+    assert sum(1 for note in notes if note.startswith("DECLARED changed")) == 2
+
     generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
     (tmp_path / "input_manifest.json").write_text(
         json.dumps(

@@ -753,6 +753,8 @@ def _lift_gate(migration: Path, what: str) -> None:
             "--reason",
             f"probe-cleared: DATA_OK from {what}",
             "--earned",
+            "--sources",
+            what,
         ],
         capture_output=True,
         check=False,

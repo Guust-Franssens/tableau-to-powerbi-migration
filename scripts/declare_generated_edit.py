@@ -16,11 +16,11 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
+from generated_edit_declarations import append_generated_edit_declaration
+
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
-GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
 
 
 def sha256_file(path: Path) -> str:
@@ -46,18 +46,6 @@ def load_generated_run(bundle: Path) -> dict:
     return generated
 
 
-def read_payload(path: Path) -> dict:
-    """Read or initialize the declaration payload."""
-    if not path.is_file():
-        return {"version": 1, "declarations": []}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        return {"version": 1, "declarations": []}
-    if not isinstance(payload.get("declarations"), list):
-        payload["declarations"] = []
-    return payload
-
-
 def append_declaration(
     bundle: Path,
     target: Path,
@@ -68,10 +56,9 @@ def append_declaration(
     """Append the declaration consumed by ``check_migration_progress.py --tamper``."""
     generated = load_generated_run(bundle)
     rel_target = target.relative_to(bundle).as_posix()
-    declaration_path = bundle / GENERATED_EDIT_DECLARATIONS
-    payload = read_payload(declaration_path)
     kind = "added" if baseline_sha256 is None else "missing" if expected_sha256 is None else "changed"
-    payload["declarations"].append(
+    return append_generated_edit_declaration(
+        bundle,
         {
             "version": 1,
             "run_id": generated["run_id"],
@@ -82,12 +69,8 @@ def append_declaration(
             "script_identity": script.relative_to(bundle).as_posix() if script.is_relative_to(bundle) else str(script),
             "script_sha256": sha256_file(script),
             "reason": "declared generated-artifact repair",
-            "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
+        },
     )
-    declaration_path.parent.mkdir(parents=True, exist_ok=True)
-    declaration_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return declaration_path
 
 
 def main(argv: list[str] | None = None) -> int:
