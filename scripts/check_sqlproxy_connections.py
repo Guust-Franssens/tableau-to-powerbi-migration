@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bundle_corpus import shipping_models
+
 REPORT_NAME = "sqlproxy-connection-check.json"
 
 STATUS_OK = "OK"
@@ -196,21 +198,7 @@ def scan_model(model_dir: Path) -> dict[str, Any]:
     }
 
 
-def find_models(root: Path) -> list[Path]:
-    """Every shipping semantic model under `root`.
-
-    A bundle is scanned through `pbip/` when it has one; `semantic_models/` is the engine baseline,
-    not the deliverable. A finished migration folder without `pbip/` (for example `examples/.../fabric`)
-    is scanned recursively from the supplied root.
-    """
-    root = root.resolve()
-    if root.name.endswith(".SemanticModel"):
-        return [root]
-    pbip = root / "pbip"
-    base = pbip if pbip.is_dir() else root
-    return sorted(
-        {path.resolve() for path in base.rglob("*.SemanticModel") if path.is_dir()}, key=lambda path: path.name
-    )
+find_models = shipping_models
 
 
 def scan(root: Path) -> dict[str, Any]:

@@ -1,0 +1,780 @@
+"""
+purpose: answer whether one migration unit is done by aggregating existing gates without merging them.
+usage:   python scripts/check_unit.py <unit-or-bundle> [--json <file>] [--reference-dir <dir>] [--oracle-dir <dir>]
+
+Exit codes are intentionally coarser than the native gates, while preserving each native exit in the
+JSON payload:
+
+| 0  | all checks that can be verified are clean; accepted exemptions, if any, are counted |
+| 1  | at least one finding remains |
+| 2  | one or more regions could not be fully checked (SKIPPED/ERROR/NOT_CHECKED) and no finding won |
+| 4  | page-count parity precondition failed; page-level oracle checks are not meaningful |
+| 64 | usage error |
+
+The command is a facade, not a merge: the existing gates remain independently runnable and their
+native statuses/exit codes are recorded under ``checks[].native_*``. Page parity and oracle coverage
+live here because no existing gate owned those questions.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import hashlib
+import importlib.util
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from bundle_corpus import shipping_models, shipping_reports
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+STATUS_PASS = "PASS"
+STATUS_FINDINGS = "FINDINGS"
+STATUS_NOT_CHECKED = "NOT_CHECKED"
+STATUS_PRECONDITION_FAILED = "PRECONDITION_FAILED"
+
+EXIT_OK = 0
+EXIT_FINDINGS = 1
+EXIT_NOT_CHECKED = 2
+EXIT_PRECONDITION_FAILED = 4
+EXIT_USAGE = 64
+
+EXEMPTIONS_FILE = "unit-check-exemptions.json"
+VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity"})
+
+
+@dataclass(frozen=True)
+class Gate:
+    """One existing script behind the unit facade."""
+
+    check_id: str
+    script: str
+    args: tuple[str, ...]
+    finding_statuses: frozenset[str]
+    not_checked_statuses: frozenset[str] = frozenset({"SKIPPED", "ERROR"})
+    writes_json: bool = True
+
+
+GATES = (
+    Gate(
+        "blank-placeholders",
+        "check_blank_placeholders.py",
+        (),
+        frozenset({"REFERENCED", "UNREFERENCED"}),
+        frozenset({"INCOMPLETE"}),
+    ),
+    Gate("field-bindings", "check_field_bindings.py", (), frozenset({"UNRESOLVED", "INCOHERENT"})),
+    Gate("sqlproxy-connections", "check_sqlproxy_connections.py", (), frozenset({"SQLPROXY"})),
+    Gate("relationship-health", "check_relationship_health.py", (), frozenset({"MISSING_RELATIONSHIP"})),
+    Gate("data-model", "check_datamodel.py", (), frozenset(), frozenset(), False),
+    Gate("empty-model", "check_empty_model.py", (), frozenset({"EMPTY_MODELS"})),
+    Gate("pbir-valid", "check_pbir_valid.py", (), frozenset({"INVALID"}), frozenset({"SKIPPED", "ERROR"})),
+    Gate("pbir-layout", "check_pbir_layout.py", (), frozenset({"DISPLACED_MAIN_COLUMN"})),
+    Gate("stub-measures", "check_stub_measures.py", ("--strict",), frozenset({"STUBS"})),
+)
+
+
+def _slug(text: str) -> str:
+    """Lossy name normalization for matching Tableau/PBIR/oracle page labels."""
+    return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
+def _read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _unit_dir(target: Path) -> Path:
+    """Return the migration unit directory when ``target`` is its fabric folder or bundle."""
+    target = target.resolve()
+    return target.parent if target.name == "fabric" else target
+
+
+def _migration_spec(target: Path) -> Path | None:
+    """Find the parser spec that declares Tableau dashboards, if this target has one."""
+    unit = _unit_dir(target)
+    candidates = [unit / "migration-spec.json", target / "migration-spec.json"]
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def expected_pages(target: Path) -> list[dict[str, str]] | None:
+    """Expected Tableau pages: dashboards only, never worksheets."""
+    spec_path = _migration_spec(target)
+    if spec_path is None:
+        return None
+    try:
+        payload = _read_json(spec_path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    pages = []
+    for item in payload.get("dashboards", []):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("title") or item.get("id")
+        if isinstance(name, str) and name.strip():
+            pages.append({"id": str(item.get("id") or name), "name": name.strip()})
+    return pages
+
+
+def _page_order(report_dir: Path) -> list[str]:
+    pages_file = report_dir / "definition" / "pages" / "pages.json"
+    if not pages_file.is_file():
+        return []
+    try:
+        payload = _read_json(pages_file)
+    except (OSError, json.JSONDecodeError):
+        return []
+    order = payload.get("pageOrder") if isinstance(payload, dict) else None
+    return [str(item) for item in order] if isinstance(order, list) else []
+
+
+def actual_pages(target: Path) -> list[dict[str, str]]:
+    """PBIR pages from shipping reports, ordered by pages.json where available."""
+    pages: list[dict[str, str]] = []
+    for report in shipping_reports(target):
+        pages_root = report / "definition" / "pages"
+        ordered = _page_order(report)
+        page_dirs = {path.parent.name: path for path in pages_root.rglob("page.json")} if pages_root.is_dir() else {}
+        names = ordered or sorted(page_dirs)
+        for page_id in names:
+            page_json = page_dirs.get(page_id)
+            if page_json is None:
+                continue
+            try:
+                payload = _read_json(page_json)
+            except (OSError, json.JSONDecodeError):
+                continue
+            display = payload.get("displayName") if isinstance(payload, dict) else None
+            internal = payload.get("name") if isinstance(payload, dict) else None
+            pages.append(
+                {
+                    "id": str(internal or page_id),
+                    "name": str(display or internal or page_id),
+                    "report": str(report),
+                    "path": str(page_json),
+                }
+            )
+    return pages
+
+
+def load_exemptions(target: Path) -> dict[str, Any]:
+    """Read and validate the explicit documented-why-not sidecar."""
+    path = _unit_dir(target) / EXEMPTIONS_FILE
+    if not path.is_file():
+        return {"path": str(path), "entries": [], "invalid": []}
+    try:
+        payload = _read_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"path": str(path), "entries": [], "invalid": [{"item": str(path), "reason": f"unreadable: {exc}"}]}
+    raw_entries = payload.get("exemptions") if isinstance(payload, dict) else payload
+    if not isinstance(raw_entries, list):
+        return {
+            "path": str(path),
+            "entries": [],
+            "invalid": [{"item": str(path), "reason": "expected a list or exemptions[]"}],
+        }
+    entries: list[dict[str, str]] = []
+    invalid: list[dict[str, str]] = []
+    for index, entry in enumerate(raw_entries, 1):
+        if not isinstance(entry, dict):
+            invalid.append({"item": f"#{index}", "reason": "entry is not an object"})
+            continue
+        check = str(entry.get("check") or "").strip()
+        item = str(entry.get("item") or "").strip()
+        reason = str(entry.get("reason") or "").strip()
+        decided_by = str(entry.get("decided_by") or entry.get("owner") or "").strip()
+        if check not in VALID_EXEMPTION_CHECKS or not item or not reason or not decided_by:
+            invalid.append(
+                {
+                    "item": item or f"#{index}",
+                    "reason": "requires check in {page-parity, stub-measures}, item, reason, and decided_by",
+                }
+            )
+            continue
+        entries.append({"check": check, "item": item, "reason": reason, "decided_by": decided_by})
+    return {"path": str(path), "entries": entries, "invalid": invalid}
+
+
+def _exempted(entries: list[dict[str, str]], check: str, item: str, aliases: set[str] | None = None) -> bool:
+    wanted = {item, *(aliases or set())}
+    normalized = {_slug(value) for value in wanted if value}
+    return any(entry["check"] == check and _slug(entry["item"]) in normalized for entry in entries)
+
+
+def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any]:
+    """Page-count parity precondition: expected Tableau dashboards vs emitted PBIR pages."""
+    expected = expected_pages(target)
+    actual = actual_pages(target)
+    if expected is None:
+        return {
+            "id": "page-parity",
+            "status": STATUS_NOT_CHECKED,
+            "detail": "no migration-spec.json found, so expected Tableau dashboards are unknown",
+            "expected_pages": None,
+            "actual_pages": actual,
+            "exemptions": [],
+        }
+    entries = exemptions["entries"]
+    dropped = [page for page in expected if _exempted(entries, "page-parity", page["name"], {page["id"]})]
+    effective_expected = [page for page in expected if page not in dropped]
+    extra = max(0, len(actual) - len(effective_expected))
+    extra_pages = actual[-extra:] if extra else []
+    exempted_extra = [page for page in extra_pages if _exempted(entries, "page-parity", f"extra:{page['name']}")]
+    unexempted_extra = [page for page in extra_pages if page not in exempted_extra]
+    missing_count = max(0, len(effective_expected) - len(actual))
+    missing_pages = effective_expected[-missing_count:] if missing_count else []
+    unexempted_missing = [
+        page for page in missing_pages if not _exempted(entries, "page-parity", page["name"], {page["id"]})
+    ]
+    status = STATUS_PASS if not unexempted_missing and not unexempted_extra else STATUS_PRECONDITION_FAILED
+    return {
+        "id": "page-parity",
+        "status": status,
+        "expected_count": len(expected),
+        "effective_expected_count": len(effective_expected),
+        "actual_count": len(actual),
+        "expected_pages": expected,
+        "actual_pages": actual,
+        "exemptions": dropped + exempted_extra,
+        "unexempted_missing": unexempted_missing,
+        "unexempted_extra": unexempted_extra,
+    }
+
+
+def _reference_dirs(target: Path, explicit: Path | None) -> list[Path]:
+    unit = _unit_dir(target)
+    candidates = [explicit] if explicit else [unit / "reference", target / "reference"]
+    return [path.resolve() for path in candidates if path and path.exists()]
+
+
+def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
+    unit = _unit_dir(target)
+    candidates = [explicit] if explicit else [unit / "_oracle", target / "_oracle", target.parent / "_oracle"]
+    return [path.resolve() for path in candidates if path and path.exists()]
+
+
+def _existing_relative(base: Path, rel: str | None) -> bool:
+    return bool(rel) and (base / rel).is_file()
+
+
+def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[dict[str, dict[str, bool]], set[str]]:
+    found: dict[str, dict[str, bool]] = {}
+    grades: set[str] = set()
+    for directory in _reference_dirs(target, reference_dir):
+        manifest = directory / "manifest.json"
+        if not manifest.is_file():
+            continue
+        try:
+            payload = _read_json(manifest)
+        except (OSError, json.JSONDecodeError):
+            continue
+        for dashboard in payload.get("dashboards", []) if isinstance(payload, dict) else []:
+            if not isinstance(dashboard, dict):
+                continue
+            name = str(dashboard.get("name") or "")
+            key = _slug(name)
+            entry = found.setdefault(key, {"visual": False, "numeric": False})
+            for state in dashboard.get("states", []):
+                if not isinstance(state, dict):
+                    continue
+                caps = {str(cap) for cap in state.get("capabilities", []) if isinstance(cap, str)}
+                if caps:
+                    grades.add("validation-grade" if "validation_grade" in caps else "/".join(sorted(caps)))
+                entry["visual"] = entry["visual"] or _existing_relative(directory, state.get("image"))
+                numeric = state.get("numeric_oracle")
+                entry["numeric"] = entry["numeric"] or (
+                    isinstance(numeric, str) and _existing_relative(directory, numeric)
+                )
+    return found, grades
+
+
+def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[dict[str, dict[str, bool]], set[str]]:
+    found: dict[str, dict[str, bool]] = {}
+    grades: set[str] = set()
+    for directory in _oracle_dirs(target, oracle_dir):
+        manifest = directory / "oracle-manifest.json"
+        if not manifest.is_file():
+            continue
+        try:
+            payload = _read_json(manifest)
+        except (OSError, json.JSONDecodeError):
+            continue
+        for record in payload.get("views", []) if isinstance(payload, dict) else []:
+            if not isinstance(record, dict):
+                continue
+            name = str(record.get("view_name") or record.get("view_url_name") or "")
+            entry = found.setdefault(_slug(name), {"visual": False, "numeric": False})
+            data = record.get("data") if isinstance(record.get("data"), dict) else {}
+            image = record.get("image") if isinstance(record.get("image"), dict) else {}
+            entry["numeric"] = (
+                entry["numeric"] or data.get("status") == "ok" and _existing_relative(directory, data.get("path"))
+            )
+            entry["visual"] = (
+                entry["visual"] or image.get("status") == "ok" and _existing_relative(directory, image.get("path"))
+            )
+            if entry["visual"] or entry["numeric"]:
+                grades.add("layout/text only (oracle capture, default view state)")
+    return found, grades
+
+
+def _merge_oracle_maps(
+    reference: dict[str, dict[str, bool]], oracle: dict[str, dict[str, bool]]
+) -> dict[str, dict[str, bool]]:
+    """Combine reference/ and _oracle coverage without losing either source."""
+    combined: dict[str, dict[str, bool]] = {}
+    for key in set(reference) | set(oracle):
+        combined[key] = {
+            "visual": reference.get(key, {}).get("visual", False) or oracle.get(key, {}).get("visual", False),
+            "numeric": reference.get(key, {}).get("numeric", False) or oracle.get(key, {}).get("numeric", False),
+        }
+    return combined
+
+
+def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: Path | None) -> dict[str, Any]:
+    """Per-page visual/numeric oracle coverage, with grade."""
+    pages = expected_pages(target) or actual_pages(target)
+    reference, reference_grades = _reference_oracles(target, reference_dir)
+    oracle, oracle_grades = _oracle_capture_oracles(target, oracle_dir)
+    if not pages:
+        return {"id": "oracle-coverage", "status": STATUS_NOT_CHECKED, "detail": "no expected or actual pages found"}
+    combined = _merge_oracle_maps(reference, oracle)
+    rows = [{"page": page, **combined.get(_slug(page["name"]), {"visual": False, "numeric": False})} for page in pages]
+    visual_missing = [row["page"] for row in rows if not row["visual"]]
+    numeric_missing = [row["page"] for row in rows if not row["numeric"]]
+    return {
+        "id": "oracle-coverage",
+        "status": STATUS_NOT_CHECKED if visual_missing or numeric_missing else STATUS_PASS,
+        "pages": len(rows),
+        "visual_present": len(rows) - len(visual_missing),
+        "numeric_present": len(rows) - len(numeric_missing),
+        "visual_missing": visual_missing,
+        "numeric_missing": numeric_missing,
+        "grade": ", ".join(sorted(reference_grades | oracle_grades)) or "not checked (no oracle manifest found)",
+        "rows": rows,
+    }
+
+
+def _run_cli_gate(gate: Gate, target: Path, output_dir: Path) -> dict[str, Any]:
+    json_path = output_dir / f"{gate.check_id}.json" if gate.writes_json else None
+    argv = [sys.executable, str(SCRIPT_DIR / gate.script), str(target), *gate.args]
+    if json_path is not None:
+        argv.extend(["--json", str(json_path), "--quiet"])
+    proc = _run_simple(argv)
+    payload: dict[str, Any] = {}
+    if json_path is not None and json_path.is_file():
+        try:
+            payload = _read_json(json_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            payload = {"status": "ERROR", "reason": f"unreadable JSON output: {exc}"}
+    else:
+        payload = {"status": "OK" if proc.returncode == 0 else "FINDINGS"}
+    native_status = str(payload.get("status") or "UNKNOWN")
+    if native_status in gate.finding_statuses or (not gate.writes_json and proc.returncode not in {0, 2}):
+        status = STATUS_FINDINGS
+    elif native_status in gate.not_checked_statuses or (not gate.writes_json and proc.returncode == 2):
+        status = STATUS_NOT_CHECKED
+    else:
+        status = STATUS_PASS
+    return {
+        "id": gate.check_id,
+        "status": status,
+        "native_status": native_status,
+        "native_exit": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+        "payload": payload,
+    }
+
+
+def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) -> dict[str, Any]:
+    payload = check.get("payload") if isinstance(check.get("payload"), dict) else {}
+    entries = exemptions["entries"]
+    stubs = []
+    for model in payload.get("models", []) if isinstance(payload.get("models"), list) else []:
+        for finding in model.get("findings", []) if isinstance(model, dict) else []:
+            canonical = f"{finding.get('kind')}:{finding.get('table')}[{finding.get('name')}]"
+            aliases = {f"{finding.get('table')}[{finding.get('name')}]", str(finding.get("name") or "")}
+            stubs.append(
+                {
+                    "canonical": canonical,
+                    "finding": finding,
+                    "exempted": _exempted(entries, "stub-measures", canonical, aliases),
+                }
+            )
+    unexempted = [stub for stub in stubs if not stub["exempted"]]
+    check["stub_exemptions"] = len(stubs) - len(unexempted)
+    check["unexempted_stubs"] = len(unexempted)
+    if check["native_status"] == "STUBS":
+        check["status"] = STATUS_FINDINGS if unexempted else STATUS_PASS
+    return check
+
+
+def _run_simple(argv: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
+    """Run a native checker in a fresh process and capture its exact exit code."""
+    return subprocess.run(
+        argv,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )  # noqa: S603
+
+
+def check_occlusion(target: Path, output_dir: Path) -> dict[str, Any]:
+    """Run detect_occlusion.py over every shipping report, preserving per-report exits."""
+    reports = shipping_reports(target)
+    if not reports:
+        return {"id": "occlusion", "status": STATUS_NOT_CHECKED, "detail": "no shipping report found"}
+    findings = []
+    native = []
+    for index, report in enumerate(reports):
+        out = output_dir / f"occlusion-{index}.json"
+        proc = _run_simple([sys.executable, str(SCRIPT_DIR / "detect_occlusion.py"), str(report), "--json", str(out)])
+        payload: list[dict[str, Any]] = []
+        if out.is_file():
+            try:
+                loaded = _read_json(out)
+                payload = loaded if isinstance(loaded, list) else []
+            except (OSError, json.JSONDecodeError):
+                pass
+        native.append({"report": str(report), "native_exit": proc.returncode, "findings": payload})
+        findings.extend(payload)
+    status = STATUS_FINDINGS if findings else STATUS_PASS
+    return {
+        "id": "occlusion",
+        "status": status,
+        "native_status": "OCCLUDED" if findings else "OK",
+        "native_exit": max(item["native_exit"] for item in native),
+        "reports": native,
+        "findings": len(findings),
+    }
+
+
+def _load_ai_readiness() -> Any:
+    """Load the skill-owned readiness checker without copying its logic here."""
+    path = REPO_ROOT / ".github" / "skills" / "powerbi-ai-readiness" / "scripts" / "check_ai_readiness.py"
+    spec = importlib.util.spec_from_file_location("unit_check_ai_readiness", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_ai_descriptions(target: Path) -> dict[str, Any]:
+    """Reuse the description/domain readiness checker per discovered model."""
+    models = shipping_models(target, include_standalone=True)
+    if not models:
+        return {"id": "ai-descriptions", "status": STATUS_NOT_CHECKED, "detail": "no semantic model found"}
+    checker = _load_ai_readiness()
+    rows = []
+    for model in models:
+        result = checker.audit_model(model)
+        counts = result["counts"]
+        total = sum(count["total"] for count in counts.values())
+        described = sum(count["described"] for count in counts.values())
+        gaps = result["categorical_gaps"]
+        rows.append(
+            {
+                "model": str(model),
+                "total": total,
+                "described": described,
+                "categorical_gaps": gaps,
+                "status": "OK" if described == total and not gaps else "FINDINGS",
+            }
+        )
+    failing = [row for row in rows if row["status"] != "OK"]
+    return {
+        "id": "ai-descriptions",
+        "status": STATUS_FINDINGS if failing else STATUS_PASS,
+        "native_status": "FINDINGS" if failing else "OK",
+        "native_exit": 1 if failing else 0,
+        "models": rows,
+    }
+
+
+def check_ai_instructions(target: Path) -> dict[str, Any]:
+    """Check CustomInstructions/qnaEnabled per model; no model is NOT_CHECKED, not PASS."""
+    models = shipping_models(target, include_standalone=True)
+    if not models:
+        return {"id": "ai-instructions", "status": STATUS_NOT_CHECKED, "detail": "no semantic model found"}
+    results = []
+    for model in models:
+        proc = _run_simple(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "set_ai_instructions.py"),
+                "--check",
+                "--strict",
+                "--model",
+                str(model),
+            ]
+        )
+        results.append(
+            {
+                "model": str(model),
+                "native_exit": proc.returncode,
+                "stdout": proc.stdout.strip(),
+                "stderr": proc.stderr.strip(),
+            }
+        )
+    failing = [result for result in results if result["native_exit"] != 0]
+    return {
+        "id": "ai-instructions",
+        "status": STATUS_FINDINGS if failing else STATUS_PASS,
+        "native_status": "FINDINGS" if failing else "OK",
+        "native_exit": max(result["native_exit"] for result in results),
+        "models": results,
+    }
+
+
+def check_cache_freshness(target: Path) -> dict[str, Any]:
+    """Partial cache validity: file-backed cache existence + mtime only, never live-row proof."""
+    models = shipping_models(target, include_standalone=True)
+    if not models:
+        return {
+            "id": "cache-freshness",
+            "status": STATUS_NOT_CHECKED,
+            "verification": "PARTIAL",
+            "detail": "no semantic model found",
+        }
+    rows = []
+    for model in models:
+        cache = model / ".pbi" / "cache.abf"
+        tmdls = list((model / "definition").rglob("*.tmdl")) if (model / "definition").is_dir() else []
+        newest = max((path.stat().st_mtime for path in tmdls), default=0.0)
+        if not cache.is_file():
+            state = "NO_CACHE"
+        elif cache.stat().st_mtime < newest:
+            state = "STALE"
+        else:
+            state = "FRESH_BY_MTIME"
+        rows.append({"model": str(model), "status": state})
+    stale = [row for row in rows if row["status"] == "STALE"]
+    missing = [row for row in rows if row["status"] == "NO_CACHE"]
+    status = STATUS_FINDINGS if stale else STATUS_NOT_CHECKED
+    detail = "mtime-only partial check; does not prove live/remote rows or description invalidation state"
+    return {
+        "id": "cache-freshness",
+        "status": status,
+        "verification": "PARTIAL",
+        "detail": detail,
+        "models": rows,
+        "stale": len(stale),
+        "missing": len(missing),
+    }
+
+
+def claimed_only_checks() -> list[dict[str, Any]]:
+    """Phases #271 says are not machine-verifiable today."""
+    return [
+        {
+            "id": "visual-layer-done",
+            "status": STATUS_NOT_CHECKED,
+            "verification": "CLAIMED_ONLY",
+            "detail": "no machine-readable completion artifact exists",
+        },
+        {
+            "id": "visual-comparison-done",
+            "status": STATUS_NOT_CHECKED,
+            "verification": "CLAIMED_ONLY",
+            "detail": "validator judgement is not a gate artifact today",
+        },
+        {
+            "id": "finalized",
+            "status": STATUS_NOT_CHECKED,
+            "verification": "CLAIMED_ONLY",
+            "detail": "sign-off is not represented by a verifiable artifact today",
+        },
+    ]
+
+
+def check_engine_receipt(target: Path) -> dict[str, Any]:
+    """Engine receipt presence and drift; check_engine_receipts.py remains the drift authority."""
+    receipt = target / "engine-output-receipt.json"
+    if not receipt.is_file():
+        return {"id": "engine-receipt", "status": STATUS_NOT_CHECKED, "detail": "no engine-output-receipt.json"}
+    proc = _run_simple([sys.executable, str(SCRIPT_DIR / "check_engine_receipts.py"), "--root", str(target)], 120)
+    try:
+        payload = _read_json(receipt)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"id": "engine-receipt", "status": STATUS_FINDINGS, "detail": f"unreadable receipt: {exc}"}
+    status = STATUS_PASS if proc.returncode == 0 else STATUS_FINDINGS
+    return {
+        "id": "engine-receipt",
+        "status": status,
+        "native_status": "OK" if proc.returncode == 0 else "WARN",
+        "native_exit": proc.returncode,
+        "engine": payload.get("engine") if isinstance(payload, dict) else None,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+
+
+def _temp_json_dir(target: Path) -> Path:
+    digest = hashlib.sha256(str(target).encode("utf-8")).hexdigest()[:16]
+    path = REPO_ROOT / ".check-unit-scratch" / digest
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _remove_json_dir(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+    parent = path.parent
+    try:
+        parent.rmdir()
+    except OSError:
+        pass
+
+
+def run_all(target: Path, reference_dir: Path | None = None, oracle_dir: Path | None = None) -> dict[str, Any]:
+    """Run preconditions and every existing gate, returning a normalized envelope."""
+    target = target.resolve()
+    exemptions = load_exemptions(target)
+    checks: list[dict[str, Any]] = []
+    if exemptions["invalid"]:
+        checks.append(
+            {
+                "id": "exemptions",
+                "status": STATUS_FINDINGS,
+                "invalid": exemptions["invalid"],
+                "path": exemptions["path"],
+            }
+        )
+    page = check_page_parity(target, exemptions)
+    checks.append(page)
+    if page["status"] == STATUS_PRECONDITION_FAILED:
+        return _finalize(target, checks, exemptions, stopped_after="page-parity")
+    checks.append(check_oracle_coverage(target, reference_dir, oracle_dir))
+    checks.append(check_engine_receipt(target))
+    output_dir = _temp_json_dir(target)
+    try:
+        for gate in GATES:
+            check = _run_cli_gate(gate, target, output_dir)
+            if gate.check_id == "stub-measures":
+                check = _apply_stub_exemptions(check, exemptions)
+            checks.append(check)
+        checks.append(check_occlusion(target, output_dir))
+    finally:
+        _remove_json_dir(output_dir)
+    checks.append(check_ai_descriptions(target))
+    checks.append(check_ai_instructions(target))
+    checks.append(check_cache_freshness(target))
+    checks.extend(claimed_only_checks())
+    return _finalize(target, checks, exemptions)
+
+
+def _finalize(
+    target: Path, checks: list[dict[str, Any]], exemptions: dict[str, Any], stopped_after: str | None = None
+) -> dict[str, Any]:
+    statuses = [check["status"] for check in checks]
+    if STATUS_PRECONDITION_FAILED in statuses:
+        status = STATUS_PRECONDITION_FAILED
+        exit_code = EXIT_PRECONDITION_FAILED
+    elif STATUS_FINDINGS in statuses:
+        status = STATUS_FINDINGS
+        exit_code = EXIT_FINDINGS
+    elif STATUS_NOT_CHECKED in statuses:
+        status = STATUS_NOT_CHECKED
+        exit_code = EXIT_NOT_CHECKED
+    else:
+        status = STATUS_PASS
+        exit_code = EXIT_OK
+    return {
+        "version": 1,
+        "target": str(target),
+        "status": status,
+        "exit_code": exit_code,
+        "stopped_after": stopped_after,
+        "exemptions": {
+            "path": exemptions["path"],
+            "accepted": len(exemptions["entries"]),
+            "invalid": len(exemptions["invalid"]),
+        },
+        "checks": checks,
+    }
+
+
+def _count_suffix(missing: int) -> str:
+    return f"   [{missing} MISSING]" if missing else ""
+
+
+def render(report: dict[str, Any]) -> str:
+    """Human-readable unit verdict."""
+    lines = [f"UNIT CHECK: {report['status']} - {report['target']}"]
+    if report.get("stopped_after"):
+        lines.append(f"  stopped after failed precondition: {report['stopped_after']}")
+    for check in report["checks"]:
+        check_id = check["id"]
+        status = check["status"]
+        if check_id == "oracle-coverage" and "pages" in check:
+            pages = check["pages"]
+            visual_missing = pages - check["visual_present"]
+            numeric_missing = pages - check["numeric_present"]
+            lines.append(
+                f"  oracle coverage:  {check['visual_present']} of {pages} pages have a visual oracle"
+                f"{_count_suffix(visual_missing)}"
+            )
+            lines.append(
+                f"                    {check['numeric_present']} of {pages} pages have a numeric oracle"
+                f"{_count_suffix(numeric_missing)}"
+            )
+            lines.append(f"                    grade: {check['grade']}  [{status}]")
+        elif check_id == "page-parity" and "expected_count" in check:
+            lines.append(
+                f"  page-count parity: {check['actual_count']} PBIR page(s) for "
+                f"{check['effective_expected_count']} expected Tableau dashboard(s)  [{status}]"
+            )
+            if check.get("exemptions"):
+                lines.append(f"                    exemptions accepted: {len(check['exemptions'])}")
+        elif check_id == "stub-measures" and "stub_exemptions" in check:
+            lines.append(
+                f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']}; "
+                f"{check['stub_exemptions']} exempted, {check['unexempted_stubs']} unexempted)"
+            )
+        elif "native_exit" in check:
+            lines.append(f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']})")
+        else:
+            detail = f" - {check['detail']}" if check.get("detail") else ""
+            lines.append(f"  {check_id}: {status}{detail}")
+    ex = report["exemptions"]
+    if ex["accepted"] or ex["invalid"]:
+        lines.append(f"  documented why-not exemptions: {ex['accepted']} accepted, {ex['invalid']} invalid")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("target", type=Path, help="migration unit, fabric folder, or engine bundle")
+    parser.add_argument("--json", type=Path, help="write the normalized unit-check envelope here")
+    parser.add_argument("--reference-dir", type=Path, help="override reference/ directory containing manifest.json")
+    parser.add_argument("--oracle-dir", type=Path, help="override _oracle directory containing oracle-manifest.json")
+    parser.add_argument("--quiet", action="store_true", help="suppress human-readable output")
+    args = parser.parse_args(argv)
+
+    if not args.target.is_dir():
+        print(f"ERROR: not a directory: {args.target}", file=sys.stderr)
+        return EXIT_USAGE
+    report = run_all(args.target, reference_dir=args.reference_dir, oracle_dir=args.oracle_dir)
+    if args.json:
+        _write_json(args.json, report)
+    if not args.quiet:
+        print(render(report))
+    return int(report["exit_code"])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

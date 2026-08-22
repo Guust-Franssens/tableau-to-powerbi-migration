@@ -87,6 +87,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bundle_corpus import shipping_models
+
 REPORT_NAME = "stub-measure-check.json"
 
 STATUS_OK = "OK"
@@ -426,18 +428,7 @@ def census_model(model_dir: Path) -> dict[str, Any]:
     }
 
 
-def find_models(root: Path) -> list[Path]:
-    """Every shipping semantic model under `root`.
-
-    A bundle is scanned through `pbip/` when it has one: `<bundle>/semantic_models/` is the engine's
-    reference-only baseline that nobody edits and nothing ships, so counting it too would double
-    every denominator and halve the reported completion of the bundle.
-    """
-    if root.name.endswith(".SemanticModel"):
-        return [root]
-    pbip = root / "pbip"
-    base = pbip if pbip.is_dir() else root
-    return sorted({p.resolve() for p in base.rglob("*.SemanticModel") if p.is_dir()}, key=lambda p: p.name)
+find_models = shipping_models
 
 
 def scan(root: Path) -> dict[str, Any]:

@@ -73,6 +73,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from bundle_corpus import shipping_reports
+
 REPORT_NAME = "field-binding-check.json"
 
 # TMDL member declarations. Names are either bare or single-quoted; a measure/calculated column
@@ -654,14 +656,7 @@ def model_for_report(report_dir: Path) -> Path | None:
     return sibling if sibling.is_dir() else None
 
 
-def find_reports(root: Path) -> list[Path]:
-    """The `.Report` folders that SHIP under `root` - `pbip/` only for a bundle."""
-    root = root.resolve()
-    if root.name.endswith(".Report"):
-        return [root]
-    pbip = root / "pbip"
-    base = pbip if pbip.is_dir() else root
-    return sorted({p.resolve() for p in base.rglob("*.Report") if p.is_dir()})
+find_reports = shipping_reports
 
 
 def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
