@@ -40,6 +40,10 @@ OBJECT_RE = re.compile(r"^(?P<indent>\t*)(?P<kind>table|column|measure)\s+(?P<na
 # A hint that a description enumerates its domain (e.g. "One of: A, B, C" or "values: X, Y").
 DOMAIN_HINT_RE = re.compile(r"(one of|values?:|categories|domain|:contains|e\.g\.)", re.IGNORECASE)
 
+EXIT_OK = 0
+EXIT_FINDINGS = 1
+EXIT_SKIPPED = 3
+
 
 def _iter_tmdl(model_dir: Path):
     yield from model_dir.glob("definition/*.tmdl")
@@ -77,23 +81,26 @@ def _model_dirs(target: Path):
     return sorted(target.glob("fabric/*.SemanticModel"))
 
 
-def _print_model(slug: str, model_dir: Path, result: dict) -> bool:
+def _print_model(slug: str, model_dir: Path, result: dict) -> str:
     counts = result["counts"]
     total = sum(c["total"] for c in counts.values())
     described = sum(c["described"] for c in counts.values())
-    pct = 100.0 * described / total if total else 100.0
+    pct = 100.0 * described / total if total else 0.0
     print(f"\n=== {slug} / {model_dir.name} ===")
     for kind in ("table", "column", "measure"):
         c = counts[kind]
-        p = 100.0 * c["described"] / c["total"] if c["total"] else 100.0
+        p = 100.0 * c["described"] / c["total"] if c["total"] else 0.0
         print(f"  {kind + 's':<9} {c['described']:>3}/{c['total']:<3} described ({p:5.1f}%)")
     print(f"  {'overall':<9} {described:>3}/{total:<3} described ({pct:5.1f}%)")
+    if total == 0:
+        print("  SKIPPED - nothing measured (no tables, columns, or measures found)")
+        return "SKIPPED"
     gaps = result["categorical_gaps"]
     if gaps:
         print(f"  categorical columns missing enumerated domain values ({len(gaps)}):")
         for g in gaps[:25]:
             print(f"    - {g}")
-    return pct >= 100.0 and not gaps
+    return "OK" if pct >= 100.0 and not gaps else "FINDINGS"
 
 
 def main() -> None:
@@ -114,18 +121,21 @@ def main() -> None:
         parser.error("provide a <tree>/<slug> path or --all")
         return
 
-    all_ok = True
+    statuses = []
     for target in targets:
         model_dirs = _model_dirs(target)
         if not model_dirs:
-            print(f"(no semantic model under {target.name}/fabric/)")
+            print(f"(no semantic model under {target.name}/fabric/) SKIPPED - nothing measured")
+            statuses.append("SKIPPED")
             continue
         for model_dir in model_dirs:
-            ok = _print_model(target.name, model_dir, audit_model(model_dir))
-            all_ok = all_ok and ok
+            statuses.append(_print_model(target.name, model_dir, audit_model(model_dir)))
 
-    if args.strict and not all_ok:
-        sys.exit(1)
+    if any(status == "FINDINGS" for status in statuses):
+        if args.strict:
+            sys.exit(EXIT_FINDINGS)
+    elif not statuses or any(status == "SKIPPED" for status in statuses):
+        sys.exit(EXIT_SKIPPED)
 
 
 if __name__ == "__main__":

@@ -132,6 +132,16 @@ def test_no_models_is_skipped_not_ok(tmp_path, capsys) -> None:
     assert "SKIPPED" in out and "OK" not in out
 
 
+def test_existing_model_with_no_tmdl_is_skipped_not_ok(tmp_path, capsys) -> None:
+    """A cache-only `.SemanticModel` is a missing input state, not a clean sqlproxy scan."""
+    model = tmp_path / "CacheOnly.SemanticModel"
+    model.mkdir()
+
+    assert csc.main([str(model)]) == csc.EXIT_SKIPPED
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out and "OK" not in out
+
+
 def test_json_output_carries_pairs_and_warning_signal(tmp_path) -> None:
     """The machine-readable output must contain the action queue and non-blocking risk telemetry."""
     bundle = _write_bundle(tmp_path, REAL_ENGINE_SQLPROXY_EXPRESSIONS)

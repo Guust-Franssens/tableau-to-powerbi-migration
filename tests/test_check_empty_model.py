@@ -532,15 +532,17 @@ def test_a_quoted_partition_name_is_unquoted(tmp_path: Path) -> None:
     assert cem.scan(bundle)["models"][0]["findings"][0]["partition"] == "Orders$"
 
 
-def test_a_model_with_no_tables_folder_is_not_a_finding(tmp_path: Path) -> None:
-    """An empty scan target must produce OK, not a crash and not a false alarm."""
+def test_a_model_with_no_tables_folder_is_skipped_not_ok(tmp_path: Path) -> None:
+    """An empty scan target is missing input, not a clean empty-model verdict."""
     bundle = tmp_path / "bundle"
     (bundle / "pbip" / "wb" / "Empty.SemanticModel" / "definition").mkdir(parents=True)
 
     report = cem.scan(bundle)
 
     assert report["models_scanned"] == 1
-    assert report["status"] == "OK"
+    assert report["models_skipped"] == 1
+    assert report["status"] == cem.STATUS_SKIPPED
+    assert cem.main([str(bundle)]) == cem.EXIT_SKIPPED
 
 
 # ---------------------------------------------------------------------------

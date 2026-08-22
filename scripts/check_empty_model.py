@@ -142,9 +142,14 @@ CATEGORY_EMPTY = "empty_file"
 BLOCKING_CATEGORIES = (CATEGORY_MISSING, CATEGORY_FOREIGN, CATEGORY_EMPTY)
 JUDGED_CATEGORIES = BLOCKING_CATEGORIES + (CATEGORY_FILE_OK,)
 
+STATUS_OK = "OK"
+STATUS_EMPTY_MODELS = "EMPTY_MODELS"
+STATUS_SKIPPED = "SKIPPED"
+
 EXIT_OK = 0
 EXIT_EMPTY_MODEL = 5
 EXIT_USAGE = 2
+EXIT_SKIPPED = 3
 
 # The host this check is running on, read ONCE into a module global so a test can exercise the other
 # host without a second CI runner. `os.name` is not read anywhere else in this module.
@@ -428,6 +433,13 @@ def classify_partition(block: dict, model_dir: Path, params: dict[str, str] | No
     return {**verdict, **decided}
 
 
+def _has_tmdl_documents(model_dir: Path) -> bool:
+    """Whether this model has any TMDL document for the checker to inspect."""
+    definition = model_dir / "definition"
+    root = definition if definition.is_dir() else model_dir
+    return any(path.is_file() for path in root.rglob("*.tmdl"))
+
+
 def scan_model(model_dir: Path, root: Path) -> dict:
     """Classify every partition of one `.SemanticModel` folder."""
     params = model_parameters(model_dir)
@@ -449,7 +461,7 @@ def scan_model(model_dir: Path, root: Path) -> dict:
         "partitions_total": len(partitions),
         "categories": _counts(partitions),
         "findings": findings,
-        "status": "EMPTY" if findings else "OK",
+        "status": "EMPTY" if findings else (STATUS_OK if _has_tmdl_documents(model_dir) else STATUS_SKIPPED),
     }
 
 
@@ -487,13 +499,16 @@ def scan(root: Path) -> dict:
     """Scan a bundle (or a single model) and return the machine-readable report."""
     models = [scan_model(model, root) for model in find_models(root)]
     empty = [m for m in models if m["status"] == "EMPTY"]
+    skipped = [m for m in models if m["status"] == STATUS_SKIPPED]
+    status = STATUS_EMPTY_MODELS if empty else (STATUS_SKIPPED if skipped or not models else STATUS_OK)
     return {
         "version": REPORT_VERSION,
         "root": str(root),
         "host": "windows" if HOST_OS == "nt" else "posix",
         "models_scanned": len(models),
         "models_empty": len(empty),
-        "status": "EMPTY_MODELS" if empty else "OK",
+        "models_skipped": len(skipped),
+        "status": status,
         "models": models,
     }
 
@@ -516,8 +531,11 @@ def category_totals(report: dict, categories: tuple[str, ...], invert: bool = Fa
 def render(report: dict) -> str:
     """Human-readable verdict: what is empty, which artifact says so, and what to do about it."""
     lines = [f"EMPTY-MODEL CHECK: {report['models_scanned']} model(s) under {report['root']}"]
-    if not report["models_scanned"]:
-        lines.append("  no .SemanticModel folders found - nothing to judge")
+    if report["status"] == STATUS_SKIPPED:
+        if not report["models_scanned"]:
+            lines.append("  SKIPPED - nothing measured (no .SemanticModel folders found)")
+        else:
+            lines.append(f"  SKIPPED - nothing measured ({report['models_skipped']} model(s) contain no TMDL files)")
         return "\n".join(lines)
 
     # Both lines print on every run, pass or fail: a gate whose false-positive posture is invisible is
@@ -582,7 +600,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.warn_only:
         return EXIT_OK
-    return EXIT_EMPTY_MODEL if any(r["status"] == "EMPTY_MODELS" for r in reports) else EXIT_OK
+    if any(r["status"] == STATUS_EMPTY_MODELS for r in reports):
+        return EXIT_EMPTY_MODEL
+    if any(r["status"] == STATUS_SKIPPED for r in reports):
+        return EXIT_SKIPPED
+    return EXIT_OK
 
 
 if __name__ == "__main__":

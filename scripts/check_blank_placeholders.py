@@ -305,13 +305,27 @@ def _blank_objects_in_tmdl(tmdl: Path, model_dir: Path, root: Path) -> list[dict
     return objects
 
 
+def _model_tmdl_documents(root: Path) -> list[Path]:
+    """TMDL table files from shipping models, used to distinguish clean from unmeasured."""
+    if root.name.endswith(".SemanticModel"):
+        model_dirs = [root]
+    else:
+        base = root / "pbip" if (root / "pbip").is_dir() else root
+        model_dirs = [path for path in base.rglob("*.SemanticModel") if path.is_dir()]
+    return sorted(
+        tmdl
+        for model_dir in model_dirs
+        for tmdl in (model_dir / "definition" / "tables").glob("*.tmdl")
+        if tmdl.is_file()
+    )
+
+
 def blank_objects(root: Path) -> list[dict]:
     """Every BLANK()-only calculated object under the shipping PBIP models."""
-    base = root / "pbip" if (root / "pbip").is_dir() else root
     objects: list[dict] = []
-    for model_dir in sorted(p for p in base.rglob("*.SemanticModel") if p.is_dir()):
-        for tmdl in sorted((model_dir / "definition" / "tables").glob("*.tmdl")):
-            objects.extend(_blank_objects_in_tmdl(tmdl, model_dir, root))
+    for tmdl in _model_tmdl_documents(root):
+        model_dir = tmdl.parents[2]
+        objects.extend(_blank_objects_in_tmdl(tmdl, model_dir, root))
     return objects
 
 
@@ -495,6 +509,7 @@ def scan(root: Path) -> dict:
     """Scan a bundle and return the machine-readable report."""
     root = root.resolve()
     evidence = handover_candidates(root)
+    documents = _model_tmdl_documents(root)
     objects = blank_objects(root)
     findings = correlated_placeholders(root, evidence, objects)
     attach_dependencies(root, findings)
@@ -505,7 +520,8 @@ def scan(root: Path) -> dict:
         unchecked_workbooks.append({**workbook, "blank_objects": blank_count})
     skipped_owners = sorted({obj["owner"] for obj in objects} - set(evidence.report_workbook_owners))
     skipped_datasources = _owner_blank_summaries(objects, skipped_owners) if evidence.report_workbook_owners else []
-    incomplete = bool(unchecked_workbooks or skipped_datasources)
+    nothing_measured = not documents and not evidence.entries and not evidence.report_workbook_owners
+    incomplete = bool(unchecked_workbooks or skipped_datasources or nothing_measured)
     status = (
         STATUS_REFERENCED
         if referenced
@@ -519,6 +535,8 @@ def scan(root: Path) -> dict:
         "placeholders_referenced": len(referenced),
         "handover_unreadable": len(evidence.unreadable),
         "handover_unreadable_paths": evidence.unreadable,
+        "model_tmdl_documents": len(documents),
+        "nothing_measured": nothing_measured,
         "workbooks_reported": len(evidence.report_workbook_owners),
         "workbooks_unchecked": len(unchecked_workbooks),
         "workbooks_unchecked_blank_objects": sum(item["blank_objects"] for item in unchecked_workbooks),
@@ -565,9 +583,12 @@ def render(report: dict) -> str:
         lines.append("  OK - no handover-backed BLANK() placeholder survived into the model.")
         return "\n".join(lines)
     if report["status"] == STATUS_INCOMPLETE and not report["findings"]:
-        lines.append(
-            "  INCOMPLETE - no handover-backed placeholders were proven, but part of the estate was not checked."
-        )
+        if report.get("nothing_measured"):
+            lines.append("  INCOMPLETE - nothing measured (no handover evidence or model TMDL files found).")
+        else:
+            lines.append(
+                "  INCOMPLETE - no handover-backed placeholders were proven, but part of the estate was not checked."
+            )
         return "\n".join(lines)
     lines.append(
         "  Severity model: unreferenced placeholders are documented gaps; references from filters or "
@@ -621,6 +642,8 @@ def main(argv: list[str] | None = None) -> int:
         "placeholders_referenced": 0,
         "handover_unreadable": 0,
         "handover_unreadable_paths": [],
+        "model_tmdl_documents": 0,
+        "nothing_measured": False,
         "workbooks_reported": 0,
         "workbooks_unchecked": 0,
         "workbooks_unchecked_blank_objects": 0,
@@ -635,6 +658,8 @@ def main(argv: list[str] | None = None) -> int:
         merged["placeholders_referenced"] += report["placeholders_referenced"]
         merged["handover_unreadable"] += report["handover_unreadable"]
         merged["handover_unreadable_paths"].extend(report["handover_unreadable_paths"])
+        merged["model_tmdl_documents"] += report["model_tmdl_documents"]
+        merged["nothing_measured"] = merged["nothing_measured"] or report["nothing_measured"]
         merged["workbooks_reported"] += report["workbooks_reported"]
         merged["workbooks_unchecked"] += report["workbooks_unchecked"]
         merged["workbooks_unchecked_blank_objects"] += report["workbooks_unchecked_blank_objects"]
@@ -643,7 +668,9 @@ def main(argv: list[str] | None = None) -> int:
         merged["skipped_shared_datasource_blank_objects"] += report["skipped_shared_datasource_blank_objects"]
         merged["skipped_shared_datasource_details"].extend(report["skipped_shared_datasource_details"])
         merged["findings"].extend(report["findings"])
-    incomplete = bool(merged["workbooks_unchecked"] or merged["skipped_shared_datasources"])
+    incomplete = bool(
+        merged["workbooks_unchecked"] or merged["skipped_shared_datasources"] or merged["nothing_measured"]
+    )
     merged["status"] = (
         STATUS_REFERENCED
         if merged["placeholders_referenced"]

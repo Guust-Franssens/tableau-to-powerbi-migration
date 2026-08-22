@@ -169,6 +169,8 @@ GATES = (
         frozenset({0}),
         frozenset({"EMPTY_MODELS"}),
         frozenset({1, 5}),
+        frozenset({"SKIPPED"}),
+        frozenset({3}),
     ),
     Gate(
         "pbir-valid",
@@ -190,6 +192,8 @@ GATES = (
         frozenset({"DISPLACED_MAIN_COLUMN"}),
         frozenset({1}),
     ),
+    # Deliberate: the native census is non-gating by default for mid-migration use, but check_unit is
+    # the completion facade. A unit claimed ready must not silently carry unresolved BLANK() stubs.
     Gate(
         "stub-measures",
         "check_stub_measures.py",
@@ -688,15 +692,23 @@ def check_ai_descriptions(target: Path) -> dict[str, Any]:
                 "total": total,
                 "described": described,
                 "categorical_gaps": gaps,
-                "status": "OK" if described == total and not gaps else "FINDINGS",
+                "status": "SKIPPED" if total == 0 else ("OK" if described == total and not gaps else "FINDINGS"),
             }
         )
-    failing = [row for row in rows if row["status"] != "OK"]
+    failing = [row for row in rows if row["status"] == "FINDINGS"]
+    skipped = [row for row in rows if row["status"] == "SKIPPED"]
+    if failing:
+        status, native_status, native_exit = STATUS_FINDINGS, "FINDINGS", 1
+    elif skipped:
+        status, native_status, native_exit = STATUS_NOT_CHECKED, "SKIPPED", 3
+    else:
+        status, native_status, native_exit = STATUS_PASS, "OK", 0
     return {
         "id": "ai-descriptions",
-        "status": STATUS_FINDINGS if failing else STATUS_PASS,
-        "native_status": "FINDINGS" if failing else "OK",
-        "native_exit": 1 if failing else 0,
+        "status": status,
+        "native_status": native_status,
+        "native_exit": native_exit,
+        "detail": "nothing measured (no tables, columns, or measures found)" if skipped and not failing else None,
         "models": rows,
     }
 
@@ -1032,6 +1044,30 @@ def _count_suffix(missing: int) -> str:
     return f"   [{missing} MISSING]" if missing else ""
 
 
+def _summary_line(report: dict[str, Any]) -> str:
+    """Stable one-line aggregate for comparing repeated gate runs."""
+    owner_findings: dict[str, int] = {}
+    structural = 0
+    missing_input = 0
+    for check in report["checks"]:
+        owner = OWNER_HINTS.get(check["id"], "unknown")
+        if check["status"] in {STATUS_FINDINGS, STATUS_PRECONDITION_FAILED}:
+            owner_findings[owner] = owner_findings.get(owner, 0) + 1
+        if check["status"] == STATUS_NOT_CHECKED:
+            if check.get("verification") == "CLAIMED_ONLY":
+                structural += 1
+            else:
+                missing_input += 1
+    findings = ",".join(f"{owner}={count}" for owner, count in sorted(owner_findings.items())) or "none"
+    return (
+        "SUMMARY: "
+        f"findings_by_owner={findings}; "
+        f"not_checked_structural={structural}; "
+        f"not_checked_missing_input={missing_input}; "
+        f"ladder={report['status']} exit={report['exit_code']}"
+    )
+
+
 def render(report: dict[str, Any]) -> str:
     """Human-readable unit verdict."""
     scope = report.get("scope", SCOPE_ALL)
@@ -1079,6 +1115,7 @@ def render(report: dict[str, Any]) -> str:
     ex = report["exemptions"]
     if ex["accepted"] or ex["invalid"]:
         lines.append(f"  documented why-not exemptions: {ex['accepted']} accepted, {ex['invalid']} invalid")
+    lines.append(_summary_line(report))
     return "\n".join(lines)
 
 
