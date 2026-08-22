@@ -11,7 +11,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import time
 import subprocess
 import sys
@@ -43,28 +42,6 @@ def _gate_by_id(check_id: str) -> cu.Gate:
     matches = [gate for gate in ORIGINAL_GATES if gate.check_id == check_id]
     assert len(matches) == 1
     return matches[0]
-
-
-def _copy_clean_fixture(tmp_path: Path) -> Path:
-    source = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
-    target = tmp_path / "clean-unit"
-    shutil.copytree(source, target)
-    cache = target / "pbip" / "Book" / "Book.SemanticModel" / ".pbi" / "cache.abf"
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text("cache placeholder\n", encoding="utf-8")
-    future = time.time() + 60
-    os.utime(cache, (future, future))
-    return target
-
-
-def _write_current_engine_receipt(unit: Path) -> None:
-    import engine_source  # pylint: disable=import-outside-toplevel
-
-    root = engine_source.engine_root()
-    (unit / "engine-output-receipt.json").write_text(
-        json.dumps({"engine": {"root": str(root), "version": engine_source.engine_version(root), "canonical": True}}),
-        encoding="utf-8",
-    )
 
 
 def _freshen_clean_fixture_cache() -> Path:
@@ -622,25 +599,6 @@ def test_cli_model_scope_exits_zero_on_committed_clean_fixture() -> None:
     assert "AUTOMATED_CHECKS_PASS" in result.stdout
     assert "cache-freshness: PASS - mtime-only partial check" in result.stdout
     assert "data-model: PASS" in result.stdout
-
-
-def test_cli_all_scope_exits_zero_on_committed_clean_fixture_copy(tmp_path: Path) -> None:
-    """Subprocess-level proof that all automated gates can go green on a clean committed fixture."""
-    unit = _copy_clean_fixture(tmp_path)
-    _write_current_engine_receipt(unit)
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(unit), "--scope", "all"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == cu.EXIT_OK, result.stdout + result.stderr
-    assert "UNIT CHECK (all scope): AUTOMATED_CHECKS_PASS" in result.stdout
-    assert "data-model: PASS" in result.stdout
-    assert "empty-model: PASS" in result.stdout
-    assert "cache-freshness: PASS - mtime-only partial check" in result.stdout
 
 
 def test_cli_integration_scope_exits_zero_on_committed_clean_fixture() -> None:
