@@ -52,11 +52,9 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
-- **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
-  correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
-  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
-  skills, which the owning agents invoke.)
+- **Run the layer gate before narrative sign-off.** `python scripts/check_unit.py <unit-or-bundle>
+  --scope model|report|all` is the machine inventory. A scoped PASS covers only that persona's layer
+  and is not unit sign-off; Desktop/data fidelity still need evidence.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -278,27 +276,16 @@ gestalt-checked against the reference before binding any field** -> `powerbi-rep
 
 ## Mandatory validation (before Desktop screenshot review)
 
-Structural validation is not optional. Run it before every screenshot-based design review, on both the
-initial build and every later fix pass:
+Run the report-scope gate before every screenshot-based design review:
 
-1. **Confirm the CLI-driven flow is available.** Run the `powerbi-report-authoring` skill's
-   `check-updates` once per session. The current skill ships `powerbi-report-author validate`
-   (structural/schema/cross-reference/role-binding) and the `powerbi-desktop` bridge
-   (`status`/`reload`/`screenshot`). Prefer it — it mechanically catches bug classes that were
-   previously found one manual screenshot at a time.
-2. **If only an older skill copy is active**, do the equivalent checks by hand before every screenshot
-   review: every `visual.json` field reference resolves against the real TMDL; every page is listed in
-   `pages/pages.json`; no two visuals overlap; every table/matrix `Values` well is free of the
-   single-active-field-with-inactive-siblings pattern (`powerbi-report-gotchas` §4); and
-   `definition.pbir`'s model reference is correct.
-   **Model reference:** a cross-tree `byPath` into a shared `datasources/<ds-slug>/` model is correct,
-   not a defect to "fix" by copying the model in beside your report (`powerbi-report-gotchas` §3);
-   cloud equivalent `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`.
-3. **Only after structural validation passes**, do the visual/numeric Desktop screenshot review.
-4. **A clean Bridge/MCP response is NOT proof the report renders error-free.** Errors *inside*
-   Desktop's own rendering (a visual error glyph, a card failing to evaluate, a refresh banner) are not
-   reliably surfaced back through the bridge — `status`/`reload` can return cleanly while Desktop shows
-   a visible error state. Always cross-check with an actual screenshot for error glyphs and banners.
+```bash
+python scripts/check_unit.py <unit-or-bundle> --scope report
+```
+
+Exit 0 is required before you claim the report layer is mechanically clean. The scoped output owns
+page parity, oracle presence/grade, PBIR validation/layout, field bindings, and occlusion. A scoped
+PASS does **not** examine the model layer, and it still does not prove Desktop renders error-free; use
+actual screenshots for glyphs, banners, and whole-page gestalt.
 
 ## Iterating on an existing report — still go through the skill chain
 
@@ -310,37 +297,15 @@ discovery + post-development checklist exists to catch.
 
 ## Definition of Done
 
-Don't report the report as complete until all of the following hold — "it opens in Desktop without
-crashing" is necessary but not sufficient:
+Before reporting report completion:
 
-1. **The `powerbi-report-gotchas` skill was read this session**, before the first visual was authored.
-   Several items below are one-line summaries of entries that only make sense in full.
-2. **Every change lives in a `_build/fix_*.py` that is semantic, scoped and idempotent, and was run
-   through `declare_generated_edit.py`** — verified by actually re-running the engine and then the
-   scripts, and by `--tamper` exiting 0. Anything else is discarded by the next landing re-run.
-3. **Every visual you touched was routed to you by the validator**, not chosen off the raw
-   `viz_fidelity` list. A `reason` can describe a deferral that must *not* be reversed.
-4. **The whole-page gestalt was compared against the reference** — per-visual checks structurally
-   cannot catch a page that reads wrong as a whole.
-5. **Structural validation passed** (see "Mandatory validation" above), not just a visual glance.
-6. **No overlapping regions and nothing placed outside its page bounds** — `space_audit`-clean. When
-   you *authored* a page from scratch this means the full `layout_contract`; when you repaired an
-   existing one it means **your fix did not introduce an overlap**, which is the common way a
-   well-intentioned resize breaks a neighbour.
-7. **Every slicer that drives the report's default view has an explicit default value set** — no
-   visual should render an all-rows aggregate on first load (`powerbi-report-gotchas` §8).
-8. **Every table/matrix visual's field projection has been checked against the real Tableau
-   worksheet**, not accepted on a plausible-looking guess — especially any single-active-field
-   pattern (`powerbi-report-gotchas` §4).
-9. **Every percentage/scaled numeric field's `formatString` has been checked against a real sample
-   value via DAX**, not assumed from the field's semantic name alone (`powerbi-report-gotchas` §3).
-10. **Every `measure_names_values_pivot` and every `UNRESOLVED:` reference surfaced in
-   `limitations_encountered` has been explicitly addressed or explicitly flagged** — none silently
-   dropped.
-11. **Any `azureMap` with >1 `Column` projection in `Category` is blocking** — it validates but almost always collapses Tableau's map grain.
-12. **This checklist applies to fix/iteration passes too, not just the initial build** — a one-line fix
-   still needs the relevant subset of this list re-checked (at minimum #4–#6 for the visual touched)
-   before you report it done.
+1. The `powerbi-report-gotchas` skill was read before the first visual edit.
+2. Every change lives in a scoped, idempotent `_build/fix_*.py` and was declared.
+3. Every visual you touched was routed to you by the validator; accepted deferrals stay accepted.
+4. Whole-page gestalt was compared against the reference; this remains human judgment.
+5. `python scripts/check_unit.py <unit-or-bundle> --scope report` exits 0. If it reports a scoped PASS,
+   say the model layer was not examined.
+6. Fix/iteration passes rerun the same gate plus the relevant screenshot comparison.
 
 ## Gotchas
 

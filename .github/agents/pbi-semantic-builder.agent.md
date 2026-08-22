@@ -57,11 +57,9 @@ examples, not hypothetical ones.
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
-- **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
-  correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
-  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
-  skills, which the owning agents invoke.)
+- **Run the layer gate before narrative sign-off.** `python scripts/check_unit.py <unit-or-bundle>
+  --scope model|report|all` is the machine inventory. A scoped PASS covers only that persona's layer
+  and is not unit sign-off; Desktop/data fidelity still need evidence.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -258,23 +256,14 @@ Everything below is what that skill *cannot* know: your place in this pipeline.
   ground-truth totals you verified. A migrated model has idioms a generic writer misses: disconnected
   parameter-proxy tables that are not dimensions, `CM`/`T `-style prefixes the migration introduced,
   `Latest*` snapshot measures that must not be re-aggregated.
-- **Your gate before hand-off** — scoped to the model you built, not the whole repo:
+- **Your gate before hand-off** — scoped to the model you built, not the whole unit:
 
   ```bash
-  python scripts/check_ai_readiness.py migrations/workbooks/<slug>
-  python scripts/set_ai_instructions.py --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel
-  python scripts/set_ai_instructions.py --check --strict --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel
+  python scripts/check_unit.py <unit-or-bundle> --scope model
   ```
 
-  The last one must exit 0. Report what you **deferred** (AI data schema, verified answers, "Approved
-  for Copilot") in `limitations_encountered` — a migration that claims "AI-ready" without naming the
-  deferred items is overstating its coverage.
-- **These paths assume the `migrations/workbooks/<slug>/fabric/` tree.** In the estate/bundle flow the
-  model lives at `<bundle>/pbip/<wb>/<Name>.SemanticModel`, and `check_ai_readiness.py` structurally
-  cannot run there. That is a **tooling gap, not a waiver**: point `set_ai_instructions.py --model` at
-  the real `.SemanticModel` path (it takes one), do the descriptions/synonyms work anyway, and record
-  the coverage you could not machine-check in `limitations_encountered`. Never report "AI-ready"
-  because a checker declined to run, and never silently skip the step — say which path you took.
+  Exit 0 is required for model hand-off. A scoped PASS does **not** examine the report layer; any
+  `FINDINGS`/`NOT_CHECKED` row is work to fix or an explicit `limitations_encountered` entry.
 
 ## Gotchas
 
@@ -300,57 +289,13 @@ not back in this file.**
 
 ## Definition of Done
 
-Don't report the semantic model as complete until all of the following hold — "it deployed without
-throwing an error" is necessary but not sufficient:
+Before reporting model completion:
 
-1. **The `powerbi-semantic-model-gotchas` skill was read this session**, before the first TMDL file was
-   written. Several items below are one-line summaries of entries that only make sense in full.
-2. **No stale banners.** Desktop shows no pending "columns need refresh" banner (see the skill's §3) —
-   confirmed via a screenshot or an explicit `RefreshWithXMLA` Calculate followed by a re-check.
-3. **Every non-trivial translated measure has a numeric ground-truth check**, not just a
-   does-it-error check — run `EVALUATE` filtered to one concrete dimension value and compare against
-   the same value read off the Tableau workbook. "It returned a number" is not verification; "it
-   returned the *right* number" is.
-4. **No orphaned/junk artifacts *among the objects you authored*** — every measure and calculated
-   column **you added** is referenced by a visual, by another measure, or documented as a deliberate
-   forward-looking addition. The engine's own emitted objects are its layer; an unreferenced one is a
-   finding to route, not yours to delete.
-5. **Every `requests[]` entry's fate is recorded** — for each stubbed calc in the handover, your
-   report states whether you landed DAX for it (and **whether you chose a visual calculation or a
-   model measure, with the reason**), routed it back, or left it stubbed and why. A silent stub is
-   indistinguishable from an overlooked one.
-6. **Renames are grep-verified** — if a column or measure was renamed for any reason (collision
-   avoidance, Title Case cleanup), every DAX expression that references it has been checked to use the
-   new `name`, not left pointing at the old one or at `sourceColumn`.
-7. **This checklist applies to fix/iteration passes too, not just the initial build** — if you're
-   called again later to patch a bug, the same validation bar applies before you report the patch
-   done.
-8. **Model-wide measure-name uniqueness is verified** — no two measures share a name anywhere in the
-   model, and no measure name equals a column name within the same table. `TmdlSerializer` does NOT
-   catch either (both deserialize clean but fail at Desktop load / commit). Assert this programmatically
-   before reporting done (the skill's §4 — this is the exact class that
-   shipped a broken `.pbip` in iteration 3).
-9. **The model is Copilot-ready** — every table, column, and measure has a business-meaning
-   description; categorical/dimension columns enumerate their domain values; synonyms are set where the
-   display name isn't natural language (see "Prep the model for AI" above). `python
-   scripts/check_ai_readiness.py migrations/workbooks/<slug>` reports ~100% description coverage with no
-   categorical column missing its domain values.
-10. **Model-level AI instructions are stamped (MANDATORY — not optional).** A grounded, high-signal
-   `migrations/workbooks/<slug>/ai-instructions.md` exists and has been written into the culture
-   `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
-   model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
-   deserialize. A migrated model without AI instructions is not done.
-11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 8).** The
-   report builder must receive a model that already holds data; otherwise every visual renders empty
-   and reads as a binding bug. Run `python scripts/refresh_pbip_model.py --pid <desktop-pid>` and
-   require exactly **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
-   `<Name>.SemanticModel/.pbi/cache.abf` advanced (`--verify-only` re-checks). **Ordering is part of
-   the gate:** Desktop discards the cache when `definition/*.tmdl` is newer, so this is the **last**
-   action after every edit, including `set_data_folder.py --sanitize`.
-   ⚠️ **`PERSISTED` alone does NOT prove the live source loaded** — a partial refresh caches whatever
-   tables *did* load (`powerbi-semantic-model-gotchas` §5). For a live source confirm **per-table**:
-   `EVALUATE ROW("n", COUNTROWS('<LiveTable>'))` must be non-zero for each.
-12. **Every TMDL edit you made is declared, and `--tamper` exits 0** — see "Declare every TMDL edit
-   you make" above. `refresh_pbip_model.py`'s own `database.tmdl` bump is the *only* self-declaring
-   edit; an undeclared culture, description or fix-script edit blocks the orchestrator's sign-off,
-   and `DECLARE: NO_CHANGE` means nothing was recorded.
+1. The `powerbi-semantic-model-gotchas` skill was read before the first TMDL/DAX edit.
+2. Non-trivial translated measures have Tableau-grounded numeric checks; "returned a number" is not enough.
+3. Every `requests[]` entry's fate is recorded (landed, visual-calc vs measure, routed, or accepted gap).
+4. Renames are grep-verified in DAX expressions.
+5. `python scripts/check_unit.py <unit-or-bundle> --scope model` exits 0. It owns the mechanical model
+   gates: stubs, structure, AI descriptions/instructions, and cache freshness. If it reports a scoped
+   PASS, say the report layer was not examined.
+6. Every TMDL edit you made is declared and `check_migration_progress.py --tamper` exits 0.

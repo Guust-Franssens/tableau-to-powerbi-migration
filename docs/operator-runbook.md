@@ -76,6 +76,16 @@ Three locations, one direction (from `AGENTS.md`, and it is enforced):
 | working copy | `<bundle>/pbip/` | agents edit here; this is what `deploy_estate.py` reads |
 | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | copied at sign-off |
 
+Before any human sign-off, run the mechanical inventory at the right layer:
+
+```powershell
+python scripts\check_unit.py <unit-or-bundle> --scope model   # semantic-builder hand-off
+python scripts\check_unit.py <unit-or-bundle> --scope report  # report-builder hand-off
+python scripts\check_unit.py <unit-or-bundle> --scope all     # validator/orchestrator sign-off
+```
+
+A scoped PASS is deliberately not a unit-level PASS; the command prints which layer was not examined.
+
 ---
 
 ## 1. Pre-flight — the day before, not on the day

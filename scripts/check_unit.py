@@ -1,13 +1,14 @@
 """
 purpose: answer whether one migration unit is done by aggregating existing gates without merging them.
-usage:   python scripts/check_unit.py <unit-or-bundle> [--json <file>] [--reference-dir <dir>] [--oracle-dir <dir>]
+usage:   python scripts/check_unit.py <unit-or-bundle> [--scope {model,report,all}] [--json <file>]
+         [--reference-dir <dir>] [--oracle-dir <dir>]
 
 Exit codes are intentionally coarser than the native gates, while preserving each native exit in the
 JSON payload:
 
-| 0  | all checks that can be verified are clean; accepted exemptions, if any, are counted |
-| 1  | at least one finding remains |
-| 2  | one or more regions could not be fully checked (SKIPPED/ERROR/NOT_CHECKED) and no finding won |
+| 0  | all checks in the selected scope that can be verified are clean; accepted exemptions, if any, are counted |
+| 1  | at least one finding remains in the selected scope |
+| 2  | one or more selected checks could not be fully checked (SKIPPED/ERROR/NOT_CHECKED) and no finding won |
 | 4  | page-count parity precondition failed; page-level oracle checks are not meaningful |
 | 64 | usage error |
 
@@ -48,6 +49,28 @@ EXIT_USAGE = 64
 
 EXEMPTIONS_FILE = "unit-check-exemptions.json"
 VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity"})
+
+SCOPE_MODEL = "model"
+SCOPE_REPORT = "report"
+SCOPE_ALL = "all"
+SCOPES = (SCOPE_MODEL, SCOPE_REPORT, SCOPE_ALL)
+MODEL_CHECK_IDS = frozenset(
+    {
+        "blank-placeholders",
+        "sqlproxy-connections",
+        "relationship-health",
+        "data-model",
+        "empty-model",
+        "stub-measures",
+        "ai-descriptions",
+        "ai-instructions",
+        "cache-freshness",
+    }
+)
+REPORT_CHECK_IDS = frozenset(
+    {"field-bindings", "pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"}
+)
+ALL_ONLY_CHECK_IDS = frozenset({"engine-receipt", "visual-layer-done", "visual-comparison-done", "finalized"})
 
 
 @dataclass(frozen=True)
@@ -639,8 +662,61 @@ def _remove_json_dir(path: Path) -> None:
         pass
 
 
-def run_all(target: Path, reference_dir: Path | None = None, oracle_dir: Path | None = None) -> dict[str, Any]:
-    """Run preconditions and every existing gate, returning a normalized envelope."""
+def _scope_check_ids(scope: str) -> frozenset[str]:
+    """Checks that belong to one persona-owned layer."""
+    if scope == SCOPE_MODEL:
+        return MODEL_CHECK_IDS
+    if scope == SCOPE_REPORT:
+        return REPORT_CHECK_IDS
+    return MODEL_CHECK_IDS | REPORT_CHECK_IDS | ALL_ONLY_CHECK_IDS
+
+
+def _in_scope(check_id: str, scope: str) -> bool:
+    return check_id in _scope_check_ids(scope)
+
+
+def _unexamined_scopes(scope: str) -> list[str]:
+    return [candidate for candidate in (SCOPE_MODEL, SCOPE_REPORT) if candidate != scope] if scope != SCOPE_ALL else []
+
+
+def _append_cli_checks(checks: list[dict[str, Any]], target: Path, exemptions: dict[str, Any], scope: str) -> None:
+    """Append native CLI-backed checks for the selected scope."""
+    cli_gates = [gate for gate in GATES if _in_scope(gate.check_id, scope)]
+    if not cli_gates and not _in_scope("occlusion", scope):
+        return
+    output_dir = _temp_json_dir(target)
+    try:
+        for gate in cli_gates:
+            check = _run_cli_gate(gate, target, output_dir)
+            if gate.check_id == "stub-measures":
+                check = _apply_stub_exemptions(check, exemptions)
+            checks.append(check)
+        if _in_scope("occlusion", scope):
+            checks.append(check_occlusion(target, output_dir))
+    finally:
+        _remove_json_dir(output_dir)
+
+
+def _append_model_readiness_checks(checks: list[dict[str, Any]], target: Path, scope: str) -> None:
+    """Append model readiness checks for the selected scope."""
+    for check_id, check_func in (
+        ("ai-descriptions", check_ai_descriptions),
+        ("ai-instructions", check_ai_instructions),
+        ("cache-freshness", check_cache_freshness),
+    ):
+        if _in_scope(check_id, scope):
+            checks.append(check_func(target))
+
+
+def run_all(
+    target: Path,
+    reference_dir: Path | None = None,
+    oracle_dir: Path | None = None,
+    scope: str = SCOPE_ALL,
+) -> dict[str, Any]:
+    """Run checks for one persona-owned scope, returning a normalized envelope."""
+    if scope not in SCOPES:
+        raise ValueError(f"unknown scope: {scope}")
     target = target.resolve()
     exemptions = load_exemptions(target)
     checks: list[dict[str, Any]] = []
@@ -653,31 +729,33 @@ def run_all(target: Path, reference_dir: Path | None = None, oracle_dir: Path | 
                 "path": exemptions["path"],
             }
         )
-    page = check_page_parity(target, exemptions)
-    checks.append(page)
-    if page["status"] == STATUS_PRECONDITION_FAILED:
-        return _finalize(target, checks, exemptions, stopped_after="page-parity")
-    checks.append(check_oracle_coverage(target, reference_dir, oracle_dir))
-    checks.append(check_engine_receipt(target))
-    output_dir = _temp_json_dir(target)
-    try:
-        for gate in GATES:
-            check = _run_cli_gate(gate, target, output_dir)
-            if gate.check_id == "stub-measures":
-                check = _apply_stub_exemptions(check, exemptions)
-            checks.append(check)
-        checks.append(check_occlusion(target, output_dir))
-    finally:
-        _remove_json_dir(output_dir)
-    checks.append(check_ai_descriptions(target))
-    checks.append(check_ai_instructions(target))
-    checks.append(check_cache_freshness(target))
-    checks.extend(claimed_only_checks())
-    return _finalize(target, checks, exemptions)
+    if _in_scope("page-parity", scope):
+        page = check_page_parity(target, exemptions)
+        checks.append(page)
+        if page["status"] == STATUS_PRECONDITION_FAILED:
+            return _finalize(target, checks, exemptions, scope=scope, stopped_after="page-parity")
+    if _in_scope("oracle-coverage", scope):
+        checks.append(check_oracle_coverage(target, reference_dir, oracle_dir))
+    if _in_scope("engine-receipt", scope):
+        checks.append(check_engine_receipt(target))
+    _append_cli_checks(checks, target, exemptions, scope)
+    _append_model_readiness_checks(checks, target, scope)
+    if scope == SCOPE_ALL:
+        checks.extend(claimed_only_checks())
+    return _finalize(target, checks, exemptions, scope=scope)
+
+
+def _is_blocking_not_checked(check: dict[str, Any]) -> bool:
+    """Whether a NOT_CHECKED row blocks exit 0 for the selected scope."""
+    return check["status"] == STATUS_NOT_CHECKED and check.get("verification") != "CLAIMED_ONLY"
 
 
 def _finalize(
-    target: Path, checks: list[dict[str, Any]], exemptions: dict[str, Any], stopped_after: str | None = None
+    target: Path,
+    checks: list[dict[str, Any]],
+    exemptions: dict[str, Any],
+    scope: str,
+    stopped_after: str | None = None,
 ) -> dict[str, Any]:
     statuses = [check["status"] for check in checks]
     if STATUS_PRECONDITION_FAILED in statuses:
@@ -686,7 +764,7 @@ def _finalize(
     elif STATUS_FINDINGS in statuses:
         status = STATUS_FINDINGS
         exit_code = EXIT_FINDINGS
-    elif STATUS_NOT_CHECKED in statuses:
+    elif any(_is_blocking_not_checked(check) for check in checks):
         status = STATUS_NOT_CHECKED
         exit_code = EXIT_NOT_CHECKED
     else:
@@ -695,6 +773,8 @@ def _finalize(
     return {
         "version": 1,
         "target": str(target),
+        "scope": scope,
+        "unexamined_scopes": _unexamined_scopes(scope),
         "status": status,
         "exit_code": exit_code,
         "stopped_after": stopped_after,
@@ -713,7 +793,11 @@ def _count_suffix(missing: int) -> str:
 
 def render(report: dict[str, Any]) -> str:
     """Human-readable unit verdict."""
-    lines = [f"UNIT CHECK: {report['status']} - {report['target']}"]
+    scope = report.get("scope", SCOPE_ALL)
+    lines = [f"UNIT CHECK ({scope} scope): {report['status']} - {report['target']}"]
+    if report.get("unexamined_scopes"):
+        skipped = ", ".join(report["unexamined_scopes"])
+        lines.append(f"  scoped run only: {skipped} layer(s) not examined; not a unit-level sign-off")
     if report.get("stopped_after"):
         lines.append(f"  stopped after failed precondition: {report['stopped_after']}")
     for check in report["checks"]:
@@ -759,6 +843,7 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("target", type=Path, help="migration unit, fabric folder, or engine bundle")
+    parser.add_argument("--scope", choices=SCOPES, default=SCOPE_ALL, help="persona layer to check (default: all)")
     parser.add_argument("--json", type=Path, help="write the normalized unit-check envelope here")
     parser.add_argument("--reference-dir", type=Path, help="override reference/ directory containing manifest.json")
     parser.add_argument("--oracle-dir", type=Path, help="override _oracle directory containing oracle-manifest.json")
@@ -768,7 +853,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.target.is_dir():
         print(f"ERROR: not a directory: {args.target}", file=sys.stderr)
         return EXIT_USAGE
-    report = run_all(args.target, reference_dir=args.reference_dir, oracle_dir=args.oracle_dir)
+    report = run_all(args.target, reference_dir=args.reference_dir, oracle_dir=args.oracle_dir, scope=args.scope)
     if args.json:
         _write_json(args.json, report)
     if not args.quiet:

@@ -91,11 +91,9 @@ reasoning or self-report of success.
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
-- **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
-  correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
-  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
-  skills, which the owning agents invoke.)
+- **Run the layer gate before narrative sign-off.** `python scripts/check_unit.py <unit-or-bundle>
+  --scope model|report|all` is the machine inventory. A scoped PASS covers only that persona's layer
+  and is not unit sign-off; Desktop/data fidelity still need evidence.
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -202,7 +200,8 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
 
 Run these passes **in order** — cheap structural checks first, expensive judgment calls last:
 
-0. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
+0. **Run the all-scope machine inventory first:** `python scripts/check_unit.py <unit-or-bundle> --scope all`. Treat every row as evidence to route; stay read-only. Exit 0 means all verifiable gates are clean, not that visual/numeric fidelity is proven.
+1. **Adjudicate the engine's own claims — do this before builders consume your routing.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with
    `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and
    a precise `reason`. Classify **every** row into exactly one of:
@@ -344,22 +343,9 @@ question.
 
 ## Definition of Done (for your own review output, not the report)
 
-1. Every dashboard has an explicit whole-dashboard verdict, not just per-visual notes.
-2. Every visual has either an explicit "no discrepancy found" or a specific, actionable entry in the
-   discrepancy table — no vague "looks mostly fine."
-3. Every numeric claim in the report is backed by a **pair** of cited evidence: (a) the PBI-side DAX
-   query + its result, and (b) the Tableau-side number it is compared against (an exported row/cell, or
-   a clearly legible location in a reference screenshot). Proving only what Power BI returned proves
-   nothing about fidelity. If no Tableau-side number can be obtained, record the check as
-   `numeric_status: unverified` and say so explicitly — never issue an unqualified "faithful" verdict
-   on the strength of a PBI value alone.
-4. The inventory/completeness pass ran and is reported first — structural gaps found before aesthetic
-   critique.
-5. Every discrepancy is routed to an owner (a subagent, or `accepted-limitation`) — nothing left
-   ambiguous for the orchestrator to puzzle over.
-6. **Every `viz_fidelity[]` row is classified** — `fixable` / `accepted-limitation` / `false-claim`,
-   including the `status: "rebuilt"` rows. An unclassified row means a builder has to guess, and the
-   guess a builder makes is "repair it", which is wrong for a deliberate deferral.
-7. **`improvement_opportunities[]` is a separate section and did not influence any verdict.** If a
-   fidelity verdict would change when the improvements are removed, the two have been mixed and the
-   verdict is not trustworthy.
+1. `python scripts/check_unit.py <unit-or-bundle> --scope all` ran and its exit/status is reported.
+2. Every dashboard has an explicit whole-dashboard verdict.
+3. Every visual has either "no discrepancy found" or a specific actionable discrepancy.
+4. Every numeric claim cites both the PBI DAX result and the Tableau-side number/source.
+5. Every discrepancy is routed to an owner or accepted limitation; every `viz_fidelity[]` row is classified.
+6. `improvement_opportunities[]` is separate and did not influence fidelity verdicts.

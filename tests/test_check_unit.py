@@ -249,6 +249,127 @@ def test_native_gate_skipped_is_not_a_pass(tmp_path: Path, monkeypatch: pytest.M
     assert report["exit_code"] == cu.EXIT_NOT_CHECKED
 
 
+def test_actual_pages_falls_back_to_page_directories_when_order_is_missing(tmp_path: Path) -> None:
+    """Kills broad mutations of small helper returns that leave ordered fixtures unaffected."""
+    report = _write_report(tmp_path, ["Executive"])
+    (report / "definition" / "pages" / "pages.json").unlink()
+
+    pages = cu.actual_pages(tmp_path)
+
+    assert pages == [
+        {
+            "id": "p1",
+            "name": "Executive",
+            "report": str(report),
+            "path": str(report / "definition" / "pages" / "p1" / "page.json"),
+        }
+    ]
+
+
+def test_clean_input_exits_zero_even_with_claimed_only_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit 0 must be reachable when only structurally-unverifiable claimed-only phases remain."""
+    _write_spec(tmp_path, ["Executive"])
+    _write_report(tmp_path, ["Executive"])
+    _write_reference_manifest(tmp_path, ["Executive"])
+    monkeypatch.setattr(
+        cu,
+        "claimed_only_checks",
+        lambda: [
+            {
+                "id": "finalized",
+                "status": cu.STATUS_NOT_CHECKED,
+                "verification": "CLAIMED_ONLY",
+                "detail": "no machine-readable completion artifact exists",
+            }
+        ],
+    )
+
+    report = cu.run_all(tmp_path)
+
+    assert report["status"] == cu.STATUS_PASS
+    assert report["exit_code"] == cu.EXIT_OK
+    assert [check["id"] for check in report["checks"]][-1] == "finalized"
+
+
+def test_scope_model_runs_only_model_layer_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model-scope pass must not run report/orchestration gates or imply full unit sign-off."""
+    _write_spec(tmp_path, ["Executive"])
+    _write_report(tmp_path, ["Executive"])
+    _write_reference_manifest(tmp_path, ["Executive"])
+    monkeypatch.setattr(
+        cu,
+        "GATES",
+        (
+            cu.Gate("stub-measures", "unused.py", (), frozenset()),
+            cu.Gate("pbir-valid", "unused.py", (), frozenset()),
+        ),
+    )
+    monkeypatch.setattr(
+        cu,
+        "_run_cli_gate",
+        lambda gate, *_args: {"id": gate.check_id, "status": cu.STATUS_PASS, "native_status": "OK", "native_exit": 0},
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+
+    assert report["exit_code"] == cu.EXIT_OK
+    assert report["unexamined_scopes"] == [cu.SCOPE_REPORT]
+    assert [check["id"] for check in report["checks"]] == [
+        "stub-measures",
+        "ai-descriptions",
+        "ai-instructions",
+        "cache-freshness",
+    ]
+    assert "not a unit-level sign-off" in cu.render(report)
+
+
+def test_scope_report_runs_only_report_layer_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A report-scope run owns page/oracle/PBIR checks and skips model readiness checks."""
+    _write_spec(tmp_path, ["Executive"])
+    _write_report(tmp_path, ["Executive"])
+    _write_reference_manifest(tmp_path, ["Executive"])
+    monkeypatch.setattr(
+        cu,
+        "GATES",
+        (
+            cu.Gate("stub-measures", "unused.py", (), frozenset()),
+            cu.Gate("pbir-valid", "unused.py", (), frozenset()),
+        ),
+    )
+    monkeypatch.setattr(
+        cu,
+        "_run_cli_gate",
+        lambda gate, *_args: {"id": gate.check_id, "status": cu.STATUS_PASS, "native_status": "OK", "native_exit": 0},
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_REPORT)
+
+    assert report["exit_code"] == cu.EXIT_OK
+    assert report["unexamined_scopes"] == [cu.SCOPE_MODEL]
+    assert [check["id"] for check in report["checks"]] == [
+        "page-parity",
+        "oracle-coverage",
+        "pbir-valid",
+        "occlusion",
+    ]
+
+
+def test_scope_all_keeps_model_report_and_orchestration_checks(tmp_path: Path) -> None:
+    """The default scope preserves the historical aggregate view plus all-only claimed phases."""
+    _write_spec(tmp_path, ["Executive"])
+    _write_report(tmp_path, ["Executive"])
+    _write_reference_manifest(tmp_path, ["Executive"])
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_ALL)
+
+    ids = [check["id"] for check in report["checks"]]
+    assert "page-parity" in ids
+    assert "oracle-coverage" in ids
+    assert "ai-descriptions" in ids
+    assert "cache-freshness" in ids
+    assert report["unexamined_scopes"] == []
+
+
 def test_cli_missing_path_is_usage_not_a_mutation_success(tmp_path: Path) -> None:
     """The mutation harness must distinguish expected usage failure from arbitrary command failure."""
     result = subprocess.run(
