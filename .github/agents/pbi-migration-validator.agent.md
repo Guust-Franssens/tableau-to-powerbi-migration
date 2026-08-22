@@ -202,7 +202,9 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
 
 Run these passes **in order** — cheap structural checks first, expensive judgment calls last:
 
-0. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
+0. **Run the all-scope automated inventory first:** `python scripts/check_unit.py <unit-or-bundle> --scope all`.
+   Route every finding; exit 0 is `AUTOMATED_CHECKS_PASS`, not visual/numeric fidelity sign-off.
+1. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with
    `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and
    a precise `reason`. Classify **every** row into exactly one of:

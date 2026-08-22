@@ -278,6 +278,10 @@ gestalt-checked against the reference before binding any field** -> `powerbi-rep
 
 ## Mandatory validation (before Desktop screenshot review)
 
+Start with `python scripts/check_unit.py <unit-or-bundle> --scope report`; it includes integration
+checks and names omitted model-only checks. Its verdict does not replace the screenshot/routing rules
+below.
+
 Structural validation is not optional. Run it before every screenshot-based design review, on both the
 initial build and every later fix pass:
 

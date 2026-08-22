@@ -158,7 +158,10 @@ The deterministic tier has already emitted the tables, columns, relationships, p
 the DAX. **You do not build a model.** You prove it loads, finish the tail it could not translate,
 enrich it, and hand it over refreshed.
 
-0. Invoke `powerbi-semantic-model-gotchas` before touching TMDL.
+0. Run `python scripts/check_unit.py <unit-or-bundle> --scope model` before and after fixes. It
+   includes integration gates and names omitted report-only checks; use it as a verdict, not as a
+   replacement for the routing/procedure below.
+1. Invoke `powerbi-semantic-model-gotchas` before touching TMDL.
 1. **Read `handover/<workbook>.json`.** `workbook.model_translation_handoff.requests[]` is your work
    queue; `workbook.openability_selfcheck` is what the engine already proved about shape.
 2. **PROVE the live source is reachable BEFORE you change anything — ONE attempt, then ask.**

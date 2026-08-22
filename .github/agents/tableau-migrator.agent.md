@@ -251,8 +251,8 @@ PBIR files yourself.
    Otherwise it stays **open/blocking** and you surface it to the user for an explicit decision.
    **You (the orchestrator) are the only writer of validation limitations/worklist entries** — the
    validator is read-only and must never edit the contract itself.
-12. **Validate before declaring done.** Structural/mechanical validation is part of the default flow,
-   not a phase-2 nice-to-have — confirm both build subagents ran their own "Mandatory validation"
+12. **Validate before declaring done.** Run `python scripts/check_unit.py <u> --scope all`; route findings.
+   Validation is part of flow, not optional — confirm both build subagents ran their own "Mandatory validation"
    steps *and* that `pbi-migration-validator` has run a full sign-off pass. **Sign-off requires ALL
    of:** (a) every dashboard's whole-dashboard verdict is *faithful* — a "no" verdict blocks sign-off
    **even when every individual discrepancy is only low/medium**, since an accumulation of small

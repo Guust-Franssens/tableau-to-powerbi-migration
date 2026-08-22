@@ -76,6 +76,17 @@ Three locations, one direction (from `AGENTS.md`, and it is enforced):
 | working copy | `<bundle>/pbip/` | agents edit here; this is what `deploy_estate.py` reads |
 | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | copied at sign-off |
 
+Automated inventory command by phase:
+
+```powershell
+python scripts\check_unit.py <unit-or-bundle> --scope model
+python scripts\check_unit.py <unit-or-bundle> --scope report
+python scripts\check_unit.py <unit-or-bundle> --scope integration
+python scripts\check_unit.py <unit-or-bundle> --scope all
+```
+
+Exit 0 is `AUTOMATED_CHECKS_PASS`, not unit completion; scoped runs print omitted checks.
+
 ---
 
 ## 1. Pre-flight — the day before, not on the day
