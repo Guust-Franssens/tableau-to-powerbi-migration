@@ -4012,12 +4012,6 @@
       "stage": "parse"
     },
     {
-      "item": "ws.2_chronology",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459268632583:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.3_accolades",
       "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3479171459272503307:qk",
       "severity": "low",
@@ -4042,26 +4036,8 @@
       "stage": "parse"
     },
     {
-      "item": "ws.7d_todd",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729711963328526:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
       "item": "ws.grouping_explanation",
       "issue": "could not resolve shelf reference UNRESOLVED:Category (group)",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.info_button",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729712000688165:qk",
-      "severity": "low",
-      "stage": "parse"
-    },
-    {
-      "item": "ws.info_button",
-      "issue": "could not resolve shelf reference UNRESOLVED:usr:Calculation_3522729712000688165:qk",
       "severity": "low",
       "stage": "parse"
     },

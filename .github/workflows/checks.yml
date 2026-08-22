@@ -52,13 +52,16 @@ jobs:
         run: uv run pytest -q
 
       - name: Migration spec contract gate
-        run: uv run python scripts/validate_spec.py --all
+        run: uv run python scripts/validate_spec.py --all --check
 
       - name: Privacy gate - no absolute user paths in tracked files
         run: uv run python scripts/set_data_folder.py --check
 
       - name: Data model gate - catch M and TMDL structural defects first
         run: uv run python scripts/check_datamodel.py --all
+
+      - name: Navigation index covers agent-facing docs and gates
+        run: uv run python scripts/check_navigation_index.py
 
       - name: Shared conventions reach every agent (a subagent sees ONLY its persona)
         run: uv run python scripts/sync_agent_conventions.py --check

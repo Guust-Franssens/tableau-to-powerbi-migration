@@ -31,6 +31,8 @@ import deploy_estate as de  # noqa: E402  # pylint: disable=wrong-import-positio
 
 TENANT_CHECK = "Fabric token tenant"
 DESKTOP_PIN_CHECK = "PBI_DESKTOP_PATH (bridge exe pin)"
+AMO_CHECK = "AMO/TOM client (Desktop progress/ImageSave)"
+ADOMD_CHECK = "ADOMD.NET client (Desktop probe/refresh)"
 
 
 def _preflight_source() -> str:
@@ -100,6 +102,49 @@ def test_the_desktop_pin_warns_rather_than_blocking_a_run_that_never_opens_it() 
     _assert_add_check_tier(_preflight_source(), DESKTOP_PIN_CHECK, "recommended")
 
 
+def test_amo_warns_rather_than_blocking_a_run_that_never_opens_desktop() -> None:
+    """AMO/TOM absence affects Desktop refresh/save, not the parse/convert estate pipeline (#283).
+
+    This mirrors the #124 Desktop-pin decision: the failure is real and must be visible, but not every
+    migration phase opens Desktop. ``recommended`` keeps the line in the WARN summary without spending
+    preflight's exit 1 on a dependency that is needed later.
+    """
+    _assert_add_check_tier(_preflight_source(), AMO_CHECK, "recommended")
+
+
+def test_amo_is_checked_by_dll_presence_not_by_the_dotnet_cli() -> None:
+    """`dotnet` on PATH is not proof that the AMO/TOM package exists in the active cache (#283)."""
+    source = _preflight_source()
+    amo_block = source[source.index("# --- AMO/TOM client assembly") : source.index("# --- ADOMD.NET")]
+    assert "Add-Cli 'dotnet'" not in amo_block, "AMO must be a file check, not another CLI check"
+    assert "microsoft.analysisservices.netcore.retail.amd64*" in amo_block
+    assert "Microsoft.AnalysisServices.Tabular.dll" in amo_block
+    assert "$env:NUGET_PACKAGES" in amo_block and "Join-Path $HOME '.nuget\\packages'" in amo_block
+    assert "console text is not proof" in amo_block
+
+
+def test_amo_warning_names_the_runtime_consequence_after_the_timeout_fix() -> None:
+    """The message must move the decision before work: scripted is blind; operator is visible."""
+    source = _preflight_source()
+    amo_block = source[source.index(f"Add-Check '{AMO_CHECK}'") : source.index("# --- ADOMD.NET")]
+    assert "progress reporting and liveness are unavailable" in amo_block
+    assert "scripted refresh runs blind" in amo_block
+    assert "ImageSave falls back to UI" in amo_block
+    assert "3600s absolute refresh backstop remains active" in amo_block
+    assert "operator refresh strategy" in amo_block
+    assert "Desktop''s own row counter" in amo_block
+    assert "falling back to legacy" not in amo_block
+
+
+def test_adomd_remains_separate_from_amo() -> None:
+    """The new AMO check must not weaken or replace the existing ADOMD gate."""
+    source = _preflight_source()
+    _assert_add_check_tier(source, ADOMD_CHECK, "critical")
+    adomd_block = source[source.index("# --- ADOMD.NET") : source.index("Add-Cli 'uv'")]
+    assert "microsoft.analysisservices.adomdclient.netcore*" in adomd_block
+    assert "Microsoft.AnalysisServices.AdomdClient.dll" in adomd_block
+
+
 def test_the_desktop_pin_hint_is_actionable_in_the_shell_that_reads_it() -> None:
     """`setx` cannot fix the session that is reading the hint, so it cannot be the only advice.
 
@@ -116,6 +161,25 @@ def test_the_desktop_pin_hint_is_actionable_in_the_shell_that_reads_it() -> None
         assert re.search(r"(?i)new shells|does NOT affect this one", hint), (
             "a `setx` hint must state that it does not affect the shell reading it"
         )
+
+
+def test_a_dead_desktop_pin_is_named_as_a_dead_pin_not_as_an_unset_pin() -> None:
+    """A stale PBI_DESKTOP_PATH is worse than unset because the bridge honours it first (#86)."""
+    source = _preflight_source()
+    assert "$desktopPathDead = $desktopPathConfigured -and -not $desktopPathValid" in source
+    assert "MSIX discovery (PBI_DESKTOP_PATH is set but dead)" in source
+    assert "PBI_DESKTOP_PATH points at" in source
+    assert "which is not on disk" in source
+    assert "The bridge honours this variable and will fail to launch" in source
+
+
+def test_a_dead_desktop_pin_is_still_recommended_not_critical() -> None:
+    """The dead-pin warning is louder, but #124's no-false-blocker severity decision still holds."""
+    source = _preflight_source()
+    _assert_add_check_tier(source, DESKTOP_PIN_CHECK, "recommended")
+    desktop_block = source[source.index("$desktopPathConfigured") : source.index("# --- Privacy Levels")]
+    critical_lines = [line for line in desktop_block.splitlines() if "'critical'" in line]
+    assert critical_lines == ["Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `"]
 
 
 def test_the_correctness_floor_says_where_report_version_at_import_belongs() -> None:
@@ -174,6 +238,15 @@ def test_the_upstream_engine_check_stays_opt_in_and_advisory() -> None:
     upstream_block = source[source.index("if ($CheckUpstream) {") :]
     assert "Add-Check 'upstream: conversion engine' 'optional'" in upstream_block
     assert "upstream_version_url" in upstream_block, "the URL belongs to engine_source.py, not to preflight"
+
+
+def test_bundle_engine_receipt_drift_is_surfaced_as_an_advisory_check() -> None:
+    """A stale bundle must name its receipt version without blocking a migration in flight."""
+    source = _preflight_source()
+    block = source[source.index("# --- Engine receipt drift") : source.index("# --- Skill plugins ---")]
+    assert "check_engine_receipts.py" in block
+    assert "--root $repoRoot" in block
+    _assert_add_check_tier(block, "engine: bundle receipt versions", "optional")
 
 
 # --------------------------------------------------------------------------------------------------

@@ -290,7 +290,37 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   that the source had a chart there. So before concluding a field is missing, grep the model for a
   `= BLANK()` measure matching the worksheet's shelf.
 
+### Declaring a generated PBIR edit, or sign-off blocks
+
+Every file under a `*.Report` folder is hash-baselined by the engine run, and the orchestrator's
+pre-sign-off `check_migration_progress.py --bundle <b> --tamper` exits **1** on any that changed
+without a matching declaration. `scripts/declare_generated_edit.py` is the **only** thing that writes
+one: it runs your `_build/` script for you and records the before/after hashes into
+`_build/generated-edit-declarations.json`.
+
+```bash
+python scripts/declare_generated_edit.py --bundle <b> \
+  --target pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json \
+  --script <b>/_build/fix_axis_title.py \
+  -- --only pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json
+# DECLARE: RECORDED pbip/.../visual.json -> <b>/_build/generated-edit-declarations.json
+```
+
+Measured — each of these leaves the gate RED while looking like it worked:
+
+- **One `--target` per run.** A second run of an idempotent script prints `DECLARE: NO_CHANGE` and
+  records nothing, so a whole-tree emitter leaves every file but one UNDECLARED. Give the script an
+  `--only <bundle-relative path>` scope argument, pass it after `--`, and run the wrapper per target.
+- **Never hand-edit first.** The wrapper hashes the target *before* running your script and the gate
+  only accepts a declaration whose baseline is the engine's hash, so a retro-declaration is never
+  accepted. Restore the target by re-running the engine — `reports/` is a **different file**, not a
+  copy of `pbip/` (see the `byPath` entry above).
+- **Declare last.** Touching the target again afterwards invalidates its declaration.
+
+Self-check before reporting done: `--tamper` must exit 0 (`DECLARED_DRIFT` passes, `DRIFT` does not).
+
 ## 4. Crosstabs and tables — a recurring fragility class
+
 
 Two distinct failure modes, both seen in production:
 

@@ -93,6 +93,8 @@ import re
 import sys
 from pathlib import Path
 
+from bundle_corpus import shipping_models
+
 # `partition <name> = <kind>` - the head line. TMDL is indentation-scoped, so the body is every
 # following line indented deeper than the head; `_partition_blocks` walks that rather than guessing
 # a terminator, which is what makes it robust to new child keywords appearing upstream.
@@ -477,10 +479,8 @@ def _counts(partitions: list[dict]) -> dict[str, int]:
 
 
 def find_models(root: Path) -> list[Path]:
-    """Every `.SemanticModel` folder under a bundle, or the folder itself if one was named."""
-    if root.name.endswith(".SemanticModel"):
-        return [root]
-    return sorted(p for p in root.rglob("*.SemanticModel") if p.is_dir())
+    """Every model check_empty_model can honestly judge, including standalone datasource models."""
+    return shipping_models(root, include_standalone=True)
 
 
 def scan(root: Path) -> dict:

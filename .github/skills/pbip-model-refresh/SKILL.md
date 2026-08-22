@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. For DAX-only edits, pass `--calculate-only` / `--measures-only` to recalculate formulas without re-reading source rows. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -48,8 +48,17 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
-                                     [--no-save] [--verify-only] [--ui-save]
+                                     [--calculate-only|--measures-only] [--no-save] [--verify-only]
+                                     [--ui-save]
 ```
+
+**`--calculate-only` / `--measures-only` is an opt-in DAX-only shortcut, not the default.** It sends
+TMSL refresh type `calculate`, which recalculates formulas, relationships and hierarchies without
+re-reading source rows. Use it only when the caller knows the pending edit was measure/DAX-only; after
+an M, partition, relationship or data-shape change, `calculate` can leave stale data wearing a fresh
+verdict, so the default remains the safe full refresh. This recipe is credited to SES field use
+(Sandeep Munagala, 2026-08-21), where the proven sequence was live measure edit -> Calculate ->
+ExportToTmdlFolder -> cache persist across ~6 workbooks in one day.
 
 **Persisting is the DEFAULT** — that is this script's stated purpose, *"so the next agent (and the
 next Desktop open) sees real data instead of an empty model"*. Pass **`--no-save`** for read-only
@@ -232,18 +241,29 @@ Desktop **discards `cache.abf` when the model definition is newer than the cache
 whose `definition/*.tmdl` were touched after the cache was written opened `NO_DATA` despite a 113 KB
 cache sitting right there. So:
 
-> make **all** TMDL edits, then refresh, then save.
+> make **all** TMDL edits, **reopen Desktop so it loads them**, then refresh, then save.
+
+That middle step is not optional, and it is the easiest one to drop: `powerbi-desktop reload` does
+**not** re-read edited TMDL (measured below). Refresh without reopening and you refresh the *old*
+in-memory definition, then persist a cache that does not match what is on disk — which opens
+`NO_DATA` and looks like the cache-invalidation problem rather than the operator error it is.
 
 Anything that rewrites TMDL afterwards invalidates it, including the host repo's own sanitize step
 (here, `set_data_folder.py --sanitize`, which must run before committing). If you sanitize last, you
 have thrown the cache away; re-run this script after.
 
-**It is the CONTENT that invalidates it, not the mtime — you cannot win this by ordering.** Measured
+**A cache newer than the definition can still be invalid — you cannot win this by ordering.** Measured
 2026-08-01 on `logistics-live-dbx`: sanitize rewrote `expressions.tmdl` at 12:24:08, `ImageSave` wrote
 `cache.abf` at 12:24:23 (15 s *newer*, 57.5 KB) — and a cold reopen still came back `NO_DATA`.
 Re-localizing, reopening, refreshing and saving again produced a cache that **did** survive a
 `Stop-Process -Force` + reopen (`PREFLIGHT: DATA_OK`, no refresh). So "refresh last, after sanitize"
 does not rescue the cache: Desktop keys the cache to the definition it was built from.
+
+⚠️ **Scope this measurement honestly.** It changed `expressions.tmdl` — a *data-affecting* file.
+Whether a culture-only edit (AI instructions), a description-only `ExportToTmdlFolder` or a
+byte-identical rewrite also invalidates the cache is **UNMEASURED**; do not cite this paragraph for
+those. What it does establish — and all the warning below needs — is that a favourable mtime proves
+nothing.
 
 > ⚠️ **Do NOT gate on `cache.abf` mtime ≥ newest definition-file mtime.** Proposed independently on
 > 2026-08-19 by a field team hitting the post-ship-edit case above, and it is a **false-green
@@ -272,6 +292,28 @@ expressions — the reload refreshes the report, not the model definition. Only 
 easy to miss precisely because the reload reports success, so **verify a model edit landed** with
 `EVALUATE SELECTCOLUMNS(INFO.MEASURES(), "Name", [Name], "Expr", [Expression])` before trusting any
 number you read back.
+
+⚠️ **A stale Desktop session can also SAVE the old model back over same-day file edits.** Customer
+report: Hemang Patel (SES), 2026-08-21, found a verified fix silently reverted overnight, with every
+file in the affected workbook's `.Report` and `.SemanticModel` folders sharing one timestamp burst.
+Measured by us the same day: while Desktop held the pre-edit in-memory model, a disk-only sentinel
+measure was added to TMDL. `powerbi-desktop reload` returned success and **did not overwrite** the
+file; `refresh_pbip_model.py --pid` **refused safely** with `REFRESH: WRONG_MODEL`, exit 2; Desktop's
+own UI **Save** overwrote the file silently, removed the sentinel, and reverted the TMDL hash exactly
+to the pre-edit value.
+
+**Forensic signature:** many files in one workbook folder sharing a single modified time to the
+second. Hemang's customer evidence showed ~30+ files rewritten together; our fixture-scale
+reproduction rewrote all 18 files under `.Report` + `.SemanticModel` in one burst (15 at
+`2026-08-21 12:10:52`, 3 at `12:10:53`). That signature is how to diagnose this after the fact when
+no Desktop process remains to inspect.
+
+**Boundary of the measurement:** we reproduced an immediate, explicit Desktop UI Save. We did **not**
+reproduce an overnight/idle autosave, and we did **not** evaluate the "Apply external changes" prompt.
+Do not cite this as proof of either. The operational rule is still binding: **if you edited files on
+disk, do not Save from a Desktop instance that was already open before the edit; close and reopen it
+first.** The guarded script path is safer than the human Save path precisely because it fails closed
+on `WRONG_MODEL` instead of writing stale state.
 
 ## How persistence actually works
 

@@ -843,6 +843,41 @@ def test_a_survey_listing_one_name_under_two_identities_is_flagged_too(tmp_path:
     assert plan[0]["name_collision"] == ["Finance", "Marketing"]
 
 
+def test_a_luid_only_name_collision_without_projects_is_still_announced(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Candidate LUIDs are collision evidence even when the REST payload has no project."""
+    both = {SHARED_DS: [("luid-finance", ""), ("luid-marketing", "")]}
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [(SHARED_DS, "")], candidates=both)],
+        )
+    )
+    entry = survey.datasources[SHARED_DS.lower()]
+    plan = build_plan(
+        [
+            {
+                "name": SHARED_DS,
+                "luid": None,
+                "projectName": "",
+                "hasExtracts": False,
+                "downstreamWorkbooks": [],
+            }
+        ],
+        "",
+        survey,
+    )
+    output = _rendered(caplog, plan, survey)
+
+    assert entry.luids == {"luid-finance", "luid-marketing"}
+    assert not entry.projects
+    assert entry.ambiguous
+    assert plan[0]["name_collision"] == ["?"]
+    assert "NAME COLLISION" in output
+    assert f"{SHARED_DS!r} exists in 1 project(s) (?)" in output
+
+
 def test_a_collision_the_metadata_api_cannot_see_at_all_is_still_reported(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

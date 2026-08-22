@@ -30,6 +30,10 @@ the shared agent conventions**, which `scripts/sync_agent_conventions.py` genera
 > That pointer file duplicates only the session-start step below and defers everything else here, so
 > the two cannot drift.
 
+**Navigation:** use [`docs/INDEX.md`](docs/INDEX.md) as the tier-2 map before searching blindly.
+Subagents are told in their generated preamble to read it as step 0; `scripts/check_navigation_index.py`
+checks the index bidirectionally.
+
 ---
 
 ## Session start, do this first (before any other work)
@@ -461,6 +465,48 @@ them. Re-dispatching blindly would have redone or overwritten ACMU's already-ver
   verified-good artifact — ACMU's fixes above were already confirmed live in Desktop; blindly
   re-dispatching that unit would have redone (and risked corrupting) work that was already done.
 
+## Desktop concurrency budget: RAM, not addressability
+
+The shared cleanup rule below is still true: concurrent Power BI Desktop instances are addressable
+because the bridge and AS-port lookup are PID-scoped. The missing constraint is memory. ⚠️ Inferred
+from a 2026-08-19 field incident, not a controlled reproduction: Desktop crashed with
+`Microsoft.Mashup.Host.Document.PlatformDependentOptions` while 4–5 instances were open and the
+machine had about 3.1 GB free of 31.7 GB. Deleting the model's 313 MB `.pbi/cache.abf` and rebuilding
+it did not fix the crash, which argues against treating this signature as simple cache-file
+corruption; each instance's resident `msmdsrv` model is the RAM-pressure hypothesis. Confirming that
+mechanism would require a controlled reproduction varying free RAM and instance count. Until then,
+keep large-model concurrency low, check free RAM before opening another instance, and close instances
+as soon as their handoff is complete.
+
+**There is a SECOND concurrency budget, and it is a different resource entirely — the agent host.**
+Do not conflate the two: the one above is machine RAM consumed by Desktop's `msmdsrv` processes; this
+one is the **V8 heap of `copilot.exe` itself**, and it is reached with no Power BI Desktop running at
+all. ⚠️ **Observed 2026-08-20, three times in one session** — with **six concurrent `opus-5`
+subagents**, the CLI host died and wrote a crash dump into the repo root
+(`report.<yyyymmdd>.<hhmmss>.<pid>.0.001.json`) naming the cause:
+
+```json
+{ "event": "Allocation failed - JavaScript heap out of memory", "trigger": "OOMError" }
+```
+
+**Marked observed rather than measured, deliberately.** The dump was read at the time but not
+retained, so this is not reproducible from anything committed here. If it happens again, **keep the
+dump** (it is gitignored, not auto-deleted) and upgrade this claim.
+
+Equally, be careful what the number means. **Six failed. Four was run repeatedly the same night
+without incident — which is not the same as four being safe**, and no one has bisected it. Treat
+"keep the wave small" as the rule and any specific ceiling as unproven.
+
+Two consequences, both of which cost real work that night:
+
+- ⚠️ **Advice to "dispatch the whole wave at once" — common in delegation guidance, including the
+  user-level instruction files some runtimes load — optimises coordination cost and is silent about
+  host memory.** It is not in this document, and this document does not endorse it: cap the wave.
+- **A crash takes every subagent's UNPUSHED work.** Committing is not enough — one agent came one
+  crash away from losing four good commits it had never pushed. Brief agents to **`git push`
+  incrementally**, and read the crash dump first after a restart: it names the trigger and timestamps
+  the crash, which is the reference point the file-mtime forensics above depend on.
+
 ---
 
 ## Starting a migration — the DISPATCHER's job
@@ -587,7 +633,7 @@ not exist yet. Getting a finished model/report into a Fabric workspace is a manu
 Desktop publish. So the target question is not "local or Fabric?" but *"note the destination
 workspace in the brief so the manual publish is unambiguous."* Do not imply an automated deploy.
 
-### Step 2 — four questions, asked ONCE, in one message
+### Step 2 — five questions, asked ONCE, in one message
 
 **The problem was never that we ask too little. It is that every question arrived too late.** Before
 this section existed, the orchestrator had four ask-moments and **all four were mid-flight**: the
@@ -607,6 +653,7 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 | 2 | **Autonomy** — see the table below. Default `standard`. | The failure modes are symmetric: too autonomous and a run spends 105 minutes saying nothing; too interactive and an overnight run stops on question 1 and achieves nothing. |
 | 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | It decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it. |
 | 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
+| 5 | **Who drives the data refreshes?** — see the table below. Default `scripted`. | A refresh is the one long operation with **no progress signal**, so an agent cannot tell "working" from "hung" *while it is happening*. Only you know how big the source is and whether you will be at the keyboard. |
 
 **Autonomy levels, defined by behaviour at a decision point — not by vibe:**
 
@@ -620,6 +667,43 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 modal sign-in dialog no automation can fill. Question 4 pre-authorises the *fallback* (build
 model-only under `credential_gate.py authorize`, artifacts marked unvalidated) — never pretending a
 source was reachable.
+
+**Refresh strategies, and why this is a question rather than a default:**
+
+| strategy | who drives it | ceiling | you can see progress |
+|---|---|---|---|
+| **`scripted`** (default) | `refresh_pbip_model.py` | **hard 300 s** (330 s with grace), not configurable | ⚠️ an elapsed-time heartbeat only — `still refreshing, 42s / 330s` |
+| `operator` | the agent prepares everything, stops, and asks **you** to hit Refresh in Desktop | none | ✅ per-table row counts, live in the UI |
+| `xmla` | manual XMLA/TOM against the live instance | none | ⚠️ partial |
+
+**Why it earns a slot in the intake instead of being discovered mid-run.** A refresh is the only
+routine step where *"still working"* and *"hung"* produce an identical signal — the scripted path's
+heartbeat reports **elapsed time, not work done** (`print_refresh_heartbeat` is documented as
+printing "an elapsed/total countdown *without claiming progress*"), so a slow refresh and a stuck one
+print the same line. Be precise about what it does catch: a **detected** credential modal does not
+heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see —
+and the script says so itself on timeout: *"CAUSE UNKNOWN - this script cannot distinguish these two,
+and they need opposite responses"* — so the decision lands at the worst possible
+moment: mid-flight, under uncertainty, on the
+agent. Worse, the two governing rules **point in opposite directions** there. The general rule says
+time-box an unresponsive external system at ~2 minutes or 3 attempts; the carve-out says *don't*, if
+the tool announces its own deadline — and `refresh_pbip_model.py` is exactly such a tool. An agent
+that resolves that tension wrongly either kills a legitimately-running refresh (recording **no
+verdict at all** — measured) or waits indefinitely (129 minutes / 298 tool calls — also measured).
+
+And the default's ceiling is **known to be too low for real sources**: measured against Snowflake,
+one table family took **~700–750 s** and another **~452 s**, both over the 330 s ceiling. Narrowing
+with `--tables` does **not** rescue it when a *single table* is the bottleneck rather than cumulative
+cost (proven twice, identical timeout both times). See #253.
+
+So: if the source is large or the run is unattended, say so **now**. `operator` trades start-latency
+for a refresh that cannot silently time out and that you can watch. Picking it up front costs one
+line in the brief; discovering it at 330 s costs the refresh.
+
+⚠️ `xmla` has a scope constraint worth stating in the brief: it must be **whole-database** scope if a
+calculated table depends on a refreshed table (e.g. a `Date` table built with
+`CALENDAR(MINX(...), MAXX(...))` over the fact). Refresh the fact alone and the calculated object
+does not recompute in the same transaction.
 
 ### Step 3 — write the brief, then dispatch
 
@@ -666,9 +750,11 @@ exists so each question is answered once per migration, not once per session.
 <!-- BEGIN:shared-conventions -->
 ## Shared agent conventions (all agents inherit these)
 
-- **Cite your source.** Every capability claim, mapping decision, or numeric result names its evidence:
-  a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE` result, or a doc URL.
-  "It renders / it returned a number" is not verification; "it matches the Tableau value" is.
+- **Cite your source — and say WHOSE.** Every capability claim, mapping decision, or numeric result
+  names its evidence: a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE`
+  result, or a doc URL. "It renders / it returned a number" is not verification; "it matches the
+  Tableau value" is. **A number also names the estate it was measured on** — ours (the reference
+  bundle) or the customer's. Never present ours as theirs: measured 2026-08-21, five did in one day.
 - **Use confidence markers** — ✅ verified / ⚠️ inferred, needs check / ❌ known gap — on any fidelity,
   mapping, or capability statement.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
@@ -694,17 +780,16 @@ exists so each question is answered once per migration, not once per session.
   Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
   what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
   rewritten `reports/`, and the diff was read as engine behaviour).
-  `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
+  ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
-  specifics — the `PBIR_SCHEMA_UNREACHABLE` silent skip, field-parameter `sourceColumn` brackets, the
-  `'Table'[Col]=[Measure]` PLACEHOLDER error — live in the `powerbi-report-gotchas` and
-  `powerbi-semantic-model-gotchas` skills, which the owning agents invoke.)
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
+  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+  skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -744,8 +829,8 @@ exists so each question is answered once per migration, not once per session.
   holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
   your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
   close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
-  by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
-  automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
+  by `MainWindowTitle`; the shell guard rejects looped/variable `-Id`, and `$pid` is read-only,
+  so use literal PIDs). **Never** close a sibling's instance, and don't close one
   mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
   scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
   scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing

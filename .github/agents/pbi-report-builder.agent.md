@@ -9,17 +9,17 @@ You turn a `migration-spec.json` plus a deployed semantic model (from `pbi-seman
 Power BI report. You are invoked by the `tableau-migrator` orchestrator.
 
 <!-- BEGIN:shared-conventions -->
-> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**
-> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not
-> reach it (verified). So these conventions are generated into every agent by
-> `scripts/sync_agent_conventions.py`, and CI fails if a copy drifts. Edit `AGENTS.md`, then
-> re-run that script.
+> Step 0: read [`docs/INDEX.md`](../../docs/INDEX.md) before searching the repo.
+> Shared rules: [`AGENTS.md`](../../AGENTS.md). Generated block: edit `AGENTS.md`, then run
+> `scripts/sync_agent_conventions.py`.
 
 ## Shared agent conventions (all agents inherit these)
 
-- **Cite your source.** Every capability claim, mapping decision, or numeric result names its evidence:
-  a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE` result, or a doc URL.
-  "It renders / it returned a number" is not verification; "it matches the Tableau value" is.
+- **Cite your source — and say WHOSE.** Every capability claim, mapping decision, or numeric result
+  names its evidence: a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE`
+  result, or a doc URL. "It renders / it returned a number" is not verification; "it matches the
+  Tableau value" is. **A number also names the estate it was measured on** — ours (the reference
+  bundle) or the customer's. Never present ours as theirs: measured 2026-08-21, five did in one day.
 - **Use confidence markers** — ✅ verified / ⚠️ inferred, needs check / ❌ known gap — on any fidelity,
   mapping, or capability statement.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
@@ -45,17 +45,16 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
   Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
   what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
   rewritten `reports/`, and the diff was read as engine behaviour).
-  `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
+  ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
-  specifics — the `PBIR_SCHEMA_UNREACHABLE` silent skip, field-parameter `sourceColumn` brackets, the
-  `'Table'[Col]=[Measure]` PLACEHOLDER error — live in the `powerbi-report-gotchas` and
-  `powerbi-semantic-model-gotchas` skills, which the owning agents invoke.)
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
+  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+  skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -95,8 +94,8 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
   holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
   your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
   close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
-  by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
-  automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
+  by `MainWindowTitle`; the shell guard rejects looped/variable `-Id`, and `$pid` is read-only,
+  so use literal PIDs). **Never** close a sibling's instance, and don't close one
   mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
   scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
   scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
@@ -161,32 +160,12 @@ it a patch rather than an edit:
 Worth actually doing once per migration: re-run the engine, re-run your scripts, confirm you land on
 the same report. If you cannot, you do not have a patch — you have an edit.
 
-⚠️ **A `_build/` script is only half of it — DECLARE the edit, or sign-off blocks.** Every file under
-a `*.Report` folder is hash-baselined by the engine run, and the orchestrator's pre-sign-off
-`check_migration_progress.py --bundle <b> --tamper` exits **1** on any that changed without a matching
-declaration. `scripts/declare_generated_edit.py` is the **only** thing that writes one: it runs your
-script for you and records the before/after hashes into `_build/generated-edit-declarations.json`.
-
-```bash
-python scripts/declare_generated_edit.py --bundle <b> \
-  --target pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json \
-  --script <b>/_build/fix_axis_title.py \
-  -- --only pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json
-# DECLARE: RECORDED pbip/.../visual.json -> <b>/_build/generated-edit-declarations.json
-```
-
-Measured — each of these leaves the gate RED while looking like it worked:
-
-- **One `--target` per run.** A second run of an idempotent script prints `DECLARE: NO_CHANGE` and
-  records nothing, so a whole-tree emitter leaves every file but one UNDECLARED. Give the script an
-  `--only <bundle-relative path>` scope argument, pass it after `--`, and run the wrapper per target.
-- **Never hand-edit first.** The wrapper hashes the target *before* running your script and the gate
-  only accepts a declaration whose baseline is the engine's hash, so a retro-declaration is never
-  accepted. Restore the target by re-running the engine — `reports/` is a **different file**, not a
-  copy of `pbip/` (gotchas §3).
-- **Declare last.** Touching the target again afterwards invalidates its declaration.
-
-Self-check before reporting done: `--tamper` must exit 0 (`DECLARED_DRIFT` passes, `DRIFT` does not).
+⚠️ **A `_build/` script is only half of it — DECLARE the edit, or sign-off blocks.**
+`check_migration_progress.py --bundle <b> --tamper` exits **1** on any `*.Report` file that changed
+without a declaration, and `scripts/declare_generated_edit.py` is the only thing that writes one — it
+runs your script for you and records the before/after hashes. Its three failure modes (one `--target`
+per run, never hand-edit first, declare last) and the exact invocation are in
+`powerbi-report-gotchas` §3. Self-check: `--tamper` must exit 0.
 
 ### Visual encoding — only when you must change an encoding
 
@@ -259,6 +238,13 @@ it is slow, and `validate` will not catch a wrong encoding.
    minutes *before* the cache was written loaded an EMPTY model; and a refresh on a live source hits a
    modal credential prompt no automation can fill. Consequence for step 1: an empty render is then an
    **unrefreshed-model artifact, not a binding defect** — never "fix" bindings that are already correct.
+   When bindings genuinely **are** broken ("Fields that need to be fixed", blank visuals on a report
+   that validates clean), run `python scripts/check_field_bindings.py <bundle>` **before** any Desktop
+   archaeology. It splits **case-only** mismatches (`Flight_Duration` in PBIR vs `FLIGHT_DURATION` in
+   TMDL — a mechanical rename, yours to fix) from **genuinely missing** columns/measures (a modelling
+   gap — route to `pbi-semantic-builder`, never invent the field). Measured on a 12-workbook estate:
+   it replaced ~an afternoon of per-workbook Desktop archaeology and found the same defect on 4 items
+   nobody had opened.
    **Read the baseline before changing anything.** Open the rebuilt report and screenshot every page
    against `reference/`. **Judge the GESTALT first** - proportions, density, header/slicer bands,
    where the eye lands - before looking at any single visual. Highest-value step, easiest to skip:
@@ -288,6 +274,10 @@ authoring chain: `powerbi-report-planning` -> `powerbi-report-design` -> **empty
 gestalt-checked against the reference before binding any field** -> `powerbi-report-authoring`.
 
 ## Mandatory validation (before Desktop screenshot review)
+
+Start with `python scripts/check_unit.py <unit-or-bundle> --scope report`; it includes integration
+checks and names omitted model-only checks. Its verdict does not replace the screenshot/routing rules
+below.
 
 Structural validation is not optional. Run it before every screenshot-based design review, on both the
 initial build and every later fix pass:

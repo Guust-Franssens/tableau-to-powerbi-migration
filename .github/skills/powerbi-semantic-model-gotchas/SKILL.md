@@ -568,6 +568,33 @@ named pipe** — the real error text is destroyed in transit. Consequences:
   as an unrelated agent's mysterious failure at the same timestamp. Check event 1026 before blaming
   their model.
 
+### ⚠️ Inferred RAM-pressure Desktop crash: `PlatformDependentOptions`
+
+Crash signature to grep for:
+
+```text
+Something went wrong
+The type initializer for 'Microsoft.Mashup.Host.Document.PlatformDependentOptions' threw an exception
+```
+
+Field evidence from 2026-08-19: the crash happened during a customer migration sweep with 4–5 Power BI
+Desktop instances open and about 3.1 GB free RAM out of 31.7 GB total. Each open Desktop instance owns
+an `msmdsrv` child with the loaded model resident, so large-model estates can exhaust the machine well
+before `--pid` addressability becomes a problem.
+
+✅ Confirmed negative result: deleting the model's 313 MB `.pbi/cache.abf` and letting Desktop rebuild
+it did **not** fix the crash, which argues against treating this signature as simple cache-file
+corruption.
+
+⚠️ Leading hypothesis, not proven cause: RAM pressure from too many loaded Desktop models. No
+controlled reproduction varied free RAM and instance count while holding the model and machine
+constant. To confirm this mechanism, reproduce the crash across controlled free-RAM / instance-count
+levels and show it disappears with otherwise identical conditions and more available RAM.
+
+Practical rule until then: before opening another Desktop instance, check free RAM and count live
+`PBIDesktop`/`msmdsrv` processes. On large models, keep concurrency low and close each Desktop
+instance as soon as its verification handoff is complete.
+
 ### ⚠️ `powerbi-desktop open` can return the WRONG pid
 
 Measured 2026-08-01, with two Desktop instances open: `open` reported a `pid` belonging to a **sibling
@@ -873,13 +900,20 @@ fields x 60 requests down to the one category you are about to author.
 
 The reader also de-duplicates `category_guidance`, which is emitted **per request** rather than per
 category. Verified across all 38 handovers of `_bundle-208`: exactly **one distinct guidance string
-per category, estate-wide**, so a 60-request file carries 60 copies of an 886-character block -
-about **53 KB of pure repetition**, and most of why the file is awkward in the first place. All
-seven categories together cost 4,481 bytes.
+per category, estate-wide**. In the worked 60-request file, repeated guidance accounts for
+**44,775 bytes (12.6% of the 347 KB file)**. Both the earlier "~53 KB" and "dominant cost" claims
+were overstated: it is a worthwhile saving, not the dominant cost. All seven categories together cost
+4,481 bytes.
 
 `needs_review[]` is worth knowing about: it lists the same calcs with a strict subset of the fields
 (`category`, `fallback_reason`, `has_suggestion`, `name`, `role` - **no `formula`**). It is enough to
 *report* a stub and structurally insufficient to *repair* one. Always work from `requests[]`.
+
+Do not compare that request count directly to `check_stub_measures.py`'s first ratio. The reader
+counts engine handover requests; `check_stub_measures.py` scans shipped TMDL placeholder bodies and
+splits measures from calculated columns. The real `_bundle-208` shape that read as
+`Admin_Insights_Starter 27/51 -> actionable 60` was not arithmetic drift: the extra actionable
+items were stubbed calculated columns, outside the measure-only denominator.
 
 ### RETRACTED: "the queue is unreachable and fails silently"
 

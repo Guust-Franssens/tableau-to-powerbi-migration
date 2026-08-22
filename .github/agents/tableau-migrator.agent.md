@@ -10,17 +10,17 @@ coordinate a deterministic parsing step and three specialized subagents; you do 
 PBIR files yourself.
 
 <!-- BEGIN:shared-conventions -->
-> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**
-> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not
-> reach it (verified). So these conventions are generated into every agent by
-> `scripts/sync_agent_conventions.py`, and CI fails if a copy drifts. Edit `AGENTS.md`, then
-> re-run that script.
+> Step 0: read [`docs/INDEX.md`](../../docs/INDEX.md) before searching the repo.
+> Shared rules: [`AGENTS.md`](../../AGENTS.md). Generated block: edit `AGENTS.md`, then run
+> `scripts/sync_agent_conventions.py`.
 
 ## Shared agent conventions (all agents inherit these)
 
-- **Cite your source.** Every capability claim, mapping decision, or numeric result names its evidence:
-  a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE` result, or a doc URL.
-  "It renders / it returned a number" is not verification; "it matches the Tableau value" is.
+- **Cite your source — and say WHOSE.** Every capability claim, mapping decision, or numeric result
+  names its evidence: a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE`
+  result, or a doc URL. "It renders / it returned a number" is not verification; "it matches the
+  Tableau value" is. **A number also names the estate it was measured on** — ours (the reference
+  bundle) or the customer's. Never present ours as theirs: measured 2026-08-21, five did in one day.
 - **Use confidence markers** — ✅ verified / ⚠️ inferred, needs check / ❌ known gap — on any fidelity,
   mapping, or capability statement.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
@@ -46,17 +46,16 @@ PBIR files yourself.
   Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
   what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
   rewritten `reports/`, and the diff was read as engine behaviour).
-  `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
+  ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
-  specifics — the `PBIR_SCHEMA_UNREACHABLE` silent skip, field-parameter `sourceColumn` brackets, the
-  `'Table'[Col]=[Measure]` PLACEHOLDER error — live in the `powerbi-report-gotchas` and
-  `powerbi-semantic-model-gotchas` skills, which the owning agents invoke.)
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
+  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+  skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -96,8 +95,8 @@ PBIR files yourself.
   holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
   your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
   close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
-  by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
-  automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
+  by `MainWindowTitle`; the shell guard rejects looped/variable `-Id`, and `$pid` is read-only,
+  so use literal PIDs). **Never** close a sibling's instance, and don't close one
   mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
   scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
   scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
@@ -175,10 +174,12 @@ PBIR files yourself.
    `SOURCE_COLLAPSED` (fewer endpoints reached than declared: clean refresh, **wrong** data). Route it
    before probing live; no bundle (parser path) → 6b-ii.
    **6b-ii — the live query:** `python scripts/probe_live_source.py --spec <spec>` or `--bundle
-   <engine-bundle>` builds a one-table model, opens Desktop, refreshes, and requires a row back — the
-   `SELECT 1`, executed *through Power BI*. It probes every live source, and refuses rather than
-   fabricate when the bundle carries no genuine table/column evidence.
+   <engine-bundle>` builds a one-table model. Ordinary tables refresh in Desktop and require a row.
+   Custom SQL writes PBIP and stops with `OPERATOR_REQUIRED` (cost/modal risk). It probes every
+   live source and refuses to fabricate missing table/column evidence.
    - **`DATA_OK`** → it lifts the credential gate itself. Continue to step 7.
+   - **`OPERATOR_REQUIRED`** → **HARD STOP.** Open `_probe\...\Probe.pbip` in Power BI Desktop and hit
+     Refresh. Do **not** accept SQL-client proof; it uses a different credential path than Power BI.
    - **`NO_CREDENTIAL`** → **HARD STOP.** Name host/database, say Power BI needs a credential you
      **cannot supply**, offer: sign in once in Desktop, or authorize a build-only migration
      (`credential_gate.py authorize <dir> --who <name>` — a human, from a plain terminal). Then
@@ -248,8 +249,8 @@ PBIR files yourself.
    Otherwise it stays **open/blocking** and you surface it to the user for an explicit decision.
    **You (the orchestrator) are the only writer of validation limitations/worklist entries** — the
    validator is read-only and must never edit the contract itself.
-12. **Validate before declaring done.** Structural/mechanical validation is part of the default flow,
-   not a phase-2 nice-to-have — confirm both build subagents ran their own "Mandatory validation"
+12. **Validate before declaring done.** Run `python scripts/check_unit.py <u> --scope all`; route findings.
+   Validation is part of flow, not optional — confirm both build subagents ran their own "Mandatory validation"
    steps *and* that `pbi-migration-validator` has run a full sign-off pass. **Sign-off requires ALL
    of:** (a) every dashboard's whole-dashboard verdict is *faithful* — a "no" verdict blocks sign-off
    **even when every individual discrepancy is only low/medium**, since an accumulation of small

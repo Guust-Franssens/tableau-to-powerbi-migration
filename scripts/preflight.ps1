@@ -232,6 +232,17 @@ else {
         'Install Python 3.11+, then re-run. The engine single-source rule is enforced by scripts/engine_source.py --json.'
 }
 
+# --- Engine receipt drift: bundles retain their provenance, so read it back --------------------------
+# A bundle built before the plugin updated is structurally indistinguishable from one built today until
+# its receipt is compared. This is advisory: the timing rule forbids an engine upgrade mid-migration,
+# so an actionable warning must never block the run that discovers it.
+if ($engineStatus -and $engineStatus.present -and $py) {
+    $receiptOutput = & python (Join-Path $repoRoot 'scripts\check_engine_receipts.py') --root $repoRoot 2>&1 | Out-String
+    Add-Check 'engine: bundle receipt versions' 'optional' ($LASTEXITCODE -eq 0) `
+        $receiptOutput.Trim() `
+        'A listed bundle was built with a different engine version. Between migrations, re-run it with the installed canonical engine; do not upgrade the engine mid-migration.'
+}
+
 # --- Skill plugins ---
 # `powerbi-authoring` is still checked by configured plugin identity, because it supplies the official
 # planning/design/authoring/semantic-model skills the builder personas chain.
@@ -387,11 +398,17 @@ if ($CheckUpstream) {
 #    makes Desktop auto-updates a non-event for every downstream call.
 $desktop = $null
 $desktopVia = ''
-if ($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH)) { $desktop = $env:PBI_DESKTOP_PATH; $desktopVia = 'PBI_DESKTOP_PATH' }
+$desktopPathConfigured = [bool]$env:PBI_DESKTOP_PATH
+$desktopPathValid = $desktopPathConfigured -and (Test-Path $env:PBI_DESKTOP_PATH)
+$desktopPathDead = $desktopPathConfigured -and -not $desktopPathValid
+if ($desktopPathValid) { $desktop = $env:PBI_DESKTOP_PATH; $desktopVia = 'PBI_DESKTOP_PATH' }
 $appx = Get-AppxPackage Microsoft.MicrosoftPowerBIDesktop -ErrorAction SilentlyContinue
 if (-not $desktop) {
     $loc = $appx.InstallLocation
-    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) { $desktop = (Join-Path $loc 'bin\PBIDesktop.exe'); $desktopVia = 'MSIX discovery' }
+    if ($loc -and (Test-Path (Join-Path $loc 'bin\PBIDesktop.exe'))) {
+        $desktop = (Join-Path $loc 'bin\PBIDesktop.exe')
+        $desktopVia = if ($desktopPathDead) { 'MSIX discovery (PBI_DESKTOP_PATH is set but dead)' } else { 'MSIX discovery' }
+    }
 }
 if (-not $desktop) {
     $classic = 'C:\Program Files\Microsoft Power BI Desktop\bin\PBIDesktop.exe'
@@ -426,13 +443,21 @@ if ($appx) {
 # Desktop auto-updates and the bridge then cannot find the exe. The phase that actually needs it -
 # report authoring / Desktop verification - is where it must be resolved, and `powerbi-desktop open`
 # fails loudly there rather than silently.
-$pathPinned = [bool]($env:PBI_DESKTOP_PATH -and (Test-Path $env:PBI_DESKTOP_PATH))
+$pathPinned = $desktopPathValid
+$installedDesktop = if ($desktop -and $appx) { "$($appx.Version) at $desktop" } elseif ($desktop) { $desktop } else { 'not found' }
+$pinDetail = if ($pathPinned) {
+    $env:PBI_DESKTOP_PATH
+} elseif ($desktopPathDead) {
+    "PBI_DESKTOP_PATH points at `"$env:PBI_DESKTOP_PATH`" which is not on disk; installed Desktop: $installedDesktop. The bridge honours this variable and will fail to launch until it is re-pinned."
+} else {
+    'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline'
+}
 # The hint must work IN THE SHELL THAT READS IT. `setx` writes the user profile and is inherited only
 # by processes started LATER - and an agent's tool shells inherit the environment of a parent that is
 # already running, so "then reopen the shell" is advice they cannot act on. `$env:` is the fix that
 # takes effect immediately; `setx` is offered second, for persistence, correctly labelled.
 Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
-    $(if ($pathPinned) { $env:PBI_DESKTOP_PATH } else { 'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline' }) `
+    $pinDetail `
     $(if ($desktop) { "THIS shell (takes effect now): `$env:PBI_DESKTOP_PATH = `"$desktop`"   |   persist for NEW shells only (does NOT affect this one): setx PBI_DESKTOP_PATH `"$desktop`"" } else { 'install Power BI Desktop first' })
 
 # --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
@@ -456,16 +481,35 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # --- .NET SDK (builds scripts/tmdl_validate for offline TMDL deserialization) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
 # ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
-# check could never pass. TOM now comes from the NuGet package Microsoft.AnalysisServices.NetCore.retail.amd64,
-# restored by the tmdl_validate project - so the real machine dependency is the .NET SDK.
+# check could never pass. The .NET SDK is still needed to build/run the offline validator, but it does
+# NOT prove AMO/TOM or ADOMD assemblies exist in the NuGet cache; those file checks live below.
 Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
 
+# --- AMO/TOM client assembly (the pbip-model-refresh skill's progress trace + ImageSave persist) ---
+# `dotnet` being on PATH proves only that a restore COULD run. It does not prove the restored package is
+# already present on a firewalled machine. Mirror the ADOMD lesson below: console text is not proof;
+# presence of the DLL on disk is. Hence a file check, not a restore attempt.
+#
+# Severity: RECOMMENDED, not critical. AMO/TOM is needed for the Desktop refresh/save phase: without it
+# scripted refresh loses row-count progress and non-fatal liveness warnings, and ImageSave falls back
+# to the UI save path. The estate pipeline's parse/convert steps never open Desktop, so failing the
+# whole run here would recreate #124's false-blocker shape for a Desktop-only dependency. After #283,
+# the refresh still keeps its 3600s absolute backstop when AMO trace setup fails; the missing
+# capability is scripted observability and AMO ImageSave, not the timeout fix. This warning exists so
+# the operator chooses before work starts: restore AMO first, or choose the operator refresh strategy.
+$nugetPackagesRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path $HOME '.nuget\packages' }
+$amoDll = Get-ChildItem -Path (Join-Path $nugetPackagesRoot 'microsoft.analysisservices.netcore.retail.amd64*') `
+    -Recurse -Filter 'Microsoft.AnalysisServices.Tabular.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+Add-Check 'AMO/TOM client (Desktop progress/ImageSave)' 'recommended' ([bool]$amoDll) `
+    $(if ($amoDll) { $amoDll.FullName } else { 'not in the nuget cache - progress reporting and liveness are unavailable, so scripted refresh runs blind; ImageSave falls back to UI; the 3600s absolute refresh backstop remains active' }) `
+    'Before a scripted refresh, restore AMO/TOM into the active NuGet global-packages cache, or prefer the operator refresh strategy and watch Desktop''s own row counter: dotnet new console -o $env:TEMP\amo --framework net8.0; dotnet add $env:TEMP\amo package Microsoft.AnalysisServices.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the cache this preflight and refresh_pbip_model.py read).'
+
 # --- ADOMD.NET client assembly (the pbip-model-refresh skill's live-Desktop probe + refresh) --------
-# The .NET-SDK check above covers TOM/AMO (Microsoft.AnalysisServices.NetCore.retail.amd64). ADOMD.NET
-# is a SEPARATE nuget package (Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64) - a machine
-# can have TOM and still be missing ADOMD. That was the silent field failure this check exists for: on
-# a colleague's box the AdomdClient assembly was absent, so probe_desktop_query.py could not run a live
-# EVALUATE, and nothing flagged it up front. `dotnet add package` had even printed "Restored ... 0
+# AMO/TOM (Microsoft.AnalysisServices.NetCore.retail.amd64) and ADOMD.NET
+# (Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64) are SEPARATE nuget packages - a machine
+# can have one and still be missing the other. That was the silent field failure this check exists for:
+# on a colleague's box the AdomdClient assembly was absent, so probe_desktop_query.py could not run a
+# live EVALUATE, and nothing flagged it up front. `dotnet add package` had even printed "Restored ... 0
 # Errors" while landing ZERO PackageReference (a net10.0 scratch project silently no-op'd the add) - so
 # console text is not proof; presence of the DLL on disk is. Hence a file check, not a restore attempt.
 #

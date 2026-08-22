@@ -38,10 +38,29 @@ report against a model it does not ship with.
 
 What it will NOT tell you
 -------------------------
-That the report is CORRECT. Names resolving is necessary, not sufficient: a binding can resolve to
-the right name on the wrong table's twin column, aggregate the wrong way, or filter to nothing. It
-also cannot see anything a name does not carry - data types, row counts, or whether the model loads
-at all (`check_empty_model.py` is the gate for that).
+That the report is CORRECT. Names resolving is necessary, not sufficient: a binding can aggregate
+the wrong way or filter to nothing. It also cannot see anything a name does not carry - data types,
+row counts, or whether the model loads at all (`check_empty_model.py` is the gate for that).
+
+Table agreement (issue #258)
+----------------------------
+Resolving a name is not the same as resolving it on the RIGHT table, and the difference is a hard
+render failure. Field report, verbatim, on a live estate's `IA_Aircraft_Installs`:
+
+    "a field existing under the identical name on BOTH the referenced table and the correct table
+     produces no gate warning - it only surfaces later as InvalidUnconstrainedJoin ("Can't
+     determine relationships between the fields"), and only after the genuinely-missing fields are
+     fixed."
+
+That ordering is what makes a silent pass actively misleading rather than merely incomplete: fix
+the real errors this gate found, re-run, get a clean bill of health, and only THEN discover the
+report still does not render. So the per-visual question is now "do these fields agree on a table
+set Power BI can join?", asked in the SAME pass as the per-field one, and both are reported
+together - the masking is what has to go.
+
+`INCOHERENT` is a new top-level status (see `render`), and it exits 1 like `UNRESOLVED`. A caller
+testing `status == "OK"` is unaffected; a caller testing `status != "UNRESOLVED"` would now let a
+non-rendering report through, which is why the exit code, not the string, is the contract.
 """
 
 from __future__ import annotations
@@ -52,7 +71,9 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+from bundle_corpus import shipping_reports
 
 REPORT_NAME = "field-binding-check.json"
 
@@ -63,7 +84,17 @@ REPORT_NAME = "field-binding-check.json"
 # report's perfectly good binding as missing - a false positive on committed, shipping data.
 _NAME = r"'(?:[^']|'')*'|[^\s=]+"
 _TABLE_RE = re.compile(rf"^table\s+(?P<name>{_NAME})\s*$")
+_RELATIONSHIP_RE = re.compile(rf"^relationship\s+(?P<name>{_NAME})\s*$")
 _MEMBER_RE = re.compile(rf"^(?P<indent>[\t ]+)(?P<kind>column|measure|hierarchy|level)\s+(?P<name>{_NAME})")
+_PROPERTY_RE = re.compile(r"^\s*(?P<key>[A-Za-z]+)\s*:\s*(?P<value>.+?)\s*$")
+
+# A table that is DELIBERATELY not joined to anything, and whose presence in a visual therefore
+# says nothing about a broken binding. Field parameters (`NAMEOF` inside a calculated partition, or
+# Desktop's `ParameterMetadata` marker) and calculation groups are both substituted at query
+# generation, so they never form the unconstrained join the table-agreement check hunts for.
+_PARAMETER_METADATA_RE = re.compile(r"extendedProperty\s+ParameterMetadata")
+_NAMEOF_RE = re.compile(r"\bNAMEOF\s*\(")
+_CALC_GROUP_RE = re.compile(r"^\s*calculationGroup\b", re.MULTILINE)
 
 # PBIR reference nodes. `Column`/`Measure` carry `Property`; `HierarchyLevel` carries `Level` and
 # wraps a `Hierarchy` node. Everything else (`Aggregation`, `FillRule`, `Subquery`, ...) merely
@@ -81,10 +112,26 @@ class TableFields:
 
 
 @dataclass
+class Relationship:
+    """One TMDL `relationship` block, reduced to the join it declares."""
+
+    name: str
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+    is_active: bool = True
+
+
+@dataclass
 class ModelFields:
-    """The semantic model reduced to the only thing this gate compares: names."""
+    """The semantic model reduced to the only things this gate compares: names and joins."""
 
     tables: dict[str, TableFields] = field(default_factory=dict)
+    relationships: list[Relationship] = field(default_factory=list)
+    # table -> why it may legitimately sit alone in a visual (field parameter, calculation group)
+    detached_ok: dict[str, str] = field(default_factory=dict)
+    _components: dict[bool, dict[str, str]] = field(default_factory=dict, repr=False)
 
     def table(self, name: str) -> TableFields | None:
         """Exact-case lookup of one table."""
@@ -97,6 +144,53 @@ class ModelFields:
             if actual.casefold() == lowered:
                 return actual, fields_
         return None
+
+    def components(self, *, include_inactive: bool = False) -> dict[str, str]:
+        """Casefolded table name -> the id of the relationship component it belongs to.
+
+        Union-find over relationships, because "can Power BI join these two tables?" is a
+        reachability question, not an adjacency one: `Installs -> Aircraft -> Manufacturer` is a
+        perfectly ordinary star/snowflake path and must not read as three unrelated tables.
+        """
+        cached = self._components.get(include_inactive)
+        if cached is not None:
+            return cached
+        parent: dict[str, str] = {name.casefold(): name.casefold() for name in self.tables}
+
+        def find(node: str) -> str:
+            parent.setdefault(node, node)
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        for rel in self.relationships:
+            if not (rel.is_active or include_inactive):
+                continue
+            left, right = find(rel.from_table.casefold()), find(rel.to_table.casefold())
+            if left != right:
+                parent[left] = right
+        resolved = {node: find(node) for node in list(parent)}
+        self._components[include_inactive] = resolved
+        return resolved
+
+    def group_tables(self, names: Iterable[str], *, include_inactive: bool = False) -> list[list[str]]:
+        """Partition table names into the joinable sets Power BI would see."""
+        components = self.components(include_inactive=include_inactive)
+        groups: dict[str, list[str]] = {}
+        for name in names:
+            key = components.get(name.casefold(), name.casefold())
+            bucket = groups.setdefault(key, [])
+            if name not in bucket:
+                bucket.append(name)
+        return sorted((sorted(bucket) for bucket in groups.values()), key=lambda bucket: bucket[0])
+
+    def tables_carrying(self, prop: str) -> list[str]:
+        """Every table whose columns include this name - the "which one did you mean?" candidates."""
+        lowered = prop.casefold()
+        return sorted(
+            name for name, fields_ in self.tables.items() if any(c.casefold() == lowered for c in fields_.columns)
+        )
 
 
 @dataclass
@@ -118,6 +212,59 @@ def _unquote(name: str) -> str:
     return name
 
 
+def _split_qualified(value: str) -> tuple[str, str] | None:
+    """Split a relationship endpoint (`'Sample Superstore'.'Order Date'`, `Date.Date`) in two.
+
+    Written by hand rather than as a regex: either half may be quoted, and a quoted half may
+    contain a dot AND a doubled apostrophe, so `partition(".")` alone mis-splits real committed
+    models.
+    """
+    value = value.strip()
+    if value.startswith("'"):
+        index = 1
+        while index < len(value):
+            if value[index] == "'":
+                if value[index + 1 : index + 2] == "'":
+                    index += 2
+                    continue
+                break
+            index += 1
+        else:
+            return None
+        table, rest = value[: index + 1], value[index + 1 :]
+        if not rest.startswith("."):
+            return None
+        column = rest[1:]
+    else:
+        table, separator, column = value.partition(".")
+        if not separator:
+            return None
+    if not table.strip() or not column.strip():
+        return None
+    return _unquote(table), _unquote(column)
+
+
+def _classify_detached(name: str, body: list[str], model: ModelFields) -> None:
+    """Flag a table that is disconnected BY DESIGN, so it cannot be read as a broken binding.
+
+    Two shapes qualify, both substituted at query-generation time rather than joined:
+
+    * a **field parameter** - Desktop stamps `extendedProperty ParameterMetadata`, while the
+      engine's own emit (measured: `examples/superstore-sales-performance` `X-Axis`) is a
+      `= calculated` partition whose source is a list of `NAMEOF(...)` tuples;
+    * a **calculation group**, whose column is a query-time modifier, not a grouping key.
+
+    A plain disconnected slicer table is deliberately NOT here - `Region Parameter` in the same
+    model is a real single-select list, and pairing it with fact columns in one visual really would
+    be an unconstrained join.
+    """
+    text = "\n".join(body)
+    if _PARAMETER_METADATA_RE.search(text) or ("= calculated" in text and _NAMEOF_RE.search(text)):
+        model.detached_ok[name] = "field parameter"
+    elif _CALC_GROUP_RE.search(text):
+        model.detached_ok[name] = "calculation group"
+
+
 def parse_model(model_dir: Path) -> ModelFields:
     """Collect table columns, measures and hierarchy levels from a `.SemanticModel`'s TMDL.
 
@@ -133,28 +280,63 @@ def parse_model(model_dir: Path) -> ModelFields:
 
 
 def _parse_tmdl_file(path: Path, model: ModelFields) -> None:
-    """Fold one TMDL file's table blocks into `model`."""
+    """Fold one TMDL file's table AND relationship blocks into `model`.
+
+    `relationship` is a top-level declaration like `table`, so it both opens its own block and
+    closes any table block above it - without that, a `model.tmdl` carrying both would file the
+    joins under the last table it happened to declare.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return
-    lines = text.splitlines()
-    blocks: list[tuple[str, list[str]]] = []
+    tables: list[tuple[str, list[str]]] = []
+    relationships: list[tuple[str, list[str]]] = []
     current: list[str] | None = None
-    for line in lines:
+    for line in text.splitlines():
         table = _TABLE_RE.match(line)
+        relationship = _RELATIONSHIP_RE.match(line)
         if table:
             current = []
-            blocks.append((_unquote(table.group("name")), current))
+            tables.append((_unquote(table.group("name")), current))
+        elif relationship:
+            current = []
+            relationships.append((_unquote(relationship.group("name")), current))
         elif current is not None:
             current.append(line)
-    for name, body in blocks:
+    for name, body in tables:
         _parse_table_block(name, body, model)
+    for name, body in relationships:
+        _parse_relationship_block(name, body, model)
+
+
+def _parse_relationship_block(name: str, body: list[str], model: ModelFields) -> None:
+    """Record one join. A block missing either endpoint is dropped, never guessed at."""
+    props: dict[str, str] = {}
+    for line in body:
+        match = _PROPERTY_RE.match(line)
+        if match:
+            props.setdefault(match.group("key"), match.group("value"))
+    source = _split_qualified(props.get("fromColumn", ""))
+    target = _split_qualified(props.get("toColumn", ""))
+    if source is None or target is None:
+        return
+    model.relationships.append(
+        Relationship(
+            name=name,
+            from_table=source[0],
+            from_column=source[1],
+            to_table=target[0],
+            to_column=target[1],
+            is_active=props.get("isActive", "true").strip().casefold() != "false",
+        )
+    )
 
 
 def _parse_table_block(name: str, body: list[str], model: ModelFields) -> None:
     """Record the members declared at the block's own top level."""
     fields_ = model.tables.setdefault(name, TableFields())
+    _classify_detached(name, body, model)
     matches = [m for m in (_MEMBER_RE.match(line) for line in body) if m]
     if not matches:
         return
@@ -326,6 +508,136 @@ def resolve_reference(model: ModelFields, ref: FieldRef) -> dict[str, Any]:
     )
 
 
+@dataclass
+class VisualQuery:
+    """One visual's GROUPING fields - the only ones an unconstrained join can be built from."""
+
+    file: Path
+    visual: str
+    visual_type: str
+    refs: list[FieldRef] = field(default_factory=list)
+
+
+def iter_visual_queries(report_dir: Path) -> list[VisualQuery]:
+    """Every `visual.json`'s query projections, kept per visual so agreement can be judged.
+
+    Deliberately narrower than `iter_references`, which sweeps every JSON in the definition. Only
+    `visual.query.queryState.<role>.projections` becomes a GROUPING column in the DAX Power BI
+    generates, and only grouping columns can raise `InvalidUnconstrainedJoin`. A visual-level
+    filter, a sort key or a conditional-formatting input on an unrelated table renders fine (it
+    simply filters nothing), so folding those in would invent findings Desktop never raises.
+    """
+    queries: list[VisualQuery] = []
+    definition = report_dir / "definition"
+    root = definition if definition.is_dir() else report_dir
+    for path in sorted(root.rglob("visual.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        visual = payload.get("visual") if isinstance(payload, dict) else None
+        if not isinstance(visual, dict):
+            continue
+        query = visual.get("query")
+        state = query.get("queryState") if isinstance(query, dict) else None
+        if not isinstance(state, dict):
+            continue
+        refs: list[FieldRef] = []
+        # `From` is a SIBLING of `queryState`, not inside it, so a walk started at `queryState`
+        # never sees it and every aliased projection resolves to None -- silently contributing
+        # zero tables to agreement. Seed the scope from the parent `query` node.
+        _walk(state, _source_scope(query, {}), path, refs)
+        if refs:
+            name = payload.get("name") if isinstance(payload.get("name"), str) else path.parent.name
+            visual_type = visual.get("visualType") if isinstance(visual.get("visualType"), str) else "unknown"
+            queries.append(VisualQuery(file=path, visual=name, visual_type=visual_type, refs=refs))
+    return queries
+
+
+def _grouping_tables(model: ModelFields, query: VisualQuery) -> dict[str, list[FieldRef]]:
+    """The model tables this visual GROUPS BY, mapped to the references that put them there.
+
+    Three deliberate exclusions, each of which would otherwise be a false positive:
+
+    * **measures** - a measure is not table-bound the way a column is. It aggregates across the
+      whole model, its home table is an organisational choice (a `_Measures` table is disconnected
+      on purpose), and it is a value in the query, never a grouping key. Requiring a measure's home
+      table to join would fire on every well-built model.
+    * **references that do not resolve** - already reported as `missing`/`near_miss`; guessing the
+      table agreement of a field that does not exist would just double the noise.
+    * **field parameters and calculation groups** - disconnected by design, see `_classify_detached`.
+    """
+    grouped: dict[str, list[FieldRef]] = {}
+    for ref in query.refs:
+        if ref.kind == "Measure":
+            continue
+        found = model.table_ci(ref.entity)
+        if found is None:
+            continue
+        spelling, _ = found
+        if spelling in model.detached_ok:
+            continue
+        if resolve_reference(model, ref)["status"] == "missing":
+            continue
+        grouped.setdefault(spelling, []).append(ref)
+    return grouped
+
+
+def _ambiguous_bindings(model: ModelFields, grouped: dict[str, list[FieldRef]], groups: list[list[str]]) -> list[dict]:
+    """Name the table a field was PROBABLY meant to bind to, when the name exists there too.
+
+    This is the customer's exact shape: `Serial_Number` on both the stranded lookup and the joined
+    fact. Candidates are restricted to tables the REST of this visual can already reach, so the
+    answer is "rebind here and the visual renders", not a model-wide census of every duplicated
+    column name - `Turbine Id` living on both sides of a relationship is normal star-schema design
+    and reporting it would drown the finding that matters.
+    """
+    reachable: dict[str, set[str]] = {}
+    for group in groups:
+        others = {name for other in groups if other is not group for name in other}
+        expanded = {
+            name
+            for name in model.tables
+            if any(model.components().get(name.casefold()) == model.components().get(o.casefold()) for o in others)
+        }
+        for table in group:
+            reachable[table] = expanded
+    ambiguous = []
+    for table, refs in sorted(grouped.items()):
+        for prop in sorted({ref.prop for ref in refs if ref.kind == "Column"}):
+            also_on = [t for t in model.tables_carrying(prop) if t != table and t in reachable.get(table, set())]
+            if also_on:
+                ambiguous.append({"report_spelling": f"{table}[{prop}]", "also_on": also_on})
+    return ambiguous
+
+
+def check_visual_coherence(model: ModelFields, query: VisualQuery) -> dict[str, Any] | None:
+    """Does this visual's grouping columns agree on a table set Power BI can actually join?"""
+    grouped = _grouping_tables(model, query)
+    if len(grouped) < 2:
+        return None
+    groups = model.group_tables(grouped)
+    if len(groups) < 2:
+        return None
+    inactive_only = len(model.group_tables(grouped, include_inactive=True)) == 1
+    detail = "grouping columns span table sets with no active relationship path: " + " | ".join(
+        "+".join(group) for group in groups
+    )
+    if inactive_only:
+        detail += " - only an INACTIVE relationship joins them (activate it, or use USERELATIONSHIP in a measure)"
+    return {
+        "status": "unrelated_tables",
+        "visual": query.visual,
+        "visual_type": query.visual_type,
+        "file": str(query.file),
+        "table_groups": groups,
+        "fields": sorted({f"{table}[{ref.prop}]" for table, refs in grouped.items() for ref in refs}),
+        "inactive_only": inactive_only,
+        "ambiguous": _ambiguous_bindings(model, grouped, groups),
+        "detail": detail,
+    }
+
+
 def model_for_report(report_dir: Path) -> Path | None:
     """Resolve the model a report actually ships with, via `definition.pbir` then a sibling."""
     pbir = report_dir / "definition.pbir"
@@ -344,14 +656,7 @@ def model_for_report(report_dir: Path) -> Path | None:
     return sibling if sibling.is_dir() else None
 
 
-def find_reports(root: Path) -> list[Path]:
-    """The `.Report` folders that SHIP under `root` - `pbip/` only for a bundle."""
-    root = root.resolve()
-    if root.name.endswith(".Report"):
-        return [root]
-    pbip = root / "pbip"
-    base = pbip if pbip.is_dir() else root
-    return sorted({p.resolve() for p in base.rglob("*.Report") if p.is_dir()})
+find_reports = shipping_reports
 
 
 def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
@@ -377,16 +682,57 @@ def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
             "near_misses": 0,
             "missing": 0,
             "findings": [],
+            "visuals": 0,
+            "incoherent_visuals": 0,
+            "coherence": [],
         }
+    queries = iter_visual_queries(report_dir)
+    # Computed in the SAME pass as the per-field grades, and reported alongside them. The field
+    # report's core complaint is the ORDERING - the table-agreement failure stayed masked until the
+    # genuinely-missing fields were fixed, so "clean bill of health" arrived one round too early.
+    coherence = [c for c in (check_visual_coherence(model, q) for q in queries) if c]
     return {
         "report": str(report_dir),
         "model": str(model_dir),
-        "status": "UNRESOLVED" if unresolved else "OK",
+        "status": _pair_status(unresolved, coherence),
         "references": len(findings),
         "near_misses": sum(1 for f in findings if f["status"] == "near_miss"),
         "missing": sum(1 for f in findings if f["status"] == "missing"),
         "findings": _dedupe(unresolved),
+        "visuals": len(queries),
+        "incoherent_visuals": len(coherence),
+        "coherence": _dedupe_coherence(coherence),
     }
+
+
+def _pair_status(unresolved: list[dict[str, Any]], coherence: list[dict[str, Any]]) -> str:
+    """`UNRESOLVED` outranks `INCOHERENT`: a name that does not exist has to be fixed first."""
+    if unresolved:
+        return "UNRESOLVED"
+    return "INCOHERENT" if coherence else "OK"
+
+
+def _dedupe_coherence(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per distinct table-set disagreement, carrying every visual that shows it.
+
+    A page built by copying one broken visual repeats the same fix N times; the grouping is what
+    keeps the verdict a to-do list rather than a wall.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for finding in findings:
+        key = json.dumps([finding["table_groups"], finding["ambiguous"]], sort_keys=True)
+        entry = merged.get(key)
+        if entry is None:
+            entry = {k: v for k, v in finding.items() if k not in ("file", "visual", "visual_type")}
+            entry["visuals"] = []
+            entry["files"] = []
+            entry["occurrences"] = 0
+            merged[key] = entry
+        entry["occurrences"] += 1
+        entry["visuals"].append(f"{finding['visual']} ({finding['visual_type']})")
+        if finding["file"] not in entry["files"]:
+            entry["files"].append(finding["file"])
+    return list(merged.values())
 
 
 def _dedupe(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -430,19 +776,27 @@ def _merge(pairs: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> dict[s
         {"report": p["report"], "model": p["model"], "reason": p["reason"]} for p in pairs if p["status"] == "SKIPPED"
     ]
     unresolved = [p for p in graded if p["status"] == "UNRESOLVED"]
+    incoherent = [p for p in graded if p["status"] == "INCOHERENT"]
     if not graded:
         status = "SKIPPED"
+    elif unresolved:
+        status = "UNRESOLVED"
     else:
-        status = "UNRESOLVED" if unresolved else "OK"
+        status = "INCOHERENT" if incoherent else "OK"
     return {
         "status": status,
         "reports_scanned": len(graded),
         "reports_unresolved": len(unresolved),
+        "reports_incoherent": len(incoherent),
         "near_misses": sum(p["near_misses"] for p in graded),
         "missing": sum(p["missing"] for p in graded),
+        "incoherent_visuals": sum(p.get("incoherent_visuals", 0) for p in graded),
         "reports": graded,
         "skipped": skipped,
     }
+
+
+FAILING_STATUSES = frozenset({"UNRESOLVED", "INCOHERENT"})
 
 
 def render(report: dict[str, Any]) -> str:
@@ -458,22 +812,41 @@ def render(report: dict[str, Any]) -> str:
         return (
             f"FIELD BINDING CHECK: OK - every PBIR field reference in {scanned} report(s) resolves in its model.{tail}"
         )
-    lines = [
-        f"FIELD BINDING CHECK: UNRESOLVED - {report['reports_unresolved']} of {scanned} report(s) "
-        f"reference fields their model does not have "
-        f"({report['near_misses']} case-only near-miss(es), {report['missing']} missing){tail}",
-    ]
+    lines = [_headline(report, scanned, tail)]
     for one in report["reports"]:
-        if one["status"] != "UNRESOLVED":
+        if one["status"] not in FAILING_STATUSES:
             continue
         lines.append(f"  {Path(one['report']).name}  (model: {Path(one['model']).name})")
         lines += _render_findings(one["findings"], "near_miss")
         lines += _render_findings(one["findings"], "missing")
-    lines.append(
-        "  A CASE-ONLY near-miss is a model-layer rename that never reached the report: rewrite the\n"
-        "  PBIR spelling to the model's, do NOT rename the model back - the fold was deliberate."
-    )
+        lines += _render_coherence(one.get("coherence") or [])
+    if report["missing"] or report["near_misses"]:
+        lines.append(
+            "  A CASE-ONLY near-miss is a model-layer rename that never reached the report: rewrite the\n"
+            "  PBIR spelling to the model's, do NOT rename the model back - the fold was deliberate."
+        )
+    if report.get("incoherent_visuals"):
+        lines.append(
+            "  UNRELATED TABLES is what Desktop raises as InvalidUnconstrainedJoin - every field\n"
+            "  resolves, so this NEVER appears in a per-field check. Rebind the odd table out, or add\n"
+            "  the missing relationship; a listed AMBIGUOUS name is the likely mis-bind."
+        )
     return "\n".join(lines)
+
+
+def _headline(report: dict[str, Any], scanned: int, tail: str) -> str:
+    """The one line a CI log shows, naming which of the two defects dominates."""
+    if report["status"] == "UNRESOLVED":
+        return (
+            f"FIELD BINDING CHECK: UNRESOLVED - {report['reports_unresolved']} of {scanned} report(s) "
+            f"reference fields their model does not have "
+            f"({report['near_misses']} case-only near-miss(es), {report['missing']} missing){tail}"
+        )
+    return (
+        f"FIELD BINDING CHECK: INCOHERENT - every field resolves, but {report['incoherent_visuals']} visual(s) "
+        f"in {report.get('reports_incoherent', 0)} of {scanned} report(s) bind fields their model cannot "
+        f"join{tail}"
+    )
 
 
 def _skipped_tail(report: dict[str, Any]) -> str:
@@ -496,6 +869,22 @@ def _render_findings(findings: list[dict[str, Any]], status: str) -> list[str]:
         if finding.get("model_spelling"):
             detail += f"   model: {finding['model_spelling']}"
         lines.append(f"    - {label}: {detail}  [{finding['kind']} x{finding['occurrences']}]")
+    return lines
+
+
+def _render_coherence(findings: list[dict[str, Any]]) -> list[str]:
+    """Render each table-set disagreement with the fields, the visuals and the likely mis-bind."""
+    lines = []
+    for finding in findings:
+        sets = " | ".join("+".join(group) for group in finding["table_groups"])
+        lines.append(f"    - UNRELATED TABLES: {sets}  [x{finding['occurrences']} visual(s)]")
+        lines.append(f"        fields:  {', '.join(finding['fields'])}")
+        lines.append(f"        visuals: {', '.join(finding['visuals'][:4])}")
+        for ambiguous in finding["ambiguous"]:
+            also = ", ".join(ambiguous["also_on"])
+            lines.append(f"        AMBIGUOUS: {ambiguous['report_spelling']} - the same name also exists on {also}")
+        if finding["inactive_only"]:
+            lines.append("        NOTE: only an INACTIVE relationship joins these tables")
     return lines
 
 
@@ -540,7 +929,7 @@ def main(argv: list[str] | None = None) -> int:
         args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     if not args.quiet:
         print(render(merged))
-    if args.warn_only or merged["status"] != "UNRESOLVED":
+    if args.warn_only or merged["status"] not in FAILING_STATUSES:
         return 0
     return 1
 

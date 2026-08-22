@@ -376,7 +376,7 @@ def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
 
     started = time.monotonic()
     with pytest.raises(CredentialMissingError):
-        refresh(port=1234, tables=["Orders"], timeout_sec=10, desktop_pid=111)
+        refresh(port=1234, tables=["Orders"], timeout_sec=10, desktop_pid=111, progress_enabled=False)
 
     assert time.monotonic() - started < 1.0, "shortened test poll interval should catch the modal quickly"
     assert calls["count"] >= 2
@@ -398,7 +398,7 @@ def test_refresh_banner_is_flushed_and_heartbeat_reports_elapsed_total(monkeypat
     monkeypatch.setattr("builtins.print", recording_print)
 
     with pytest.raises(TimeoutError):
-        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
+        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111, progress_enabled=False)
 
     out = capsys.readouterr().out
     assert "No blocking dialog on PID 111. Refreshing, bounded at 0.1s XMLA + 0.15s grace" in out
@@ -424,7 +424,7 @@ def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, ca
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
 
     with pytest.raises(CredentialUnknownError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
+        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111, progress_enabled=False)
 
     assert excinfo.value.reason == reason
     out = capsys.readouterr().out
@@ -445,7 +445,7 @@ def test_refresh_latches_unknown_seen_only_by_initial_precheck(monkeypatch, park
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
 
     with pytest.raises(CredentialUnknownError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
+        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111, progress_enabled=False)
 
     assert excinfo.value.reason == reason
     parked.set()
@@ -472,7 +472,7 @@ def test_refresh_latches_desktop_unready_seen_only_by_initial_precheck(monkeypat
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
 
     with pytest.raises(DesktopUnreadyError) as excinfo:
-        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111)
+        refresh(port=1234, tables=["Orders"], timeout_sec=0.1, desktop_pid=111, progress_enabled=False)
 
     assert excinfo.value.reason == reason
     parked.set()

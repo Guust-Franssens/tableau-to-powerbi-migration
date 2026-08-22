@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "LargeRefresh"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "e0a78767-cfed-4aa4-8f5f-04648a020262"
+  }
+}

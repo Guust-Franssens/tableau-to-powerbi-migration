@@ -211,6 +211,14 @@ class _Scanner:
             if j == -1:
                 self.errors.append(("unterminated string literal", start_line, start_col))
                 return None
+            if j > i and text[j - 1] == "\\" and not _is_string_terminator(text, j + 1):
+                self.errors.append(
+                    (
+                        'invalid JSON-style \\" escape; Power Query M uses doubled quotes ("")',
+                        self.line,
+                        self.col + j - i - 1,
+                    )
+                )
             if j + 1 < len(text) and text[j + 1] == '"':
                 j += 2
                 continue
@@ -218,6 +226,19 @@ class _Scanner:
         token = Token("string", text[i : j + 1], start_line, start_col)
         self.advance(j + 1 - i)
         return token
+
+
+def _is_string_terminator(text: str, index: int) -> bool:
+    """Whether text after a quote can legally follow an M string literal."""
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index == len(text) or text[index] in ",)]}&+-*/=<>&|?":
+        return True
+    for word in ("as", "catch", "else", "in", "is", "meta", "or", "otherwise", "then"):
+        end = index + len(word)
+        if text.startswith(word, index) and (end == len(text) or not (text[end].isalnum() or text[end] == "_")):
+            return True
+    return False
 
 
 def _tokenize(text: str) -> tuple[list[Token], list[tuple[str, int, int]]]:
@@ -241,6 +262,10 @@ def _tokenize(text: str) -> tuple[list[Token], list[tuple[str, int, int]]]:
                 break
             tokens.append(token)
             continue
+        if text.startswith('\\"', scanner.pos):
+            scanner.errors.append(
+                ('invalid JSON-style \\" escape; Power Query M uses doubled quotes ("")', scanner.line, scanner.col)
+            )
         match = _NUMBER_RE.match(text, scanner.pos) if ch.isdigit() else None
         if match is None and (ch.isalpha() or ch == "_"):
             # A dotted path (Table.TransformColumnTypes, Int64.Type) is ONE token, so the
@@ -348,13 +373,88 @@ def _check_expression(path: Path, text: str, offset_line: int = 0, first_col: in
         findings.append(Finding(path, line + offset_line, shifted, kind, detail, _snippet(text, line)))
 
     for message, line, col in scan_errors:
-        add("UNTERMINATED", f"{message} - the expression ends inside it", line, col)
+        if message.startswith("invalid JSON-style"):
+            add("INVALID_STRING_ESCAPE", message, line, col)
+        else:
+            add("UNTERMINATED", f"{message} - the expression ends inside it", line, col)
 
     _check_delimiters(tokens, add, offset_line)
     _check_let_in(tokens, add)
+    _check_transform_column_type_pairs(tokens, add)
 
     findings.extend(_check_missing_separator(path, text, tokens, offset_line, first_col))
     return findings
+
+
+def _check_transform_column_type_pairs(tokens: list[Token], add: Callable[[str, str, int, int], None]) -> None:
+    """Check that TransformColumnTypes receives a list of `{columnName, type}` pairs."""
+    for index, token in enumerate(tokens[:-1]):
+        if token.kind != "ident" or token.text != "Table.TransformColumnTypes" or tokens[index + 1].text != "(":
+            continue
+        arguments = _function_arguments(tokens, index + 1)
+        if len(arguments) < 2:
+            continue
+        pairs = arguments[1]
+        if len(pairs) < 2 or pairs[0].text != "{" or pairs[-1].text != "}":
+            continue
+        entries = pairs[1:-1]
+        if not entries:
+            continue
+        for entry in _split_top_level(entries):
+            if not entry or entry[0].text != "{":
+                continue
+            if len(entry) < 2 or entry[-1].text != "}":
+                _add_invalid_transform_pair(add, entry[0], "each literal entry must be a `{columnName, type}` pair")
+                continue
+            values = _split_top_level(entry[1:-1])
+            if len(values) != 2 or any(not value or value[0].text == "{" for value in values):
+                _add_invalid_transform_pair(add, entry[0], "each entry must contain a column name and one type")
+
+
+def _function_arguments(tokens: list[Token], open_index: int) -> list[list[Token]]:
+    """Return top-level arguments for a balanced function call, or none when it is incomplete."""
+    arguments: list[list[Token]] = [[]]
+    stack = ["("]
+    for token in tokens[open_index + 1 :]:
+        if token.kind == "punct" and token.text in PAIRS:
+            stack.append(token.text)
+        elif token.kind == "punct" and token.text in CLOSERS:
+            if not stack or stack[-1] != CLOSERS[token.text]:
+                return []
+            stack.pop()
+            if not stack:
+                return arguments
+        if token.kind == "punct" and token.text == "," and len(stack) == 1:
+            arguments.append([])
+        else:
+            arguments[-1].append(token)
+    return []
+
+
+def _split_top_level(tokens: list[Token]) -> list[list[Token]]:
+    """Split comma-separated tokens, ignoring commas inside nested M expressions."""
+    values: list[list[Token]] = [[]]
+    depth = 0
+    for token in tokens:
+        if token.kind == "punct" and token.text in PAIRS:
+            depth += 1
+        elif token.kind == "punct" and token.text in CLOSERS:
+            depth -= 1
+        if token.kind == "punct" and token.text == "," and depth == 0:
+            values.append([])
+        else:
+            values[-1].append(token)
+    return values
+
+
+def _add_invalid_transform_pair(add: Callable[[str, str, int, int], None], token: Token, detail: str) -> None:
+    """Report the refresh-only TransformColumnTypes pair-shape failure at its entry."""
+    add(
+        "INVALID_TRANSFORM_COLUMN_TYPE_PAIR",
+        f"Table.TransformColumnTypes {detail}; extra brace nesting passes syntax but fails refresh",
+        token.line,
+        token.col,
+    )
 
 
 def _check_missing_separator(

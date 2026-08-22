@@ -1,0 +1,20 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBI_QueryOrder = ["Orders","OrdersTypedAgain","CustomerDateRollup","CustomerStatusMerge","SourceFolder"]
+
+annotation PBI_ProTooling = ["DevMode"]
+
+ref table Orders
+
+ref table OrdersTypedAgain
+
+ref table CustomerDateRollup
+
+ref table CustomerStatusMerge
+

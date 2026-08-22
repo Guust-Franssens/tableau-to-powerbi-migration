@@ -76,6 +76,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from bundle_corpus import shipping_reports
+
 REPORT_NAME = "pbir-validity-check.json"
 CLI = "powerbi-report-author"
 CLI_PKG = "@microsoft/powerbi-report-authoring-cli"
@@ -103,18 +105,7 @@ def find_cli(explicit: str | None = None) -> str | None:
     return None
 
 
-def find_reports(root: Path) -> list[Path]:
-    """Return the `.Report` folders that SHIP, newest-convention first.
-
-    Pointed at a bundle, this is `pbip/` only (see the module docstring). Pointed at a `.Report`
-    folder directly, it is that folder - which is how a caller overrides the `pbip/`-only rule.
-    """
-    root = root.resolve()
-    if root.name.endswith(".Report"):
-        return [root]
-    pbip = root / "pbip"
-    base = pbip if pbip.is_dir() else root
-    return sorted({p.resolve() for p in base.rglob("*.Report") if p.is_dir()})
+find_reports = shipping_reports
 
 
 def validate_one(report: Path, cli: str, timeout: int = TIMEOUT_SEC) -> dict:

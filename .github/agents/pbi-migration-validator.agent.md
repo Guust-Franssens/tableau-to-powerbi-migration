@@ -48,17 +48,17 @@ truth (Tableau screenshots, the migration-spec.json, the deployed model) — nev
 reasoning or self-report of success.
 
 <!-- BEGIN:shared-conventions -->
-> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**
-> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not
-> reach it (verified). So these conventions are generated into every agent by
-> `scripts/sync_agent_conventions.py`, and CI fails if a copy drifts. Edit `AGENTS.md`, then
-> re-run that script.
+> Step 0: read [`docs/INDEX.md`](../../docs/INDEX.md) before searching the repo.
+> Shared rules: [`AGENTS.md`](../../AGENTS.md). Generated block: edit `AGENTS.md`, then run
+> `scripts/sync_agent_conventions.py`.
 
 ## Shared agent conventions (all agents inherit these)
 
-- **Cite your source.** Every capability claim, mapping decision, or numeric result names its evidence:
-  a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE` result, or a doc URL.
-  "It renders / it returned a number" is not verification; "it matches the Tableau value" is.
+- **Cite your source — and say WHOSE.** Every capability claim, mapping decision, or numeric result
+  names its evidence: a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE`
+  result, or a doc URL. "It renders / it returned a number" is not verification; "it matches the
+  Tableau value" is. **A number also names the estate it was measured on** — ours (the reference
+  bundle) or the customer's. Never present ours as theirs: measured 2026-08-21, five did in one day.
 - **Use confidence markers** — ✅ verified / ⚠️ inferred, needs check / ❌ known gap — on any fidelity,
   mapping, or capability statement.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
@@ -84,17 +84,16 @@ reasoning or self-report of success.
   Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
   what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
   rewritten `reports/`, and the diff was read as engine behaviour).
-  `--tamper` already covers `reports/`; this is the rule it enforces. ⚠️ **The copy must keep
+  ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (PBIR
-  specifics — the `PBIR_SCHEMA_UNREACHABLE` silent skip, field-parameter `sourceColumn` brackets, the
-  `'Table'[Col]=[Measure]` PLACEHOLDER error — live in the `powerbi-report-gotchas` and
-  `powerbi-semantic-model-gotchas` skills, which the owning agents invoke.)
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
+  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+  skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -134,8 +133,8 @@ reasoning or self-report of success.
   holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
   your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
   close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
-  by `MainWindowTitle`; note the shell guard rejects looped/variable `-Id`, and `$pid` is a read-only
-  automatic variable, so use literal PIDs). **Never** close a sibling's instance, and don't close one
+  by `MainWindowTitle`; the shell guard rejects looped/variable `-Id`, and `$pid` is read-only,
+  so use literal PIDs). **Never** close a sibling's instance, and don't close one
   mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
   scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
   scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
@@ -201,7 +200,9 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
 
 Run these passes **in order** — cheap structural checks first, expensive judgment calls last:
 
-0. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
+0. **Run the all-scope automated inventory first:** `python scripts/check_unit.py <unit-or-bundle> --scope all`.
+   Route every finding; exit 0 is `AUTOMATED_CHECKS_PASS`, not visual/numeric fidelity sign-off.
+1. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with
    `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and
    a precise `reason`. Classify **every** row into exactly one of:
@@ -235,6 +236,13 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
    time on aesthetic judgment.
    `powerbi-report-author preview-pages <report>` and `preview-visuals <report>` emit this inventory as
    structured JSON — use them instead of reading every `visual.json` by hand.
+   `python scripts/check_field_bindings.py <bundle>` is the matching **cross-layer** check: every PBIR
+   field reference resolved against the TMDL. Run it here — it is offline and sweeps a whole estate, so
+   it costs nothing next to opening Desktop. Report its two classes **separately, because they route to
+   different owners**: **case-only** mismatches (`Flight_Duration` in PBIR vs `FLIGHT_DURATION` in TMDL)
+   are a mechanical rename for `pbi-report-builder`; **genuinely missing** columns/measures are a
+   modelling gap for `pbi-semantic-builder`. A broken binding renders blank on a report that
+   `validate` passes clean, so no other pass you run will catch it.
 2. **Whole-dashboard pass** (do this *before* drilling into individual visuals, not after). Compare
    the full-page PBI screenshot against the full Tableau dashboard screenshot as a gestalt: overall
    layout density/proportions, visual hierarchy (what draws the eye first), color usage, spacing,

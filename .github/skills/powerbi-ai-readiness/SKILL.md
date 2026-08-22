@@ -66,8 +66,14 @@ definition/cultures/<lcid>.tmdl
   `definition.pbism`'s version — a different schema. (Measured 2026-07-30: a model published with
   `4.2.0` still round-tripped intact, so this is correctness hygiene, not a fix for observed data loss.)
 - **The Modeling-MCP culture `Update` surface cannot reach this key** (it exposes name / annotations /
-  extendedProperties). Editing the TMDL directly is therefore the mechanism, not a shortcut — and it
-  has a second benefit: no XMLA refresh is required to apply it.
+  extendedProperties). Editing the TMDL directly is therefore the mechanism, not a shortcut.
+- ⚠️ **"No XMLA refresh is required" is a claim about the WRITE, not about the cost.** Stamping needs
+  no XMLA call to land on disk — but it does **not** update an already-open Desktop model
+  (`pbip-model-refresh`: `reload` does not re-read edited TMDL, measured 2026-08-01), and whether it
+  leaves the persisted `.pbi/cache.abf` valid is **UNMEASURED**. The one dated cache experiment we
+  have changed `expressions.tmdl`, not a culture file, so it does not cover this case. Until that is
+  settled, treat stamping as a **final** `definition/` edit — stamp, *then* reopen Desktop, refresh
+  and save — so you pay any reload once at most.
 - The markdown source is the editable artifact (`<migration>/ai-instructions.md`, two levels above the
   `.SemanticModel` folder); the culture TMDL is **generated**. Edit the markdown, re-stamp.
 
