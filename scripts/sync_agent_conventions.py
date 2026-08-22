@@ -122,11 +122,9 @@ def _classify_citation(token: str, follower: str) -> str:
 
 
 PREAMBLE = (
-    "> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**\n"
-    "> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not\n"
-    "> reach it (verified). So these conventions are generated into every agent by\n"
-    "> `scripts/sync_agent_conventions.py`, and CI fails if a copy drifts. Edit `AGENTS.md`, then\n"
-    "> re-run that script.\n"
+    "> Step 0: read [`docs/INDEX.md`](../../docs/INDEX.md) before searching the repo.\n"
+    "> Shared rules: [`AGENTS.md`](../../AGENTS.md). Generated block: edit `AGENTS.md`, then run\n"
+    "> `scripts/sync_agent_conventions.py`.\n"
 )
 
 log = logging.getLogger("sync_agent_conventions")

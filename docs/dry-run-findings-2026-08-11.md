@@ -8,7 +8,7 @@ excused as a known bug):
 | tag | meaning |
 |---|---|
 | `new-UX` | the thing we are hunting: unintuitive, unclear, surprising, or slow |
-| `known-engine` | listed in `known-defects.md`. Record it, do **not** re-file upstream |
+| `known-engine` | listed in the contemporaneous dry-run known-defects file. Record it, do **not** re-file upstream |
 | `docs-gap` | the answer exists in the repo but was not findable |
 | `regression` | something previously verified working, now broken. Highest priority |
 
