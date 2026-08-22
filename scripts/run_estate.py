@@ -94,6 +94,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from check_empty_model import REPORT_NAME as EMPTY_MODEL_REPORT
+from check_empty_model import STATUS_EMPTY_MODELS
 from check_empty_model import render as render_empty_model
 from check_empty_model import scan as scan_for_empty_models
 from check_blank_placeholders import REPORT_NAME as BLANK_PLACEHOLDER_REPORT
@@ -592,7 +593,7 @@ def final_verdict(gates: GateResults, out_dir: Path) -> int:
             f"Details: {out_dir / BLANK_PLACEHOLDER_REPORT}"
         )
         return EXIT_BLANK_PLACEHOLDER
-    if gates.empty_models["status"] != "OK":
+    if gates.empty_models["status"] == STATUS_EMPTY_MODELS:
         print(
             f"\nESTATE: EMPTY_MODEL - {gates.empty_models['models_empty']} of "
             f"{gates.empty_models['models_scanned']} model(s) would open and load NO ROWS\n"
