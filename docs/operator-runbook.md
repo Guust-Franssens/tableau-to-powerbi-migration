@@ -76,15 +76,16 @@ Three locations, one direction (from `AGENTS.md`, and it is enforced):
 | working copy | `<bundle>/pbip/` | agents edit here; this is what `deploy_estate.py` reads |
 | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | copied at sign-off |
 
-Before any human sign-off, run the mechanical inventory at the right layer:
+Automated inventory command by phase:
 
 ```powershell
-python scripts\check_unit.py <unit-or-bundle> --scope model   # semantic-builder hand-off
-python scripts\check_unit.py <unit-or-bundle> --scope report  # report-builder hand-off
-python scripts\check_unit.py <unit-or-bundle> --scope all     # validator/orchestrator sign-off
+python scripts\check_unit.py <unit-or-bundle> --scope model
+python scripts\check_unit.py <unit-or-bundle> --scope report
+python scripts\check_unit.py <unit-or-bundle> --scope integration
+python scripts\check_unit.py <unit-or-bundle> --scope all
 ```
 
-A scoped PASS is deliberately not a unit-level PASS; the command prints which layer was not examined.
+Exit 0 is `AUTOMATED_CHECKS_PASS`, not unit completion; scoped runs print omitted checks.
 
 ---
 

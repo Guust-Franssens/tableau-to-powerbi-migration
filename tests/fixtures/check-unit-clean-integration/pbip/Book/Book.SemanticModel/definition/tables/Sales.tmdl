@@ -1,0 +1,6 @@
+table Sales
+
+	column 'Order Date'
+		dataType: dateTime
+
+	measure 'Total Revenue' = SUM(Sales[Amount])

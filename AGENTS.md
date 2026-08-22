@@ -781,9 +781,11 @@ exists so each question is answered once per migration, not once per session.
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
-- **Run the layer gate before narrative sign-off.** `python scripts/check_unit.py <unit-or-bundle>
-  --scope model|report|all` is the machine inventory. A scoped PASS covers only that persona's layer
-  and is not unit sign-off; Desktop/data fidelity still need evidence.
+- **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
+  correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
+  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+  skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.

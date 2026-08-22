@@ -53,9 +53,11 @@ PBIR files yourself.
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
   `powerbi-report-gotchas` §3.
 
-- **Run the layer gate before narrative sign-off.** `python scripts/check_unit.py <unit-or-bundle>
-  --scope model|report|all` is the machine inventory. A scoped PASS covers only that persona's layer
-  and is not unit sign-off; Desktop/data fidelity still need evidence.
+- **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
+  correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
+  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
+  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
+  skills, which the owning agents invoke.)
 - **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
   and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
   stale entries don't mislead the validator.
@@ -249,10 +251,14 @@ PBIR files yourself.
    Otherwise it stays **open/blocking** and you surface it to the user for an explicit decision.
    **You (the orchestrator) are the only writer of validation limitations/worklist entries** — the
    validator is read-only and must never edit the contract itself.
-12. **Validate before declaring done.** Run `python scripts/check_unit.py <unit-or-bundle> --scope all`
-   and require exit 0 for the mechanical inventory, then require the validator's full sign-off:
-   faithful whole-dashboard verdicts, no open high-severity discrepancies, and only evidenced accepted
-   limitations. A green subagent summary is not validation.
+12. **Validate before declaring done.** Run `python scripts/check_unit.py <u> --scope all`; route findings.
+   Validation is part of flow, not optional — confirm both build subagents ran their own "Mandatory validation"
+   steps *and* that `pbi-migration-validator` has run a full sign-off pass. **Sign-off requires ALL
+   of:** (a) every dashboard's whole-dashboard verdict is *faithful* — a "no" verdict blocks sign-off
+   **even when every individual discrepancy is only low/medium**, since an accumulation of small
+   deviations is explicitly allowed to fail the gestalt; (b) no open high-severity discrepancies;
+   (c) any remaining item is an *evidenced* accepted limitation (step 9), not merely an unresolved
+   one. "The subagents reported success" is not "it was validated."
 13. **Summarize the migration** for the user: what was built (tables/measures/pages/visuals counts),
     what was *simplified* rather than transliterated (parameter-equality filters → slicers, pivot
     string-parsing → Power Query unpivot — positive findings, present them as such), what the

@@ -1,12 +1,12 @@
 """
 purpose: answer whether one migration unit is done by aggregating existing gates without merging them.
-usage:   python scripts/check_unit.py <unit-or-bundle> [--scope {model,report,all}] [--json <file>]
+usage:   python scripts/check_unit.py <unit-or-bundle> [--scope {model,report,integration,all}] [--json <file>]
          [--reference-dir <dir>] [--oracle-dir <dir>]
 
 Exit codes are intentionally coarser than the native gates, while preserving each native exit in the
 JSON payload:
 
-| 0  | all checks in the selected scope that can be verified are clean; accepted exemptions, if any, are counted |
+| 0  | AUTOMATED_CHECKS_PASS: all automated checks in the selected scope are clean |
 | 1  | at least one finding remains in the selected scope |
 | 2  | one or more selected checks could not be fully checked (SKIPPED/ERROR/NOT_CHECKED) and no finding won |
 | 4  | page-count parity precondition failed; page-level oracle checks are not meaningful |
@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 STATUS_PASS = "PASS"
+STATUS_AUTOMATED_PASS = "AUTOMATED_CHECKS_PASS"
 STATUS_FINDINGS = "FINDINGS"
 STATUS_NOT_CHECKED = "NOT_CHECKED"
 STATUS_PRECONDITION_FAILED = "PRECONDITION_FAILED"
@@ -52,11 +53,11 @@ VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity"})
 
 SCOPE_MODEL = "model"
 SCOPE_REPORT = "report"
+SCOPE_INTEGRATION = "integration"
 SCOPE_ALL = "all"
-SCOPES = (SCOPE_MODEL, SCOPE_REPORT, SCOPE_ALL)
+SCOPES = (SCOPE_MODEL, SCOPE_REPORT, SCOPE_INTEGRATION, SCOPE_ALL)
 MODEL_CHECK_IDS = frozenset(
     {
-        "blank-placeholders",
         "sqlproxy-connections",
         "relationship-health",
         "data-model",
@@ -67,21 +68,43 @@ MODEL_CHECK_IDS = frozenset(
         "cache-freshness",
     }
 )
-REPORT_CHECK_IDS = frozenset(
-    {"field-bindings", "pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"}
-)
+REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
+INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings"})
 ALL_ONLY_CHECK_IDS = frozenset({"engine-receipt", "visual-layer-done", "visual-comparison-done", "finalized"})
+
+OWNER_HINTS = {
+    "blank-placeholders": "integration (model placeholder referenced by report)",
+    "field-bindings": "integration (report reference vs model field)",
+    "sqlproxy-connections": "model",
+    "relationship-health": "model",
+    "data-model": "model",
+    "empty-model": "model",
+    "stub-measures": "model",
+    "ai-descriptions": "model",
+    "ai-instructions": "model",
+    "cache-freshness": "model",
+    "pbir-valid": "report",
+    "pbir-layout": "report",
+    "page-parity": "report",
+    "oracle-coverage": "report/reference capture",
+    "occlusion": "report",
+    "engine-receipt": "orchestrator",
+}
 
 
 @dataclass(frozen=True)
-class Gate:
+class Gate:  # pylint: disable=too-many-instance-attributes
     """One existing script behind the unit facade."""
 
     check_id: str
     script: str
     args: tuple[str, ...]
+    pass_statuses: frozenset[str]
+    pass_exit_codes: frozenset[int]
     finding_statuses: frozenset[str]
+    finding_exit_codes: frozenset[int]
     not_checked_statuses: frozenset[str] = frozenset({"SKIPPED", "ERROR"})
+    not_checked_exit_codes: frozenset[int] = frozenset({2, 3})
     writes_json: bool = True
 
 
@@ -90,17 +113,92 @@ GATES = (
         "blank-placeholders",
         "check_blank_placeholders.py",
         (),
+        frozenset({"OK"}),
+        frozenset({0}),
         frozenset({"REFERENCED", "UNREFERENCED"}),
+        frozenset({1, 2}),
         frozenset({"INCOMPLETE"}),
+        frozenset({3}),
     ),
-    Gate("field-bindings", "check_field_bindings.py", (), frozenset({"UNRESOLVED", "INCOHERENT"})),
-    Gate("sqlproxy-connections", "check_sqlproxy_connections.py", (), frozenset({"SQLPROXY"})),
-    Gate("relationship-health", "check_relationship_health.py", (), frozenset({"MISSING_RELATIONSHIP"})),
-    Gate("data-model", "check_datamodel.py", (), frozenset(), frozenset(), False),
-    Gate("empty-model", "check_empty_model.py", (), frozenset({"EMPTY_MODELS"})),
-    Gate("pbir-valid", "check_pbir_valid.py", (), frozenset({"INVALID"}), frozenset({"SKIPPED", "ERROR"})),
-    Gate("pbir-layout", "check_pbir_layout.py", (), frozenset({"DISPLACED_MAIN_COLUMN"})),
-    Gate("stub-measures", "check_stub_measures.py", ("--strict",), frozenset({"STUBS"})),
+    Gate(
+        "field-bindings",
+        "check_field_bindings.py",
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"UNRESOLVED", "INCOHERENT"}),
+        frozenset({1}),
+        frozenset({"SKIPPED", "ERROR"}),
+        frozenset({0, 2, 3}),
+    ),
+    Gate(
+        "sqlproxy-connections",
+        "check_sqlproxy_connections.py",
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"SQLPROXY"}),
+        frozenset({1}),
+    ),
+    Gate(
+        "relationship-health",
+        "check_relationship_health.py",
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"MISSING_RELATIONSHIP"}),
+        frozenset({1}),
+    ),
+    Gate(
+        "data-model",
+        "check_datamodel.py",
+        (),
+        frozenset(),
+        frozenset({0}),
+        frozenset(),
+        frozenset({1}),
+        frozenset(),
+        frozenset(),
+        False,
+    ),
+    Gate(
+        "empty-model",
+        "check_empty_model.py",
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"EMPTY_MODELS"}),
+        frozenset({1}),
+    ),
+    Gate(
+        "pbir-valid",
+        "check_pbir_valid.py",
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"INVALID"}),
+        frozenset({1}),
+        frozenset({"SKIPPED", "ERROR"}),
+        frozenset({0, 2, 3}),
+    ),
+    Gate(
+        "pbir-layout",
+        "check_pbir_layout.py",
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"DISPLACED_MAIN_COLUMN"}),
+        frozenset({1}),
+    ),
+    Gate(
+        "stub-measures",
+        "check_stub_measures.py",
+        ("--strict",),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"STUBS"}),
+        frozenset({1}),
+    ),
 )
 
 
@@ -388,36 +486,85 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
     }
 
 
-def _run_cli_gate(gate: Gate, target: Path, output_dir: Path) -> dict[str, Any]:
-    json_path = output_dir / f"{gate.check_id}.json" if gate.writes_json else None
+def _gate_command(gate: Gate, target: Path, json_path: Path | None = None) -> list[str]:
+    """Native checker command for reruns and subprocess execution."""
     argv = [sys.executable, str(SCRIPT_DIR / gate.script), str(target), *gate.args]
     if json_path is not None:
         argv.extend(["--json", str(json_path), "--quiet"])
-    proc = _run_simple(argv)
-    payload: dict[str, Any] = {}
-    if json_path is not None and json_path.is_file():
-        try:
-            payload = _read_json(json_path)
-        except (OSError, json.JSONDecodeError) as exc:
-            payload = {"status": "ERROR", "reason": f"unreadable JSON output: {exc}"}
-    else:
-        payload = {"status": "OK" if proc.returncode == 0 else "FINDINGS"}
-    native_status = str(payload.get("status") or "UNKNOWN")
-    if native_status in gate.finding_statuses or (not gate.writes_json and proc.returncode not in {0, 2}):
-        status = STATUS_FINDINGS
-    elif native_status in gate.not_checked_statuses or (not gate.writes_json and proc.returncode == 2):
-        status = STATUS_NOT_CHECKED
-    else:
+    return argv
+
+
+def _command_text(argv: list[str]) -> str:
+    """Human-rerunnable command text."""
+    return " ".join(f'"{part}"' if " " in part else part for part in argv)
+
+
+def _gate_result(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    gate: Gate,
+    target: Path,
+    proc: subprocess.CompletedProcess[str],
+    payload: dict[str, Any],
+    native_status: str,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    """Normalize one native checker result without fail-open fallthroughs."""
+    if native_status in gate.pass_statuses and proc.returncode in gate.pass_exit_codes:
         status = STATUS_PASS
+    elif native_status in gate.finding_statuses and proc.returncode in gate.finding_exit_codes:
+        status = STATUS_FINDINGS
+    elif native_status in gate.not_checked_statuses or proc.returncode in gate.not_checked_exit_codes:
+        status = STATUS_NOT_CHECKED
+    elif not gate.writes_json and proc.returncode in gate.finding_exit_codes:
+        status = STATUS_FINDINGS
+    else:
+        status = STATUS_NOT_CHECKED
+        detail = detail or f"unexpected native status/exit combination: {native_status}/{proc.returncode}"
     return {
         "id": gate.check_id,
         "status": status,
         "native_status": native_status,
         "native_exit": proc.returncode,
+        "native_command": _command_text(_gate_command(gate, target)),
+        "detail": detail,
         "stdout": proc.stdout.strip(),
         "stderr": proc.stderr.strip(),
         "payload": payload,
     }
+
+
+def _run_cli_gate(gate: Gate, target: Path, output_dir: Path) -> dict[str, Any]:  # pylint: disable=too-many-return-statements
+    json_path = output_dir / f"{gate.check_id}.json" if gate.writes_json else None
+    argv = _gate_command(gate, target, json_path)
+    try:
+        proc = _run_simple(argv)
+    except subprocess.TimeoutExpired as exc:
+        proc = subprocess.CompletedProcess(argv, 124, exc.stdout or "", exc.stderr or "")
+        return _gate_result(gate, target, proc, {"status": "ERROR"}, "ERROR", "native checker timed out")
+    if not gate.writes_json:
+        if proc.returncode == 0:
+            return _gate_result(gate, target, proc, {}, "OK")
+        detail = "native checker exited nonzero without JSON"
+        if "NOTHING CHECKED" in f"{proc.stdout}\n{proc.stderr}":
+            return _gate_result(gate, target, proc, {"status": "ERROR"}, "ERROR", detail)
+        return _gate_result(gate, target, proc, {}, "FINDINGS", detail)
+    if json_path is None or not json_path.is_file():
+        proc_status = "ERROR" if proc.returncode != 0 else "UNKNOWN"
+        return _gate_result(gate, target, proc, {"status": proc_status}, proc_status, "native JSON output missing")
+    try:
+        payload = _read_json(json_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return _gate_result(
+            gate,
+            target,
+            proc,
+            {"status": "ERROR", "reason": f"unreadable JSON output: {exc}"},
+            "ERROR",
+            "native JSON output unreadable",
+        )
+    if not isinstance(payload, dict):
+        return _gate_result(gate, target, proc, {"status": "ERROR"}, "ERROR", "native JSON output is not an object")
+    native_status = str(payload.get("status") or "UNKNOWN")
+    return _gate_result(gate, target, proc, payload, native_status)
 
 
 def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) -> dict[str, Any]:
@@ -455,6 +602,19 @@ def _run_simple(argv: list[str], timeout: int = 300) -> subprocess.CompletedProc
     )  # noqa: S603
 
 
+def _read_occlusion_payload(out: Path) -> tuple[list[dict[str, Any]], str | None]:
+    """Read detect_occlusion.py output, returning an error instead of guessing clean."""
+    if not out.is_file():
+        return [], "native JSON output missing"
+    try:
+        loaded = _read_json(out)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], f"native JSON output unreadable: {exc}"
+    if not isinstance(loaded, list):
+        return [], "native JSON output is not a list"
+    return loaded, None
+
+
 def check_occlusion(target: Path, output_dir: Path) -> dict[str, Any]:
     """Run detect_occlusion.py over every shipping report, preserving per-report exits."""
     reports = shipping_reports(target)
@@ -464,24 +624,37 @@ def check_occlusion(target: Path, output_dir: Path) -> dict[str, Any]:
     native = []
     for index, report in enumerate(reports):
         out = output_dir / f"occlusion-{index}.json"
-        proc = _run_simple([sys.executable, str(SCRIPT_DIR / "detect_occlusion.py"), str(report), "--json", str(out)])
-        payload: list[dict[str, Any]] = []
-        if out.is_file():
-            try:
-                loaded = _read_json(out)
-                payload = loaded if isinstance(loaded, list) else []
-            except (OSError, json.JSONDecodeError):
-                pass
-        native.append({"report": str(report), "native_exit": proc.returncode, "findings": payload})
+        argv = [sys.executable, str(SCRIPT_DIR / "detect_occlusion.py"), str(report), "--json", str(out)]
+        try:
+            proc = _run_simple(argv)
+        except subprocess.TimeoutExpired as exc:
+            proc = subprocess.CompletedProcess(argv, 124, exc.stdout or "", exc.stderr or "")
+            payload, error = [], "native checker timed out"
+        else:
+            payload, error = _read_occlusion_payload(out)
+        if proc.returncode not in {0, 1} and error is None and not payload:
+            error = f"unexpected native exit without findings: {proc.returncode}"
+        native.append(
+            {
+                "report": str(report),
+                "native_exit": proc.returncode,
+                "findings": payload,
+                "error": error,
+                "stderr": proc.stderr.strip(),
+            }
+        )
         findings.extend(payload)
-    status = STATUS_FINDINGS if findings else STATUS_PASS
+    errors = [item for item in native if item["error"]]
+    status = STATUS_FINDINGS if findings else (STATUS_NOT_CHECKED if errors else STATUS_PASS)
     return {
         "id": "occlusion",
         "status": status,
-        "native_status": "OCCLUDED" if findings else "OK",
+        "native_status": "OCCLUDED" if findings else ("ERROR" if errors else "OK"),
         "native_exit": max(item["native_exit"] for item in native),
+        "native_command": f"{sys.executable} {SCRIPT_DIR / 'detect_occlusion.py'} <report.Report> --json <out.json>",
         "reports": native,
         "findings": len(findings),
+        "detail": errors[0]["error"] if errors else None,
     }
 
 
@@ -662,21 +835,31 @@ def _remove_json_dir(path: Path) -> None:
         pass
 
 
+def _all_check_ids() -> frozenset[str]:
+    """Every check registered in the facade."""
+    return MODEL_CHECK_IDS | REPORT_CHECK_IDS | INTEGRATION_CHECK_IDS | ALL_ONLY_CHECK_IDS
+
+
 def _scope_check_ids(scope: str) -> frozenset[str]:
-    """Checks that belong to one persona-owned layer."""
+    """Checks that belong to one requested layer scope."""
     if scope == SCOPE_MODEL:
-        return MODEL_CHECK_IDS
+        return MODEL_CHECK_IDS | INTEGRATION_CHECK_IDS
     if scope == SCOPE_REPORT:
-        return REPORT_CHECK_IDS
-    return MODEL_CHECK_IDS | REPORT_CHECK_IDS | ALL_ONLY_CHECK_IDS
+        return REPORT_CHECK_IDS | INTEGRATION_CHECK_IDS
+    if scope == SCOPE_INTEGRATION:
+        return INTEGRATION_CHECK_IDS
+    return _all_check_ids()
 
 
 def _in_scope(check_id: str, scope: str) -> bool:
     return check_id in _scope_check_ids(scope)
 
 
-def _unexamined_scopes(scope: str) -> list[str]:
-    return [candidate for candidate in (SCOPE_MODEL, SCOPE_REPORT) if candidate != scope] if scope != SCOPE_ALL else []
+def _omitted_checks(scope: str) -> list[str]:
+    """Checks not run in the requested scope, named so a scoped pass cannot look complete."""
+    if scope == SCOPE_ALL:
+        return []
+    return sorted(_all_check_ids() - _scope_check_ids(scope))
 
 
 def _append_cli_checks(checks: list[dict[str, Any]], target: Path, exemptions: dict[str, Any], scope: str) -> None:
@@ -768,13 +951,13 @@ def _finalize(
         status = STATUS_NOT_CHECKED
         exit_code = EXIT_NOT_CHECKED
     else:
-        status = STATUS_PASS
+        status = STATUS_AUTOMATED_PASS
         exit_code = EXIT_OK
     return {
         "version": 1,
         "target": str(target),
         "scope": scope,
-        "unexamined_scopes": _unexamined_scopes(scope),
+        "omitted_checks": _omitted_checks(scope),
         "status": status,
         "exit_code": exit_code,
         "stopped_after": stopped_after,
@@ -787,6 +970,64 @@ def _finalize(
     }
 
 
+def _compact_identity(item: Any) -> str | None:
+    """Best-effort one-line identity for a native finding payload object."""
+    if not isinstance(item, dict):
+        return None
+    parts = []
+    for key in ("severity", "status", "kind", "category", "entity", "property", "table", "name", "reason"):
+        value = item.get(key)
+        if value not in (None, "", []):
+            parts.append(f"{key}={value}")
+    for key in ("path", "report", "model", "file"):
+        value = item.get(key)
+        if value not in (None, "", []):
+            parts.append(f"evidence={value}")
+            break
+    return "; ".join(parts) if parts else None
+
+
+def _payload_findings(payload: Any, limit: int = 5) -> list[str]:
+    """Extract concrete finding identities from heterogeneous native JSON payloads."""
+    findings: list[str] = []
+
+    def walk(value: Any) -> None:
+        if len(findings) >= limit:
+            return
+        if isinstance(value, dict):
+            identity = _compact_identity(value)
+            if identity and any(key in value for key in ("severity", "kind", "category", "reason", "path")):
+                findings.append(identity)
+            for child_key in ("findings", "unresolved", "skipped", "models", "reports"):
+                child = value.get(child_key)
+                if isinstance(child, list):
+                    walk(child)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+                if len(findings) >= limit:
+                    break
+
+    walk(payload)
+    return findings
+
+
+def _render_actionable_detail(check: dict[str, Any]) -> list[str]:
+    """Human details for a non-clean check row."""
+    if check["status"] not in {STATUS_FINDINGS, STATUS_NOT_CHECKED, STATUS_PRECONDITION_FAILED}:
+        return []
+    lines = [f"      suspected owner: {OWNER_HINTS.get(check['id'], 'unknown')}"]
+    if check.get("detail"):
+        lines.append(f"      detail: {check['detail']}")
+    if check.get("native_command"):
+        lines.append(f"      rerun: {check['native_command']}")
+    for finding in _payload_findings(check.get("payload")):
+        lines.append(f"      finding: {finding}")
+    if check.get("stderr"):
+        lines.append(f"      stderr: {check['stderr'][:500]}")
+    return lines
+
+
 def _count_suffix(missing: int) -> str:
     return f"   [{missing} MISSING]" if missing else ""
 
@@ -795,9 +1036,10 @@ def render(report: dict[str, Any]) -> str:
     """Human-readable unit verdict."""
     scope = report.get("scope", SCOPE_ALL)
     lines = [f"UNIT CHECK ({scope} scope): {report['status']} - {report['target']}"]
-    if report.get("unexamined_scopes"):
-        skipped = ", ".join(report["unexamined_scopes"])
-        lines.append(f"  scoped run only: {skipped} layer(s) not examined; not a unit-level sign-off")
+    if report.get("omitted_checks"):
+        skipped = ", ".join(report["omitted_checks"])
+        lines.append(f"  scoped automated checks only; omitted checks: {skipped}")
+        lines.append("  scoped PASS is not unit completion or cross-layer sign-off")
     if report.get("stopped_after"):
         lines.append(f"  stopped after failed precondition: {report['stopped_after']}")
     for check in report["checks"]:
@@ -833,6 +1075,7 @@ def render(report: dict[str, Any]) -> str:
         else:
             detail = f" - {check['detail']}" if check.get("detail") else ""
             lines.append(f"  {check_id}: {status}{detail}")
+        lines.extend(_render_actionable_detail(check))
     ex = report["exemptions"]
     if ex["accepted"] or ex["invalid"]:
         lines.append(f"  documented why-not exemptions: {ex['accepted']} accepted, {ex['invalid']} invalid")

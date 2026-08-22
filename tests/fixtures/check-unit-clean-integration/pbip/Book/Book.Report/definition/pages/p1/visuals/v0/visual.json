@@ -1,0 +1,30 @@
+{
+  "name": "v1",
+  "visual": {
+    "visualType": "clusteredColumnChart",
+    "query": {
+      "queryState": {
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {"SourceRef": {"Entity": "Sales"}},
+                  "Property": "Order Date"
+                }
+              }
+            },
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {"SourceRef": {"Entity": "Sales"}},
+                  "Property": "Total Revenue"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

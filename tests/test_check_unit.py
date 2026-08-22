@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from subprocess import CompletedProcess, TimeoutExpired
 
 import pytest
 
@@ -19,6 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
+
+ORIGINAL_CHECK_OCCLUSION = cu.check_occlusion
 
 
 def _write_spec(unit: Path, names: list[str]) -> None:
@@ -231,7 +234,7 @@ def test_native_gate_skipped_is_not_a_pass(tmp_path: Path, monkeypatch: pytest.M
     _write_spec(tmp_path, ["Executive"])
     _write_report(tmp_path, ["Executive"])
     _write_reference_manifest(tmp_path, ["Executive"])
-    monkeypatch.setattr(cu, "GATES", (cu.Gate("pbir-valid", "check_pbir_valid.py", (), frozenset({"INVALID"})),))
+    monkeypatch.setattr(cu, "GATES", (_gate("pbir-valid", "check_pbir_valid.py"),))
     monkeypatch.setattr(
         cu,
         "_run_cli_gate",
@@ -247,6 +250,145 @@ def test_native_gate_skipped_is_not_a_pass(tmp_path: Path, monkeypatch: pytest.M
 
     assert report["status"] == cu.STATUS_NOT_CHECKED
     assert report["exit_code"] == cu.EXIT_NOT_CHECKED
+
+
+def _gate(check_id: str = "x", script: str = "x.py") -> cu.Gate:
+    return cu.Gate(
+        check_id,
+        script,
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"BAD"}),
+        frozenset({1}),
+    )
+
+
+def _completed(argv: list[str], code: int, stdout: str = "", stderr: str = "") -> CompletedProcess[str]:
+    return CompletedProcess(argv, code, stdout, stderr)
+
+
+def test_registered_checks_are_scoped_without_vanishing() -> None:
+    """Every check belongs somewhere, and all is exactly the full registry."""
+    union = set()
+    for scope in (cu.SCOPE_MODEL, cu.SCOPE_REPORT, cu.SCOPE_INTEGRATION):
+        ids = cu._scope_check_ids(scope)  # pylint: disable=protected-access
+        assert ids
+        union.update(ids)
+    assert union <= cu._scope_check_ids(cu.SCOPE_ALL)  # pylint: disable=protected-access
+    assert cu._scope_check_ids(cu.SCOPE_ALL) == cu._all_check_ids()  # pylint: disable=protected-access
+    assert cu.INTEGRATION_CHECK_IDS <= cu._scope_check_ids(cu.SCOPE_MODEL)  # pylint: disable=protected-access
+    assert cu.INTEGRATION_CHECK_IDS <= cu._scope_check_ids(cu.SCOPE_REPORT)  # pylint: disable=protected-access
+
+
+def test_cli_gate_missing_json_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing native JSON is an error state, never synthesized into PASS."""
+    gate = _gate()
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 1, stderr="boom"))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert check["native_status"] == "ERROR"
+    assert "missing" in check["detail"]
+
+
+def test_cli_gate_invalid_json_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Malformed native JSON means the facade could not form an opinion."""
+    gate = _gate()
+    (tmp_path / "x.json").write_text("not-json", encoding="utf-8")
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 0))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert check["native_status"] == "ERROR"
+
+
+def test_cli_gate_unknown_status_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A renamed native status must be registered before it can pass."""
+    gate = _gate()
+    (tmp_path / "x.json").write_text(json.dumps({"status": "RENAMED"}), encoding="utf-8")
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 0))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert "unexpected native status" in check["detail"]
+
+
+def test_cli_gate_subprocess_import_failure_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Python import failure before JSON write is infrastructure failure, not findings or pass."""
+    gate = _gate()
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 1, stderr="ModuleNotFoundError: nope"))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert "ModuleNotFoundError" in check["stderr"]
+
+
+def test_cli_gate_nonzero_with_clean_payload_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Payload/exit disagreement cannot be accepted as clean."""
+    gate = _gate()
+    (tmp_path / "x.json").write_text(json.dumps({"status": "OK"}), encoding="utf-8")
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 1))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert "unexpected native status" in check["detail"]
+
+
+def test_cli_gate_timeout_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Timeouts are infrastructure failures, never passes."""
+    gate = _gate()
+
+    def raise_timeout(argv: list[str]) -> CompletedProcess[str]:
+        raise TimeoutExpired(argv, 1, output="partial", stderr="slow")
+
+    monkeypatch.setattr(cu, "_run_simple", raise_timeout)
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert check["native_exit"] == 124
+    assert "timed out" in check["detail"]
+
+
+def test_occlusion_missing_output_after_nonzero_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Occlusion cannot pass when the detector failed before producing JSON."""
+    report = _write_report(tmp_path, ["Executive"])
+    monkeypatch.setattr(cu, "check_occlusion", ORIGINAL_CHECK_OCCLUSION)
+    monkeypatch.setattr(cu, "shipping_reports", lambda _target: [report])
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 1, stderr="import failed"))
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    check = cu.check_occlusion(tmp_path, output_dir)
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert check["reports"][0]["error"] == "native JSON output missing"
+
+
+def test_occlusion_malformed_output_is_not_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Malformed occlusion JSON is infrastructure failure, not clean output."""
+    report = _write_report(tmp_path, ["Executive"])
+    monkeypatch.setattr(cu, "check_occlusion", ORIGINAL_CHECK_OCCLUSION)
+    monkeypatch.setattr(cu, "shipping_reports", lambda _target: [report])
+
+    def write_bad_json(argv: list[str]) -> CompletedProcess[str]:
+        Path(argv[-1]).write_text("not-json", encoding="utf-8")
+        return _completed(argv, 1, stderr="bad json")
+
+    monkeypatch.setattr(cu, "_run_simple", write_bad_json)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    check = cu.check_occlusion(tmp_path, output_dir)
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert "unreadable" in check["reports"][0]["error"]
 
 
 def test_actual_pages_falls_back_to_page_directories_when_order_is_missing(tmp_path: Path) -> None:
@@ -286,7 +428,7 @@ def test_clean_input_exits_zero_even_with_claimed_only_rows(tmp_path: Path, monk
 
     report = cu.run_all(tmp_path)
 
-    assert report["status"] == cu.STATUS_PASS
+    assert report["status"] == cu.STATUS_AUTOMATED_PASS
     assert report["exit_code"] == cu.EXIT_OK
     assert [check["id"] for check in report["checks"]][-1] == "finalized"
 
@@ -300,8 +442,8 @@ def test_scope_model_runs_only_model_layer_checks(tmp_path: Path, monkeypatch: p
         cu,
         "GATES",
         (
-            cu.Gate("stub-measures", "unused.py", (), frozenset()),
-            cu.Gate("pbir-valid", "unused.py", (), frozenset()),
+            _gate("stub-measures", "unused.py"),
+            _gate("pbir-valid", "unused.py"),
         ),
     )
     monkeypatch.setattr(
@@ -313,14 +455,14 @@ def test_scope_model_runs_only_model_layer_checks(tmp_path: Path, monkeypatch: p
     report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
 
     assert report["exit_code"] == cu.EXIT_OK
-    assert report["unexamined_scopes"] == [cu.SCOPE_REPORT]
+    assert "pbir-valid" in report["omitted_checks"]
     assert [check["id"] for check in report["checks"]] == [
         "stub-measures",
         "ai-descriptions",
         "ai-instructions",
         "cache-freshness",
     ]
-    assert "not a unit-level sign-off" in cu.render(report)
+    assert "omitted checks:" in cu.render(report)
 
 
 def test_scope_report_runs_only_report_layer_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,8 +474,8 @@ def test_scope_report_runs_only_report_layer_checks(tmp_path: Path, monkeypatch:
         cu,
         "GATES",
         (
-            cu.Gate("stub-measures", "unused.py", (), frozenset()),
-            cu.Gate("pbir-valid", "unused.py", (), frozenset()),
+            _gate("stub-measures", "unused.py"),
+            _gate("pbir-valid", "unused.py"),
         ),
     )
     monkeypatch.setattr(
@@ -345,7 +487,7 @@ def test_scope_report_runs_only_report_layer_checks(tmp_path: Path, monkeypatch:
     report = cu.run_all(tmp_path, scope=cu.SCOPE_REPORT)
 
     assert report["exit_code"] == cu.EXIT_OK
-    assert report["unexamined_scopes"] == [cu.SCOPE_MODEL]
+    assert "empty-model" in report["omitted_checks"]
     assert [check["id"] for check in report["checks"]] == [
         "page-parity",
         "oracle-coverage",
@@ -367,7 +509,23 @@ def test_scope_all_keeps_model_report_and_orchestration_checks(tmp_path: Path) -
     assert "oracle-coverage" in ids
     assert "ai-descriptions" in ids
     assert "cache-freshness" in ids
-    assert report["unexamined_scopes"] == []
+    assert report["omitted_checks"] == []
+
+
+def test_cli_integration_scope_exits_zero_on_committed_clean_fixture() -> None:
+    """Subprocess-level exit-0 proof with real native gate wiring, not monkeypatched passes."""
+    fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(fixture), "--scope", "integration"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == cu.EXIT_OK, result.stdout + result.stderr
+    assert "AUTOMATED_CHECKS_PASS" in result.stdout
+    assert "omitted checks:" in result.stdout
 
 
 def test_cli_missing_path_is_usage_not_a_mutation_success(tmp_path: Path) -> None:
