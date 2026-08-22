@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bundle_corpus import shipping_models
+
 import check_field_bindings as cfb
 
 REPORT_NAME = "relationship-health-check.json"
@@ -132,19 +134,7 @@ def _parse_tmdl_columns(lines: list[str], tables: dict[str, TableInfo]) -> None:
             current_column.data_type = data_type.group("value")
 
 
-def find_models(root: Path) -> list[Path]:
-    """Every shipping semantic model under `root`.
-
-    A bundle is scanned through `pbip/`; `semantic_models/` is the engine baseline, not the shipping
-    artifact. A finished migration folder without `pbip/` is scanned recursively from the supplied
-    root, matching sibling offline gates.
-    """
-    root = root.resolve()
-    if root.name.endswith(".SemanticModel"):
-        return [root]
-    pbip = root / "pbip"
-    base = pbip if pbip.is_dir() else root
-    return sorted({path.resolve() for path in base.rglob("*.SemanticModel") if path.is_dir()}, key=str)
+find_models = shipping_models
 
 
 def _is_date_table(name: str, _info: TableInfo) -> bool:

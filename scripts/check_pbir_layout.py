@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bundle_corpus import shipping_reports
+
 REPORT_NAME = "pbir-layout-check.json"
 
 STATUS_OK = "OK"
@@ -86,14 +88,7 @@ class Page:
     boxes: list[Box]
 
 
-def find_reports(root: Path) -> list[Path]:
-    """The `.Report` folders that ship under `root`, using `pbip/` for engine bundles."""
-    root = root.resolve()
-    if root.name.endswith(".Report"):
-        return [root]
-    pbip = root / "pbip"
-    base = pbip if pbip.is_dir() else root
-    return sorted({path.resolve() for path in base.rglob("*.Report") if path.is_dir()}, key=str)
+find_reports = shipping_reports
 
 
 def _number(value: Any) -> float | None:

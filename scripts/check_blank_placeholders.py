@@ -66,6 +66,8 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
+from bundle_corpus import shipping_reports
+
 REPORT_VERSION = 1
 REPORT_NAME = "blank-placeholder-check.json"
 
@@ -460,13 +462,7 @@ def _report_references(report: Path) -> list[dict]:
     return references
 
 
-def find_reports(root: Path) -> list[Path]:
-    """Shipping report folders under pbip/, or a direct .Report target."""
-    root = root.resolve()
-    if root.name.endswith(".Report"):
-        return [root]
-    base = root / "pbip" if (root / "pbip").is_dir() else root
-    return sorted({p.resolve() for p in base.rglob("*.Report") if p.is_dir()})
+find_reports = shipping_reports
 
 
 def _matches_finding(ref: dict, finding: dict) -> bool:
