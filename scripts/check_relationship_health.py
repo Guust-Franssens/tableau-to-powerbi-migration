@@ -195,6 +195,14 @@ def _stranded_date_tables(model: cfb.ModelFields, census: dict[str, TableInfo]) 
     return findings
 
 
+def _has_tmdl_documents(model_dir: Path) -> bool:
+    """Whether this model has any TMDL document for the checker to inspect."""
+    root = model_dir / "definition"
+    if not root.is_dir():
+        root = model_dir
+    return any(path.is_file() for path in root.rglob("*.tmdl"))
+
+
 def scan_model(model_dir: Path) -> dict[str, Any]:
     """Scan one `.SemanticModel` for sparse Date relationship gaps."""
     model = cfb.parse_model(model_dir)
@@ -202,7 +210,7 @@ def scan_model(model_dir: Path) -> dict[str, Any]:
     active_relationships = sum(1 for rel in model.relationships if rel.is_active)
     relationshipable = _relationshipable_tables(model)
     findings = _stranded_date_tables(model, census)
-    status = STATUS_MISSING if findings else STATUS_OK
+    status = STATUS_MISSING if findings else (STATUS_OK if _has_tmdl_documents(model_dir) else STATUS_SKIPPED)
     date_tables = [name for name, info in census.items() if name in relationshipable and _is_date_table(name, info)]
     return {
         "model": model_dir.name,
@@ -230,10 +238,11 @@ def scan(root: Path) -> dict[str, Any]:
 def merge(models: list[dict[str, Any]]) -> dict[str, Any]:
     """Fold per-model reports into one verdict."""
     failing = [model for model in models if model["status"] == STATUS_MISSING]
+    skipped = [model for model in models if model["status"] == STATUS_SKIPPED]
     if not models:
         status = STATUS_SKIPPED
     else:
-        status = STATUS_MISSING if failing else STATUS_OK
+        status = STATUS_MISSING if failing else (STATUS_SKIPPED if skipped else STATUS_OK)
     return {
         "status": status,
         "models_scanned": len(models),
@@ -248,7 +257,7 @@ def merge(models: list[dict[str, Any]]) -> dict[str, Any]:
 def render(report: dict[str, Any]) -> str:
     """Human-readable verdict, matching sibling offline gates."""
     if report["status"] == STATUS_SKIPPED:
-        return "RELATIONSHIP HEALTH CHECK: SKIPPED - nothing measured (no semantic model found)"
+        return "RELATIONSHIP HEALTH CHECK: SKIPPED - nothing measured (no semantic model or TMDL files found)"
     if report["status"] == STATUS_OK:
         sparse = sum(1 for model in report["models"] if model["sparse_relationship_graph"])
         tail = f" {sparse} sparse graph(s) reported for review." if sparse else ""

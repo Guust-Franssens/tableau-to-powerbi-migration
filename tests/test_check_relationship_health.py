@@ -156,3 +156,13 @@ def test_no_models_is_skipped_not_ok(tmp_path, capsys) -> None:
     """An affirmative verdict requires at least one model to be measured."""
     assert crh.main([str(tmp_path)]) == crh.EXIT_SKIPPED
     assert "SKIPPED" in capsys.readouterr().out
+
+
+def test_existing_model_with_no_tmdl_is_skipped_not_ok(tmp_path, capsys) -> None:
+    """A cache-only `.SemanticModel` is a missing input state, not a clean relationship scan."""
+    model = tmp_path / "CacheOnly.SemanticModel"
+    model.mkdir()
+
+    assert crh.main([str(model)]) == crh.EXIT_SKIPPED
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out and "OK" not in out

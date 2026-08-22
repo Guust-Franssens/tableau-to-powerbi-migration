@@ -184,14 +184,22 @@ def _finding(pair: Pair, model_dir: Path, expressions_path: Path) -> dict[str, A
     }
 
 
+def _has_tmdl_documents(model_dir: Path) -> bool:
+    """Whether this model has any TMDL document for the checker to inspect."""
+    definition = model_dir / "definition"
+    root = definition if definition.is_dir() else model_dir
+    return any(path.is_file() for path in root.rglob("*.tmdl"))
+
+
 def scan_model(model_dir: Path) -> dict[str, Any]:
     """Scan one semantic model for sqlproxy-derived expression parameters."""
     expressions_path = model_dir / "definition" / "expressions.tmdl"
     findings = [_finding(pair, model_dir, expressions_path) for pair in _pairs(parse_expressions(expressions_path))]
+    measured = _has_tmdl_documents(model_dir)
     return {
         "model": model_dir.name,
         "path": str(model_dir),
-        "status": STATUS_SQLPROXY if findings else STATUS_OK,
+        "status": STATUS_SQLPROXY if findings else (STATUS_OK if measured else STATUS_SKIPPED),
         "connections": len(findings),
         "incomplete_connections": sum(1 for finding in findings if not finding["complete"]),
         "findings": findings,
@@ -211,10 +219,11 @@ def merge(models: list[dict[str, Any]], risks: list[RiskSignal] | None = None) -
     """Fold per-model reports into one verdict."""
     risks = risks or []
     failing = [model for model in models if model["status"] == STATUS_SQLPROXY]
+    skipped = [model for model in models if model["status"] == STATUS_SKIPPED]
     if not models:
         status = STATUS_SKIPPED
     else:
-        status = STATUS_SQLPROXY if failing else STATUS_OK
+        status = STATUS_SQLPROXY if failing else (STATUS_SKIPPED if skipped else STATUS_OK)
     return {
         "status": status,
         "models_scanned": len(models),
@@ -264,7 +273,7 @@ def _workbooks(value: Any) -> list[dict[str, Any]]:
 def render(report: dict[str, Any]) -> str:
     """Human-readable verdict, matching the sibling offline gates."""
     if report["status"] == STATUS_SKIPPED:
-        return "SQLPROXY CONNECTION CHECK: SKIPPED - nothing measured (no semantic model found)"
+        return "SQLPROXY CONNECTION CHECK: SKIPPED - nothing measured (no semantic model or TMDL files found)"
     warning_tail = _warning_tail(report)
     if report["status"] == STATUS_OK:
         return (

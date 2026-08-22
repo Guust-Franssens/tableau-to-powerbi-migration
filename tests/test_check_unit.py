@@ -282,6 +282,36 @@ def test_native_gate_skipped_is_not_a_pass(tmp_path: Path, monkeypatch: pytest.M
     assert report["exit_code"] == cu.EXIT_NOT_CHECKED
 
 
+def test_summary_line_counts_findings_and_not_checked_classes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The final line gives reviewers one stable aggregate to compare between runs."""
+    _write_spec(tmp_path, ["Executive"])
+    _write_report(tmp_path, ["Executive"])
+    _write_reference_manifest(tmp_path, ["Executive"])
+    monkeypatch.setattr(cu, "GATES", (_gate("sqlproxy-connections", "unused.py"),))
+    monkeypatch.setattr(
+        cu,
+        "_run_cli_gate",
+        lambda gate, *_args: {
+            "id": gate.check_id,
+            "status": cu.STATUS_FINDINGS,
+            "native_status": "STUBS",
+            "native_exit": 1,
+        },
+    )
+    monkeypatch.setattr(
+        cu,
+        "claimed_only_checks",
+        lambda: [{"id": "finalized", "status": cu.STATUS_NOT_CHECKED, "verification": "CLAIMED_ONLY"}],
+    )
+
+    rendered = cu.render(cu.run_all(tmp_path))
+
+    assert rendered.splitlines()[-1] == (
+        "SUMMARY: findings_by_owner=model=1; not_checked_structural=1; "
+        "not_checked_missing_input=0; ladder=FINDINGS exit=1"
+    )
+
+
 def _gate(check_id: str = "x", script: str = "x.py") -> cu.Gate:
     return cu.Gate(
         check_id,
@@ -560,10 +590,12 @@ def test_gate_registrations_match_native_exit_constants() -> None:
     assert gate.not_checked_exit_codes == {blank.EXIT_INCOMPLETE}
 
     gate = _gate_by_id("empty-model")
-    assert gate.pass_statuses == {"OK"}
+    assert gate.pass_statuses == {empty.STATUS_OK}
     assert gate.pass_exit_codes == {empty.EXIT_OK}
-    assert gate.finding_statuses == {"EMPTY_MODELS"}
+    assert gate.finding_statuses == {empty.STATUS_EMPTY_MODELS}
     assert empty.EXIT_EMPTY_MODEL in gate.finding_exit_codes
+    assert gate.not_checked_statuses == {empty.STATUS_SKIPPED}
+    assert gate.not_checked_exit_codes == {empty.EXIT_SKIPPED}
 
     for check_id, module, finding_status, finding_exit in (
         ("sqlproxy-connections", sqlproxy, sqlproxy.STATUS_SQLPROXY, sqlproxy.EXIT_SQLPROXY),
@@ -576,6 +608,9 @@ def test_gate_registrations_match_native_exit_constants() -> None:
         assert gate.pass_exit_codes == {module.EXIT_OK}
         assert gate.finding_statuses == {finding_status}
         assert gate.finding_exit_codes == {finding_exit}
+        if hasattr(module, "STATUS_SKIPPED"):
+            assert module.STATUS_SKIPPED in gate.not_checked_statuses
+            assert module.EXIT_SKIPPED in gate.not_checked_exit_codes
 
     gate = _gate_by_id("data-model")
     assert gate.pass_statuses == {"OK"}
@@ -615,6 +650,27 @@ def test_cli_integration_scope_exits_zero_on_committed_clean_fixture() -> None:
     assert result.returncode == cu.EXIT_OK, result.stdout + result.stderr
     assert "AUTOMATED_CHECKS_PASS" in result.stdout
     assert "omitted checks:" in result.stdout
+
+
+def test_cli_model_scope_empty_semantic_model_is_not_a_vacuous_pass(tmp_path: Path) -> None:
+    """Subprocess regression for a customer folder containing a cache-only semantic model."""
+    model = tmp_path / "CacheOnly.SemanticModel"
+    model.mkdir()
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(model), "--scope", "model"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == cu.EXIT_FINDINGS, result.stdout + result.stderr
+    assert "blank-placeholders: NOT_CHECKED" in result.stdout
+    assert "sqlproxy-connections: NOT_CHECKED" in result.stdout
+    assert "relationship-health: NOT_CHECKED" in result.stdout
+    assert "empty-model: NOT_CHECKED" in result.stdout
+    assert "ai-descriptions: NOT_CHECKED" in result.stdout
+    assert "SUMMARY:" in result.stdout
 
 
 def test_cli_missing_path_is_usage_not_a_mutation_success(tmp_path: Path) -> None:

@@ -472,6 +472,18 @@ def test_an_unreadable_input_alone_does_not_invent_a_placeholder(tmp_path: Path)
     assert cbp.main([str(bundle), "--quiet"]) == cbp.EXIT_OK
 
 
+def test_existing_model_with_no_tmdl_is_incomplete_not_ok(tmp_path: Path) -> None:
+    """A cache-only `.SemanticModel` measures no placeholder evidence and must not pass."""
+    model = tmp_path / "CacheOnly.SemanticModel"
+    model.mkdir()
+
+    report = cbp.scan(model)
+
+    assert report["status"] == cbp.STATUS_INCOMPLETE
+    assert report["nothing_measured"] is True
+    assert cbp.main([str(model), "--quiet"]) == cbp.EXIT_INCOMPLETE
+
+
 def test_cli_exit_codes_distinguish_clean_gap_incomplete_and_material_dependency(tmp_path: Path) -> None:
     """The process status is the gate: clean, documented gap, incomplete scope, material dependency."""
     clean = _bundle(tmp_path / "clean")
