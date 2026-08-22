@@ -1,0 +1,6 @@
+FIELD BINDING CHECK: UNRESOLVED - 1 of 1 report(s) reference fields their model does not have (1 case-only near-miss(es), 1 missing)
+  Admin_Insights_Starter.Report  (model: Admin_Insights_Starter.SemanticModel)
+    - NEAR-MISS (case only): report: _Measures[avg(0)]   model: _Measures[Avg(0)]  [Measure x1]
+    - MISSING: report: sqlproxy[group_name]  [Column x1]
+  A CASE-ONLY near-miss is a model-layer rename that never reached the report: rewrite the
+  PBIR spelling to the model's, do NOT rename the model back - the fold was deliberate.
