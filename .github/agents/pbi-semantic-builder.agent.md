@@ -138,7 +138,7 @@ committed here as well as published.
 | source | what it gives you |
 |---|---|
 | the emitted `.SemanticModel` | tables, columns, relationships, partitions, and most of the DAX — already built and openable |
-| `handover/<workbook>.json` → `model_translation_handoff.requests[]` | **your work queue**: the calcs the engine refused, each with `name`, `formula`, `role` (measure vs column — it already decided), `target_table`, `fields[]` (source table + type), `category`, `category_guidance`, `fallback_reason` |
+| `read_handover.py <bundle> --workbook <name> [--category X]` | **your work queue**: each refused calc with `name`, `formula`, `role` (measure vs column — already decided), `target_table`, `fields[]` (source table + type), `category`, `category_guidance`, `fallback_reason`. Via the script only — see step 1 |
 | → `openability_selfcheck` | what it already proved about the model's shape **against its own parse** — do not re-prove *that*. Since engine 2.75.0 this includes `checks.endpoints_distinct`. It is blind to a mis-parse, which is why step 3 still cross-checks against the spec |
 | `migration-spec.json` | source intent its input format cannot carry: `worksheets[].encodings` (rows/columns/`derivation`/`manual_sort`) — the addressing for table calcs, and the parameter-equality idiom in a filter's `note` |
 
@@ -160,8 +160,13 @@ enrich it, and hand it over refreshed.
    includes integration gates and names omitted report-only checks; use it as a verdict, not as a
    replacement for the routing/procedure below.
 1. Invoke `powerbi-semantic-model-gotchas` before touching TMDL.
-1. **Read `handover/<workbook>.json`.** `workbook.model_translation_handoff.requests[]` is your work
-   queue; `workbook.openability_selfcheck` is what the engine already proved about shape.
+1. **Read the queue with `python scripts/read_handover.py <bundle> --workbook <name>`**, then
+   `--category <X>` for each category's full detail. Reading the raw slice by hand works but costs a
+   round trip — a 60-stub slice is 347 KB and a file read refuses it — and its repeated
+   `category_guidance` is printed once per category. ⚠️ **Whatever route you take, work from
+   `requests[]`, never `needs_review[]`** — the latter lists the same calcs with no `formula`, so it
+   is enough to *report* a stub and not to *repair* one. Background: `powerbi-semantic-model-gotchas`
+   §8. `openability_selfcheck` is what the engine already proved about shape.
 2. **PROVE the live source is reachable BEFORE you change anything — ONE attempt, then ask.**
    `python scripts/probe_bundle.py <bundle> --check-only --spec <spec>` first (static, free), then the
    live probe. A refusal naming authentication, permissions or a sign-in prompt is a **final answer**:
@@ -319,7 +324,9 @@ throwing an error" is necessary but not sufficient:
 5. **Every `requests[]` entry's fate is recorded** — for each stubbed calc in the handover, your
    report states whether you landed DAX for it (and **whether you chose a visual calculation or a
    model measure, with the reason**), routed it back, or left it stubbed and why. A silent stub is
-   indistinguishable from an overlooked one.
+   indistinguishable from an overlooked one. ⚠️ **"Recorded" is not "addressed."** This item is
+   satisfiable from `needs_review[]`, which has no `formula` — so a complete fate list proves you
+   enumerated the stubs, not that you could fix any of them. Say which you did.
 6. **Renames are grep-verified** — if a column or measure was renamed for any reason (collision
    avoidance, Title Case cleanup), every DAX expression that references it has been checked to use the
    new `name`, not left pointing at the old one or at `sourceColumn`.
