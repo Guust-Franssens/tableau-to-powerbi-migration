@@ -1,0 +1,5 @@
+expression Source =
+		let
+			Source = #table(type table [Amount = number, #"Order Date" = date], {{1, #date(2026, 1, 1)}})
+		in
+			Source

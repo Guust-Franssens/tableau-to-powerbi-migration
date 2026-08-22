@@ -153,12 +153,12 @@ GATES = (
         "data-model",
         "check_datamodel.py",
         (),
-        frozenset(),
+        frozenset({"OK"}),
         frozenset({0}),
-        frozenset(),
+        frozenset({"FINDINGS"}),
         frozenset({1}),
-        frozenset(),
-        frozenset(),
+        frozenset({"ERROR"}),
+        frozenset({1}),
         False,
     ),
     Gate(
@@ -168,7 +168,7 @@ GATES = (
         frozenset({"OK"}),
         frozenset({0}),
         frozenset({"EMPTY_MODELS"}),
-        frozenset({1}),
+        frozenset({1, 5}),
     ),
     Gate(
         "pbir-valid",
@@ -760,8 +760,8 @@ def check_cache_freshness(target: Path) -> dict[str, Any]:
         rows.append({"model": str(model), "status": state})
     stale = [row for row in rows if row["status"] == "STALE"]
     missing = [row for row in rows if row["status"] == "NO_CACHE"]
-    status = STATUS_FINDINGS if stale else STATUS_NOT_CHECKED
-    detail = "mtime-only partial check; does not prove live/remote rows or description invalidation state"
+    status = STATUS_FINDINGS if stale else (STATUS_NOT_CHECKED if missing else STATUS_PASS)
+    detail = "mtime-only partial check; PASS means fresh by mtime only, not proven data validity"
     return {
         "id": "cache-freshness",
         "status": status,

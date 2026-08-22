@@ -1,26 +1,47 @@
 {
-  "name": "v1",
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/2.9.0/schema.json",
+  "name": "v0",
+  "position": {
+    "x": 0,
+    "y": 0,
+    "z": 1000,
+    "height": 300,
+    "width": 500,
+    "tabOrder": 1000
+  },
   "visual": {
-    "visualType": "clusteredColumnChart",
+    "visualType": "tableEx",
     "query": {
       "queryState": {
-        "Y": {
+        "Values": {
           "projections": [
             {
               "field": {
                 "Column": {
-                  "Expression": {"SourceRef": {"Entity": "Sales"}},
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Sales"
+                    }
+                  },
                   "Property": "Order Date"
                 }
-              }
+              },
+              "queryRef": "Sales.Order Date",
+              "nativeQueryRef": "Order Date"
             },
             {
               "field": {
                 "Measure": {
-                  "Expression": {"SourceRef": {"Entity": "Sales"}},
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "Sales"
+                    }
+                  },
                   "Property": "Total Revenue"
                 }
-              }
+              },
+              "queryRef": "Sales.Total Revenue",
+              "nativeQueryRef": "Total Revenue"
             }
           ]
         }

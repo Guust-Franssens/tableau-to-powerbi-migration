@@ -8,7 +8,11 @@ exit code and output shape rather than any non-zero result.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
+import shutil
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +26,51 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
 
 ORIGINAL_CHECK_OCCLUSION = cu.check_occlusion
+ORIGINAL_GATES = cu.GATES
+
+
+def _load_script_module(script_name: str):
+    name = script_name[:-3]
+    spec = importlib.util.spec_from_file_location(name, REPO_ROOT / "scripts" / script_name)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _gate_by_id(check_id: str) -> cu.Gate:
+    matches = [gate for gate in ORIGINAL_GATES if gate.check_id == check_id]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _copy_clean_fixture(tmp_path: Path) -> Path:
+    source = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
+    target = tmp_path / "clean-unit"
+    shutil.copytree(source, target)
+    cache = target / "pbip" / "Book" / "Book.SemanticModel" / ".pbi" / "cache.abf"
+    future = time.time() + 60
+    os.utime(cache, (future, future))
+    return target
+
+
+def _write_current_engine_receipt(unit: Path) -> None:
+    import engine_source  # pylint: disable=import-outside-toplevel
+
+    root = engine_source.engine_root()
+    (unit / "engine-output-receipt.json").write_text(
+        json.dumps({"engine": {"root": str(root), "version": engine_source.engine_version(root), "canonical": True}}),
+        encoding="utf-8",
+    )
+
+
+def _freshen_clean_fixture_cache() -> Path:
+    fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
+    cache = fixture / "pbip" / "Book" / "Book.SemanticModel" / ".pbi" / "cache.abf"
+    future = time.time() + 60
+    os.utime(cache, (future, future))
+    return fixture
 
 
 def _write_spec(unit: Path, names: list[str]) -> None:
@@ -510,6 +559,84 @@ def test_scope_all_keeps_model_report_and_orchestration_checks(tmp_path: Path) -
     assert "ai-descriptions" in ids
     assert "cache-freshness" in ids
     assert report["omitted_checks"] == []
+
+
+def test_gate_registrations_match_native_exit_constants() -> None:
+    """Registration drift must fail before a native finding is downgraded or a clean gate cannot pass."""
+    blank = _load_script_module("check_blank_placeholders.py")
+    empty = _load_script_module("check_empty_model.py")
+    sqlproxy = _load_script_module("check_sqlproxy_connections.py")
+    relationship = _load_script_module("check_relationship_health.py")
+    layout = _load_script_module("check_pbir_layout.py")
+    stubs = _load_script_module("check_stub_measures.py")
+
+    gate = _gate_by_id("blank-placeholders")
+    assert gate.pass_statuses == {blank.STATUS_OK}
+    assert gate.pass_exit_codes == {blank.EXIT_OK}
+    assert gate.finding_statuses == {blank.STATUS_REFERENCED, blank.STATUS_UNREFERENCED}
+    assert gate.finding_exit_codes == {blank.EXIT_REFERENCED, blank.EXIT_UNREFERENCED}
+    assert gate.not_checked_statuses == {blank.STATUS_INCOMPLETE}
+    assert gate.not_checked_exit_codes == {blank.EXIT_INCOMPLETE}
+
+    gate = _gate_by_id("empty-model")
+    assert gate.pass_statuses == {"OK"}
+    assert gate.pass_exit_codes == {empty.EXIT_OK}
+    assert gate.finding_statuses == {"EMPTY_MODELS"}
+    assert empty.EXIT_EMPTY_MODEL in gate.finding_exit_codes
+
+    for check_id, module, finding_status, finding_exit in (
+        ("sqlproxy-connections", sqlproxy, sqlproxy.STATUS_SQLPROXY, sqlproxy.EXIT_SQLPROXY),
+        ("relationship-health", relationship, relationship.STATUS_MISSING, relationship.EXIT_MISSING),
+        ("pbir-layout", layout, layout.STATUS_DISPLACED, layout.EXIT_DISPLACED),
+        ("stub-measures", stubs, stubs.STATUS_STUBS, stubs.EXIT_STRICT),
+    ):
+        gate = _gate_by_id(check_id)
+        assert gate.pass_statuses == {module.STATUS_OK}
+        assert gate.pass_exit_codes == {module.EXIT_OK}
+        assert gate.finding_statuses == {finding_status}
+        assert gate.finding_exit_codes == {finding_exit}
+
+    gate = _gate_by_id("data-model")
+    assert gate.pass_statuses == {"OK"}
+    assert gate.pass_exit_codes == {0}
+    assert gate.finding_statuses == {"FINDINGS"}
+    assert gate.not_checked_statuses == {"ERROR"}
+
+
+def test_cli_model_scope_exits_zero_on_committed_clean_fixture() -> None:
+    """Subprocess-level proof that model scope can go green with real native gate wiring."""
+    fixture = _freshen_clean_fixture_cache()
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(fixture), "--scope", "model"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == cu.EXIT_OK, result.stdout + result.stderr
+    assert "AUTOMATED_CHECKS_PASS" in result.stdout
+    assert "cache-freshness: PASS - mtime-only partial check" in result.stdout
+    assert "data-model: PASS" in result.stdout
+
+
+def test_cli_all_scope_exits_zero_on_committed_clean_fixture_copy(tmp_path: Path) -> None:
+    """Subprocess-level proof that all automated gates can go green on a clean committed fixture."""
+    unit = _copy_clean_fixture(tmp_path)
+    _write_current_engine_receipt(unit)
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(unit), "--scope", "all"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == cu.EXIT_OK, result.stdout + result.stderr
+    assert "UNIT CHECK (all scope): AUTOMATED_CHECKS_PASS" in result.stdout
+    assert "data-model: PASS" in result.stdout
+    assert "empty-model: PASS" in result.stdout
+    assert "cache-freshness: PASS - mtime-only partial check" in result.stdout
 
 
 def test_cli_integration_scope_exits_zero_on_committed_clean_fixture() -> None:
