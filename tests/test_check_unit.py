@@ -50,6 +50,8 @@ def _copy_clean_fixture(tmp_path: Path) -> Path:
     target = tmp_path / "clean-unit"
     shutil.copytree(source, target)
     cache = target / "pbip" / "Book" / "Book.SemanticModel" / ".pbi" / "cache.abf"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("cache placeholder\n", encoding="utf-8")
     future = time.time() + 60
     os.utime(cache, (future, future))
     return target
@@ -68,6 +70,8 @@ def _write_current_engine_receipt(unit: Path) -> None:
 def _freshen_clean_fixture_cache() -> Path:
     fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
     cache = fixture / "pbip" / "Book" / "Book.SemanticModel" / ".pbi" / "cache.abf"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("cache placeholder\n", encoding="utf-8")
     future = time.time() + 60
     os.utime(cache, (future, future))
     return fixture
