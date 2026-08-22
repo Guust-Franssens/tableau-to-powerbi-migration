@@ -1,0 +1,10 @@
+table 'sqlproxy (Groups)'
+
+	column admin_insights_publish_timestamp
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 8e3d866a-d390-54fe-b583-03f0894ed806
+		summarizeBy: none
+		sourceColumn: admin_insights_publish_timestamp
+
+		annotation SummarizationSetBy = Automatic

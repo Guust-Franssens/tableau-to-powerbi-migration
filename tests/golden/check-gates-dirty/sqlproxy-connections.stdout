@@ -1,0 +1,5 @@
+SQLPROXY CONNECTION CHECK: SQLPROXY - 1 sqlproxy-derived connection pair(s) in 1 of 1 model(s).
+  WARN: 1 built workbook(s) declare secondary_datasources in binding_signal: Admin_Insights_Starter (1 secondary)
+  Admin_Insights_Starter.SemanticModel
+    - Server_sqlproxy='10ax.online.tableau.com' / Database_sqlproxy='TSEvents' (Admin_Insights_Starter.SemanticModel/definition/expressions.tmdl:3)
+  Database_sqlproxy* names the Tableau published datasource that must be migrated or rebound; Power BI cannot query Tableau sqlproxy directly.

@@ -1,0 +1,8 @@
+STUB MEASURE CHECK: STUBS - 2/3 (67%) measure(s) across 1 model(s) are = BLANK() placeholders
+  1 actionable, 1 dead end
+  Admin_Insights_Starter.SemanticModel  measures 2/3 (67%)   -> actionable 1, dead end 1
+    _Measures  2/3 (67%)
+    DEAD END (no TableauFormula annotation - recover from the Tableau workbook):
+      - _Measures[Dead End Stub]  (measure, Admin_Insights_Starter.SemanticModel/definition/tables/_Measures.tmdl:8)
+  ACTIONABLE = the Tableau formula survived as `annotation TableauFormula`; translate it in place.
+  DEAD END   = nothing survived; recover the formula from the Tableau workbook before translating.

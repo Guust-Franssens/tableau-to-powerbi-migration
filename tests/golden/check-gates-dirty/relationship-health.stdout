@@ -1,0 +1,4 @@
+RELATIONSHIP HEALTH CHECK: MISSING_RELATIONSHIP - 1 date-bearing table(s) stranded from Date/Calendar in 1 of 1 model(s); 1 active relationship(s).
+  Admin_Insights_Starter.SemanticModel: 1 active relationship(s), 3 component(s), Date tables: Date
+    - sqlproxy has date column(s) [Calculation_920704701759684608] but no path to Date/Calendar
+  This is a model-owner decision: add the intended relationship, or document why the fact-like table is disconnected.

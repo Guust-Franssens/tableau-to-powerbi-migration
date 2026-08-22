@@ -1,0 +1,9 @@
+BLANK-PLACEHOLDER CHECK: REFERENCED - 1 placeholder(s)
+  Severity model: unreferenced placeholders are documented gaps; references from filters or visual field bindings block because they can render a page or visual empty.
+  - Admin_Insights_Starter: measure '_Measures'[Group Sort] (REFERENCED)
+      reason: bare row-level field [..] not valid in a measure
+      handover: report.json  category=model_object_parameter has_suggestion=False
+      tmdl: pbip/Admin_Insights_Starter/Admin_Insights_Starter.SemanticModel/definition/tables/_Measures.tmdl:3
+      dependency (BLOCKING, visual_field): page=Group Drilldown visual=v-page-GroupDrilbd8fd9a2 file=Admin_Insights_Starter/Admin_Insights_Starter.Report/definition/pages/page-GroupDrilld7ca8a5ce/visuals/v-page-GroupDrilbd8fd9a2/visual.json
+      dependency (not-blocking, sort): page=Group Drilldown visual=v-page-GroupDrilbd8fd9a2 file=Admin_Insights_Starter/Admin_Insights_Starter.Report/definition/pages/page-GroupDrilld7ca8a5ce/visuals/v-page-GroupDrilbd8fd9a2/visual.json
+      dependency (BLOCKING, filter): page=Group Drilldown visual=visual-filter file=Admin_Insights_Starter/Admin_Insights_Starter.Report/definition/pages/page-GroupDrilld7ca8a5ce/visuals/visual-filter/visual.json

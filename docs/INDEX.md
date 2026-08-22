@@ -151,6 +151,7 @@ The reverse check treats these as eligible: every tracked Markdown knowledge/nav
 | Validate an artifact | [`scripts/check_sqlproxy_connections.py`](../scripts/check_sqlproxy_connections.py) | Run or inspect when Tableau sqlproxy/published-source connections may hide server-side logic. |
 | Validate an artifact | [`scripts/check_stub_measures.py`](../scripts/check_stub_measures.py) | Run or inspect when deterministic conversion may have emitted placeholder/stub DAX measures. |
 | Validate an artifact | [`scripts/check_unit.py`](../scripts/check_unit.py) | Run or inspect when aggregating layer-scoped validation gates for a workbook, model, or report. |
+| Validate an artifact | [`tests/fixtures/check-gates-dirty/README.md`](../tests/fixtures/check-gates-dirty/README.md) | Read when updating dirty gate fixtures or interpreting their golden stdout snapshots. |
 
 ## Explicit exclusions
 

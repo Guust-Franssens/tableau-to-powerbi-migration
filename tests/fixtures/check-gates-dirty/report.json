@@ -1,0 +1,26 @@
+{
+  "workbooks": [
+    {
+      "name": "Admin_Insights_Starter",
+      "pbip_status": "built",
+      "pbip_folder": "pbip/Admin_Insights_Starter/Admin_Insights_Starter.pbip",
+      "binding_signal": {
+        "secondary_datasources": [
+          "TSEvents"
+        ]
+      },
+      "model_translation_handoff": {
+        "requests": [
+          {
+            "category": "model_object_parameter",
+            "fallback_reason": "bare row-level field [..] not valid in a measure",
+            "has_suggestion": false,
+            "name": "Group Sort",
+            "role": "measure",
+            "target_table": "_Measures"
+          }
+        ]
+      }
+    }
+  ]
+}
