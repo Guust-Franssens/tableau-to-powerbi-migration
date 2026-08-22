@@ -30,6 +30,10 @@ the shared agent conventions**, which `scripts/sync_agent_conventions.py` genera
 > That pointer file duplicates only the session-start step below and defers everything else here, so
 > the two cannot drift.
 
+**Navigation:** use [`docs/INDEX.md`](docs/INDEX.md) as the tier-2 map before searching blindly.
+Subagents are told in their generated preamble to read it as step 0; `scripts/check_navigation_index.py`
+checks the index bidirectionally.
+
 ---
 
 ## Session start, do this first (before any other work)

@@ -1,6 +1,6 @@
 """Two smoke tests for every tracked `scripts/*.py`, both born from one dry run.
 
-Filed as F003/F004 in `migrations/dry-run-2026-08-11/findings.md`: a fresh agent hit both defects in
+Filed as F003/F004 in `docs/dry-run-findings-2026-08-11.md`: a fresh agent hit both defects in
 the first minutes of a real assessment, on the script that is most load-bearing for getting started
 (`harvest_estate_assets.py`, the site->folder bridge).
 

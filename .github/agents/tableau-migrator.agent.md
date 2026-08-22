@@ -10,11 +10,9 @@ coordinate a deterministic parsing step and three specialized subagents; you do 
 PBIR files yourself.
 
 <!-- BEGIN:shared-conventions -->
-> **Inherited from [`AGENTS.md`](../../AGENTS.md) — do not edit here.**
-> A custom-agent subagent receives ONLY this persona file: repo-level instruction files do not
-> reach it (verified). So these conventions are generated into every agent by
-> `scripts/sync_agent_conventions.py`, and CI fails if a copy drifts. Edit `AGENTS.md`, then
-> re-run that script.
+> Step 0: read [`docs/INDEX.md`](../../docs/INDEX.md) before searching the repo.
+> Shared rules: [`AGENTS.md`](../../AGENTS.md). Generated block: edit `AGENTS.md`, then run
+> `scripts/sync_agent_conventions.py`.
 
 ## Shared agent conventions (all agents inherit these)
 
