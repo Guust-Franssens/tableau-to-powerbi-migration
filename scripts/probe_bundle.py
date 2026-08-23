@@ -531,8 +531,8 @@ def build_probe(bundle: Path, out: Path, rows: int, keep_dax: bool) -> dict:
         "m_parameters": check_m_parameters(model_dir),
         "operator_required": bool(native_query_files),
         "operator_required_reason": (
-            "Value.NativeQuery/custom SQL is present; Table.FirstN cannot be assumed to bound the "
-            "source-side work, so a human must decide whether to refresh this probe in Desktop."
+            "Value.NativeQuery/custom SQL is present; refresh will run the full customer query. "
+            "The probe isolates one table/no report layer, but a human must approve the cost."
             if native_query_files
             else None
         ),
@@ -860,10 +860,13 @@ def main() -> int:
     if receipt["operator_required"]:
         print(f"PROBE: OPERATOR_REQUIRED {args.out}")
         print(
-            "  Value.NativeQuery/custom SQL is present. Do not refresh automatically: Table.FirstN "
-            "may be applied after the source executes the full customer query."
+            "  Custom SQL refresh WILL run the full customer query; folding is off, so this is not "
+            "a cheap row probe. The probe is still isolated to one table and no report layer."
         )
-        print("  Open the probe in Power BI Desktop only after a human approves that native-query refresh.")
+        print(
+            "  Automation stops here because Desktop's native-query approval modal looks like a "
+            "credential failure; refresh only after a human approves the cost."
+        )
         return EXIT_OPERATOR_REQUIRED
     return 0
 

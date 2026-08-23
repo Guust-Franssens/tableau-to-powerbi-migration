@@ -101,7 +101,10 @@ def test_native_query_bundle_exits_operator_required(native_query_bundle: Path, 
 
     assert proc.returncode == probe_bundle.EXIT_OPERATOR_REQUIRED, proc.stdout + proc.stderr
     assert f"PROBE: OPERATOR_REQUIRED {out}" in proc.stdout
-    assert "full customer query" in proc.stdout
+    assert "Custom SQL refresh WILL run the full customer query" in proc.stdout
+    assert "not a cheap row probe" in proc.stdout
+    assert "isolated to one table and no report layer" in proc.stdout
+    assert "native-query approval modal looks like a credential failure" in proc.stdout
 
     receipt = probe_bundle.read_receipt(out)
     assert receipt["status"] == probe_bundle.STATUS_BUILT

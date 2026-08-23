@@ -154,6 +154,11 @@ def test_custom_sql_probe_writes_pbip_then_requires_desktop_operator(tmp_path, c
     assert f"PROBE: OPERATOR_REQUIRED {pbip.parent}" in messages
     assert f"Open {pbip} in Power BI Desktop" in messages
     assert "do NOT use a SQL client" in messages
+    assert "Custom SQL refresh WILL run the full customer query" in messages
+    assert "not a cheap row probe" in messages
+    assert "isolated to one table and no report layer" in messages
+    assert "native-query approval modal looks like a credential failure" in messages
+    assert "gate stays armed until the operator reports the result" in messages
     assert "DBeaver" in messages and "Snowsight" in messages and "SSMS" in messages
 
 
