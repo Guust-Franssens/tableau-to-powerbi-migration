@@ -254,7 +254,7 @@ def merge(models: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def render(report: dict[str, Any]) -> str:
+def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     """Human-readable verdict, matching sibling offline gates."""
     if report["status"] == STATUS_SKIPPED:
         return "RELATIONSHIP HEALTH CHECK: SKIPPED - nothing measured (no semantic model or TMDL files found)"
@@ -278,13 +278,29 @@ def render(report: dict[str, Any]) -> str:
             f"{model['relationship_components']} component(s), Date tables: {', '.join(model['date_tables'])}"
         )
         for finding in model["findings"]:
-            columns = ", ".join(finding["date_columns"])
-            lines.append(f"    - {finding['table']} has date column(s) [{columns}] but no path to Date/Calendar")
+            lines.append(_render_finding(finding, verbose=verbose))
     lines.append(
-        "  This is a model-owner decision: add the intended relationship, or document why the fact-like table "
-        "is disconnected."
+        "  MISSING_RELATIONSHIP = add the intended relationship to Date/Calendar, or document why this "
+        "fact-like table is intentionally disconnected."
     )
+    if not verbose:
+        lines.append("  Run with --verbose to list the date-like columns behind each table count.")
     return "\n".join(lines)
+
+
+def _render_finding(finding: dict[str, Any], *, verbose: bool) -> str:
+    """Render one stranded table, keeping column evidence optional."""
+    count = len(finding["date_columns"])
+    if not verbose:
+        return f"    - {finding['table']} has {count} date-like column(s) but no path to Date/Calendar"
+    columns = ", ".join(_column_with_line(finding, column) for column in finding["date_columns"])
+    return f"    - {finding['table']} has {count} date-like column(s) [{columns}] but no path to Date/Calendar"
+
+
+def _column_with_line(finding: dict[str, Any], column: str) -> str:
+    """Render a date-like column with its TMDL line when available."""
+    line = finding.get("date_column_lines", {}).get(column)
+    return f"{column}:{line}" if line else column
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -293,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="bundle folder(s) or .SemanticModel folder(s)")
     parser.add_argument("--json", type=Path, help="write the machine-readable verdict here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered verdict")
+    parser.add_argument("--verbose", action="store_true", help="also list the date-like columns behind each count")
     parser.add_argument("--warn-only", action="store_true", help="always exit 0 after a successful scan")
     args = parser.parse_args(argv)
 
@@ -306,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     if not args.quiet:
-        print(render(merged))
+        print(render(merged, verbose=args.verbose))
     if args.warn_only:
         return EXIT_OK
     if merged["status"] == STATUS_SKIPPED:

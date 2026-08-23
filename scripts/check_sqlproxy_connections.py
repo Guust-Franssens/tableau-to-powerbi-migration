@@ -270,11 +270,11 @@ def _workbooks(value: Any) -> list[dict[str, Any]]:
     return []
 
 
-def render(report: dict[str, Any]) -> str:
+def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     """Human-readable verdict, matching the sibling offline gates."""
     if report["status"] == STATUS_SKIPPED:
         return "SQLPROXY CONNECTION CHECK: SKIPPED - nothing measured (no semantic model or TMDL files found)"
-    warning_tail = _warning_tail(report)
+    warning_tail = _warning_tail(report, verbose=verbose)
     if report["status"] == STATUS_OK:
         return (
             f"SQLPROXY CONNECTION CHECK: OK - no sqlproxy-derived connection parameters in "
@@ -296,19 +296,30 @@ def render(report: dict[str, Any]) -> str:
                 f"({finding['tmdl']}:{finding['database_line'] or finding['server_line']})"
             )
     lines.append(
-        "  Database_sqlproxy* names the Tableau published datasource that must be migrated or rebound; "
-        "Power BI cannot query Tableau sqlproxy directly."
+        "  SQLPROXY = replace the Tableau sqlproxy parameters with the real upstream connection, or migrate "
+        "and rebind the published datasource first."
     )
+    if report.get("warnings"):
+        lines.append(
+            "  SECONDARY_DATASOURCES WARN = engine telemetry says these built workbooks depend on secondary "
+            "published datasources; verify they were migrated before trusting the report."
+        )
     return "\n".join(lines)
 
 
-def _warning_tail(report: dict[str, Any]) -> str:
+def _warning_tail(report: dict[str, Any], *, verbose: bool) -> str:
     """Render at-risk report.json telemetry without changing the blocking verdict."""
     risks = report.get("at_risk_workbooks") or []
     if not risks:
         return ""
-    names = ", ".join(f"{risk['workbook']} ({len(risk['secondary_datasources'])} secondary)" for risk in risks)
-    return f"\n  WARN: {len(risks)} built workbook(s) declare secondary_datasources in binding_signal: {names}"
+    if verbose or len(risks) <= 3:
+        names = ", ".join(f"{risk['workbook']} ({len(risk['secondary_datasources'])} secondary)" for risk in risks)
+        return f"\n  WARN: {len(risks)} built workbook(s) declare secondary_datasources in binding_signal: {names}"
+    total = sum(len(risk["secondary_datasources"]) for risk in risks)
+    return (
+        f"\n  WARN: {len(risks)} built workbook(s) declare {total} secondary_datasource reference(s) "
+        "in binding_signal (use --verbose for workbook names)"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -318,6 +329,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", type=Path, help="explicit .SemanticModel folder")
     parser.add_argument("--json", type=Path, help="write the machine-readable verdict here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered verdict")
+    parser.add_argument(
+        "--verbose", action="store_true", help="also list workbook names behind secondary-datasource warnings"
+    )
     parser.add_argument("--warn-only", action="store_true", help="always exit 0 after a successful scan")
     args = parser.parse_args(argv)
 
@@ -337,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     if not args.quiet:
-        print(render(merged))
+        print(render(merged, verbose=args.verbose))
     if args.warn_only:
         return EXIT_OK
     if merged["status"] == STATUS_SKIPPED:

@@ -799,7 +799,7 @@ def _merge(pairs: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> dict[s
 FAILING_STATUSES = frozenset({"UNRESOLVED", "INCOHERENT"})
 
 
-def render(report: dict[str, Any]) -> str:
+def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     """Human-readable verdict, in the shape the sibling gates use."""
     if report["status"] == "SKIPPED":
         reasons = "; ".join(s["reason"] for s in report.get("skipped", [])) or "no report found"
@@ -807,30 +807,32 @@ def render(report: dict[str, Any]) -> str:
     scanned = report["reports_scanned"]
     # A skipped report is invisible in the pass count, so name it here too: "OK - 1 report(s)" on a
     # two-report bundle reads as full coverage when half of it was never checked.
-    tail = _skipped_tail(report)
+    tail = _skipped_tail(report, verbose=verbose)
     if report["status"] == "OK":
         return (
             f"FIELD BINDING CHECK: OK - every PBIR field reference in {scanned} report(s) resolves in its model.{tail}"
         )
     lines = [_headline(report, scanned, tail)]
+    inline_small_evidence = report["reports_unresolved"] + report["reports_incoherent"] <= 3
     for one in report["reports"]:
         if one["status"] not in FAILING_STATUSES:
             continue
-        lines.append(f"  {Path(one['report']).name}  (model: {Path(one['model']).name})")
-        lines += _render_findings(one["findings"], "near_miss")
-        lines += _render_findings(one["findings"], "missing")
-        lines += _render_coherence(one.get("coherence") or [])
-    if report["missing"] or report["near_misses"]:
+        lines += _render_report_summary(one, verbose=verbose, inline_small_evidence=inline_small_evidence)
+    if report["near_misses"]:
         lines.append(
-            "  A CASE-ONLY near-miss is a model-layer rename that never reached the report: rewrite the\n"
-            "  PBIR spelling to the model's, do NOT rename the model back - the fold was deliberate."
+            "  NEAR-MISS = model-layer rename that never reached the report; rewrite PBIR to the model spelling."
+        )
+    if report["missing"]:
+        lines.append(
+            "  MISSING   = field/table absent from the model; add it to TMDL or rebind/remove the PBIR reference."
         )
     if report.get("incoherent_visuals"):
         lines.append(
-            "  UNRELATED TABLES is what Desktop raises as InvalidUnconstrainedJoin - every field\n"
-            "  resolves, so this NEVER appears in a per-field check. Rebind the odd table out, or add\n"
-            "  the missing relationship; a listed AMBIGUOUS name is the likely mis-bind."
+            "  UNRELATED TABLES = visual fields resolve but Power BI cannot join their tables; rebind the odd table "
+            "out, or add/activate the relationship."
         )
+    if not verbose:
+        lines.append("  Run with --verbose to list every field, visual, and skipped report behind these counts.")
     return "\n".join(lines)
 
 
@@ -849,13 +851,37 @@ def _headline(report: dict[str, Any], scanned: int, tail: str) -> str:
     )
 
 
-def _skipped_tail(report: dict[str, Any]) -> str:
-    """Name the reports that were NOT graded, so a partial sweep cannot read as a full one."""
+def _skipped_tail(report: dict[str, Any], *, verbose: bool) -> str:
+    """Name or summarize reports that were NOT graded, so a partial sweep cannot read as a full one."""
     skipped = report.get("skipped") or []
     if not skipped:
         return ""
-    names = ", ".join(f"{Path(s['report']).name} ({s['reason']})" for s in skipped)
-    return f"\n  {len(skipped)} report(s) SKIPPED, not checked: {names}"
+    if verbose or len(skipped) <= 3:
+        names = ", ".join(f"{Path(s['report']).name} ({s['reason']})" for s in skipped)
+        return f"\n  {len(skipped)} report(s) SKIPPED, not checked: {names}"
+    counts: dict[str, int] = {}
+    for item in skipped:
+        counts[item["reason"]] = counts.get(item["reason"], 0) + 1
+    reasons = "; ".join(f"{count} {reason}" for reason, count in sorted(counts.items()))
+    return f"\n  {len(skipped)} report(s) SKIPPED, not checked ({reasons}; use --verbose for names)"
+
+
+def _render_report_summary(one: dict[str, Any], *, verbose: bool, inline_small_evidence: bool) -> list[str]:
+    """Render one report as category counts by default, with lossless evidence in verbose mode."""
+    lines = [f"  {Path(one['report']).name}  (model: {Path(one['model']).name})"]
+    inline_fields = verbose or (inline_small_evidence and one["near_misses"] + one["missing"] <= 3)
+    if one["near_misses"]:
+        lines.append(f"    - NEAR-MISS (case only): {one['near_misses']} reference(s)")
+    if one["missing"]:
+        lines.append(f"    - MISSING: {one['missing']} reference(s)")
+    if one.get("incoherent_visuals"):
+        lines.append(f"    - UNRELATED TABLES: {one['incoherent_visuals']} visual(s)")
+    if inline_fields:
+        lines += _render_findings(one["findings"], "near_miss")
+        lines += _render_findings(one["findings"], "missing")
+    if verbose or one.get("incoherent_visuals"):
+        lines += _render_coherence(one.get("coherence") or [])
+    return lines
 
 
 def _render_findings(findings: list[dict[str, Any]], status: str) -> list[str]:
@@ -901,6 +927,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, help="explicit .Report folder (use with --model)")
     parser.add_argument("--json", type=Path, help="write the machine-readable verdict here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered verdict")
+    parser.add_argument("--verbose", action="store_true", help="also list every field, visual, and skipped report")
     parser.add_argument("--warn-only", action="store_true", help="always exit 0")
     args = parser.parse_args(argv)
 
@@ -928,7 +955,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     if not args.quiet:
-        print(render(merged))
+        print(render(merged, verbose=args.verbose))
     if args.warn_only or merged["status"] not in FAILING_STATUSES:
         return 0
     return 1
