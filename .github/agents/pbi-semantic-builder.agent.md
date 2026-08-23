@@ -38,18 +38,11 @@ examples, not hypothetical ones.
   | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
-  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
-  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
-  compares the two path *strings* and prints a confident non-answer):
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**. Keep
+  `reports/` pristine so it remains the exact answer to *"what did our tier change versus what the
+  engine produced?"* — rewriting it cost a retracted upstream bug on 2026-08-10. Use git for that
+  comparison; the mechanics live in `powerbi-report-gotchas` §3.
 
-  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
-  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = they differ** — but git also
-  exits 1 on `error: Could not access`, the likely slip here, so **check for a stat line**, not the code.
-
-  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
-  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
-  rewritten `reports/`, and the diff was read as engine behaviour).
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
@@ -210,16 +203,17 @@ Every file under a `*.SemanticModel` folder is hash-baselined by the engine run 
 `input_manifest.json`, and the orchestrator runs `python scripts/check_migration_progress.py --bundle
 <b> --tamper` before sign-off: it exits **1** on any generated file that changed without a matching
 declaration. `scripts/declare_generated_edit.py` is the **only** thing that writes one — it runs your
-script for you and records the before/after hashes into `_build/generated-edit-declarations.json`:
+script for you and records the before/after hashes as one append-only
+`_build/generated-edit-declarations/*.json` record:
 
 ```bash
 python scripts/declare_generated_edit.py --bundle <b> \
   --target pbip/<WB>/<Name>.SemanticModel/definition/cultures/en-US.tmdl \
   --script <b>/_build/fix_ai_instructions.py -- --only pbip/<WB>/<Name>.SemanticModel/definition/cultures/en-US.tmdl
-# DECLARE: RECORDED pbip/.../en-US.tmdl -> <b>/_build/generated-edit-declarations.json
+# DECLARE: RECORDED pbip/.../en-US.tmdl -> <b>/_build/generated-edit-declarations/<timestamp...>.json
 ```
 
-Only two things are already covered, and neither is the work you do here: `refresh_pbip_model.py`
+Only two things are already covered, and neither is the work you do here: the refresh skill
 self-declares **its own** `database.tmdl` compatibility-level bump, and `.pbi/` cache/autosave
 sidecars are outside the baseline entirely. Everything else you touch — `set_ai_instructions.py`
 writing the culture TMDL, an MCP description write, any `_build/fix_*.py` — is **yours to declare**.
@@ -282,16 +276,20 @@ failure knowledge, extracted from this persona so it does not sit in the region 
 first. Invoke by name, or read
 [`.github/skills/powerbi-semantic-model-gotchas/SKILL.md`](../skills/powerbi-semantic-model-gotchas/SKILL.md).
 
-**What is in it, so you can tell when you need it.** If any row matches what you are about to build or
-debug, you have not read enough yet:
+<!-- BEGIN:generated-skill-index:powerbi-semantic-model-gotchas -->
+**Generated skill section index.** Do not hand-edit this table; it is generated from the `powerbi-semantic-model-gotchas` skill headings by `scripts/sync_agent_conventions.py`. If a row matches what you are about to build or debug, invoke/read the skill section first.
 
-| § | Covers |
+| § | Skill section |
 |---|---|
-| 1 | Translating source fields: `ATTR()` at row grain, duplicate `CASE WHEN` branches, reference-line measure naming, stale `internal_name`s, the non-tabular `table`/`spatial` data types |
-| 2 | TMDL pitfalls that **crash Desktop on open**: `database.tmdl` shape, single-line DAX, measure/column name collisions, `.pbip` `$schema`, the **field-parameter `sourceColumn: [Value1]` bracket trap**, the **`'Table'[Col] = [Measure]` PLACEHOLDER error** |
-| 3 | MCP/Desktop rules: DAX uses a column's `name` not `sourceColumn`, explicit M culture and the `'4096' locale` failure, re-discovering the AS port, blank MCP response = success, pending-changes banner, junk artifacts |
-| 4 | Offline integrity checks the parser misses (**duplicate measure names break Desktop load**), table calcs at compat 1606, what `pbi-report-builder` needs decided at model-design time, modeling at scale |
-| 5 | **Live sources**: prove reachability first, why a static spec check is not a test, and never self-supplying a credential |
+| 1 | Translating source fields |
+| 2 | TMDL hand-authoring pitfalls |
+| 3 | MCP / Desktop operational gotchas |
+| 4 | Model integrity, table calcs, cross-agent hand-offs, and scale |
+| 5 | Live sources: prove reachability first, and never self-supply a credential |
+| 6 | File-based extracts: a legacy `.xls` + a custom OS locale silently corrupts DATA |
+| 7 | Legacy `.xls` navigation keys, and Desktop sessions that turn errors into hangs |
+| 8 | Reading the handover queue, and a retracted claim worth keeping |
+<!-- END:generated-skill-index:powerbi-semantic-model-gotchas -->
 
 **Report-layer bugs stay with `pbi-report-builder`** — own your layer. **New learnings go in the skill,
 not back in this file.**
@@ -351,6 +349,6 @@ throwing an error" is necessary but not sufficient:
    tables *did* load (`powerbi-semantic-model-gotchas` §5). For a live source confirm **per-table**:
    `EVALUATE ROW("n", COUNTROWS('<LiveTable>'))` must be non-zero for each.
 12. **Every TMDL edit you made is declared, and `--tamper` exits 0** — see "Declare every TMDL edit
-   you make" above. `refresh_pbip_model.py`'s own `database.tmdl` bump is the *only* self-declaring
+   you make" above. The refresh skill's own `database.tmdl` bump is the *only* self-declaring
    edit; an undeclared culture, description or fix-script edit blocks the orchestrator's sign-off,
    and `DECLARE: NO_CHANGE` means nothing was recorded.

@@ -33,18 +33,11 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
   | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
-  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
-  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
-  compares the two path *strings* and prints a confident non-answer):
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**. Keep
+  `reports/` pristine so it remains the exact answer to *"what did our tier change versus what the
+  engine produced?"* — rewriting it cost a retracted upstream bug on 2026-08-10. Use git for that
+  comparison; the mechanics live in `powerbi-report-gotchas` §3.
 
-  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
-  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = they differ** — but git also
-  exits 1 on `error: Could not access`, the likely slip here, so **check for a stat line**, not the code.
-
-  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
-  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
-  rewritten `reports/`, and the diff was read as engine behaviour).
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
@@ -184,13 +177,10 @@ idioms → dated Microsoft Learn citation → cache into `visuals/<type>.md` →
      `visual.objects` and draws a blank rectangle while `validate` returns 0 errors. A green
      CLI/`validate` result is **never** evidence that a visual draws.
 2. **The cookbook is a *cache*, not the authority** (`.github/pbi.kb/visual-cookbook.md`). Don't open
-   it reflexively: 19 of the 29 entries are transcribed `catalog describe` output with zero drift, so
-   step 1 already gave you those. The ones worth opening are the **7 idioms** (`error-bars`,
-   `reference-lines`, `smallmultiples`, `zoom-slider`, `table-cond-format`, `table-databars`,
-   `forecast` — not visual types, so the CLI returns `VISUAL_TYPE_UNKNOWN`) and the **3 render-truth**
-   entries (`actionButton`, `shape`, `azureMap`). Trust by tier: 🟢 render-verified → copy and rebind, then
-   reconcile property names against the live CLI; 🟡 structural-template → a shape hint only, the
-   live CLI wins any conflict; 🔴 needs-capture → do not ship.
+   it reflexively; use its own "What's actually in here" table to decide when it carries guidance the
+   CLI cannot answer (idioms and render-truth entries). Trust by tier: 🟢 render-verified → copy and
+   rebind, then reconcile property names against the live CLI; 🟡 structural-template → a shape hint
+   only, the live CLI wins any conflict; 🔴 needs-capture → do not ship.
 3. **Research + human capture** for anything neither covers, then **write it back as a 🟢 entry** with
    the dated citation. Growing the cookbook is part of the job.
 
@@ -343,19 +333,22 @@ a visual validates clean but renders wrong. It is ~18 KB of PBIR/Desktop failure
 across every prior migration. Invoke it by name, or read
 [`.github/skills/powerbi-report-gotchas/SKILL.md`](../skills/powerbi-report-gotchas/SKILL.md).
 
-**What is in it, so you can tell when you need it.** If any row below matches what you are about to
-build or debug, you have not read enough yet:
+<!-- BEGIN:generated-skill-index:powerbi-report-gotchas -->
+**Generated skill section index.** Do not hand-edit this table; it is generated from the `powerbi-report-gotchas` skill headings by `scripts/sync_agent_conventions.py`. If a row matches what you are about to build or debug, invoke/read the skill section first.
 
-| § | Covers |
+| § | Skill section |
 |---|---|
-| 1 | Validation-invisible rendering bugs: `Else` ignored for table `fontColor`, azureMap `Location` + Lat/Long, the `Aggregation.Function` enum, `expansionStates`, measure-filters that silently zero a visual, "Column cannot be found" = a field-parameter model bug |
-| 2 | Data colours: `Conditional.Cases[]` vs `fillRule`, per-point colour needs a PROJECTED field, `scopeId` mode, string colour-helpers cannot drive rules |
-| 3 | PBIR mechanics: `filterConfig` is a SIBLING of `visual`, stacked bar = `barChart`, `displayName` renames headers, type-suffixed reference-line literals, theme rules, `formatString` scale |
-| 4 | Crosstabs: `tableEx` empty-rows, the `SUMMARIZECOLUMNS` Columns-pivot drop, prefer flat tables |
-| 5 | Maps: azureMap is the only non-deprecated one; choropleth `referenceLayer` encoding, fixed-view zoom, route maps need one row per endpoint |
-| 6 | Scatter: X and Y must BOTH be measures |
-| 7 | Desktop mechanics: no refresh verb, `cache.abf`, the XMLA fallback, MSIX `PBI_DESKTOP_PATH`, autosave races, the bridge as a serialization point |
-| 8 | Reading the spec: nested shelves, tooltips, manual sorts, stale internal names, Measure Names/Values, slicer defaults |
+| 1 | Validation-invisible rendering bugs |
+| 2 | Data colours and conditional formatting |
+| 3 | PBIR mechanics |
+| 4 | Crosstabs and tables — a recurring fragility class |
+| 5 | Maps — Azure Maps is the only non-deprecated option |
+| 6 | Scatter |
+| 7 | Desktop verification mechanics |
+| 8 | Reading the source spec |
+| 9 | Keeping the visual mapping current (research per idiom, not per instance) |
+| 10 | Reading the report-side handover queue |
+<!-- END:generated-skill-index:powerbi-report-gotchas -->
 
 **Semantic-model-owned bugs stay with `pbi-semantic-builder`.** Anything that turns out to be a TMDL or
 DAX defect (a field-parameter `sourceColumn` missing its brackets, a measure evaluated at the wrong

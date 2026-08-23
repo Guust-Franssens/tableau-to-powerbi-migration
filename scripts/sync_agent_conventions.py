@@ -53,6 +53,13 @@ AGENTS_DIR = REPO_ROOT / ".github" / "agents"
 
 BEGIN = "<!-- BEGIN:shared-conventions -->"
 END = "<!-- END:shared-conventions -->"
+SKILL_INDEX_BEGIN = "<!-- BEGIN:generated-skill-index:{skill} -->"
+SKILL_INDEX_END = "<!-- END:generated-skill-index:{skill} -->"
+SECTION_HEADING = re.compile(r"^##\s+(\d+)\.\s+(.+)$", re.MULTILINE)
+SKILL_INDEX_TARGETS = {
+    "pbi-report-builder.agent.md": "powerbi-report-gotchas",
+    "pbi-semantic-builder.agent.md": "powerbi-semantic-model-gotchas",
+}
 
 # GitHub documents a 30,000-character maximum for a custom agent prompt
 # (docs.github.com/en/copilot/reference/custom-agents-configuration).
@@ -141,6 +148,47 @@ def canonical_block() -> str:
 
 def _rendered() -> str:
     return f"{BEGIN}\n{PREAMBLE}\n{canonical_block()}\n{END}"
+
+
+def skill_section_index(skill_name: str) -> str:
+    """Generate the persona-visible section index from a skill's own headings."""
+    skill_path = REPO_ROOT / ".github" / "skills" / skill_name / "SKILL.md"
+    text = skill_path.read_text(encoding="utf-8")
+    rows = [(number, heading.strip()) for number, heading in SECTION_HEADING.findall(text)]
+    if not rows:
+        raise SystemExit(f"{skill_path.relative_to(REPO_ROOT)} has no numbered section headings")
+    table = [
+        f"<!-- BEGIN:generated-skill-index:{skill_name} -->",
+        "**Generated skill section index.** Do not hand-edit this table; it is generated from the "
+        f"`{skill_name}` skill headings by `scripts/sync_agent_conventions.py`. If a row matches "
+        "what you are about to build or debug, invoke/read the skill section first.",
+        "",
+        "| § | Skill section |",
+        "|---|---|",
+    ]
+    table.extend(f"| {number} | {heading} |" for number, heading in rows)
+    table.append(f"<!-- END:generated-skill-index:{skill_name} -->")
+    return "\n".join(table)
+
+
+def apply_skill_index(path: Path, write: bool) -> bool:
+    """Refresh a generated skill section index in one persona, when it has one."""
+    skill_name = SKILL_INDEX_TARGETS.get(path.name)
+    if skill_name is None:
+        return False
+    text = path.read_text(encoding="utf-8")
+    begin = SKILL_INDEX_BEGIN.format(skill=skill_name)
+    end = SKILL_INDEX_END.format(skill=skill_name)
+    if begin not in text or end not in text:
+        raise SystemExit(f"{path.relative_to(REPO_ROOT)} is missing generated index fences for {skill_name}")
+    head, rest = text.split(begin, 1)
+    _, tail = rest.split(end, 1)
+    updated = f"{head.rstrip()}\n\n{skill_section_index(skill_name)}\n\n{tail.lstrip()}"
+    if updated == text:
+        return False
+    if write:
+        path.write_text(updated, encoding="utf-8")
+    return True
 
 
 def _split_frontmatter(text: str) -> tuple[str, str]:
@@ -299,6 +347,17 @@ def check_bundle_paths(bundle: Path | None) -> list[str]:
     return problems
 
 
+def sync_agent_files(agents: list[Path], write: bool) -> list[Path]:
+    """Refresh generated convention blocks and generated skill indexes."""
+    drifted = []
+    for agent in agents:
+        conventions_changed = apply_to(agent, write=write)
+        index_changed = apply_skill_index(agent, write=write)
+        if conventions_changed or index_changed:
+            drifted.append(agent)
+    return drifted
+
+
 def report_sizes(agents: list[Path]) -> list[Path]:
     """Warn about personas over the documented prompt cap. Returns the over-cap files."""
     over = [p for p in agents if prompt_size(p) > PROMPT_CHAR_LIMIT]
@@ -343,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     # Order matters: sync first, then check paths. In write mode the check must see the state this run
     # leaves on disk, not the one it replaced - otherwise a run that FIXES a bad path still reports it
     # (observed while testing this change), and the operator "fixes" an already-fixed file.
-    drifted = [p for p in agents if apply_to(p, write=not args.check)]
+    drifted = sync_agent_files(agents, write=not args.check)
     path_problems = check_bundle_paths(args.bundle)
 
     if args.check:

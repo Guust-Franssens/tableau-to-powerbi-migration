@@ -34,18 +34,11 @@ PBIR files yourself.
   | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level** — and the
-  two sides differ in shape, so compare the matching **pair**, with **git** (✅ measured 2026-08-13;
-  bare `diff` on Windows is a PowerShell alias for `Compare-Object`, which given two directories
-  compares the two path *strings* and prints a confident non-answer):
+  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**. Keep
+  `reports/` pristine so it remains the exact answer to *"what did our tier change versus what the
+  engine produced?"* — rewriting it cost a retracted upstream bug on 2026-08-10. Use git for that
+  comparison; the mechanics live in `powerbi-report-gotchas` §3.
 
-  `git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report`
-  → *98 files changed, 2013 insertions(+), 553 deletions(-)*; **exit 1 = they differ** — but git also
-  exits 1 on `error: Could not access`, the likely slip here, so **check for a stat line**, not the code.
-
-  Keeping `reports/` pristine is what makes that an exact answer to *"what did our tier change versus
-  what the engine produced?"* — that cost a retracted upstream bug on 2026-08-10 (our fix pass had
-  rewritten `reports/`, and the diff was read as engine behaviour).
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
   shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
@@ -107,10 +100,9 @@ PBIR files yourself.
    `-Update` belongs to *session start* only (`AGENTS.md` → "Session start"). Upgrading the bridge CLIs
    mid-migration would swap the validator underneath a half-built report. If preflight reports a CLI
    **below the correctness floor**, stop and tell the user to re-run session start with `-Update`.
-   It verifies the whole toolchain — Python + parser deps, **both skill plugins**, the MCP servers,
-   Power BI Desktop + Bridge CLI, `npx`, the .NET SDK, the CLI version matrix, and whether the
-   published skill bundles still match `.github/skills/`. If it exits non-zero, **stop and surface the
-   missing items with the printed install hints** — do not migrate against a half-configured machine.
+   Treat preflight's own output as the environment inventory; do not maintain a second checklist in
+   this persona. If it exits non-zero, **stop and surface the missing items with the printed install
+   hints** — do not migrate against a half-configured machine.
 1. **Read the brief, then confirm inputs.** The *dispatcher* — the top-level session, per `AGENTS.md`
    — decides **what** gets migrated and hands you one unit of work plus
    `migrations/workbooks/<name>/migration-brief.md`: scope, **autonomy** (`guided` / `standard` /

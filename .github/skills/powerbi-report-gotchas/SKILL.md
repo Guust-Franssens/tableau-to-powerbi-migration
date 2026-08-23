@@ -210,6 +210,16 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
     `byPath` next to it has no model to point at (2026-08-11 it read `"../../pbip/<wb>/<Name>.SemanticModel"`;
     on a 2026-08-13 bundle it reads `"../<Name>.SemanticModel"` — ⚠️ engine-version dependent, and
     unresolvable either way).
+  - **Compare engine truth to working copy with git, not PowerShell `diff`.** The two sides differ in
+    shape, so compare the matching pair with:
+
+    ```bash
+    git diff --no-index --stat <bundle>/reports/<WB>.Report <bundle>/pbip/<WB>/<WB>.Report
+    ```
+
+    On Windows, bare `diff` is a PowerShell alias for `Compare-Object` and can compare only the two
+    path strings. `git diff` exits 1 both when trees differ and when a path is wrong, so require a real
+    stat line, not just the exit code.
 
 - ⚠️ **A "shipped" deliverable can be structurally present and functionally EMPTY — check content, not
   existence.** Reported 2026-08-19 from a 46-asset estate, found by direct verification rather than by
@@ -304,15 +314,15 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
 Every file under a `*.Report` folder is hash-baselined by the engine run, and the orchestrator's
 pre-sign-off `check_migration_progress.py --bundle <b> --tamper` exits **1** on any that changed
 without a matching declaration. `scripts/declare_generated_edit.py` is the **only** thing that writes
-one: it runs your `_build/` script for you and records the before/after hashes into
-`_build/generated-edit-declarations.json`.
+one: it runs your `_build/` script for you and records the before/after hashes as one append-only
+`_build/generated-edit-declarations/*.json` file.
 
 ```bash
 python scripts/declare_generated_edit.py --bundle <b> \
   --target pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json \
   --script <b>/_build/fix_axis_title.py \
   -- --only pbip/<WB>/<WB>.Report/definition/pages/<p>/visuals/<id>/visual.json
-# DECLARE: RECORDED pbip/.../visual.json -> <b>/_build/generated-edit-declarations.json
+# DECLARE: RECORDED pbip/.../visual.json -> <b>/_build/generated-edit-declarations/<timestamp...>.json
 ```
 
 Measured — each of these leaves the gate RED while looking like it worked:
