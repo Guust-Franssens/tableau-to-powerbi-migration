@@ -135,6 +135,19 @@ else {
     Add-Check 'Python >= 3.11' 'critical' $false 'not on PATH' 'Install Python 3.11+ (the deterministic parser and all scripts/ need it).'
 }
 
+$node = Get-Command node -ErrorAction SilentlyContinue
+if ($node) {
+    $nodeRaw = (& node --version 2>&1 | Select-Object -First 1) -replace '^v', ''
+    $nodeOk = $false
+    try { $nodeOk = [version]$nodeRaw -ge [version]'20.0.0' } catch { $nodeOk = $false }
+    Add-Check 'Node.js >= 20' 'critical' $nodeOk `
+        $(if ($nodeRaw) { $nodeRaw } else { 'no version reported' }) `
+        'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.'
+}
+else {
+    Add-Check 'Node.js >= 20' 'critical' $false 'node not on PATH' 'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.'
+}
+
 Add-Cli 'powerbi-report-author' 'critical' 'npm install -g @microsoft/powerbi-report-authoring-cli (needs Node >= 20); provides validate + catalog/formatting/preview-*.'
 
 # --- npm CLI versions: correctness FLOOR + known-good matrix (see AGENTS.md) ---
