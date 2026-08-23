@@ -33,9 +33,9 @@ Why custom SQL stops before refresh
 -----------------------------------
 A Tableau relation of `type='text'` is already a hand-written query. Automatically wrapping it in
 `Value.NativeQuery` would lose both properties this probe exists for: folding is off, so the
-warehouse may run the full custom query, and Desktop can raise a native-query approval modal that
-looks like a false NO_CREDENTIAL. For custom SQL this script writes the same throwaway PBIP scaffold
-but returns OPERATOR_REQUIRED before opening Desktop; a human must decide whether to run it.
+warehouse runs the full custom query, and Desktop can raise a native-query approval modal that looks
+like a false NO_CREDENTIAL. For custom SQL this script writes the same throwaway PBIP scaffold but
+returns OPERATOR_REQUIRED before opening Desktop; a human must decide whether to run it.
 
 The ordinary-table probe mirrors the builder on purpose: `pbi-semantic-builder` is instructed to emit
 `Databricks.Catalogs(host, httpPath, ...)` / `Sql.Database(server, db)`, and `build_m_query` below
@@ -1055,6 +1055,8 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
     pbip = _write_probe_model(migration, m_query, table, column) / "Probe.pbip"
     log.info("probe model built: %s", pbip.parent)
     log.info("target: %s", note)
+    # `probe_bundle.py` makes the same OPERATOR_REQUIRED decision by scanning emitted M for
+    # Value.NativeQuery; this script has the richer parsed `custom_sql` relation before M exists.
     if table_spec.get("custom_sql"):
         log.error("PROBE: OPERATOR_REQUIRED %s", pbip.parent)
         log.error(
@@ -1063,9 +1065,12 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
             pbip,
         )
         log.error(
-            "Reason: SQL clients authenticate as their own identity, while Power BI uses the "
-            "per-Windows-user Desktop DPAPI credential store. Measured 2026-08-01: the databricks "
-            "CLI could query the warehouse while Power BI had never authenticated to it."
+            "Custom SQL refresh WILL run the full customer query; folding is off, so this is not "
+            "a cheap row probe. The probe is still isolated to one table and no report layer."
+        )
+        log.error(
+            "Automation stops here because Desktop's native-query approval modal looks like a "
+            "credential failure; the gate stays armed until the operator reports the result."
         )
         _record_attempt(migration, "OPERATOR_REQUIRED", f"{table} -> OPERATOR_REQUIRED ({pbip.parent})")
         return EXIT_OPERATOR_REQUIRED, "OPERATOR_REQUIRED"

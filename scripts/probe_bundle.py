@@ -29,10 +29,14 @@ Why `Table.FirstN` and not a native `SELECT 1`
 ----------------------------------------------
 Two reasons, and the second is the one that matters.
 
-1. `Table.FirstN(source, 1)` is a folding operation: against SQL Server / Snowflake / Databricks the
-   mashup engine pushes it down as `TOP 1` / `LIMIT 1`, so it IS the select-1 at the source, without
-   this script needing to know a single SQL dialect. It is also connector-agnostic - one transform
-   covers every connector the deterministic tier supports today or adds tomorrow.
+1. For ordinary table navigation, `Table.FirstN(source, 1)` is a folding operation: against
+   SQL Server / Snowflake / Databricks the mashup engine pushes it down as `TOP 1` / `LIMIT 1`, so
+   it IS the select-1 at the source, without this script needing to know a single SQL dialect. It is
+   also connector-agnostic - one transform covers every connector the deterministic tier supports
+   today or adds tomorrow. The exception is `Value.NativeQuery`: folding is off unless the native
+   query itself opts in, and even then the provider may execute the whole customer query before the
+   `Table.FirstN` wrapper is applied. For those bundles this script still writes the probe artifact,
+   but returns `PROBE: OPERATOR_REQUIRED` before any refresh so a human decides whether to run it.
    WARNING: folding is documented behaviour, not something this script can verify offline. Confirm
    in the source system's query history (that trace is the real oracle - see `credential_gate.py`).
 
@@ -100,6 +104,7 @@ OUTCOME_NO_DATA = "NO_DATA"
 OUTCOME_TIMEOUT = "TIMEOUT"
 OUTCOME_CREDENTIAL_REQUIRED = "CREDENTIAL_REQUIRED"
 OUTCOME_ERROR = "ERROR"
+EXIT_OPERATOR_REQUIRED = 4
 REFRESH_OUTCOMES = frozenset(
     {
         OUTCOME_DATA_OK,
@@ -113,6 +118,11 @@ REFRESH_OUTCOMES = frozenset(
 
 # A wrapped expression: `Table.FirstN(<expr>, <n>) /*PROBE*/`
 _WRAPPED = re.compile(r"Table\.FirstN\((?P<expr>.+),\s*\d+\)\s*" + re.escape(PROBE_MARKER))
+
+# Bundle probes only see emitted M, so this is the native-query/custom-SQL predicate here.
+# `probe_live_source.py` makes the same safety decision from the parsed `custom_sql` relation before
+# it emits M; keep both OPERATOR_REQUIRED contracts aligned even though their inputs differ.
+_NATIVE_QUERY = re.compile(r"\bValue\.NativeQuery\s*\(")
 
 # The line that OPENS a calculated object: `measure 'X' = ...` / `column 'X' = ...`.
 # A SOURCE column has no `=`, so it never matches and is never stripped.
@@ -182,6 +192,11 @@ def find_probe_residue(root: Path) -> list[Path]:
     that no validator flags.
     """
     return [p for p in sorted(root.rglob("*.tmdl")) if PROBE_MARKER in p.read_text(encoding="utf-8", errors="replace")]
+
+
+def find_native_query_files(model_dir: Path) -> list[Path]:
+    """TMDL files whose M contains `Value.NativeQuery` (custom SQL / native query)."""
+    return [p for p in sorted(model_dir.rglob("*.tmdl")) if _NATIVE_QUERY.search(p.read_text(encoding="utf-8"))]
 
 
 def force_import_mode(tmdl: str) -> tuple[str, int]:
@@ -484,7 +499,14 @@ def build_probe(bundle: Path, out: Path, rows: int, keep_dax: bool) -> dict:
     shutil.copytree(bundle, out)
 
     model_dir = find_model_dir(out)
-    stats = {"tables": 0, "partitions_wrapped": 0, "dq_flipped": 0, "dax_stripped": 0}
+    native_query_files = find_native_query_files(model_dir)
+    stats = {
+        "tables": 0,
+        "partitions_wrapped": 0,
+        "dq_flipped": 0,
+        "dax_stripped": 0,
+        "native_query_files": len(native_query_files),
+    }
 
     for tmdl in sorted((model_dir / "tables").glob("*.tmdl")):
         text = tmdl.read_text(encoding="utf-8")
@@ -507,6 +529,14 @@ def build_probe(bundle: Path, out: Path, rows: int, keep_dax: bool) -> dict:
         "rows_per_partition": rows,
         "stats": stats,
         "m_parameters": check_m_parameters(model_dir),
+        "operator_required": bool(native_query_files),
+        "operator_required_reason": (
+            "Value.NativeQuery/custom SQL is present; refresh will run the full customer query. "
+            "The probe isolates one table/no report layer, but a human must approve the cost."
+            if native_query_files
+            else None
+        ),
+        "native_query_files": [str(path.relative_to(model_dir)) for path in native_query_files],
         # ---------------------------------------------------------------------------------
         # NOTHING here is a connectivity claim, and that is deliberate. This function has
         # copied a directory and rewritten regexes; it has not opened Power BI, not bound a
@@ -827,6 +857,17 @@ def main() -> int:
         )
         return 1
     print("  M parameters: all referenced parameters are defined and non-empty.")
+    if receipt["operator_required"]:
+        print(f"PROBE: OPERATOR_REQUIRED {args.out}")
+        print(
+            "  Custom SQL refresh WILL run the full customer query; folding is off, so this is not "
+            "a cheap row probe. The probe is still isolated to one table and no report layer."
+        )
+        print(
+            "  Automation stops here because Desktop's native-query approval modal looks like a "
+            "credential failure; refresh only after a human approves the cost."
+        )
+        return EXIT_OPERATOR_REQUIRED
     return 0
 
 
