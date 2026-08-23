@@ -238,13 +238,12 @@ it is slow, and `validate` will not catch a wrong encoding.
    minutes *before* the cache was written loaded an EMPTY model; and a refresh on a live source hits a
    modal credential prompt no automation can fill. Consequence for step 1: an empty render is then an
    **unrefreshed-model artifact, not a binding defect** — never "fix" bindings that are already correct.
-   When bindings genuinely **are** broken ("Fields that need to be fixed", blank visuals on a report
-   that validates clean), run `python scripts/check_field_bindings.py <bundle>` **before** any Desktop
-   archaeology. It splits **case-only** mismatches (`Flight_Duration` in PBIR vs `FLIGHT_DURATION` in
-   TMDL — a mechanical rename, yours to fix) from **genuinely missing** columns/measures (a modelling
-   gap — route to `pbi-semantic-builder`, never invent the field). Measured on a 12-workbook estate:
-   it replaced ~an afternoon of per-workbook Desktop archaeology and found the same defect on 4 items
-   nobody had opened.
+   When bindings are broken ("Fields that need to be fixed", blank visuals on a report that validates
+   clean), run `python scripts/check_unit.py <bundle> --scope integration` **before** any Desktop
+   archaeology; use its `field-bindings` result. It splits **case-only** mismatches (`Flight_Duration` vs
+   `FLIGHT_DURATION` — a mechanical rename, yours to fix) from **missing** columns/measures (a modelling
+   gap — route to `pbi-semantic-builder`, never invent the field). Measured on a 12-workbook estate: it
+   replaced ~an afternoon of Desktop archaeology and found the same defect on 4 items nobody had opened.
    **Read the baseline before changing anything.** Open the rebuilt report and screenshot every page
    against `reference/`. **Judge the GESTALT first** - proportions, density, header/slicer bands,
    where the eye lands - before looking at any single visual. Highest-value step, easiest to skip:
