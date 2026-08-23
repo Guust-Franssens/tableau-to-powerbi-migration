@@ -196,6 +196,7 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
 
 0. **Run the all-scope automated inventory first:** `python scripts/check_unit.py <unit-or-bundle> --scope all`.
    Route every finding; exit 0 is `AUTOMATED_CHECKS_PASS`, not visual/numeric fidelity sign-off.
+   `NOT_CHECKED` is not a pass: in `SUMMARY`, `not_checked_structural` means no artifact can exist for that scoped check, while `not_checked_missing_input` means this run lacked an expected input and you may be pointed at the wrong target.
 1. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with
    `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and

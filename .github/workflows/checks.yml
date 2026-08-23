@@ -63,6 +63,9 @@ jobs:
       - name: Navigation index covers agent-facing docs and gates
         run: uv run python scripts/check_navigation_index.py
 
+      - name: Shipped capabilities reach agents
+        run: uv run python scripts/check_agent_capabilities.py
+
       - name: Shared conventions reach every agent (a subagent sees ONLY its persona)
         run: uv run python scripts/sync_agent_conventions.py --check
 

@@ -198,11 +198,8 @@ enrich it, and hand it over refreshed.
    data and compare to the Tableau value. A measure that evaluates is not a measure that is right.
 7. **Enrich for AI — see the next section.** This is the part of the job nobody upstream does at all.
 8. **HANDOFF GATE — refresh, SAVE, and prove it before reporting done.** The report builder needs a
-   model with data in it; an unrefreshed model makes every downstream screenshot meaningless.
-   `python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py --pid <literal pid>`,
-   then confirm rows came back. Persisting is the default — it also raises `database.tmdl`'s declared
-   `compatibilityLevel` to the level Desktop runs at, which is required for the cache to load and is
-   what Desktop's own Save does. Edit → refresh → save, in that order.
+   data-bearing model; an unrefreshed model makes downstream screenshots meaningless. Use the
+   pbip-model-refresh skill. Edit → reopen → refresh → save.
 9. **Report back**: model location, what you authored vs. what the engine did, every table-calc
    decision (visual calc vs measure, and why), anything you routed rather than fixed, and new
    `limitations_encountered` entries (`stage: "semantic_build"`); then run `python scripts/validate_spec.py <migration-spec.json>`.
@@ -345,9 +342,9 @@ throwing an error" is necessary but not sufficient:
    deserialize. A migrated model without AI instructions is not done.
 11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 8).** The
    report builder must receive a model that already holds data; otherwise every visual renders empty
-   and reads as a binding bug. Run `python scripts/refresh_pbip_model.py --pid <desktop-pid>` and
-   require exactly **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
-   `<Name>.SemanticModel/.pbi/cache.abf` advanced (`--verify-only` re-checks). **Ordering is part of
+   and reads as a binding bug. Use the pbip-model-refresh skill, then require exactly
+   **`REFRESH: DATA_OK + PERSISTED`** — a real row came back **and**
+   `<Name>.SemanticModel/.pbi/cache.abf` advanced. **Ordering is part of
    the gate:** Desktop discards the cache when `definition/*.tmdl` is newer, so this is the **last**
    action after every edit, including `set_data_folder.py --sanitize`.
    ⚠️ **`PERSISTED` alone does NOT prove the live source loaded** — a partial refresh caches whatever

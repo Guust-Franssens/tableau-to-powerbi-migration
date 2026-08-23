@@ -244,6 +244,7 @@ PBIR files yourself.
    **You (the orchestrator) are the only writer of validation limitations/worklist entries** — the
    validator is read-only and must never edit the contract itself.
 12. **Validate before declaring done.** Run `python scripts/check_unit.py <u> --scope all`; route findings.
+   When `check_unit` prints `BROWNFIELD DISCOVERY`, treat it as read-only artifact discovery: it found engine output by content, not path, and the expected/found-instead block is the path forward before redoing work.
    Validation is part of flow, not optional — confirm both build subagents ran their own "Mandatory validation"
    steps *and* that `pbi-migration-validator` has run a full sign-off pass. **Sign-off requires ALL
    of:** (a) every dashboard's whole-dashboard verdict is *faithful* — a "no" verdict blocks sign-off
