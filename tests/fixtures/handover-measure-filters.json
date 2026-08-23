@@ -1,0 +1,39 @@
+{
+  "estate": {
+    "tool": "migrate_estate"
+  },
+  "workbook": {
+    "name": "Admin_Insights_Starter",
+    "model_translation_handoff": {
+      "needs_review": [],
+      "requests": [],
+      "summary": {
+        "total": 0,
+        "translated": 0,
+        "stub": 0
+      }
+    },
+    "remediation_worklist": {
+      "items": [],
+      "summary": {
+        "visuals_flagged": 0,
+        "visuals_clean": 0
+      },
+      "visuals": []
+    },
+    "measure_filters_needs_review": {
+      "count": 2,
+      "note": "worksheet filter on an aggregate/calculated measure was left to review (no faithful slicer mapping); it changes the values shown -- re-apply it as a visual-level filter in Power BI",
+      "worksheets": [
+        {
+          "reason": "manual attention required: aggregate/measure filter on 'Activity Threshold (T/F)' is not mapped to a slicer (filter scope requires manual attention)",
+          "worksheet": "Above Thresholds - BAN"
+        },
+        {
+          "reason": "manual attention required: aggregate/measure filter on 'Days Since Last Login' is not mapped to a slicer (filter scope requires manual attention)",
+          "worksheet": "Days since last login"
+        }
+      ]
+    }
+  }
+}

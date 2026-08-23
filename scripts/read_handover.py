@@ -33,7 +33,10 @@ The problem is not that the data is unreachable. It is that reading it costs mor
   clean. There are **15** in the worked example and **26 across 9 of the 38 workbooks**, sitting
   beside a 170-item worklist that does not rank them. No persona or skill surfaced them before this
   tool; whether a human ever looked is not something this file can know, and the earlier "nobody had
-  looked at them" is narrowed accordingly.
+  looked at them" is narrowed accordingly. ``measure_filters_needs_review`` is the same class of
+  buried report-side signal, but worse for sign-off: the visual renders and the values are wrong.
+  This reader turns each dropped aggregate/calculated measure filter into a blocking work item so
+  a severity-scoped triage sees the invisible numeric-fidelity risk beside visible report defects.
 
 ⚠️ **What this tool is NOT.** An earlier version of this docstring claimed that reading the slice
 directly failed *silently* - that a truncated read returned ``needs_review[]`` (the same calcs with
@@ -121,6 +124,17 @@ CATEGORY_ORDER = [
 ]
 
 SEVERITY_ORDER = ["blocking", "high", "medium", "low"]
+
+MEASURE_FILTER_CATEGORY = "measure_filter_needs_review"
+MEASURE_FILTER_MISSING = "not_recorded"
+MEASURE_FILTER_NONE = "none"
+MEASURE_FILTER_PRESENT = "present"
+MEASURE_FILTER_INVALID = "invalid"
+MEASURE_FILTER_DEFAULT_NOTE = (
+    "worksheet filter on an aggregate/calculated measure was left to review (no faithful slicer "
+    "mapping); it changes the values shown -- re-apply it as a visual-level filter in Power BI"
+)
+MEASURE_FILTER_RISK = "INVISIBLE NUMERIC FIDELITY RISK: visual renders, values are wrong until filter is re-applied."
 
 
 class HandoverError(RuntimeError):
@@ -526,22 +540,99 @@ def _emptied_visuals(wb: dict) -> list[dict]:
     return [d for d in drops if isinstance(d, dict) and d.get("emptied")]
 
 
+def measure_filter_status(wb: dict) -> tuple[str, dict]:
+    """Return whether the engine recorded the measure-filter audit, without treating missing as zero."""
+    if "measure_filters_needs_review" not in wb:
+        return MEASURE_FILTER_MISSING, {}
+    payload = wb.get("measure_filters_needs_review")
+    if not isinstance(payload, dict):
+        return MEASURE_FILTER_INVALID, {}
+    count = payload.get("count")
+    worksheets = payload.get("worksheets")
+    if not count and not worksheets:
+        return MEASURE_FILTER_NONE, payload
+    return MEASURE_FILTER_PRESENT, payload
+
+
+def _measure_filter_note(payload: dict) -> str:
+    note = (payload.get("note") or "").strip()
+    return note or MEASURE_FILTER_DEFAULT_NOTE
+
+
+def _measure_filter_work_items(wb: dict) -> list[dict]:
+    """Synthesize dropped measure filters as report worklist items, because they change numbers."""
+    status, payload = measure_filter_status(wb)
+    if status != MEASURE_FILTER_PRESENT:
+        return []
+
+    note = _measure_filter_note(payload)
+    worksheets = payload.get("worksheets")
+    rows = [r for r in worksheets if isinstance(r, dict)] if isinstance(worksheets, list) else []
+    count = payload.get("count")
+    if not rows and count:
+        rows = [{"worksheet": f"{count} worksheet filter(s)", "reason": note}]
+
+    out = []
+    for row in rows:
+        reason = (row.get("reason") or note).strip()
+        out.append(
+            {
+                "category": MEASURE_FILTER_CATEGORY,
+                "severity": "blocking",
+                "reason": f"{MEASURE_FILTER_RISK} {reason}",
+                "remediation": f"{note} ({MEASURE_FILTER_RISK})",
+                "worksheet": row.get("worksheet") or "?",
+            }
+        )
+    return out
+
+
+def report_items_of(wb: dict) -> list[dict]:
+    """Report-side work queue, including invisible numeric-fidelity measure filter drops."""
+    raw = worklist_of(wb).get("items") or []
+    items = [i for i in raw if isinstance(i, dict)] if isinstance(raw, list) else []
+    return items + _measure_filter_work_items(wb)
+
+
+def _severity_counts(items: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        sev = str(item.get("severity") or "?")
+        counts[sev] = counts.get(sev, 0) + 1
+    return counts
+
+
+def _measure_filter_summary_line(wb: dict) -> str | None:
+    status, payload = measure_filter_status(wb)
+    if status == MEASURE_FILTER_PRESENT:
+        count = payload.get("count") or len(_measure_filter_work_items(wb))
+        return (
+            f"        !! {count} dropped aggregate/calculated measure filter(s) - "
+            "INVISIBLE numeric-fidelity risk; values change while visuals still render"
+        )
+    if status == MEASURE_FILTER_MISSING:
+        return "        measure filters: NOT RECORDED (key missing; this is not a zero-dropped signal)"
+    if status == MEASURE_FILTER_INVALID:
+        return "        measure filters: INVALID SHAPE (key present but not an object; inspect raw handover)"
+    return None
+
+
 def _report_section(wb: dict) -> list[str]:
-    rw = worklist_of(wb)
-    items = rw.get("items") if isinstance(rw.get("items"), list) else []
-    summary = rw.get("summary") if isinstance(rw.get("summary"), dict) else {}
+    items = report_items_of(wb)
     fidelity = wb.get("viz_fidelity") if isinstance(wb.get("viz_fidelity"), list) else []
     emptied = _emptied_visuals(wb)
+    measure_line = _measure_filter_summary_line(wb)
 
-    if not items and not fidelity:
+    if not items and not fidelity and not measure_line:
         return ["REPORT: no remediation worklist in this handover.", ""]
 
     out = []
+    summary = worklist_of(wb).get("summary") if isinstance(worklist_of(wb).get("summary"), dict) else {}
     flagged = summary.get("visuals_flagged", "?")
     clean = summary.get("visuals_clean", "?")
     out.append(f"REPORT: {len(items)} remediation item(s), {flagged} visual(s) flagged, {clean} clean")
 
-    by_sev = summary.get("by_severity") if isinstance(summary.get("by_severity"), dict) else {}
+    by_sev = _severity_counts(items)
     if by_sev:
         parts = [f"{s} {by_sev[s]}" for s in SEVERITY_ORDER if s in by_sev]
         parts += [f"{s} {n}" for s, n in sorted(by_sev.items()) if s not in SEVERITY_ORDER]
@@ -556,6 +647,8 @@ def _report_section(wb: dict) -> list[str]:
 
     if emptied:
         out.append(f"        !! {len(emptied)} visual(s) EMPTIED - every field binding was dropped")
+    if measure_line:
+        out.append(measure_line)
 
     out += ["", "        next step: --viz    (full worklist)   --viz --severity blocking", ""]
     return out
@@ -792,7 +885,11 @@ def _budgeted_worklist(grouped: dict[str, list[dict]], budget: int) -> tuple[lis
 
 
 def _viz_sections(
-    wb: dict, items: list[dict], grouped: dict[str, list[dict]], severity: str | None, budget: int
+    wb: dict,
+    items: list[dict],
+    grouped: dict[str, list[dict]],
+    filters: tuple[str | None, str | None],
+    budget: int,
 ) -> tuple[list[str], int]:
     """Emptied visuals + fidelity counts + the item-count heading, all charged to ``budget``.
 
@@ -800,10 +897,18 @@ def _viz_sections(
     worklist. Split out of `render_viz` only to keep that function under pylint's local-variable
     cap; the ordering inside is load-bearing and commented where it is.
     """
-    counts = _fidelity_counts(wb)
-    budget -= sum(_blen(x) + 1 for x in counts)
+    severity, category = filters
+    counts = _fidelity_counts(wb) if category is None else []
+    measure_line = _measure_filter_summary_line(wb) if category in (None, MEASURE_FILTER_CATEGORY) else None
+    measure_lines = [measure_line] if measure_line else []
+    budget -= sum(_blen(x) + 1 for x in counts + measure_lines)
 
-    scope = f" at severity {severity!r}" if severity else ""
+    scope_parts = []
+    if severity:
+        scope_parts.append(f"severity {severity!r}")
+    if category:
+        scope_parts.append(f"category {category!r}")
+    scope = " at " + ", ".join(scope_parts) if scope_parts else ""
     section = (
         f"--- {len(items)} ITEM(S) IN {len(grouped)} CATEGORY(IES) ---"
         if items
@@ -814,21 +919,23 @@ def _viz_sections(
     # how a section that IS budgeted still overshoots by exactly one heading.
     budget -= _blen(section) + 1
 
-    emptied = _emptied_block(_emptied_visuals(wb), budget)
+    emptied = _emptied_block(_emptied_visuals(wb), budget) if category is None else []
     budget -= sum(_blen(x) + 1 for x in emptied)
-    return emptied + counts + [section], budget
+    return emptied + counts + measure_lines + [section], budget
 
 
-def render_viz(wb_name: str, wb: dict, severity: str | None, max_bytes: int) -> str:
+def render_viz(wb_name: str, wb: dict, severity: str | None, category: str | None, max_bytes: int) -> str:
     """Report-side queue: emptied visuals first, then worklist items grouped by category.
 
     ``max_bytes`` governs EVERY section, the emptied-visuals block included. That block keeps its
     priority - it is the highest-severity content in the file, so it is claimed from the budget
     before any worklist detail - but priority is not exemption: see `_emptied_block`.
     """
-    items = [i for i in (worklist_of(wb).get("items") or []) if isinstance(i, dict)]
+    items = report_items_of(wb)
     if severity:
         items = [i for i in items if (i.get("severity") or "").lower() == severity.lower()]
+    if category:
+        items = [i for i in items if (i.get("category") or "uncategorised") == category]
 
     out = [f"=== {_clip(wb_name)} - REPORT REMEDIATION QUEUE ===", ""]
     banner_reserve = max(BANNER_RESERVE_FLOOR, max_bytes // 4)
@@ -838,7 +945,7 @@ def render_viz(wb_name: str, wb: dict, severity: str | None, max_bytes: int) -> 
     for item in items:
         grouped.setdefault(item.get("category") or "uncategorised", []).append(item)
 
-    head, budget = _viz_sections(wb, items, grouped, severity, budget)
+    head, budget = _viz_sections(wb, items, grouped, (severity, category), budget)
     out += head
 
     if not items:
@@ -851,7 +958,13 @@ def render_viz(wb_name: str, wb: dict, severity: str | None, max_bytes: int) -> 
     out += body
 
     if omitted:
-        out += _truncation_banner(max_bytes, shown, omitted, banner_reserve, recovery=RECOVERY_BY_SEVERITY)
+        out += _truncation_banner(
+            max_bytes,
+            shown,
+            omitted,
+            banner_reserve,
+            recovery=RECOVERY_BY_JSON if category else RECOVERY_BY_SEVERITY,
+        )
     return "\n".join(out)
 
 
@@ -881,19 +994,35 @@ def render_default(wb_name: str, wb: dict, target: Path, max_bytes: int) -> str:
     return "\n".join(out + report + [NEEDS_REVIEW_NOTE])
 
 
-def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int]:
-    """One workbook's urgency tuple: (name, calc requests, worklist items, blocking, emptied)."""
-    items = [i for i in (worklist_of(wb).get("items") or []) if isinstance(i, dict)]
+def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool]:
+    """Urgency tuple: (name, calc requests, report items, blocking, emptied, measure filters, missing)."""
+    items = report_items_of(wb)
     blocking = sum(1 for i in items if (i.get("severity") or "").lower() == "blocking")
-    return name, len(requests_of(wb)), len(items), blocking, len(_emptied_visuals(wb))
+    status, payload = measure_filter_status(wb)
+    measure_filters = int(payload.get("count") or 0) if status == MEASURE_FILTER_PRESENT else 0
+    return (
+        name,
+        len(requests_of(wb)),
+        len(items),
+        blocking,
+        len(_emptied_visuals(wb)),
+        measure_filters,
+        status == MEASURE_FILTER_MISSING,
+    )
 
 
-def _list_line(row: tuple[str, int, int, int, int]) -> str:
+def _list_line(row: tuple[str, int, int, int, int, int, bool]) -> str:
     """Format one `--list` row. The name is clipped so a long one cannot push the line off-cap."""
-    name, n_reqs, n_items, blocking, emptied = row
+    name, n_reqs, n_items, blocking, emptied, measure_filters, measure_missing = row
     short = _clip(name, 52)
     line = f"    {short:<52} {n_reqs:>4} calc request(s)  {n_items:>4} report item(s)  {blocking:>3} blocking"
-    return line + (f"  !! {emptied} EMPTIED" if emptied else "")
+    if emptied:
+        line += f"  !! {emptied} EMPTIED"
+    if measure_filters:
+        line += f"  !! {measure_filters} MEASURE-FILTERS"
+    elif measure_missing:
+        line += "  ?? measure-filter key missing"
+    return line
 
 
 def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
@@ -907,10 +1036,11 @@ def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     """
     rows = [_list_row(name, wb) for name, wb, _ in found]
     out = [
-        f"{len(found)} workbook(s), most urgent first (emptied visuals > blocking items > queue size):",
+        f"{len(found)} workbook(s), most urgent first "
+        "(invisible measure filters > emptied visuals > blocking items > queue size):",
         "",
     ]
-    ranked = sorted(rows, key=lambda r: (-r[4], -r[3], -(r[1] + r[2]), r[0].lower()))
+    ranked = sorted(rows, key=lambda r: (-r[5], -r[4], -r[3], -(r[1] + r[2]), r[0].lower()))
     budget = max_bytes - sum(_blen(x) + 1 for x in out)
     more = "    ... and {n} more workbook(s) not listed here; raise --max-bytes"
     return "\n".join(out + _fit_lines([_list_line(r) for r in ranked], budget, more))
@@ -927,8 +1057,12 @@ def build_json(wb_name: str, wb: dict, category: str | None) -> dict:
         "guidance": guidance_by_category(requests_of(wb)),
         "counts": category_counts(requests_of(wb)),
         "requests": slim,
-        "report_items": worklist_of(wb).get("items") or [],
+        "report_items": report_items_of(wb),
         "emptied_visuals": _emptied_visuals(wb),
+        "measure_filters_needs_review": wb.get("measure_filters_needs_review")
+        if "measure_filters_needs_review" in wb
+        else MEASURE_FILTER_MISSING,
+        "measure_filter_items": _measure_filter_work_items(wb),
         "viz_fidelity": [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)],
     }
 
@@ -946,7 +1080,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("target", type=Path, help="bundle dir, handover/<workbook>.json, or report.json")
     p.add_argument("--workbook", help="select one workbook when the target holds several")
-    p.add_argument("--category", help="print full repair detail for one category")
+    p.add_argument(
+        "--category", help="print full repair detail for one model category; with --viz, filter report items"
+    )
     p.add_argument("--name", help="print one calculation in full, by name")
     p.add_argument("--viz", action="store_true", help="print the report-side remediation queue")
     p.add_argument(
@@ -987,10 +1123,10 @@ def _force_utf8_stdout() -> None:
 
 def _render(args: argparse.Namespace, wb_name: str, wb: dict, source: Path, budget: int) -> str:
     """Pick the view. Every one of these is capped; `--name` is handled by the caller."""
+    if args.viz:
+        return render_viz(wb_name, wb, args.severity, args.category, budget)
     if args.category:
         return render_category(wb_name, requests_of(wb), args.category, budget)
-    if args.viz:
-        return render_viz(wb_name, wb, args.severity, budget)
     if args.fidelity:
         return render_fidelity(wb_name, wb, budget)
     return render_default(wb_name, wb, source, budget)
