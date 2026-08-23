@@ -1,0 +1,3 @@
+relationship e6070890-f01f-58d8-8513-f729c497a61e
+	fromColumn: 'sqlproxy (Groups)'.admin_insights_publish_timestamp
+	toColumn: Date.Date

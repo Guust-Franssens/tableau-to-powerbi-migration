@@ -1,0 +1,16 @@
+table _Measures
+
+	measure 'Group Sort' = BLANK()
+		lineageTag: 1c384e71-b155-5ffb-ba1c-8dc53914ce1d
+		annotation TableauFormula = CASE [Parameters].[Sort Users by... (copy)_5898871118881927168] WHEN "Group Name" THEN FLOAT([group_name]) WHEN "# Members ▲" THEN ZN([Calculation_5898871118888693762]) WHEN "# Members ▼" THEN -ZN([Calculation_5898871118888693762]) END
+		annotation SummarizationSetBy = Automatic
+
+	measure 'Dead End Stub' = BLANK()
+		lineageTag: 40a0692a-3eee-5bc8-8e4a-6b5963074270
+		annotation SummarizationSetBy = Automatic
+
+	measure 'Avg(0)' = AVERAGE(sqlproxy[event_id])
+		lineageTag: 887c0d0e-6c66-57d8-a5c5-4d9a2a23a296
+		annotation TableauFormula = AVG(0)
+		annotation TranslatedBy = deterministic
+		annotation SummarizationSetBy = Automatic

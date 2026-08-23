@@ -1,0 +1,74 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/1.0.0/schema.json",
+  "name": "v-page-GroupDrilbd8fd9a2",
+  "position": {
+    "x": 0.0,
+    "y": 270.31,
+    "z": 100,
+    "width": 820.73,
+    "height": 497.69,
+    "tabOrder": 6
+  },
+  "visual": {
+    "visualType": "clusteredBarChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "sqlproxy"
+                    }
+                  },
+                  "Property": "group_name"
+                }
+              },
+              "queryRef": "sqlproxy.group_name",
+              "nativeQueryRef": "group_name"
+            }
+          ]
+        },
+        "Tooltips": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {
+                    "SourceRef": {
+                      "Entity": "_Measures"
+                    }
+                  },
+                  "Property": "Group Sort"
+                }
+              },
+              "queryRef": "_Measures.Group Sort",
+              "nativeQueryRef": "Group Sort"
+            }
+          ]
+        }
+      },
+      "sortDefinition": {
+        "sort": [
+          {
+            "field": {
+              "Measure": {
+                "Expression": {
+                  "SourceRef": {
+                    "Entity": "_Measures"
+                  }
+                },
+                "Property": "Group Sort"
+              }
+            },
+            "direction": "Ascending"
+          }
+        ],
+        "isDefaultSort": false
+      }
+    },
+    "drillFilterOtherVisuals": true
+  }
+}

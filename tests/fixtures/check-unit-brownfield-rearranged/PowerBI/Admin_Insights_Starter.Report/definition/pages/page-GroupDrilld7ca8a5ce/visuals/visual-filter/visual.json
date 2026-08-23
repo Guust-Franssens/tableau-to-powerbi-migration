@@ -1,0 +1,50 @@
+{
+  "name": "visual-filter",
+  "visual": {
+    "visualType": "tableEx"
+  },
+  "objects": {
+    "general": [
+      {
+        "properties": {
+          "filter": {
+            "filter": {
+              "Version": 2,
+              "From": [
+                {
+                  "Name": "m",
+                  "Entity": "_Measures",
+                  "Type": 0
+                }
+              ],
+              "Where": [
+                {
+                  "Condition": {
+                    "Comparison": {
+                      "ComparisonKind": 0,
+                      "Left": {
+                        "Measure": {
+                          "Expression": {
+                            "SourceRef": {
+                              "Source": "m"
+                            }
+                          },
+                          "Property": "Group Sort"
+                        }
+                      },
+                      "Right": {
+                        "Literal": {
+                          "Value": "1L"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

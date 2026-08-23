@@ -1,0 +1,27 @@
+table sqlproxy
+
+	column Calculation_920704701759684608
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 738d972e-b6f7-5707-96ee-db179fe5e74c
+		summarizeBy: none
+		sourceColumn: Calculation_920704701759684608
+
+		annotation SummarizationSetBy = Automatic
+
+	column event_id
+		dataType: int64
+		formatString: #,0
+		lineageTag: dbf0b42e-5c3c-5213-9441-703851f8bfaa
+		summarizeBy: sum
+		sourceColumn: event_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column event_type
+		dataType: string
+		lineageTag: 2d245766-abbd-5c44-bcac-08388367bbad
+		summarizeBy: none
+		sourceColumn: event_type
+
+		annotation SummarizationSetBy = Automatic

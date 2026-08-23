@@ -148,6 +148,58 @@ def no_native_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cu, "claimed_only_checks", lambda: [])
 
 
+def test_brownfield_empty_folder_says_expected_shape(tmp_path: Path) -> None:
+    """Wrong-shape NOT_CHECKED output names the expected bundle/unit shapes."""
+    report = cu.run_all(tmp_path)
+    rendered = cu.render(report)
+
+    assert report["status"] == cu.STATUS_NOT_CHECKED
+    assert report["brownfield"]["found_count"] == 0
+    assert "not_checked_missing_input=" in rendered
+    assert "expected a migration unit or engine bundle shaped as one of:" in rendered
+    assert "reorganisation plan (not applied): no recognised artifacts to place" in rendered
+
+
+def test_brownfield_rearranged_real_artifacts_emit_plan() -> None:
+    """Real artifacts in someone else's folders are reported with concrete proposed destinations."""
+    fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-brownfield-rearranged"
+
+    report = cu.run_all(fixture)
+    rendered = cu.render(report)
+
+    assert report["brownfield"]["found_count"] >= 4
+    assert not report["brownfield"]["recognized_target_shape"]
+    assert f"source{os.sep}migration-spec.json" in rendered
+    assert f"PowerBI{os.sep}Admin_Insights_Starter.Report" in rendered
+    assert f"PowerBI{os.sep}Admin_Insights_Starter.SemanticModel" in rendered
+    assert "reorganisation plan (not applied):" in rendered
+    assert "working copy:" in rendered
+    assert "engine truth:" in rendered
+
+
+def test_brownfield_partial_pbip_reports_evidenced_and_missing_phases() -> None:
+    """A partial migration is not called missing; evidenced phases and absent phases are separated."""
+    fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-brownfield-partial-pbip"
+
+    report = cu.run_all(fixture)
+    rendered = cu.render(report)
+
+    assert report["brownfield"]["recognized_target_shape"]
+    assert "PBIR reports: EVIDENCED" in rendered
+    assert "semantic models: EVIDENCED" in rendered
+    assert "source intent: NOT_EVIDENCED (no migration-spec.json found)" in rendered
+    assert "handover queue: NOT_EVIDENCED (no handover/*.json slices found)" in rendered
+
+
+def test_brownfield_canonical_bundle_stays_quiet() -> None:
+    """A recognisable bundle does not gain brownfield guidance noise."""
+    fixture = REPO_ROOT / "tests" / "fixtures" / "check-gates-dirty"
+
+    rendered = cu.render(cu.run_all(fixture))
+
+    assert "BROWNFIELD DISCOVERY" not in rendered
+
+
 def test_page_count_mismatch_is_a_precondition_and_stops_before_oracle(tmp_path: Path) -> None:
     """Kills: treating missing pages as just another row and continuing into noisy page checks."""
     _write_spec(tmp_path, ["A", "B"])

@@ -1,0 +1,3 @@
+expression Server_sqlproxy = "10ax.online.tableau.com" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+
+expression Database_sqlproxy = "TSEvents" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
