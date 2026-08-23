@@ -259,6 +259,15 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   `visual.json`); the theme file's internal `name` must exactly equal the `report.json` `customTheme`
   reference **including `.json`**. Single-line caption/legend textboxes need ≥3.4 grid rows or they trip
   `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR`.
+- **`reportVersionAtImport` belongs inside every `themeCollection` entry, never at the top level of
+  `report.json`.** 🟢 CLI-verified against `powerbi-report-author` 0.1.4. Removing it from
+  `themeCollection.baseTheme` raises a schema error (`/themeCollection/baseTheme must have required
+  property 'reportVersionAtImport'`); removing it from `customTheme` raises both
+  `PBIR_THEME_VERSION_AT_IMPORT_MISSING` and the schema error; adding it at report root raises
+  `PBIR_SCHEMA_VALIDATION_ERROR` for an additional property. Ground-truth committed shape:
+  `examples/shipping-kpis/fabric/ShippingKPIs.Report/definition/report.json` has top-level keys
+  `$schema`, `themeCollection`, `resourcePackages`, `settings`, and both theme entries carry
+  `name`, `type`, `reportVersionAtImport`.
 - **What-if % slicer format: `0.0"%"` (quoted) when the stored value is pre-scaled (e.g. 22.8); `0.0%`
   (unquoted) only when it is a true 0–1 fraction** — mixing them mis-scales the display by 100×.
 - **Check `formatString` against the field's actual numeric scale, not its semantic meaning.** A source
