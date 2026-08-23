@@ -27,6 +27,15 @@ class Entry:
     link: str | None = None
 
 
+@dataclass
+class ExclusionSetState:
+    """Parser state for an exact explicit-exclusion path set."""
+
+    in_paths: bool = False
+    base: str = ""
+    reason: str = ""
+
+
 def _git_files() -> set[str]:
     """Return tracked plus untracked, non-ignored files so local additions fail before commit."""
     result = subprocess.run(
@@ -75,18 +84,56 @@ def _extract_link(cell: str, line_number: int) -> tuple[str, str | None]:
     raise ValueError(f"line {line_number}: path cell must be [`path`](link) or `path`: {cell}")
 
 
+def _parse_exclusion_set_line(
+    stripped: str,
+    line_number: int,
+    state: ExclusionSetState,
+) -> tuple[bool, Entry | None]:
+    """Parse compact exact-path exclusion sets under the explicit-exclusions section."""
+    handled = True
+    entry = None
+    if stripped.startswith("### "):
+        state.in_paths = False
+        state.base = ""
+        state.reason = ""
+    elif stripped.startswith("Base:"):
+        state.base = stripped.removeprefix("Base:").strip().strip("`")
+    elif stripped.startswith("Reason:"):
+        state.reason = stripped.removeprefix("Reason:").strip()
+    elif stripped == "```text" and state.reason:
+        state.in_paths = True
+    elif stripped == "```" and state.in_paths:
+        state.in_paths = False
+    elif state.in_paths and stripped:
+        path = f"{state.base.rstrip('/')}/{stripped}" if state.base else stripped
+        entry = Entry(path=path, line_number=line_number, reason=state.reason)
+    else:
+        handled = False
+    return handled, entry
+
+
 def parse_index() -> tuple[list[Entry], list[Entry]]:
     """Return (indexed_entries, explicit_exclusions)."""
     indexed: list[Entry] = []
     excluded: list[Entry] = []
     in_exclusions = False
+    exclusion_set = ExclusionSetState()
 
     for line_number, line in enumerate(INDEX_PATH.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
         if line.startswith("## Explicit exclusions"):
             in_exclusions = True
             continue
         if line.startswith("## ") and not line.startswith("## Explicit exclusions"):
             in_exclusions = False
+            exclusion_set = ExclusionSetState()
+        if in_exclusions:
+            handled, entry = _parse_exclusion_set_line(stripped, line_number, exclusion_set)
+            if entry is not None:
+                excluded.append(entry)
+                continue
+            if handled:
+                continue
         if not line.startswith("|"):
             continue
         cells = _split_table_row(line)
