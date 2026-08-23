@@ -4,17 +4,27 @@ Tier-2 navigation contract for agents: choose the task row, then load that file 
 
 Use this for searchable knowledge. Always-needed failure rules stay inline in `AGENTS.md` and generated personas.
 
+## Start here for a migration unit
+
+This is the tier-1 route; use the tables only after you know the specific question.
+
+1. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status check and final gate; direct `scripts/check_*.py` gates are isolation tools.
+2. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason before authoring fixes.
+3. Load the layer gotchas skill before editing: `powerbi-semantic-model-gotchas` for TMDL/DAX, `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh handoff, and `powerbi-ai-readiness` for Copilot/Q&A metadata.
+
+Toolkit-maintenance scripts stay reachable through `scripts/README.md` but are not part of this per-unit route.
+
 ## Section index
 
 | Section | What it covers |
 |---|---|
-| Author PBIR visuals | Proven `.github/pbi.kb/` visual notes and `visual.json` fixtures. |
-| Validate an artifact | `scripts/check_*.py` gates and when to run each one. |
+| Author PBIR visuals | Long-tail visual/idiom lookup through the cookbook, after report gotchas. |
+| Validate an artifact | `check_unit` first; direct gates only for isolating findings. |
 | Invoke a custom subagent | The four persona files exactly as subagents receive them. |
-| Load a repo skill | Repo-local skills to invoke before specialized Power BI work. |
+| Load a repo skill | Layer gotchas and refresh/AI skills used by the per-unit route. |
 | Find migration guidance | Operator, credential, migration-spec, reference-capture, and DAX/map guidance. |
-| Navigate repo artifacts | Top-level README, examples, migrations, scripts, and contribution/security docs. |
-| Explicit exclusions | Eligible files intentionally not used as navigation targets, with reasons. |
+| Navigate repo artifacts | Repo/example/fixture docs for specific follow-up questions. |
+| Explicit exclusions | Eligible files intentionally routed through a better index, with reasons. |
 
 ## Inclusion rule
 
@@ -24,8 +34,8 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 
 | Task | Path | Read when... |
 |---|---|---|
-| Author PBIR visuals | [`.github/pbi.kb/visual-cookbook.md`](../.github/pbi.kb/visual-cookbook.md) | Read before choosing any visual encoding; it routes to the visual/idiom files with confidence tiers and Tableau mappings. |
-| Validate an artifact | [`scripts/README.md`](../scripts/README.md) | Read when choosing validation/check gates; it is the curated scripts index with purpose, caller, and exit-code context. |
+| Author PBIR visuals | [`.github/pbi.kb/visual-cookbook.md`](../.github/pbi.kb/visual-cookbook.md) | Long-tail after `powerbi-report-gotchas`; it routes to visual/idiom files with confidence tiers and Tableau mappings. |
+| Validate an artifact | [`scripts/README.md`](../scripts/README.md) | Prefer `check_unit --scope <layer>`; use this only to choose a direct gate or maintenance script. |
 | Check third-party notices | [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | Read for license/notice questions. |
 | Contribute safely | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Read before code/docs changes. |
 | Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Read when reasoning about root sessions, subagents, skill visibility, and inheritance boundaries. |
@@ -89,7 +99,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 
 ### Exclusion set: PBIR visual cookbook entries
 
-Reason: indexed by `.github/pbi.kb/visual-cookbook.md`, which carries confidence tiers and Tableau idiom mapping this flat list cannot.
+Reason: indexed by `.github/pbi.kb/visual-cookbook.md`, which carries confidence tiers and Tableau idiom mapping this flat list cannot; consult after `powerbi-report-gotchas`, not as the first report step.
 Base: `.github/pbi.kb/visuals/`
 
 ```text
@@ -155,7 +165,7 @@ zoom-slider.visual.json
 
 ### Exclusion set: validation gate implementations
 
-Reason: indexed by `scripts/README.md`, which carries purpose, caller, and exit-code guidance this flat list cannot.
+Reason: prefer `check_unit --scope <layer>`; these direct gates are indexed by `scripts/README.md` for isolating a single finding.
 Base: `scripts/`
 
 ```text
