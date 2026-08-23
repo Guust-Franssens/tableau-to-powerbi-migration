@@ -32,6 +32,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Handle conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Conduct/community questions. |
 | Handle security reports | [`SECURITY.md`](../SECURITY.md) | Security disclosure routing. |
 | Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Root sessions, subagents, skill visibility. |
+| Find migration guidance | [`docs/agent-capability-wiring.md`](../docs/agent-capability-wiring.md) | Registry of shipped capabilities that must be visible to agents. |
 | Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | AI-instruction authoring redirect. |
 | Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |
 | Find migration guidance | [`docs/credential-gate-testing.md`](../docs/credential-gate-testing.md) | Credential-gate tests and audit behavior. |
@@ -129,6 +130,7 @@ zoom-slider.visual.json
 Reason: prefer `check_unit --scope <layer>`; `scripts/README.md` indexes direct gates for isolation.
 Base: `scripts/`
 ```text
+check_agent_capabilities.py
 check_ai_readiness.py
 check_blank_placeholders.py
 check_datamodel.py
