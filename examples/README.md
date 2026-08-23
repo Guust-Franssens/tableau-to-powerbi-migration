@@ -34,3 +34,19 @@ original dashboards belongs to their respective Tableau Public authors; follow e
 
 > Screenshots are committed under `examples/<slug>/reference/` (`tableau-*` = source reference,
 > `powerbi-*` = the Power BI Desktop render). The [showcase](../docs/showcase/README.md) features the render-verified pairs.
+
+## Agent evidence files
+
+These nested Markdown files carry example-specific dispositions, relationships, AI instructions, or report plans. Use this table after choosing an example above.
+
+| File | Use when... |
+|---|---|
+| [`examples/electricity-per-capita/fabric/DISPOSITIONS.md`](electricity-per-capita/fabric/DISPOSITIONS.md) | Use when checking migration disposition decisions and caveats. |
+| [`examples/fast-fashion-impact/fabric/DISPOSITIONS.md`](fast-fashion-impact/fabric/DISPOSITIONS.md) | Use when checking migration disposition decisions and caveats. |
+| [`examples/fast-fashion-impact/fabric/RELATIONSHIPS.md`](fast-fashion-impact/fabric/RELATIONSHIPS.md) | Use when checking relationship-modeling decisions. |
+| [`examples/health-tracker/ai-instructions.md`](health-tracker/ai-instructions.md) | Use when comparing committed AI-instruction examples. |
+| [`examples/interactive-resume/fabric/DISPOSITIONS.md`](interactive-resume/fabric/DISPOSITIONS.md) | Use when checking migration disposition decisions and caveats. |
+| [`examples/price-of-prosperity/fabric/DISPOSITIONS.md`](price-of-prosperity/fabric/DISPOSITIONS.md) | Use when checking migration disposition decisions and caveats. |
+| [`examples/quadruple-axis-charts/report_build/PAGE-PLAN.md`](quadruple-axis-charts/report_build/PAGE-PLAN.md) | Use when comparing report-planning artifacts. |
+| [`examples/superstore-sales-performance/_brief/report-spec.md`](superstore-sales-performance/_brief/report-spec.md) | Use when comparing report-planning briefs. |
+| [`examples/wind-energy-utilization/ai-instructions.md`](wind-energy-utilization/ai-instructions.md) | Use when comparing committed AI-instruction examples. |

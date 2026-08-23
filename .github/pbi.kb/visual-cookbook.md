@@ -250,6 +250,44 @@ is wrong or lossy.
 - `visuals/<type>.visual.json` — one minimal worked example per type (tier noted in its sibling `.md`).
 - `visuals/<type>.md` — roles, the idiom notes, tier (🟡/🟢), and any human-capture instructions.
 
+## Local visual-file reachability
+
+This exact list keeps the per-file notes and fixtures reachable after `docs/INDEX.md` points here instead of listing them flat.
+
+| Entry | Local files |
+|---|---|
+| `actionButton` | [`actionButton.md`](visuals/actionButton.md), [`actionButton.visual.json`](visuals/actionButton.visual.json) |
+| `areaChart` | [`areaChart.md`](visuals/areaChart.md), [`areaChart.visual.json`](visuals/areaChart.visual.json) |
+| `azureMap` | [`azureMap.md`](visuals/azureMap.md) |
+| `card` | [`card.md`](visuals/card.md), [`card.visual.json`](visuals/card.visual.json) |
+| `decompositionTreeVisual` | [`decompositionTreeVisual.md`](visuals/decompositionTreeVisual.md), [`decompositionTreeVisual.visual.json`](visuals/decompositionTreeVisual.visual.json) |
+| `donutChart` | [`donutChart.md`](visuals/donutChart.md), [`donutChart.visual.json`](visuals/donutChart.visual.json) |
+| `error-bars` | [`error-bars.md`](visuals/error-bars.md), [`error-bars.visual.json`](visuals/error-bars.visual.json) |
+| `forecast` | [`forecast.md`](visuals/forecast.md) |
+| `funnel` | [`funnel.md`](visuals/funnel.md), [`funnel.visual.json`](visuals/funnel.visual.json) |
+| `heatMap` | [`heatMap.md`](visuals/heatMap.md), [`heatMap.visual.json`](visuals/heatMap.visual.json) |
+| `hundredPercentStackedAreaChart` | [`hundredPercentStackedAreaChart.md`](visuals/hundredPercentStackedAreaChart.md), [`hundredPercentStackedAreaChart.visual.json`](visuals/hundredPercentStackedAreaChart.visual.json) |
+| `hundredPercentStackedColumnChart` | [`hundredPercentStackedColumnChart.md`](visuals/hundredPercentStackedColumnChart.md), [`hundredPercentStackedColumnChart.visual.json`](visuals/hundredPercentStackedColumnChart.visual.json) |
+| `keyDriversVisual` | [`keyDriversVisual.md`](visuals/keyDriversVisual.md), [`keyDriversVisual.visual.json`](visuals/keyDriversVisual.visual.json) |
+| `kpi` | [`kpi.md`](visuals/kpi.md), [`kpi.visual.json`](visuals/kpi.visual.json) |
+| `lineClusteredColumnComboChart` | [`lineClusteredColumnComboChart.md`](visuals/lineClusteredColumnComboChart.md), [`lineClusteredColumnComboChart.visual.json`](visuals/lineClusteredColumnComboChart.visual.json) |
+| `lineStackedColumnComboChart` | [`lineStackedColumnComboChart.md`](visuals/lineStackedColumnComboChart.md), [`lineStackedColumnComboChart.visual.json`](visuals/lineStackedColumnComboChart.visual.json) |
+| `multiRowCard` | [`multiRowCard.md`](visuals/multiRowCard.md), [`multiRowCard.visual.json`](visuals/multiRowCard.visual.json) |
+| `pieChart` | [`pieChart.md`](visuals/pieChart.md), [`pieChart.visual.json`](visuals/pieChart.visual.json) |
+| `reference-lines` | [`reference-lines.md`](visuals/reference-lines.md), [`reference-lines.visual.json`](visuals/reference-lines.visual.json) |
+| `ribbonChart` | [`ribbonChart.md`](visuals/ribbonChart.md), [`ribbonChart.visual.json`](visuals/ribbonChart.visual.json) |
+| `shape` | [`shape.md`](visuals/shape.md), [`shape.visual.json`](visuals/shape.visual.json) |
+| `shapeMap` | [`shapeMap.md`](visuals/shapeMap.md), [`shapeMap.visual.json`](visuals/shapeMap.visual.json) |
+| `smallmultiples` | [`smallmultiples.md`](visuals/smallmultiples.md), [`smallmultiples.visual.json`](visuals/smallmultiples.visual.json) |
+| `stackedAreaChart` | [`stackedAreaChart.md`](visuals/stackedAreaChart.md), [`stackedAreaChart.visual.json`](visuals/stackedAreaChart.visual.json) |
+| `step-line` | [`step-line.md`](visuals/step-line.md) |
+| `table-cond-format` | [`table-cond-format.md`](visuals/table-cond-format.md), [`table-cond-format.visual.json`](visuals/table-cond-format.visual.json) |
+| `table-databars` | [`table-databars.md`](visuals/table-databars.md), [`table-databars.visual.json`](visuals/table-databars.visual.json) |
+| `textSlicer` | [`textSlicer.md`](visuals/textSlicer.md) |
+| `treemap` | [`treemap.md`](visuals/treemap.md), [`treemap.visual.json`](visuals/treemap.visual.json) |
+| `waterfallChart` | [`waterfallChart.md`](visuals/waterfallChart.md), [`waterfallChart.visual.json`](visuals/waterfallChart.visual.json) |
+| `zoom-slider` | [`zoom-slider.md`](visuals/zoom-slider.md), [`zoom-slider.visual.json`](visuals/zoom-slider.visual.json) |
+
 ## Human capture workflow (for 🔴 render-uncertain items)
 
 1. Open the cookbook capture report (a PBIP bound to a simple generic model) in Power BI Desktop.
