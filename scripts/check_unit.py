@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import check_desktop_orphans as check_desktop_orphans_module
 from bundle_corpus import shipping_models, shipping_reports
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -70,7 +71,9 @@ MODEL_CHECK_IDS = frozenset(
 )
 REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
 INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings"})
-ALL_ONLY_CHECK_IDS = frozenset({"engine-receipt", "visual-layer-done", "visual-comparison-done", "finalized"})
+ALL_ONLY_CHECK_IDS = frozenset(
+    {"engine-receipt", "desktop-orphans", "visual-layer-done", "visual-comparison-done", "finalized"}
+)
 
 OWNER_HINTS = {
     "blank-placeholders": "integration (model placeholder referenced by report)",
@@ -89,6 +92,7 @@ OWNER_HINTS = {
     "oracle-coverage": "report/reference capture",
     "occlusion": "report",
     "engine-receipt": "orchestrator",
+    "desktop-orphans": "orchestrator",
 }
 
 
@@ -809,6 +813,26 @@ def claimed_only_checks() -> list[dict[str, Any]]:
     ]
 
 
+def check_desktop_orphans(target: Path) -> dict[str, Any]:
+    """Fail only on run-owned Desktop instances left live; unrelated instances are ignored."""
+    result = check_desktop_orphans_module.audit_target(target)
+    native_status = str(result.get("status") or check_desktop_orphans_module.STATUS_ERROR)
+    if native_status == check_desktop_orphans_module.STATUS_OK:
+        status, native_exit = STATUS_PASS, check_desktop_orphans_module.EXIT_OK
+    elif native_status == check_desktop_orphans_module.STATUS_ORPHANS:
+        status, native_exit = STATUS_FINDINGS, check_desktop_orphans_module.EXIT_ORPHANS
+    else:
+        status, native_exit = STATUS_NOT_CHECKED, check_desktop_orphans_module.EXIT_ERROR
+    return {
+        "id": "desktop-orphans",
+        "status": status,
+        "native_status": native_status,
+        "native_exit": native_exit,
+        "native_command": _command_text([sys.executable, str(SCRIPT_DIR / "check_desktop_orphans.py"), str(target)]),
+        **result,
+    }
+
+
 def check_engine_receipt(target: Path) -> dict[str, Any]:
     """Engine receipt presence and drift; check_engine_receipts.py remains the drift authority."""
     receipt = target / "engine-output-receipt.json"
@@ -935,6 +959,8 @@ def run_all(
         checks.append(check_engine_receipt(target))
     _append_cli_checks(checks, target, exemptions, scope)
     _append_model_readiness_checks(checks, target, scope)
+    if _in_scope("desktop-orphans", scope):
+        checks.append(check_desktop_orphans(target))
     if scope == SCOPE_ALL:
         checks.extend(claimed_only_checks())
     return _finalize(target, checks, exemptions, scope=scope)
