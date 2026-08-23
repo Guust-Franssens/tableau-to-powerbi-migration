@@ -9,12 +9,14 @@ the most important test in this file.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
 
 import probe_bundle  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -41,6 +43,31 @@ expression 'Server' = "myserver.database.windows.net" meta [IsParameterQuery=tru
 expression 'Database' = "sales" meta [IsParameterQuery=true]
 """
 
+# Partition M copied from deterministic engine 2.260.0 output generated from
+# tests/fixtures/Meridian_Custom_SQL_Snowflake.tds. Keep this tied to a real emitted shape: a
+# hand-written simplification can miss the native-query boundary that issue #300 is about.
+EMITTED_NATIVE_QUERY_TMDL = """\
+table 'Custom SQL Query'
+	column 'TOTAL_PRICE'
+		dataType: double
+		sourceColumn: TOTAL_PRICE
+
+	partition Custom_SQL_Query = m
+		mode: directQuery
+		source =
+			let
+				Source = Snowflake.Databases(#"Server", #"Warehouse"),
+				Catalog = Source{[Name="MERIDIAN", Kind="Database"]}[Data],
+				Result = Value.NativeQuery(Catalog, "SELECT o.TOTAL_PRICE, o.ORDER_DATE, o.ORDER_STATUS, c.CUSTOMER_NAME, c.NATION, c.REGION, d.CALENDAR_YEAR FROM SALES.FACT_ORDERS o JOIN SALES.DIM_CUSTOMER c ON c.CUSTOMER_KEY = o.CUSTOMER_KEY JOIN SALES.DIM_DATE d ON d.DATE_KEY = o.ORDER_DATE", null, [EnableFolding=true])
+			in
+				Result
+"""
+
+NATIVE_QUERY_EXPRESSIONS_TMDL = """\
+expression 'Server' = "ORG-ACCOUNT.snowflakecomputing.com" meta [IsParameterQuery=true]
+expression 'Warehouse' = "COMPUTE_WH" meta [IsParameterQuery=true]
+"""
+
 
 @pytest.fixture(name="bundle")
 def bundle_fixture(tmp_path: Path) -> Path:
@@ -50,6 +77,59 @@ def bundle_fixture(tmp_path: Path) -> Path:
     (model / "tables" / "Sales.tmdl").write_text(PARTITION_TMDL, encoding="utf-8")
     (model / "expressions.tmdl").write_text(EXPRESSIONS_TMDL, encoding="utf-8")
     return tmp_path / "bundle"
+
+
+@pytest.fixture(name="native_query_bundle")
+def native_query_bundle_fixture(tmp_path: Path) -> Path:
+    """A compact bundle carrying real engine-emitted `Value.NativeQuery` M."""
+    model = tmp_path / "native-bundle" / "Demo.SemanticModel" / "definition"
+    (model / "tables").mkdir(parents=True)
+    (model / "tables" / "Custom SQL Query.tmdl").write_text(EMITTED_NATIVE_QUERY_TMDL, encoding="utf-8")
+    (model / "expressions.tmdl").write_text(NATIVE_QUERY_EXPRESSIONS_TMDL, encoding="utf-8")
+    return tmp_path / "native-bundle"
+
+
+def test_native_query_bundle_exits_operator_required(native_query_bundle: Path, tmp_path: Path) -> None:
+    """A real emitted Value.NativeQuery bundle is scaffolded, but never auto-approved to refresh."""
+    out = tmp_path / "probe"
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "probe_bundle.py"), str(native_query_bundle), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == probe_bundle.EXIT_OPERATOR_REQUIRED, proc.stdout + proc.stderr
+    assert f"PROBE: OPERATOR_REQUIRED {out}" in proc.stdout
+    assert "full customer query" in proc.stdout
+
+    receipt = probe_bundle.read_receipt(out)
+    assert receipt["status"] == probe_bundle.STATUS_BUILT
+    assert receipt["operator_required"] is True
+    assert receipt["stats"]["native_query_files"] == 1
+    assert receipt["refresh"] is None
+
+    tmdl = out / "Demo.SemanticModel" / "definition" / "tables" / "Custom SQL Query.tmdl"
+    text = tmdl.read_text(encoding="utf-8")
+    assert "Value.NativeQuery" in text, "the operator handoff must retain the real emitted M"
+    assert "Table.FirstN(Result, 1) /*PROBE*/" in text
+
+
+def test_ordinary_table_bundle_still_exits_zero(bundle: Path, tmp_path: Path) -> None:
+    """The native-query guard must not change the ordinary table probe path."""
+    out = tmp_path / "probe"
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "probe_bundle.py"), str(bundle), "--out", str(out)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "OPERATOR_REQUIRED" not in proc.stdout
+    receipt = probe_bundle.read_receipt(out)
+    assert receipt["operator_required"] is False
+    assert receipt["stats"]["native_query_files"] == 0
 
 
 def test_build_makes_no_connectivity_claim(bundle: Path, tmp_path: Path) -> None:

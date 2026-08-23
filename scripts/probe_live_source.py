@@ -1055,6 +1055,8 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
     pbip = _write_probe_model(migration, m_query, table, column) / "Probe.pbip"
     log.info("probe model built: %s", pbip.parent)
     log.info("target: %s", note)
+    # `probe_bundle.py` makes the same OPERATOR_REQUIRED decision by scanning emitted M for
+    # Value.NativeQuery; this script has the richer parsed `custom_sql` relation before M exists.
     if table_spec.get("custom_sql"):
         log.error("PROBE: OPERATOR_REQUIRED %s", pbip.parent)
         log.error(
