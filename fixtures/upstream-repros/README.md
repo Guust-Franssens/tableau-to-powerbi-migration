@@ -18,6 +18,6 @@ $json = & $py scripts\engine_source.py --json | ConvertFrom-Json
 
 | Issue | Fixture | 2.260.0 result |
 |---:|---|---|
-| #166 / #164 | `issue-166-custom-sql-disambiguation` | Meaningful negative: model tables disambiguate, but report fails closed/skips fields; no wrong PBIR binding emitted. |
-| #168 | `issue-168-case-one-bad-branch` | Reproduces: one unresolved CASE branch stubs the whole dispatcher measure to `BLANK()`. |
-| #171 | `issue-171-measure-names-parameter` | Partial: parameter calc translates, but virtual Measure Names remains unresolved/deferred and no field parameter is emitted. |
+| #166 / #164 | [`issue-166-custom-sql-disambiguation`](issue-166-custom-sql-disambiguation/README.md) | Meaningful negative: model tables disambiguate, but report fails closed/skips fields; no wrong PBIR binding emitted. |
+| #168 | [`issue-168-case-one-bad-branch`](issue-168-case-one-bad-branch/README.md) | Reproduces: one unresolved CASE branch stubs the whole dispatcher measure to `BLANK()`. |
+| #171 | [`issue-171-measure-names-parameter`](issue-171-measure-names-parameter/README.md) | Partial: parameter calc translates, but virtual Measure Names remains unresolved/deferred and no field parameter is emitted. |

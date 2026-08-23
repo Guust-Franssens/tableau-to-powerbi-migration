@@ -1,107 +1,69 @@
 # Agent navigation index
 
-Tier-2 navigation contract for agents: choose the task row, then load that file on demand.
-
-Use this for searchable knowledge. Always-needed failure rules stay inline in `AGENTS.md` and generated personas.
+Map of maps for agent-facing knowledge. Start here, then open the matching index or direct file.
 
 ## Start here for a migration unit
 
-This is the tier-1 route; use the tables only after you know the specific question.
+1. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status and final gate; direct `check_*.py` gates only isolate one finding.
+2. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
+3. Load the layer gotchas skill before editing: `powerbi-semantic-model-gotchas` for TMDL/DAX, `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, `powerbi-ai-readiness` for Copilot/Q&A metadata.
 
-1. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status check and final gate; direct `scripts/check_*.py` gates are isolation tools.
-2. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason before authoring fixes.
-3. Load the layer gotchas skill before editing: `powerbi-semantic-model-gotchas` for TMDL/DAX, `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh handoff, and `powerbi-ai-readiness` for Copilot/Q&A metadata.
-
-Toolkit-maintenance scripts stay reachable through `scripts/README.md` but are not part of this per-unit route.
-
-## Section index
-
-| Section | What it covers |
-|---|---|
-| Author PBIR visuals | Long-tail visual/idiom lookup through the cookbook, after report gotchas. |
-| Validate an artifact | `check_unit` first; direct gates only for isolating findings. |
-| Invoke a custom subagent | The four persona files exactly as subagents receive them. |
-| Load a repo skill | Layer gotchas and refresh/AI skills used by the per-unit route. |
-| Find migration guidance | Operator, credential, migration-spec, reference-capture, and DAX/map guidance. |
-| Navigate repo artifacts | Repo/example/fixture docs for specific follow-up questions. |
-| Explicit exclusions | Eligible files intentionally routed through a better index, with reasons. |
+Toolkit-maintenance scripts live in `scripts/README.md`, outside the per-unit route.
 
 ## Inclusion rule
 
-Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/*.json` visual fixtures, and `scripts/check_*.py` gates. Each must appear exactly once below or in explicit exclusions with a reason. Run `python scripts/check_navigation_index.py` after eligible file changes.
+Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/*.json` visual fixtures, and `scripts/check_*.py` gates. Each appears once below or in explicit exclusions. Run `python scripts/check_navigation_index.py` after eligible file changes.
 
-## Indexed paths
+## Indexed maps and direct entries
 
 | Task | Path | Read when... |
 |---|---|---|
-| Author PBIR visuals | [`.github/pbi.kb/visual-cookbook.md`](../.github/pbi.kb/visual-cookbook.md) | Long-tail after `powerbi-report-gotchas`; it routes to visual/idiom files with confidence tiers and Tableau mappings. |
-| Validate an artifact | [`scripts/README.md`](../scripts/README.md) | Prefer `check_unit --scope <layer>`; use this only to choose a direct gate or maintenance script. |
-| Check third-party notices | [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | Read for license/notice questions. |
-| Contribute safely | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Read before code/docs changes. |
-| Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Read when reasoning about root sessions, subagents, skill visibility, and inheritance boundaries. |
-| Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | Read when authoring AI instructions; it redirects to the canonical skill guidance. |
-| Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Read when setting expectations about what the migration toolkit can and cannot automate. |
-| Find migration guidance | [`docs/credential-gate-testing.md`](../docs/credential-gate-testing.md) | Read when testing credential gates, modal sign-in handling, or authorization/audit behavior. |
-| Find migration guidance | [`docs/credential-gate.md`](../docs/credential-gate.md) | Read when a live source, Desktop, or external credential dependency blocks automation. |
-| Find migration guidance | [`docs/customer-text-exposure.md`](../docs/customer-text-exposure.md) | Read before handling customer text, extracts, screenshots, or artifacts with privacy exposure. |
-| Find migration guidance | [`docs/data-source-credentials.md`](../docs/data-source-credentials.md) | Read when configuring Tableau, database, or warehouse credentials for migration probes. |
-| Find migration guidance | [`docs/deterministic-tier-integration.md`](../docs/deterministic-tier-integration.md) | Read when connecting this repo to the deterministic conversion engine or its handoff artifacts. |
-| Find migration guidance | [`docs/dry-run-findings-2026-08-11.md`](../docs/dry-run-findings-2026-08-11.md) | Read for durable F00x dry-run findings that are still cited by regression tests. |
-| Find migration guidance | [`docs/migration-programme.md`](../docs/migration-programme.md) | Read when planning the broader migration programme, phases, or operating model. |
-| Find migration guidance | [`docs/migration-spec.md`](../docs/migration-spec.md) | Read when creating, validating, or interpreting migration-spec.json contracts. |
-| Find migration guidance | [`docs/operator-runbook.md`](../docs/operator-runbook.md) | Read when running the migration pipeline by hand or diagnosing expected operator failure modes. |
-| Find migration guidance | [`docs/reference-capture.md`](../docs/reference-capture.md) | Read when capturing Tableau reference images/data or grading validation evidence. |
-| Find migration guidance | [`docs/review-remediation-plan.md`](../docs/review-remediation-plan.md) | Read when turning validation/review findings into routed fix work. |
-| Find migration guidance | [`docs/showcase/README-afterbefore.md`](../docs/showcase/README-afterbefore.md) | Read when building or reviewing before/after showcase evidence. |
-| Find migration guidance | [`docs/showcase/README.md`](../docs/showcase/README.md) | Read when generating or browsing the showcase outputs. |
-| Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Read when translating Tableau calculations, LODs, table calcs, and Measure Names patterns to DAX. |
-| Find migration guidance | [`docs/tableau-map-to-azuremaps.md`](../docs/tableau-map-to-azuremaps.md) | Read when translating Tableau map marks, layers, or geospatial fields to Power BI Azure Maps. |
-| Find migration guidance | [`docs/upstream-issue-gate.md`](../docs/upstream-issue-gate.md) | Read before filing or triaging deterministic-engine issues upstream versus local repo issues. |
-| Handle conduct or disclosure | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Read for conduct/community questions. |
-| Handle security reports | [`SECURITY.md`](../SECURITY.md) | Read for security reports. |
-| Inspect example evidence | [`examples/electricity-per-capita/fabric/DISPOSITIONS.md`](../examples/electricity-per-capita/fabric/DISPOSITIONS.md) | Use for example dispositions/caveats. |
-| Inspect example evidence | [`examples/fast-fashion-impact/fabric/DISPOSITIONS.md`](../examples/fast-fashion-impact/fabric/DISPOSITIONS.md) | Use for example dispositions/caveats. |
-| Inspect example evidence | [`examples/fast-fashion-impact/fabric/RELATIONSHIPS.md`](../examples/fast-fashion-impact/fabric/RELATIONSHIPS.md) | Read when checking per-example relationship modeling decisions. |
-| Inspect example evidence | [`examples/health-tracker/ai-instructions.md`](../examples/health-tracker/ai-instructions.md) | Use for AI-instruction examples. |
-| Inspect example evidence | [`examples/interactive-resume/fabric/DISPOSITIONS.md`](../examples/interactive-resume/fabric/DISPOSITIONS.md) | Use for example dispositions/caveats. |
-| Inspect example evidence | [`examples/price-of-prosperity/fabric/DISPOSITIONS.md`](../examples/price-of-prosperity/fabric/DISPOSITIONS.md) | Use for example dispositions/caveats. |
-| Inspect example evidence | [`examples/quadruple-axis-charts/report_build/PAGE-PLAN.md`](../examples/quadruple-axis-charts/report_build/PAGE-PLAN.md) | Use for report-planning examples. |
-| Inspect example evidence | [`examples/superstore-sales-performance/_brief/report-spec.md`](../examples/superstore-sales-performance/_brief/report-spec.md) | Use for report-planning examples. |
-| Inspect example evidence | [`examples/wind-energy-utilization/ai-instructions.md`](../examples/wind-energy-utilization/ai-instructions.md) | Use for AI-instruction examples. |
-| Invoke a custom subagent | [`.github/agents/pbi-migration-validator.agent.md`](../.github/agents/pbi-migration-validator.agent.md) | Read when doing read-only fidelity validation against Tableau references and Power BI output. |
-| Invoke a custom subagent | [`.github/agents/pbi-report-builder.agent.md`](../.github/agents/pbi-report-builder.agent.md) | Read when fixing PBIR visuals, pages, filters, layout, screenshots, or Desktop rendering. |
-| Invoke a custom subagent | [`.github/agents/pbi-semantic-builder.agent.md`](../.github/agents/pbi-semantic-builder.agent.md) | Read when fixing TMDL, DAX, relationships, model load, refresh, or AI-readiness work. |
-| Invoke a custom subagent | [`.github/agents/tableau-migrator.agent.md`](../.github/agents/tableau-migrator.agent.md) | Read when dispatching a workbook/data-source migration subagent or checking orchestration duties. |
-| Load a repo skill | [`.github/skills/pbip-model-refresh/SKILL.md`](../.github/skills/pbip-model-refresh/SKILL.md) | Invoke after TMDL edits or when Desktop/cache refresh and .pbi/cache.abf persistence are needed. |
-| Load a repo skill | [`.github/skills/powerbi-ai-readiness/SKILL.md`](../.github/skills/powerbi-ai-readiness/SKILL.md) | Invoke when a semantic model must answer Copilot/Fabric data-agent natural-language questions correctly. |
-| Load a repo skill | [`.github/skills/powerbi-report-gotchas/SKILL.md`](../.github/skills/powerbi-report-gotchas/SKILL.md) | Invoke before PBIR authoring/debugging, especially when validation passes but rendering is wrong. |
-| Load a repo skill | [`.github/skills/powerbi-semantic-model-gotchas/SKILL.md`](../.github/skills/powerbi-semantic-model-gotchas/SKILL.md) | Invoke before hand-authoring TMDL/DAX or diagnosing model open/refresh/render failures. |
-| Navigate repo artifacts | [`examples/README.md`](../examples/README.md) | Use to select example workbooks. |
-| Navigate repo artifacts | [`migrations/README.md`](../migrations/README.md) | Use to navigate migration outputs. |
-| Navigate repo artifacts | [`migrations/datasources/README.md`](../migrations/datasources/README.md) | Use for migrated data sources. |
-| Navigate repo artifacts | [`migrations/workbooks/README.md`](../migrations/workbooks/README.md) | Use for migrated workbooks. |
-| Start from VS Code Copilot | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | Use for VS Code runtime instructions. |
-| Start or route a repo session | [`AGENTS.md`](../AGENTS.md) | Read before repo work. |
-| Understand the toolkit | [`README.md`](../README.md) | Use for project tour/quick start. |
-| Use test fixtures | [`fixtures/large-refresh/README.md`](../fixtures/large-refresh/README.md) | Use for large refresh fixture. |
-| Use test fixtures | [`fixtures/upstream-repros/README.md`](../fixtures/upstream-repros/README.md) | Use for upstream repro fixtures. |
-| Use test fixtures | [`fixtures/upstream-repros/issue-166-custom-sql-disambiguation/README.md`](../fixtures/upstream-repros/issue-166-custom-sql-disambiguation/README.md) | Use for upstream repro fixtures. |
-| Use test fixtures | [`fixtures/upstream-repros/issue-168-case-one-bad-branch/README.md`](../fixtures/upstream-repros/issue-168-case-one-bad-branch/README.md) | Use for upstream repro fixtures. |
-| Use test fixtures | [`fixtures/upstream-repros/issue-171-measure-names-parameter/README.md`](../fixtures/upstream-repros/issue-171-measure-names-parameter/README.md) | Use for upstream repro fixtures. |
-| Validate an artifact | [`tests/fixtures/check-gates-dirty/README.md`](../tests/fixtures/check-gates-dirty/README.md) | Use for dirty gate fixtures. |
+| Start or route session | [`AGENTS.md`](../AGENTS.md) | Canonical workflow plus repo agent/skill map. |
+| Understand toolkit | [`README.md`](../README.md) | Project purpose and quick start. |
+| Contribute safely | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Validation and PR expectations. |
+| Use VS Code Copilot | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | VS Code entry instructions. |
+| Run or choose scripts | [`scripts/README.md`](../scripts/README.md) | Map of scripts; `test_repo_layout.py` owns script-list completeness. |
+| Author PBIR visuals | [`.github/pbi.kb/visual-cookbook.md`](../.github/pbi.kb/visual-cookbook.md) | Map of visual files with confidence tiers and Tableau idioms. |
+| Inspect examples | [`examples/README.md`](../examples/README.md) | Map of example migrations, provenance, screenshots, and evidence files. |
+| Browse showcase | [`docs/showcase/README.md`](../docs/showcase/README.md) | Map of rendered showcase outputs and variants. |
+| Use upstream repros | [`fixtures/upstream-repros/README.md`](../fixtures/upstream-repros/README.md) | Map of fixtures, upstream issues, and pinned engine behavior. |
+| Navigate migrations | [`migrations/README.md`](../migrations/README.md) | Map of workbook vs datasource migration folders. |
+| Check third-party notices | [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | License/notice questions. |
+| Handle conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Conduct/community questions. |
+| Handle security reports | [`SECURITY.md`](../SECURITY.md) | Security disclosure routing. |
+| Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Root sessions, subagents, skill visibility. |
+| Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | AI-instruction authoring redirect. |
+| Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |
+| Find migration guidance | [`docs/credential-gate-testing.md`](../docs/credential-gate-testing.md) | Credential-gate tests and audit behavior. |
+| Find migration guidance | [`docs/credential-gate.md`](../docs/credential-gate.md) | Live-source/Desktop credential wall. |
+| Find migration guidance | [`docs/customer-text-exposure.md`](../docs/customer-text-exposure.md) | Customer text/privacy exposure. |
+| Find migration guidance | [`docs/data-source-credentials.md`](../docs/data-source-credentials.md) | Tableau/database/warehouse credentials. |
+| Find migration guidance | [`docs/deterministic-tier-integration.md`](../docs/deterministic-tier-integration.md) | Engine and handoff integration. |
+| Find migration guidance | [`docs/dry-run-findings-2026-08-11.md`](../docs/dry-run-findings-2026-08-11.md) | Durable F00x dry-run findings. |
+| Find migration guidance | [`docs/migration-programme.md`](../docs/migration-programme.md) | Programme phases and operating model. |
+| Find migration guidance | [`docs/migration-spec.md`](../docs/migration-spec.md) | `migration-spec.json` contract. |
+| Find migration guidance | [`docs/operator-runbook.md`](../docs/operator-runbook.md) | Manual pipeline operation. |
+| Find migration guidance | [`docs/reference-capture.md`](../docs/reference-capture.md) | Tableau reference capture and evidence grading. |
+| Find migration guidance | [`docs/review-remediation-plan.md`](../docs/review-remediation-plan.md) | Route validation/review findings. |
+| Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Translate Tableau calcs/LODs/table calcs. |
+| Find migration guidance | [`docs/tableau-map-to-azuremaps.md`](../docs/tableau-map-to-azuremaps.md) | Translate Tableau maps to Azure Maps. |
+| Find migration guidance | [`docs/upstream-issue-gate.md`](../docs/upstream-issue-gate.md) | Route engine issues upstream vs local. |
+| Invoke subagent | [`.github/agents/pbi-migration-validator.agent.md`](../.github/agents/pbi-migration-validator.agent.md) | Read-only fidelity validator persona. |
+| Invoke subagent | [`.github/agents/pbi-report-builder.agent.md`](../.github/agents/pbi-report-builder.agent.md) | PBIR/report repair persona. |
+| Invoke subagent | [`.github/agents/pbi-semantic-builder.agent.md`](../.github/agents/pbi-semantic-builder.agent.md) | TMDL/DAX/model repair persona. |
+| Invoke subagent | [`.github/agents/tableau-migrator.agent.md`](../.github/agents/tableau-migrator.agent.md) | Workbook/datasource migration worker persona. |
+| Use fixture | [`fixtures/large-refresh/README.md`](../fixtures/large-refresh/README.md) | Large refresh/cache behavior fixture. |
+| Use fixture | [`tests/fixtures/check-gates-dirty/README.md`](../tests/fixtures/check-gates-dirty/README.md) | Dirty gate golden-output fixture. |
 
 ## Explicit exclusions
-
 | Task | Path | Exclusion reason |
 |---|---|---|
-| Exclude from navigation targets | [`docs/INDEX.md`](../docs/INDEX.md) | This file is the registry being checked; indexing itself would not help an agent choose a next file. |
-| Exclude from production migration guidance | [`.github/skills/sentinel-probe/SKILL.md`](../.github/skills/sentinel-probe/SKILL.md) | Test-only sentinel skill for proving subagent skill visibility; not part of the migration pipeline. |
+| Exclude self | [`docs/INDEX.md`](../docs/INDEX.md) | This registry would not help choose a next file. |
+| Exclude test skill | [`.github/skills/sentinel-probe/SKILL.md`](../.github/skills/sentinel-probe/SKILL.md) | Test-only subagent skill-visibility sentinel. |
 
-### Exclusion set: PBIR visual cookbook entries
-
-Reason: indexed by `.github/pbi.kb/visual-cookbook.md`, which carries confidence tiers and Tableau idiom mapping this flat list cannot; consult after `powerbi-report-gotchas`, not as the first report step.
+### PBIR visual files
+Reason: indexed by `.github/pbi.kb/visual-cookbook.md`; it adds confidence tiers and Tableau idiom mapping.
 Base: `.github/pbi.kb/visuals/`
-
 ```text
 actionButton.md
 actionButton.visual.json
@@ -163,11 +125,9 @@ zoom-slider.md
 zoom-slider.visual.json
 ```
 
-### Exclusion set: validation gate implementations
-
-Reason: prefer `check_unit --scope <layer>`; these direct gates are indexed by `scripts/README.md` for isolating a single finding.
+### Validation gate implementations
+Reason: prefer `check_unit --scope <layer>`; `scripts/README.md` indexes direct gates for isolation.
 Base: `scripts/`
-
 ```text
 check_ai_readiness.py
 check_blank_placeholders.py
@@ -184,4 +144,53 @@ check_relationship_health.py
 check_sqlproxy_connections.py
 check_stub_measures.py
 check_unit.py
+```
+
+### Example evidence files
+Reason: `examples/README.md` carries provenance, artifact context, screenshots, and nested evidence links.
+Base: ``
+```text
+examples/electricity-per-capita/fabric/DISPOSITIONS.md
+examples/fast-fashion-impact/fabric/DISPOSITIONS.md
+examples/fast-fashion-impact/fabric/RELATIONSHIPS.md
+examples/health-tracker/ai-instructions.md
+examples/interactive-resume/fabric/DISPOSITIONS.md
+examples/price-of-prosperity/fabric/DISPOSITIONS.md
+examples/quadruple-axis-charts/report_build/PAGE-PLAN.md
+examples/superstore-sales-performance/_brief/report-spec.md
+examples/wind-energy-utilization/ai-instructions.md
+```
+
+### Showcase variants
+Reason: `docs/showcase/README.md` carries showcase narrative, rendered images, and variant routing.
+Base: ``
+```text
+docs/showcase/README-afterbefore.md
+```
+
+### Upstream repro notes
+Reason: `fixtures/upstream-repros/README.md` carries issue mapping and pinned engine behavior.
+Base: ``
+```text
+fixtures/upstream-repros/issue-166-custom-sql-disambiguation/README.md
+fixtures/upstream-repros/issue-168-case-one-bad-branch/README.md
+fixtures/upstream-repros/issue-171-measure-names-parameter/README.md
+```
+
+### Migration folder READMEs
+Reason: `migrations/README.md` routes workbook vs datasource migration folders.
+Base: ``
+```text
+migrations/datasources/README.md
+migrations/workbooks/README.md
+```
+
+### Repo-local skill docs
+Reason: `AGENTS.md` indexes repo-local skills; the start-here block names when to invoke the per-layer skills.
+Base: ``
+```text
+.github/skills/pbip-model-refresh/SKILL.md
+.github/skills/powerbi-ai-readiness/SKILL.md
+.github/skills/powerbi-report-gotchas/SKILL.md
+.github/skills/powerbi-semantic-model-gotchas/SKILL.md
 ```
