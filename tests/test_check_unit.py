@@ -169,9 +169,9 @@ def test_brownfield_rearranged_real_artifacts_emit_plan() -> None:
 
     assert report["brownfield"]["found_count"] >= 4
     assert not report["brownfield"]["recognized_target_shape"]
-    assert "source\\migration-spec.json" in rendered
-    assert "PowerBI\\Admin_Insights_Starter.Report" in rendered
-    assert "PowerBI\\Admin_Insights_Starter.SemanticModel" in rendered
+    assert f"source{os.sep}migration-spec.json" in rendered
+    assert f"PowerBI{os.sep}Admin_Insights_Starter.Report" in rendered
+    assert f"PowerBI{os.sep}Admin_Insights_Starter.SemanticModel" in rendered
     assert "reorganisation plan (not applied):" in rendered
     assert "working copy:" in rendered
     assert "engine truth:" in rendered
