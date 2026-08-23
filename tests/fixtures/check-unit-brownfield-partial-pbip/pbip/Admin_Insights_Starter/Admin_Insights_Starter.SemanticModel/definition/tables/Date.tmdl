@@ -1,0 +1,14 @@
+table Date
+	lineageTag: b8ad2503-1d23-5433-9620-e0bb434136df
+	dataCategory: Time
+
+	column Date
+		dataType: dateTime
+		isKey
+		formatString: Short Date
+		lineageTag: 7afefff1-e0b7-55f7-978a-9076c47d7533
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Date]
+
+		annotation SummarizationSetBy = Automatic

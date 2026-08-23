@@ -1,0 +1,8 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.0.0/schema.json",
+  "name": "page-GroupDrilld7ca8a5ce",
+  "displayName": "Group Drilldown",
+  "displayOption": "FitToPage",
+  "height": 776.0,
+  "width": 1280.0
+}

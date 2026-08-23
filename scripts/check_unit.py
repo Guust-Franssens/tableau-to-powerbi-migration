@@ -17,6 +17,8 @@ native statuses/exit codes are recorded under ``checks[].native_*``. Page parity
 live here because no existing gate owned those questions.
 """
 
+# Unit gate, brownfield inventory, and CLI rendering intentionally live together as one facade.
+# pylint: disable=too-many-lines
 from __future__ import annotations
 
 import argparse
@@ -235,6 +237,145 @@ def _migration_spec(target: Path) -> Path | None:
     unit = _unit_dir(target)
     candidates = [unit / "migration-spec.json", target / "migration-spec.json"]
     return next((path for path in candidates if path.is_file()), None)
+
+
+EXPECTED_BUNDLE_SHAPE = (
+    "expected a migration unit or engine bundle shaped as one of:",
+    "  - unit root: migration-spec.json plus fabric/<Name>.Report and/or fabric/<Name>.SemanticModel",
+    "  - engine bundle root: report.json or engine-output-receipt.json plus "
+    "{pbip,reports,semantic_models,handover,data}",
+    "  - direct artifact: <Name>.Report/definition or <Name>.SemanticModel/definition",
+    "  - partial unit: any subset of those phases, reported as evidenced rather than failed",
+)
+
+
+def _relative(path: Path, root: Path) -> str:
+    """Display a target-local path where possible, preserving actual paths for action."""
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _is_under_named_dir(path: Path, root: Path, name: str) -> bool:
+    try:
+        return name in path.relative_to(root).parts[:-1]
+    except ValueError:
+        return False
+
+
+def _json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = _read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_engine_report(path: Path) -> bool:
+    payload = _json_object(path)
+    return bool(isinstance(payload, dict) and isinstance(payload.get("workbooks"), list))
+
+
+def _engine_version(path: Path) -> str | None:
+    payload = _json_object(path)
+    engine = payload.get("engine") if isinstance(payload, dict) else None
+    if isinstance(engine, dict) and engine.get("version"):
+        return str(engine["version"])
+    return None
+
+
+def _is_handover_slice(path: Path) -> bool:
+    payload = _json_object(path)
+    return bool(isinstance(payload, dict) and ("workbook" in payload or "workbooks" in payload or "estate" in payload))
+
+
+def _artifact_dirs(target: Path, suffix: str) -> list[Path]:
+    return sorted(
+        {path.resolve() for path in target.rglob(f"*{suffix}") if path.is_dir() and (path / "definition").is_dir()},
+        key=str,
+    )
+
+
+def _phase_row(name: str, paths: list[Path], target: Path, missing_text: str) -> dict[str, Any]:
+    if paths:
+        return {"phase": name, "status": "EVIDENCED", "paths": [_relative(path, target) for path in paths[:8]]}
+    return {"phase": name, "status": "NOT_EVIDENCED", "detail": missing_text, "paths": []}
+
+
+def _plan_target_for_artifact(target: Path, artifact: Path) -> Path:
+    unit_name = artifact.parent.name if artifact.parent != target else artifact.stem
+    return target / "pbip" / unit_name / artifact.name
+
+
+def _brownfield_plan(target: Path, inventory: dict[str, list[Path]]) -> list[str]:
+    lines: list[str] = []
+    for marker in inventory["engine_reports"] + inventory["receipts"]:
+        if marker.parent == target:
+            continue
+        destination = target / marker.name
+        lines.append(f"engine truth: {marker} -> {destination}")
+    for handover in inventory["handovers"]:
+        if _is_under_named_dir(handover, target, "handover"):
+            continue
+        lines.append(f"handover queue: {handover} -> {target / 'handover' / handover.name}")
+    for spec in inventory["specs"]:
+        if spec.parent == target:
+            continue
+        lines.append(f"source intent: {spec} -> {target / 'migration-spec.json'}")
+    for artifact in inventory["reports"] + inventory["models"]:
+        if _is_under_named_dir(artifact, target, "pbip"):
+            continue
+        if _is_under_named_dir(artifact, target, "fabric"):
+            continue
+        lines.append(f"working copy: {artifact} -> {_plan_target_for_artifact(target, artifact)}")
+    return lines
+
+
+def inspect_brownfield(target: Path) -> dict[str, Any]:
+    """Read-only inventory for migration output whose layout may not match this toolkit."""
+    target = target.resolve()
+    engine_reports = [path for path in sorted(target.rglob("report.json"), key=str) if _is_engine_report(path)]
+    receipts = sorted(target.rglob("engine-output-receipt.json"), key=str)
+    specs = sorted(target.rglob("migration-spec.json"), key=str)
+    handovers = [
+        path
+        for path in sorted(target.rglob("*.json"), key=str)
+        if path.parent.name == "handover" and _is_handover_slice(path)
+    ]
+    inventory = {
+        "engine_reports": engine_reports,
+        "receipts": receipts,
+        "specs": specs,
+        "handovers": handovers,
+        "reports": _artifact_dirs(target, ".Report"),
+        "models": _artifact_dirs(target, ".SemanticModel"),
+    }
+    found_count = sum(len(paths) for paths in inventory.values())
+    canonical_markers = [path for path in engine_reports + receipts if path.parent == target]
+    canonical_pbip = any(
+        _is_under_named_dir(path, target, "pbip") for path in inventory["reports"] + inventory["models"]
+    )
+    direct_artifact = target.name.endswith((".Report", ".SemanticModel")) and (target / "definition").is_dir()
+    recognized = bool(
+        canonical_markers or canonical_pbip or (target / "migration-spec.json").is_file() or direct_artifact
+    )
+    return {
+        "expected_shape": list(EXPECTED_BUNDLE_SHAPE),
+        "recognized_target_shape": recognized,
+        "found_count": found_count,
+        "engine_versions": sorted({version for path in receipts if (version := _engine_version(path))}),
+        "phases": [
+            _phase_row("source intent", specs, target, "no migration-spec.json found"),
+            _phase_row(
+                "engine bundle marker", engine_reports + receipts, target, "no engine report.json or receipt found"
+            ),
+            _phase_row("handover queue", handovers, target, "no handover/*.json slices found"),
+            _phase_row("PBIR reports", inventory["reports"], target, "no *.Report/definition folders found"),
+            _phase_row("semantic models", inventory["models"], target, "no *.SemanticModel/definition folders found"),
+        ],
+        "plan": _brownfield_plan(target, inventory),
+    }
 
 
 def expected_pages(target: Path) -> list[dict[str, str]] | None:
@@ -1005,6 +1146,7 @@ def _finalize(
             "invalid": len(exemptions["invalid"]),
         },
         "checks": checks,
+        "brownfield": inspect_brownfield(target),
     }
 
 
@@ -1070,8 +1212,8 @@ def _count_suffix(missing: int) -> str:
     return f"   [{missing} MISSING]" if missing else ""
 
 
-def _summary_line(report: dict[str, Any]) -> str:
-    """Stable one-line aggregate for comparing repeated gate runs."""
+def _summary_counts(report: dict[str, Any]) -> tuple[dict[str, int], int, int]:
+    """Counts behind the stable summary line and shape-guidance trigger."""
     owner_findings: dict[str, int] = {}
     structural = 0
     missing_input = 0
@@ -1084,6 +1226,12 @@ def _summary_line(report: dict[str, Any]) -> str:
                 structural += 1
             else:
                 missing_input += 1
+    return owner_findings, structural, missing_input
+
+
+def _summary_line(report: dict[str, Any]) -> str:
+    """Stable one-line aggregate for comparing repeated gate runs."""
+    owner_findings, structural, missing_input = _summary_counts(report)
     findings = ",".join(f"{owner}={count}" for owner, count in sorted(owner_findings.items())) or "none"
     return (
         "SUMMARY: "
@@ -1092,6 +1240,35 @@ def _summary_line(report: dict[str, Any]) -> str:
         f"not_checked_missing_input={missing_input}; "
         f"ladder={report['status']} exit={report['exit_code']}"
     )
+
+
+def _render_brownfield(report: dict[str, Any]) -> list[str]:
+    """Actionable read-only guidance for non-canonical or partial migration folders."""
+    brownfield = report.get("brownfield") or {}
+    _, _, missing_input = _summary_counts(report)
+    if brownfield.get("recognized_target_shape") and not brownfield.get("plan") and missing_input == 0:
+        return []
+    if missing_input == 0 and not brownfield.get("found_count"):
+        return []
+    lines = ["", "BROWNFIELD DISCOVERY (read-only):"]
+    lines.extend(f"  {line}" for line in brownfield.get("expected_shape", []))
+    if brownfield.get("engine_versions"):
+        lines.append(f"  engine version(s) found: {', '.join(brownfield['engine_versions'])}")
+    lines.append("  found instead:")
+    for phase in brownfield.get("phases", []):
+        status = phase.get("status")
+        paths = phase.get("paths") or []
+        if paths:
+            lines.append(f"    - {phase['phase']}: {status}")
+            lines.extend(f"        {path}" for path in paths)
+        else:
+            lines.append(f"    - {phase['phase']}: {status} ({phase.get('detail')})")
+    if brownfield.get("plan"):
+        lines.append("  reorganisation plan (not applied):")
+        lines.extend(f"    - {item}" for item in brownfield["plan"])
+    else:
+        lines.append("  reorganisation plan (not applied): no recognised artifacts to place")
+    return lines
 
 
 def render(report: dict[str, Any]) -> str:
@@ -1142,6 +1319,7 @@ def render(report: dict[str, Any]) -> str:
     if ex["accepted"] or ex["invalid"]:
         lines.append(f"  documented why-not exemptions: {ex['accepted']} accepted, {ex['invalid']} invalid")
     lines.append(_summary_line(report))
+    lines.extend(_render_brownfield(report))
     return "\n".join(lines)
 
 
