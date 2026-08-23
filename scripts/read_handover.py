@@ -89,6 +89,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# One cohesive projection CLI; adding every engine handover signal here keeps drills consistent.
+# pylint: disable=too-many-lines
+
 DEFAULT_MAX_BYTES = 20_000
 
 # The smallest cap this tool will accept. The truncation banner is content too: its head, its
@@ -135,6 +138,54 @@ MEASURE_FILTER_DEFAULT_NOTE = (
     "mapping); it changes the values shown -- re-apply it as a visual-level filter in Power BI"
 )
 MEASURE_FILTER_RISK = "INVISIBLE NUMERIC FIDELITY RISK: visual renders, values are wrong until filter is re-applied."
+
+PBIP_WARNING_PREFIX = "manual attention required: "
+PBIP_WARNING_CATEGORY = "pbip_warning"
+PBIP_WARNING_MISSING = "not_recorded"
+PBIP_WARNING_NONE = "none"
+PBIP_WARNING_PRESENT = "present"
+PBIP_WARNING_INVALID = "invalid"
+PBIP_WARNING_REMEDIATION = {
+    "ambiguous_field": "Verify each ambiguous field binding against the Tableau relation name; rebind wrong columns.",
+    "no_relationship": "Add the intended model relationship, or document why the orphan table must stay disconnected.",
+    "tableau_blend": "Model the Tableau blend explicitly, usually with relationships or COMBINEVALUES composite keys.",
+    "max_path": (
+        "Move/rebuild under a shorter output root or enable Windows long paths before local Desktop validation."
+    ),
+    "dangling_refs": "Run/fix field-binding repair; these visuals bind names the model does not contain.",
+    "ref_drop": "Restore or intentionally replace the dropped visual binding before report sign-off.",
+    "storage_decision": "Make the required storage decision and rebuild; skipped workbook PBIP is not a clean output.",
+    "flatfile_not_landed": "Materialize the flat-file data to an absolute path, then rebuild and refresh.",
+    "viz_lint": "Fix the PBIR validity violations emitted by the engine before visual sign-off.",
+    "measure_rebind": "Verify the rebound measure reference still points at the intended translated measure.",
+    "no_report": "Re-run or repair the viz stage; there is no openable report definition to bind.",
+    "other": "Inspect the engine warning and route to the owner named by the affected artifact.",
+}
+PBIP_WARNING_SEVERITY = {
+    "ambiguous_field": "blocking",
+    "no_relationship": "blocking",
+    "tableau_blend": "blocking",
+    "no_report": "blocking",
+    "dangling_refs": "high",
+    "flatfile_not_landed": "high",
+    "max_path": "high",
+    "ref_drop": "high",
+    "storage_decision": "high",
+    "viz_lint": "high",
+    "measure_rebind": "medium",
+    "other": "medium",
+}
+PBIP_WARNING_PATTERNS = [
+    ("is ambiguous within datasource", "ambiguous_field"),
+    ("landed with no relationship", "no_relationship"),
+    ("tableau blends", "tableau_blend"),
+    (".pbip output path", "max_path"),
+    ("visual field reference(s) name a model object", "dangling_refs"),
+    ("dangling refs", "dangling_refs"),
+    ("storage decision", "storage_decision"),
+    ("pbir validity violation", "viz_lint"),
+    ("no pbir report definition", "no_report"),
+]
 
 
 class HandoverError(RuntimeError):
@@ -587,11 +638,86 @@ def _measure_filter_work_items(wb: dict) -> list[dict]:
     return out
 
 
+def pbip_warning_status(wb: dict) -> tuple[str, list[str]]:
+    """Return whether PBIP warnings were recorded, without treating absence as clean."""
+    if "pbip_warnings" not in wb:
+        return PBIP_WARNING_MISSING, []
+    warnings = wb.get("pbip_warnings")
+    if not isinstance(warnings, list):
+        return PBIP_WARNING_INVALID, []
+    rows = [str(w) for w in warnings if str(w).strip()]
+    if not rows:
+        return PBIP_WARNING_NONE, []
+    return PBIP_WARNING_PRESENT, rows
+
+
+def _pbip_warning_family(warning: str) -> str:
+    """Classify the engine's free-text PBIP warning into a stable report queue family."""
+    lower = warning.casefold()
+    for token, family in PBIP_WARNING_PATTERNS:
+        if token in lower:
+            return family
+    if "max_path" in lower:
+        return "max_path"
+    if "dropped" in lower and "reference(s)" in lower:
+        return "ref_drop"
+    if "flat-file" in lower and "not landed" in lower:
+        return "flatfile_not_landed"
+    if "rebound" in lower and "measure reference" in lower:
+        return "measure_rebind"
+    return "other"
+
+
+def _pbip_warning_subject(family: str, warning: str, index: int) -> str:
+    """Short identity for the drill-down line; the full warning remains in `reason`."""
+    if family == "no_relationship" and "table '" in warning:
+        return "table " + warning.split("table '", 1)[1].split("'", 1)[0]
+    if family == "ambiguous_field" and "field '" in warning:
+        return "field " + warning.split("field '", 1)[1].split("'", 1)[0]
+    if family == "tableau_blend" and "Tableau BLENDS " in warning:
+        return warning.split(" on ", 1)[0].replace(PBIP_WARNING_PREFIX, "")
+    if family == "max_path":
+        return "workbook .pbip path"
+    if family == "ref_drop" and "visual '" in warning:
+        return "visual " + warning.split("visual '", 1)[1].split("'", 1)[0]
+    return f"PBIP warning {index}"
+
+
+def _pbip_warning_family_counts(warnings: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for warning in warnings:
+        family = _pbip_warning_family(warning)
+        counts[family] = counts.get(family, 0) + 1
+    return counts
+
+
+def _pbip_warning_work_items(wb: dict) -> list[dict]:
+    """Synthesize PBIP warnings as report worklist items, grouped by defect family."""
+    status, warnings = pbip_warning_status(wb)
+    if status != PBIP_WARNING_PRESENT:
+        return []
+
+    out = []
+    for index, warning in enumerate(warnings, start=1):
+        family = _pbip_warning_family(warning)
+        clean = warning[len(PBIP_WARNING_PREFIX) :] if warning.startswith(PBIP_WARNING_PREFIX) else warning
+        out.append(
+            {
+                "category": f"{PBIP_WARNING_CATEGORY}_{family}",
+                "severity": PBIP_WARNING_SEVERITY.get(family, "medium"),
+                "reason": clean,
+                "remediation": PBIP_WARNING_REMEDIATION.get(family, PBIP_WARNING_REMEDIATION["other"]),
+                "worksheet": _pbip_warning_subject(family, warning, index),
+            }
+        )
+    return out
+
+
 def report_items_of(wb: dict) -> list[dict]:
-    """Report-side work queue, including invisible numeric-fidelity measure filter drops."""
+    """Report-side work queue, including invisible numeric-fidelity engine warnings."""
     raw = worklist_of(wb).get("items") or []
     items = [i for i in raw if isinstance(i, dict)] if isinstance(raw, list) else []
-    return items + _measure_filter_work_items(wb)
+    return items + _measure_filter_work_items(wb) + _pbip_warning_work_items(wb)
 
 
 def _severity_counts(items: list[dict]) -> dict[str, int]:
@@ -617,13 +743,27 @@ def _measure_filter_summary_line(wb: dict) -> str | None:
     return None
 
 
+def _pbip_warning_summary_line(wb: dict) -> str | None:
+    status, warnings = pbip_warning_status(wb)
+    if status == PBIP_WARNING_PRESENT:
+        counts = _pbip_warning_family_counts(warnings)
+        families = " | ".join(f"{k} {counts[k]}" for k in sorted(counts))
+        return f"        !! {len(warnings)} PBIP warning(s): {families}"
+    if status == PBIP_WARNING_MISSING:
+        return "        pbip warnings: NOT RECORDED (key missing; this is not a zero-warning signal)"
+    if status == PBIP_WARNING_INVALID:
+        return "        pbip warnings: INVALID SHAPE (key present but not a list; inspect raw handover)"
+    return "        pbip warnings: none recorded (key present and empty)"
+
+
 def _report_section(wb: dict) -> list[str]:
     items = report_items_of(wb)
     fidelity = wb.get("viz_fidelity") if isinstance(wb.get("viz_fidelity"), list) else []
     emptied = _emptied_visuals(wb)
     measure_line = _measure_filter_summary_line(wb)
+    pbip_line = _pbip_warning_summary_line(wb)
 
-    if not items and not fidelity and not measure_line:
+    if not items and not fidelity and not measure_line and not pbip_line:
         return ["REPORT: no remediation worklist in this handover.", ""]
 
     out = []
@@ -649,6 +789,8 @@ def _report_section(wb: dict) -> list[str]:
         out.append(f"        !! {len(emptied)} visual(s) EMPTIED - every field binding was dropped")
     if measure_line:
         out.append(measure_line)
+    if pbip_line:
+        out.append(pbip_line)
 
     out += ["", "        next step: --viz    (full worklist)   --viz --severity blocking", ""]
     return out
@@ -900,19 +1042,19 @@ def _viz_sections(
     severity, category = filters
     counts = _fidelity_counts(wb) if category is None else []
     measure_line = _measure_filter_summary_line(wb) if category in (None, MEASURE_FILTER_CATEGORY) else None
-    measure_lines = [measure_line] if measure_line else []
-    budget -= sum(_blen(x) + 1 for x in counts + measure_lines)
+    pbip_line = (
+        _pbip_warning_summary_line(wb) if category is None or category.startswith(PBIP_WARNING_CATEGORY) else None
+    )
+    extra_lines = [line for line in (measure_line, pbip_line) if line]
+    budget -= sum(_blen(x) + 1 for x in counts + extra_lines)
 
-    scope_parts = []
-    if severity:
-        scope_parts.append(f"severity {severity!r}")
+    scope_parts = [f"severity {severity!r}"] if severity else []
     if category:
         scope_parts.append(f"category {category!r}")
-    scope = " at " + ", ".join(scope_parts) if scope_parts else ""
     section = (
         f"--- {len(items)} ITEM(S) IN {len(grouped)} CATEGORY(IES) ---"
         if items
-        else f"No remediation worklist items{scope}."
+        else f"No remediation worklist items{' at ' + ', '.join(scope_parts) if scope_parts else ''}."
     )
     # Costed BEFORE the emptied block, because it is emitted unconditionally afterwards. Letting
     # the emptied names spend the budget down to 14 bytes and then appending a 39-byte heading is
@@ -921,7 +1063,7 @@ def _viz_sections(
 
     emptied = _emptied_block(_emptied_visuals(wb), budget) if category is None else []
     budget -= sum(_blen(x) + 1 for x in emptied)
-    return emptied + counts + measure_lines + [section], budget
+    return emptied + counts + extra_lines + [section], budget
 
 
 def render_viz(wb_name: str, wb: dict, severity: str | None, category: str | None, max_bytes: int) -> str:
@@ -994,11 +1136,12 @@ def render_default(wb_name: str, wb: dict, target: Path, max_bytes: int) -> str:
     return "\n".join(out + report + [NEEDS_REVIEW_NOTE])
 
 
-def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool]:
-    """Urgency tuple: (name, calc requests, report items, blocking, emptied, measure filters, missing)."""
+def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool, int, bool]:
+    """Urgency tuple with calc, report, invisible-warning, and missing-audit counts."""
     items = report_items_of(wb)
     blocking = sum(1 for i in items if (i.get("severity") or "").lower() == "blocking")
     status, payload = measure_filter_status(wb)
+    warning_status, warnings = pbip_warning_status(wb)
     measure_filters = int(payload.get("count") or 0) if status == MEASURE_FILTER_PRESENT else 0
     return (
         name,
@@ -1008,21 +1151,48 @@ def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool]:
         len(_emptied_visuals(wb)),
         measure_filters,
         status == MEASURE_FILTER_MISSING,
+        len(warnings) if warning_status == PBIP_WARNING_PRESENT else 0,
+        warning_status == PBIP_WARNING_MISSING,
     )
 
 
-def _list_line(row: tuple[str, int, int, int, int, int, bool]) -> str:
+def _list_line(row: tuple[str, int, int, int, int, int, bool, int, bool]) -> str:
     """Format one `--list` row. The name is clipped so a long one cannot push the line off-cap."""
-    name, n_reqs, n_items, blocking, emptied, measure_filters, measure_missing = row
-    short = _clip(name, 52)
-    line = f"    {short:<52} {n_reqs:>4} calc request(s)  {n_items:>4} report item(s)  {blocking:>3} blocking"
-    if emptied:
-        line += f"  !! {emptied} EMPTIED"
-    if measure_filters:
-        line += f"  !! {measure_filters} MEASURE-FILTERS"
-    elif measure_missing:
+    line = f"    {_clip(row[0], 52):<52} {row[1]:>4} calc request(s)  {row[2]:>4} report item(s)  {row[3]:>3} blocking"
+    if row[4]:
+        line += f"  !! {row[4]} EMPTIED"
+    if row[5]:
+        line += f"  !! {row[5]} MEASURE-FILTERS"
+    elif row[6]:
         line += "  ?? measure-filter key missing"
+    if row[7]:
+        line += f"  !! {row[7]} PBIP-WARNINGS"
+    elif row[8]:
+        line += "  ?? pbip-warning key missing"
     return line
+
+
+def _pbip_warning_estate_lines(found: list[tuple[str, dict, Path]]) -> list[str]:
+    """Estate totals for `--list`, including missing vs present-empty audit states."""
+    states = {PBIP_WARNING_PRESENT: 0, PBIP_WARNING_NONE: 0, PBIP_WARNING_MISSING: 0, PBIP_WARNING_INVALID: 0}
+    families: dict[str, int] = {}
+    workbooks_with_warnings = 0
+    for _, wb, _ in found:
+        status, warnings = pbip_warning_status(wb)
+        states[status] = states.get(status, 0) + 1
+        if warnings:
+            workbooks_with_warnings += 1
+        for family, count in _pbip_warning_family_counts(warnings).items():
+            families[family] = families.get(family, 0) + count
+    total = sum(families.values())
+    out = [
+        f"PBIP warnings: {total} warning(s) across {workbooks_with_warnings} workbook(s); "
+        f"present-empty {states[PBIP_WARNING_NONE]}, missing {states[PBIP_WARNING_MISSING]}, "
+        f"invalid {states[PBIP_WARNING_INVALID]}",
+    ]
+    if families:
+        out.append("PBIP warning families: " + " | ".join(f"{k} {families[k]}" for k in sorted(families)))
+    return out + [""]
 
 
 def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
@@ -1037,10 +1207,11 @@ def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     rows = [_list_row(name, wb) for name, wb, _ in found]
     out = [
         f"{len(found)} workbook(s), most urgent first "
-        "(invisible measure filters > emptied visuals > blocking items > queue size):",
+        "(PBIP warnings > invisible measure filters > emptied visuals > blocking items > queue size):",
         "",
     ]
-    ranked = sorted(rows, key=lambda r: (-r[5], -r[4], -r[3], -(r[1] + r[2]), r[0].lower()))
+    out += _pbip_warning_estate_lines(found)
+    ranked = sorted(rows, key=lambda r: (-r[7], -r[5], -r[4], -r[3], -(r[1] + r[2]), r[0].lower()))
     budget = max_bytes - sum(_blen(x) + 1 for x in out)
     more = "    ... and {n} more workbook(s) not listed here; raise --max-bytes"
     return "\n".join(out + _fit_lines([_list_line(r) for r in ranked], budget, more))
@@ -1063,6 +1234,8 @@ def build_json(wb_name: str, wb: dict, category: str | None) -> dict:
         if "measure_filters_needs_review" in wb
         else MEASURE_FILTER_MISSING,
         "measure_filter_items": _measure_filter_work_items(wb),
+        "pbip_warnings": wb.get("pbip_warnings") if "pbip_warnings" in wb else PBIP_WARNING_MISSING,
+        "pbip_warning_items": _pbip_warning_work_items(wb),
         "viz_fidelity": [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)],
     }
 

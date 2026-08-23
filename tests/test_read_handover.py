@@ -731,6 +731,100 @@ def test_measure_filter_present_zero_prints_no_empty_section(tmp_path, capsys):
     assert "No remediation worklist items" in viz
 
 
+def test_real_pbip_warning_fixture_is_grouped_into_report_queue(capsys):
+    """Kills: leaving real `pbip_warnings[]` as prose-only instead of report-side work items."""
+    path = FIXTURES / "handover-pbip-warnings.json"
+
+    _, default = run([str(path)], capsys)
+    _, viz = run([str(path), "--viz"], capsys)
+    _, blocking = run([str(path), "--viz", "--severity", "blocking"], capsys)
+
+    assert "!! 4 PBIP warning(s): dangling_refs 1 | no_relationship 2 | tableau_blend 1" in default
+    assert "REPORT: 4 remediation item(s)" in default
+    assert "severity: blocking 3 | high 1" in default
+    assert "## pbip_warning_no_relationship  (2 item(s))" in viz
+    assert "## pbip_warning_tableau_blend  (1 item(s))" in viz
+    assert "## pbip_warning_dangling_refs  (1 item(s))" in viz
+    assert "Activity Threshold" in viz
+    assert "Tableau BLENDS 'Groups' with 'TS Users'" in viz
+    assert "visual field reference(s) name a model object" in viz
+    assert "pbip_warning_dangling_refs" not in blocking
+
+
+def test_viz_category_drills_into_one_pbip_warning_family(capsys):
+    """Kills: treating every PBIP warning as one flat bucket with no family-specific drill-down."""
+    path = FIXTURES / "handover-pbip-warnings.json"
+
+    _, out = run([str(path), "--viz", "--category", "pbip_warning_no_relationship"], capsys)
+
+    assert "## pbip_warning_no_relationship  (2 item(s))" in out
+    assert "Activity Threshold" in out
+    assert "Timezone" in out
+    assert "Tableau BLENDS" not in out
+
+
+def test_pbip_warning_json_preserves_present_vs_missing(tmp_path, capsys):
+    """Kills: reducing missing `pbip_warnings` to the same shape as present-and-empty warnings."""
+    present_json = tmp_path / "present-pbip.json"
+    missing_json = tmp_path / "missing-pbip.json"
+    present = FIXTURES / "handover-pbip-warnings.json"
+    missing = write_slice(tmp_path, make_workbook([]), "missing-pbip-key.json")
+
+    assert run([str(present), "--json", str(present_json)], capsys)[0] == 0
+    assert run([str(missing), "--json", str(missing_json)], capsys)[0] == 0
+
+    present_payload = json.loads(present_json.read_text(encoding="utf-8"))
+    missing_payload = json.loads(missing_json.read_text(encoding="utf-8"))
+    assert len(present_payload["pbip_warnings"]) == 4
+    assert len(present_payload["pbip_warning_items"]) == 4
+    assert missing_payload["pbip_warnings"] == rh.PBIP_WARNING_MISSING
+    assert missing_payload["pbip_warning_items"] == []
+
+
+def test_pbip_warning_missing_and_empty_are_not_conflated(tmp_path, capsys):
+    """Kills: a false green where an unrecorded audit key prints like an explicitly empty list."""
+    missing = write_slice(tmp_path, make_workbook([]), "missing-pbip-key.json")
+    empty_wb = make_workbook([])
+    empty_wb["pbip_warnings"] = []
+    empty = write_slice(tmp_path, empty_wb, "empty-pbip-key.json")
+
+    _, missing_out = run([str(missing)], capsys)
+    _, empty_out = run([str(empty)], capsys)
+
+    assert "pbip warnings: NOT RECORDED" in missing_out
+    assert "pbip warnings: none recorded (key present and empty)" in empty_out
+    assert "zero-warning" in missing_out
+
+
+def test_pbip_warning_list_ranks_warning_heavy_workbooks(tmp_path, capsys):
+    """Kills: bundle list sorting only by calc/report worklist size, burying PBIP warnings."""
+    handover = tmp_path / "handover"
+    handover.mkdir()
+    quiet = make_workbook([], name="Quiet")
+    quiet["pbip_warnings"] = []
+    loud = make_workbook([], name="Loud")
+    loud["pbip_warnings"] = ["manual attention required: table 'T' landed with NO relationship to any other table"]
+    write_slice(handover, quiet, "quiet.json")
+    write_slice(handover, loud, "loud.json")
+
+    _, out = run([str(tmp_path), "--list"], capsys)
+
+    lines = [line for line in out.splitlines() if "calc request" in line]
+    assert "Loud" in lines[0]
+    assert "!! 1 PBIP-WARNINGS" in lines[0]
+
+
+def test_pbip_warning_command_failure_is_not_scored_as_expected_output():
+    """Mutation harness guard: command failure is a failure, not a caught-output mutation."""
+    cmd = [sys.executable, str(SCRIPTS / "read_handover.py"), "does-not-exist.json", "--viz"]
+
+    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 2
+    assert "PBIP warning" not in result.stdout
+    assert "does not exist" in result.stderr
+
+
 # --------------------------------------------------------------------------------------------
 # --fidelity
 # --------------------------------------------------------------------------------------------
