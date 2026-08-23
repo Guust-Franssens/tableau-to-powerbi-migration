@@ -1,0 +1,32 @@
+{
+  "estate": {
+    "tool": "migrate_estate",
+    "source": "<REPO_ROOT>\\_bundle-208\\handover\\Admin_Insights_Starter.json"
+  },
+  "workbook": {
+    "name": "Admin_Insights_Starter",
+    "model_translation_handoff": {
+      "needs_review": [],
+      "requests": [],
+      "summary": {
+        "total": 0,
+        "translated": 0,
+        "stub": 0
+      }
+    },
+    "remediation_worklist": {
+      "items": [],
+      "summary": {
+        "visuals_flagged": 0,
+        "visuals_clean": 0
+      },
+      "visuals": []
+    },
+    "pbip_warnings": [
+      "manual attention required: Tableau BLENDS 'Groups' with 'TS Users' on 'Calculation_363806422393368576 <-> user_email - Split 1', 'user_email', but the tables they landed as (sqlproxy (Groups) | sqlproxy (TS Users)) have no relationship between them -- a measure from one sliced by the other's columns returns that table's GRAND TOTAL identically for every member. A blend is a composite-key link with no single-column Power BI equivalent, so it is reported rather than guessed: add a relationship (or a COMBINEVALUES key column on both tables) using exactly these columns",
+      "manual attention required: table 'Activity Threshold' landed with NO relationship to any other table -- a measure broken down by its columns returns the whole table's GRAND TOTAL identically for every member, and no structural gate can see that. The source declared no join for it, so none was invented.",
+      "manual attention required: table 'Timezone' landed with NO relationship to any other table -- a measure broken down by its columns returns the whole table's GRAND TOTAL identically for every member, and no structural gate can see that. The source declared no join for it, so none was invented.",
+      "manual attention required: 20 visual field reference(s) name a model object that does not exist -- those visuals render EMPTY and report no error; first: PBIR_VISUAL_REF_MISSING: definition/pages/page-GroupDrilld7ca8a5ce/visuals/slicer-page-Grouf91973fc/visual.json binds column 'group_name' on table 'sqlproxy', which the model does not contain -- the visual renders EMPTY and validation reports no error"
+    ]
+  }
+}
