@@ -32,7 +32,9 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+FIXTURES = ROOT / "tests" / "fixtures"
 sys.path.insert(0, str(SCRIPTS))
 
 import read_handover as rh  # noqa: E402  # pylint: disable=wrong-import-position
@@ -635,6 +637,98 @@ def test_default_view_surfaces_the_report_queue(tmp_path, capsys):
     assert "REPORT:" in out
     assert "EMPTIED" in out
     assert "--viz" in out
+
+
+def test_real_measure_filter_fixture_is_report_side_blocking_numeric_fidelity(capsys):
+    """Kills: ignoring the real `measure_filters_needs_review` field from Admin_Insights_Starter."""
+    path = FIXTURES / "handover-measure-filters.json"
+
+    _, default = run([str(path)], capsys)
+    _, viz = run([str(path), "--viz"], capsys)
+    _, blocking = run([str(path), "--viz", "--severity", "blocking"], capsys)
+
+    assert "REPORT: 2 remediation item(s)" in default
+    assert "severity: blocking 2" in default
+    assert "2 dropped aggregate/calculated measure filter(s)" in default
+    assert "INVISIBLE numeric-fidelity risk" in default
+    assert "## measure_filter_needs_review  (2 item(s))" in viz
+    assert "Above Thresholds - BAN" in viz
+    assert "Days since last login" in viz
+    assert "visual renders, values are wrong" in viz
+    assert "re-apply it as a visual-level filter" in viz
+    assert "Above Thresholds - BAN" in blocking
+
+
+def test_viz_category_drills_into_measure_filters_without_emptied_visual_noise(capsys):
+    """Kills: `--viz --category measure_filter_needs_review` falling through to model categories."""
+    path = FIXTURES / "handover-measure-filters.json"
+
+    _, out = run([str(path), "--viz", "--category", rh.MEASURE_FILTER_CATEGORY], capsys)
+
+    assert "## measure_filter_needs_review  (2 item(s))" in out
+    assert "Above Thresholds - BAN" in out
+    assert "No requests in category" not in out
+    assert "EMPTIED VISUALS" not in out
+
+
+def test_viz_category_truncation_recovery_does_not_suggest_severity(tmp_path, capsys):
+    """Kills: scoped report-category truncation pointing at `--severity`, which no longer narrows it."""
+    wb = make_workbook([])
+    wb["measure_filters_needs_review"] = {
+        "count": 40,
+        "note": "re-apply it as a visual-level filter in Power BI",
+        "worksheets": [{"worksheet": f"Sheet {i}", "reason": "R" * 200} for i in range(40)],
+    }
+    path = write_slice(tmp_path, wb)
+
+    _, out = run([str(path), "--viz", "--category", rh.MEASURE_FILTER_CATEGORY, "--max-bytes", "3000"], capsys)
+
+    assert "OUTPUT TRUNCATED" in out
+    assert "--json <file>" in out
+    assert "--severity" not in out
+
+
+def test_measure_filter_json_preserves_present_vs_missing(tmp_path, capsys):
+    """Kills: reducing missing `measure_filters_needs_review` to the same shape as zero dropped filters."""
+    present_json = tmp_path / "present.json"
+    missing_json = tmp_path / "missing.json"
+    present = FIXTURES / "handover-measure-filters.json"
+    missing = write_slice(tmp_path, make_workbook([]), "missing-key.json")
+
+    assert run([str(present), "--json", str(present_json)], capsys)[0] == 0
+    assert run([str(missing), "--json", str(missing_json)], capsys)[0] == 0
+
+    present_payload = json.loads(present_json.read_text(encoding="utf-8"))
+    missing_payload = json.loads(missing_json.read_text(encoding="utf-8"))
+    assert present_payload["measure_filters_needs_review"]["count"] == 2
+    assert len(present_payload["measure_filter_items"]) == 2
+    assert missing_payload["measure_filters_needs_review"] == rh.MEASURE_FILTER_MISSING
+    assert missing_payload["measure_filter_items"] == []
+
+
+def test_measure_filter_missing_is_not_a_false_zero(tmp_path, capsys):
+    """Kills: printing a clean zero when the engine never emitted the audit field at all."""
+    path = write_slice(tmp_path, make_workbook([]))
+
+    _, out = run([str(path)], capsys)
+
+    assert "measure filters: NOT RECORDED" in out
+    assert "0 dropped" not in out
+
+
+def test_measure_filter_present_zero_prints_no_empty_section(tmp_path, capsys):
+    """Kills: adding a noisy empty section for a workbook that explicitly recorded no dropped filters."""
+    wb = make_workbook([])
+    wb["measure_filters_needs_review"] = {"count": 0, "note": "none", "worksheets": []}
+    path = write_slice(tmp_path, wb)
+
+    _, default = run([str(path)], capsys)
+    _, viz = run([str(path), "--viz"], capsys)
+
+    assert "measure filters:" not in default
+    assert "measure_filter_needs_review" not in viz
+    assert "dropped aggregate/calculated measure filter" not in default
+    assert "No remediation worklist items" in viz
 
 
 # --------------------------------------------------------------------------------------------
