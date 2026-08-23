@@ -197,8 +197,9 @@ enrich it, and hand it over refreshed.
      sets the ORDER BY, not merely the display format), and `manual_sort`.
    - Land approvals through the engine: write `{name: dax}` and re-run via `--approved-dax`. **Never
      hand-edit `_Measures.tmdl`** — a landing re-run deletes and recreates it.
-5. **Check the data model before Desktop sees it** — `python scripts/check_datamodel.py <Name>.SemanticModel`.
-   Clean ≠ opens: it is a dependency-free M/TMDL structural screen, not an openability proof (`powerbi-semantic-model-gotchas`).
+5. **Check the data model before Desktop sees it** — `python scripts/check_unit.py <Name>.SemanticModel --scope model`.
+   Inspect `data-model`. Clean ≠ opens: this is an M/TMDL structural screen, not an openability proof
+   (`powerbi-semantic-model-gotchas`).
 6. **Validate a sample offline.** For at least the non-trivial translations, evaluate against real
    data and compare to the Tableau value. A measure that evaluates is not a measure that is right.
 7. **Enrich for AI — see the next section.** This is the part of the job nobody upstream does at all.
@@ -267,7 +268,7 @@ Everything below is what that skill *cannot* know: your place in this pipeline.
 - **Your gate before hand-off** — scoped to the model you built, not the whole repo:
 
   ```bash
-  python scripts/check_ai_readiness.py migrations/workbooks/<slug>
+  python scripts/check_unit.py migrations/workbooks/<slug> --scope model
   python scripts/set_ai_instructions.py --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel
   python scripts/set_ai_instructions.py --check --strict --model migrations/workbooks/<slug>/fabric/<Name>.SemanticModel
   ```
@@ -276,11 +277,11 @@ Everything below is what that skill *cannot* know: your place in this pipeline.
   for Copilot") in `limitations_encountered` — a migration that claims "AI-ready" without naming the
   deferred items is overstating its coverage.
 - **These paths assume the `migrations/workbooks/<slug>/fabric/` tree.** In the estate/bundle flow the
-  model lives at `<bundle>/pbip/<wb>/<Name>.SemanticModel`, and `check_ai_readiness.py` structurally
-  cannot run there. That is a **tooling gap, not a waiver**: point `set_ai_instructions.py --model` at
-  the real `.SemanticModel` path (it takes one), do the descriptions/synonyms work anyway, and record
-  the coverage you could not machine-check in `limitations_encountered`. Never report "AI-ready"
-  because a checker declined to run, and never silently skip the step — say which path you took.
+  model lives at `<bundle>/pbip/<wb>/<Name>.SemanticModel`; run `check_unit --scope model` on that target
+  and point `set_ai_instructions.py --model` at the same `.SemanticModel` path. Do the
+  descriptions/synonyms work anyway, and record any coverage you could not machine-check in
+  `limitations_encountered`. Never report "AI-ready" because a checker declined to run, and never
+  silently skip the step — say which path you took.
 
 ## Gotchas
 
@@ -341,8 +342,8 @@ throwing an error" is necessary but not sufficient:
 9. **The model is Copilot-ready** — every table, column, and measure has a business-meaning
    description; categorical/dimension columns enumerate their domain values; synonyms are set where the
    display name isn't natural language (see "Prep the model for AI" above). `python
-   scripts/check_ai_readiness.py migrations/workbooks/<slug>` reports ~100% description coverage with no
-   categorical column missing its domain values.
+   scripts/check_unit.py migrations/workbooks/<slug> --scope model` reports ~100% description coverage
+   with no categorical column missing its domain values.
 10. **Model-level AI instructions are stamped (MANDATORY — not optional).** A grounded, high-signal
    `migrations/workbooks/<slug>/ai-instructions.md` exists and has been written into the culture
    `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
