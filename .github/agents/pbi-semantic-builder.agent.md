@@ -93,17 +93,11 @@ examples, not hypothetical ones.
 - **Durable learnings go in committed files** (the agent `Gotchas` sections and
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
   real migration permanently improves the toolkit.
-- **Clean up after yourself when you finish.** (a) **Close any Power BI Desktop instance you opened.**
-  **Concurrent instances are fine** — the Desktop Bridge addresses one by `--pid` natively and every
-  port lookup is PID-scoped, so this is a **leak** rule, not a concurrency limit: each live instance
-  holds an `msmdsrv` with the model in RAM, so orphans exhaust the **machine**. Requirement: **name
-  your PID** (an unnamed lookup with several instances is a deliberate error, not a coin flip), and
-  close what you opened: `Stop-Process -Id <your literal pid> -Force` (map instance→migration
-  by `MainWindowTitle`; the shell guard rejects looped/variable `-Id`, and `$pid` is read-only,
-  so use literal PIDs). **Never** close a sibling's instance, and don't close one
-  mid-handoff that a peer still needs (e.g. a validator awaiting a semantic-builder's fix). (b) **Remove
-  scratch/temp files you created** (ajv harnesses in `%TEMP%`, `.pbip` cache/backups, one-off probe
-  scripts) — keep only committed deliverables plus the re-runnable `_build/` scripts; confirm nothing
+- **Power BI Desktop cleanup is PID-scoped.** Concurrent instances are fine; never sweep by name.
+  Use the literal PID you opened (`Stop-Process -Id <pid> -Force`; `$pid` is a read-only shell
+  variable), and never close a sibling's instance or one mid validator↔builder handoff. Run-owned
+  leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch/temp files you
+  created; keep only committed deliverables plus re-runnable `_build/` scripts, and confirm nothing
   scratch leaked into git before reporting done.
 <!-- END:shared-conventions -->
 

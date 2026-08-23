@@ -87,6 +87,7 @@ from _verdict_lines import (
     _has_desktop_gone_verdict,
     _has_desktop_unready_verdict,
 )
+from check_desktop_orphans import record_desktop_event
 from migration_bundle import load_bundle
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -451,6 +452,15 @@ def _close(pid: int, pbip: Path) -> bool:
         check=False,
     )
     return True
+
+
+def _record_desktop_lifecycle(migration: Path, action: str, pid: int, pbip: Path, event: dict | None = None) -> dict:
+    """Best-effort Desktop lifecycle audit; cleanup must not depend on audit success."""
+    try:
+        return record_desktop_event(migration, action, pid, pbip, process=event)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        log.warning("could not record Desktop lifecycle event %s for pid %d: %s", action, pid, exc)
+        return {}
 
 
 def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[dict], str] | None:
@@ -1061,8 +1071,10 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
         return EXIT_OPERATOR_REQUIRED, "OPERATOR_REQUIRED"
 
     pid = None
+    desktop_event = None
     try:
         pid = _open_desktop(pbip)
+        desktop_event = _record_desktop_lifecycle(migration, "desktop-open", pid, pbip)
         log.info("desktop pid %d", pid)
         if not _wait_for_catalog(pid):
             verdict = _classify_catalog_timeout(conn)
@@ -1076,8 +1088,12 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
         _record_attempt(migration, verdict, f"{table} -> {verdict}")
         return rc, verdict
     finally:
+        if pid and desktop_event and opts[1]:
+            _record_desktop_lifecycle(migration, "desktop-kept", pid, pbip, desktop_event)
         if pid and not opts[1]:
             if _close(pid, pbip):
+                if desktop_event:
+                    _record_desktop_lifecycle(migration, "desktop-closed", pid, pbip, desktop_event)
                 log.info("closed desktop pid %d", pid)
 
 

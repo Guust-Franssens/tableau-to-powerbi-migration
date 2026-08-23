@@ -132,6 +132,7 @@ Base: `scripts/`
 check_ai_readiness.py
 check_blank_placeholders.py
 check_datamodel.py
+check_desktop_orphans.py
 check_empty_model.py
 check_engine_receipts.py
 check_field_bindings.py

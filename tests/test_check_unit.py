@@ -569,6 +569,7 @@ def test_scope_all_keeps_model_report_and_orchestration_checks(tmp_path: Path) -
     assert "oracle-coverage" in ids
     assert "ai-descriptions" in ids
     assert "cache-freshness" in ids
+    assert "desktop-orphans" in ids
     assert report["omitted_checks"] == []
 
 
