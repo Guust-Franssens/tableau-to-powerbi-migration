@@ -387,11 +387,19 @@ under the plugin, it is upstream — even when we also ship a mitigation on our 
 *our* tier (`scripts/`, the personas, the skills, the docs). When both apply, file upstream and keep a
 local issue only for the mitigation, cross-linked — never a second copy of the defect report.
 
-**Where does the output go?** Be honest about this rather than promising: **local PBIP is the only
-supported target today.** There is no publish step in this repo — `pbi-deployer` is phase 2 and does
-not exist yet. Getting a finished model/report into a Fabric workspace is a manual `fab import` or a
-Desktop publish. So the target question is not "local or Fabric?" but *"note the destination
-workspace in the brief so the manual publish is unambiguous."* Do not imply an automated deploy.
+**Where does the output go?** A migration produces a **local PBIP bundle**; publishing it is a
+separate, deliberate step — and that step has a tool. `scripts/deploy_estate.py` lands a bundle in an
+**existing** Fabric landing-zone workspace: models first, each report rebound from `byPath` to
+`byConnection` once its model exists, crash-safe by a run journal. Run `--dry-run` first — it reports
+the plan and the **item count**, which is the number a customer agrees before you deploy. Mechanics
+and the three tenant-measured facts it encodes: `scripts/README.md`; post-deploy check:
+`verify_bindings.py`.
+
+What it deliberately does **not** decide is **topology**. It takes ONE `--workspace` and never creates
+one, so cross-workspace shared-model binding, permission mapping and promotion out of the landing zone
+remain human decisions (#57). So the target question is not "local or Fabric?" but *"name the
+destination workspace in the brief, and say whether this run stops at the bundle or goes on to
+deploy."*
 
 ### Step 2 — five questions, asked ONCE, in one message
 
