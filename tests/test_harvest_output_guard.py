@@ -111,11 +111,22 @@ def test_the_two_harvesters_do_not_share_one_documented_folder() -> None:
 
 
 # --------------------------------------------------------------------------- the script's guard
+#
+# ⚠️ The unignored fixture is called `leaky`, with NO leading underscore, and must stay that way.
+# `.gitignore` now carries a root-anchored `/_*`, so EVERY `_*` path at the repo root is ignored by
+# construction - which means the old `_leaky` name was silently ignored and this negative case
+# asserted nothing. Renaming it back "for consistency with `_sweep`" would re-break it in a way that
+# still passes locally and fails only here.
+#
+# The rename also sharpens what these tests cover. Post-`/_*`, an underscore-prefixed output path is
+# safe whether or not the guard fires, so the guard's remaining value is for paths that do NOT start
+# with `_` - exactly the `ses-prep/` shape from issue #322, where a deliverable naming real customer
+# servers landed unprefixed and unignored.
 
 
 def test_guard_refuses_an_unignored_path_inside_a_work_tree(repo: Path) -> None:
-    assert h.unignored_output_paths(repo / "_leaky") == [repo / "_leaky" / artifact for artifact in h.OUTPUT_ARTIFACTS]
-    assert h.refuse_unignored_output(repo / "_leaky", allow_unignored=False) is True
+    assert h.unignored_output_paths(repo / "leaky") == [repo / "leaky" / artifact for artifact in h.OUTPUT_ARTIFACTS]
+    assert h.refuse_unignored_output(repo / "leaky", allow_unignored=False) is True
 
 
 def test_guard_proceeds_for_an_ignored_path(repo: Path) -> None:
@@ -134,15 +145,15 @@ def test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it(repo: Path) -> 
     stamp = _git(["check-ignore", "-q", "--", f"{repo / 'definitely-not-ignored'}/"], repo)
     if stamp.returncode != 0:
         pytest.skip("this git no longer reports every trailing-slash path as ignored")
-    assert h.refuse_unignored_output(repo / "_leaky", allow_unignored=False) is True
+    assert h.refuse_unignored_output(repo / "leaky", allow_unignored=False) is True
 
 
 def test_guard_proceeds_when_the_directory_already_exists(repo: Path) -> None:
     """An existing `--out` (the `--skip-download` re-run) must be judged the same way."""
     (repo / "_sweep-again" / "assets").mkdir(parents=True)
-    (repo / "_leaky-again" / "assets").mkdir(parents=True)
+    (repo / "leaky-again" / "assets").mkdir(parents=True)
     assert h.refuse_unignored_output(repo / "_sweep-again", allow_unignored=False) is False
-    assert h.refuse_unignored_output(repo / "_leaky-again", allow_unignored=False) is True
+    assert h.refuse_unignored_output(repo / "leaky-again", allow_unignored=False) is True
 
 
 def test_guard_proceeds_outside_any_git_work_tree(tmp_path: Path) -> None:
@@ -170,7 +181,7 @@ def test_guard_checks_every_artifact_not_just_the_downloads(repo: Path) -> None:
 
 def test_override_flag_downgrades_the_refusal_to_a_warning(repo: Path, caplog) -> None:
     with caplog.at_level("WARNING"):
-        assert h.refuse_unignored_output(repo / "_leaky", allow_unignored=True) is False
+        assert h.refuse_unignored_output(repo / "leaky", allow_unignored=True) is False
     assert "--allow-unignored-out" in caplog.text
 
 
@@ -219,7 +230,7 @@ def test_cli_exits_nonzero_before_touching_anything(repo: Path) -> None:
     which carries every workbook name, so the guard cannot be conditional on downloading.
     """
     result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"), "--out", "_leaky", "--skip-download"],
+        [sys.executable, str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"), "--out", "leaky", "--skip-download"],
         cwd=repo,
         capture_output=True,
         text=True,
@@ -227,4 +238,4 @@ def test_cli_exits_nonzero_before_touching_anything(repo: Path) -> None:
     )
     assert result.returncode != 0, f"the CLI accepted an unignored --out:\n{result.stdout}\n{result.stderr}"
     assert "REFUSING" in (result.stdout + result.stderr)
-    assert not (repo / "_leaky").exists(), "the refusal ran too late - it already created --out"
+    assert not (repo / "leaky").exists(), "the refusal ran too late - it already created --out"
