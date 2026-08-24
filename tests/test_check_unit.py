@@ -745,9 +745,27 @@ def test_cli_missing_path_is_usage_not_a_mutation_success(tmp_path: Path) -> Non
 
 
 # --- issue #317: a shared/published datasource model lands once and each report byPath-hops to it. ---
-# check_unit built its model inventory with a local glob, so eight model-layer gates called the model
-# absent while field-bindings resolved and PASSed it in the SAME run. These fixtures pin all four
-# states a report unit's model can be in, including the negative (genuinely modelless) one.
+# check_unit built its model inventory with a local *.SemanticModel glob and never resolved
+# definition.pbir byPath, so for a split shared datasource (model under datasources/<ds>/fabric/, each
+# report under workbooks/<wb>/fabric/) eight model-layer gates called the model absent while
+# check_field_bindings resolved and PASSed it in the SAME run. These hand-written minimal fixtures pin
+# all four states a report unit's model can be in - the negative (genuinely modelless) one included on
+# purpose, so "model lives elsewhere, by design" and "this unit has no model" never look the same:
+#
+#   fixture                          state     check_unit.py --scope model
+#   -------------------------------- --------- ------------------------------------------------------
+#   model-local/                     LOCAL     model gates run for real (data-model: PASS); external=0
+#   external-resolves/.../sales-wb   EXTERNAL  8 gates NOT_CHECKED "model is EXTERNAL", field-bindings
+#                                              PASS, not_checked_external=9, brownfield EVIDENCED
+#                                              (external); exit 2
+#   external-broken/.../sales-wb     BROKEN    model-reference FINDINGS "byPath does not resolve";
+#                                              exit 1
+#   no-model/                        NONE      ai-descriptions "no semantic model found", no
+#                                              model-reference row, external=0; exit 2
+#
+# The report references Sales[Order Date] and Sales[Total Revenue] so field-bindings genuinely resolves
+# and PASSes against the external model. The golden snapshot below locks the actionable EXTERNAL
+# wording; it is normalized so it is portable across Windows and the Linux CI runner.
 SHARED_DS = REPO_ROOT / "tests" / "fixtures" / "shared-datasource"
 STATE_TARGETS = {
     "model-local": SHARED_DS / "model-local",
@@ -777,7 +795,8 @@ def test_model_location_classifies_all_four_states() -> None:
     assert local.state == cu.MODEL_LOC_LOCAL
     assert external.state == cu.MODEL_LOC_EXTERNAL
     assert external.model_path is not None and external.model_path.is_dir()
-    assert not cu._path_within(external.model_path, STATE_TARGETS["external-resolves"])  # pylint: disable=protected-access
+    external_unit = STATE_TARGETS["external-resolves"]
+    assert not cu._path_within(external.model_path, external_unit)  # pylint: disable=protected-access
     assert broken.state == cu.MODEL_LOC_BROKEN
     assert broken.declared == "../../../../datasources/sales-ds/fabric/Sales.SemanticModel"
     assert broken.model_path is None
