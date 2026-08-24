@@ -37,6 +37,14 @@ The problem is not that the data is unreachable. It is that reading it costs mor
   buried report-side signal, but worse for sign-off: the visual renders and the values are wrong.
   This reader turns each dropped aggregate/calculated measure filter into a blocking work item so
   a severity-scoped triage sees the invisible numeric-fidelity risk beside visible report defects.
+* **A model-side deferral is swallowed the same way.** ``partitions_needs_review`` is the engine's
+  own record of a table whose M partition is a deploy-valid but EMPTY scaffold - e.g. "custom SQL
+  native query for this connector isn't verified; complete it manually" - because the upstream
+  query couldn't be auto-emitted (issue #326). Nothing surfaced it before this tool: a real
+  migration resolved the gap by materializing ~2.3M rows from a packaged extract instead of
+  completing the live translation the engine had already named as the needed manual step. This
+  reader groups the reasons (a FAMILY, not one sentence) and ranks them ahead of the calc queue,
+  because an unresolved partition means the table has ZERO rows, not just an unevaluated cell.
 
 ⚠️ **What this tool is NOT.** An earlier version of this docstring claimed that reading the slice
 directly failed *silently* - that a truncated read returned ``needs_review[]`` (the same calcs with
@@ -138,6 +146,19 @@ MEASURE_FILTER_DEFAULT_NOTE = (
     "mapping); it changes the values shown -- re-apply it as a visual-level filter in Power BI"
 )
 MEASURE_FILTER_RISK = "INVISIBLE NUMERIC FIDELITY RISK: visual renders, values are wrong until filter is re-applied."
+
+# `partitions_needs_review[]` (workbook-level, confirmed against a real slice --
+# `_bundle-208/handover/Admin_Insights_Starter.json`: `[{"kind": "m_partition", "reason": "...",
+# "table": "..."}]`) is the engine's own record of a `_scaffold_review(...)` deferral: a table whose
+# M partition is a deploy-valid but EMPTY typed-table scaffold because the upstream query could not
+# be auto-emitted -- e.g. "custom SQL native query for this connector isn't verified; complete it
+# manually" (connection_to_m.py). It is a FAMILY of reasons, not one sentence -- a neighbouring
+# scaffold site uses a different reason for a catalog/database drill that isn't resolvable from the
+# .tds -- so this groups by the reason text rather than matching a fixed string.
+PARTITION_REVIEW_MISSING = "not_recorded"
+PARTITION_REVIEW_NONE = "none"
+PARTITION_REVIEW_PRESENT = "present"
+PARTITION_REVIEW_INVALID = "invalid"
 
 PBIP_WARNING_PREFIX = "manual attention required: "
 PBIP_WARNING_CATEGORY = "pbip_warning"
@@ -550,12 +571,94 @@ def _cascadable_lines(handoff: dict, budget: int) -> list[str]:
     return head + _fit_lines(rows, budget - sum(_blen(x) + 1 for x in head) - 1, more) + [""]
 
 
+def partitions_needs_review_status(wb: dict) -> tuple[str, list[dict]]:
+    """Return whether the engine recorded any M-partition scaffold deferral, without treating an
+    absent key as zero. Mirrors `measure_filter_status`/`pbip_warning_status` on purpose: this repo
+    has shipped a false "0 deferrals" three times (#276, #299, #309) from exactly this conflation."""
+    if "partitions_needs_review" not in wb:
+        return PARTITION_REVIEW_MISSING, []
+    rows = wb.get("partitions_needs_review")
+    if not isinstance(rows, list):
+        return PARTITION_REVIEW_INVALID, []
+    rows = [r for r in rows if isinstance(r, dict) and (r.get("reason") or "").strip()]
+    if not rows:
+        return PARTITION_REVIEW_NONE, []
+    return PARTITION_REVIEW_PRESENT, rows
+
+
+def _partition_review_groups(rows: list[dict]) -> dict[str, list[str]]:
+    """Group by the REASON text -- a family of deferrals, not one sentence -- tables listed under it.
+
+    The engine repeats the same reason once per affected table (e.g. one Snowflake datasource with
+    6 custom-SQL tables emits the identical sentence 6 times); printing it once per DISTINCT reason,
+    with every table it covers, is the same de-duplication `guidance_by_category` already does for
+    `category_guidance`.
+    """
+    grouped: dict[str, list[str]] = {}
+    for row in rows:
+        reason = (row.get("reason") or "").strip()
+        grouped.setdefault(reason, []).append(str(row.get("table") or "?"))
+    return grouped
+
+
+def _partition_review_summary_line(wb: dict) -> str | None:
+    """One-liner for the default view. `None` only for an explicit, present, empty list -- MISSING
+    and INVALID both print a loud line so absence never reads as a clean zero."""
+    status, rows = partitions_needs_review_status(wb)
+    if status == PARTITION_REVIEW_PRESENT:
+        groups = _partition_review_groups(rows)
+        return (
+            f"        !! {len(rows)} table partition(s) across {len(groups)} distinct reason(s) NEED MANUAL "
+            "COMPLETION -- the engine emitted a deploy-valid but EMPTY scaffold; see the reason(s) below"
+        )
+    if status == PARTITION_REVIEW_MISSING:
+        return "        partition scaffolds: NOT RECORDED (key missing; this is not a zero-deferral signal)"
+    if status == PARTITION_REVIEW_INVALID:
+        return "        partition scaffolds: INVALID SHAPE (key present but not a list; inspect raw handover)"
+    return None
+
+
+def _partition_review_group_block(reason: str, tables: list[str]) -> str:
+    """One reason, printed ONCE, with every affected table listed under it."""
+    return "\n".join([f"    REASON: {reason}", f"        tables: {', '.join(sorted(tables))}"])
+
+
+def _partition_review_block(wb: dict, budget: int) -> list[str]:
+    """The full, budgeted breakdown backing `_partition_review_summary_line` -- ranked ahead of the
+    calc-stub queue in `_model_section` because unlike a stub measure (which still evaluates, just
+    to BLANK), this scaffold's table has ZERO rows and carries a named manual completion step. A
+    real migration resolved this gap by materializing ~2.3M rows from a packaged extract instead of
+    completing the live translation the engine had already named (issue #326) -- exactly the outcome
+    surfacing this reason exists to prevent.
+    """
+    status, rows = partitions_needs_review_status(wb)
+    if status != PARTITION_REVIEW_PRESENT:
+        return []
+    groups = _partition_review_groups(rows)
+    head = f"    --- {len(rows)} TABLE PARTITION(S) NEED MANUAL COMPLETION ({len(groups)} reason(s)) ---"
+    blocks = [_partition_review_group_block(reason, groups[reason]) for reason in sorted(groups)]
+    more = "    ... and {n} more reason group(s) not named here; raise --max-bytes or use --json"
+    return [head] + _fit_lines(blocks, budget - _blen(head) - 1, more) + [""]
+
+
 def _model_section(wb_name: str, wb: dict, reqs: list[dict], target: Path, budget: int) -> list[str]:
-    """Model-side summary: coverage, the per-category queue, and any cascade ordering constraint."""
+    """Model-side summary: partition scaffolds first, then coverage, the per-category queue, and
+    any cascade ordering constraint."""
     handoff = handoff_of(wb)
     summary = handoff.get("summary") if isinstance(handoff.get("summary"), dict) else {}
 
     out = [f"=== HANDOVER QUEUE - {_clip(wb_name)} ===", f"source: {_clip(str(target))}", ""]
+
+    # Ranked FIRST, ahead of the calc-stub queue: an unresolved M partition means the table has NO
+    # rows at all, which is a more severe defect than a stub calc (which still evaluates to BLANK).
+    partition_line = _partition_review_summary_line(wb)
+    if partition_line:
+        out.append(partition_line)
+    partition_block = _partition_review_block(wb, budget - sum(_blen(x) + 1 for x in out))
+    out += partition_block
+    if partition_line and not partition_block:
+        out.append("")
+
     if not reqs:
         return out + ["MODEL: no residual calculations in the handover queue.", ""]
 
@@ -1136,12 +1239,13 @@ def render_default(wb_name: str, wb: dict, target: Path, max_bytes: int) -> str:
     return "\n".join(out + report + [NEEDS_REVIEW_NOTE])
 
 
-def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool, int, bool]:
-    """Urgency tuple with calc, report, invisible-warning, and missing-audit counts."""
+def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool, int, bool, int, bool]:
+    """Urgency tuple with calc, report, invisible-warning, partition-scaffold, and missing-audit counts."""
     items = report_items_of(wb)
     blocking = sum(1 for i in items if (i.get("severity") or "").lower() == "blocking")
     status, payload = measure_filter_status(wb)
     warning_status, warnings = pbip_warning_status(wb)
+    partition_status, partition_rows = partitions_needs_review_status(wb)
     measure_filters = int(payload.get("count") or 0) if status == MEASURE_FILTER_PRESENT else 0
     return (
         name,
@@ -1153,10 +1257,12 @@ def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool, 
         status == MEASURE_FILTER_MISSING,
         len(warnings) if warning_status == PBIP_WARNING_PRESENT else 0,
         warning_status == PBIP_WARNING_MISSING,
+        len(partition_rows) if partition_status == PARTITION_REVIEW_PRESENT else 0,
+        partition_status == PARTITION_REVIEW_MISSING,
     )
 
 
-def _list_line(row: tuple[str, int, int, int, int, int, bool, int, bool]) -> str:
+def _list_line(row: tuple[str, int, int, int, int, int, bool, int, bool, int, bool]) -> str:
     """Format one `--list` row. The name is clipped so a long one cannot push the line off-cap."""
     line = f"    {_clip(row[0], 52):<52} {row[1]:>4} calc request(s)  {row[2]:>4} report item(s)  {row[3]:>3} blocking"
     if row[4]:
@@ -1169,6 +1275,10 @@ def _list_line(row: tuple[str, int, int, int, int, int, bool, int, bool]) -> str
         line += f"  !! {row[7]} PBIP-WARNINGS"
     elif row[8]:
         line += "  ?? pbip-warning key missing"
+    if row[9]:
+        line += f"  !! {row[9]} PARTITION-SCAFFOLDS"
+    elif row[10]:
+        line += "  ?? partition-review key missing"
     return line
 
 
@@ -1195,6 +1305,34 @@ def _pbip_warning_estate_lines(found: list[tuple[str, dict, Path]]) -> list[str]
     return out + [""]
 
 
+def _partition_review_estate_lines(found: list[tuple[str, dict, Path]]) -> list[str]:
+    """Estate totals for `--list`: unresolved M-partition scaffolds, missing vs present-empty."""
+    states = {
+        PARTITION_REVIEW_PRESENT: 0,
+        PARTITION_REVIEW_NONE: 0,
+        PARTITION_REVIEW_MISSING: 0,
+        PARTITION_REVIEW_INVALID: 0,
+    }
+    reasons: dict[str, int] = {}
+    workbooks_with_partitions = 0
+    for _, wb, _ in found:
+        status, rows = partitions_needs_review_status(wb)
+        states[status] = states.get(status, 0) + 1
+        if rows:
+            workbooks_with_partitions += 1
+        for reason, tables in _partition_review_groups(rows).items():
+            reasons[reason] = reasons.get(reason, 0) + len(tables)
+    total = sum(reasons.values())
+    out = [
+        f"Partition scaffolds: {total} table(s) need manual completion across "
+        f"{workbooks_with_partitions} workbook(s); present-empty {states[PARTITION_REVIEW_NONE]}, "
+        f"missing {states[PARTITION_REVIEW_MISSING]}, invalid {states[PARTITION_REVIEW_INVALID]}",
+    ]
+    if reasons:
+        out.append("Partition scaffold reasons: " + " | ".join(f"{r[:60]!r} {reasons[r]}" for r in sorted(reasons)))
+    return out + [""]
+
+
 def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     """Every workbook in a bundle, ranked by urgency, with the size of both its queues.
 
@@ -1206,12 +1344,16 @@ def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     """
     rows = [_list_row(name, wb) for name, wb, _ in found]
     out = [
-        f"{len(found)} workbook(s), most urgent first "
-        "(PBIP warnings > invisible measure filters > emptied visuals > blocking items > queue size):",
+        f"{len(found)} workbook(s), most urgent first (unresolved M-partition scaffolds > PBIP "
+        "warnings > invisible measure filters > emptied visuals > blocking items > queue size):",
         "",
     ]
     out += _pbip_warning_estate_lines(found)
-    ranked = sorted(rows, key=lambda r: (-r[7], -r[5], -r[4], -r[3], -(r[1] + r[2]), r[0].lower()))
+    out += _partition_review_estate_lines(found)
+    # Partition scaffolds rank FIRST: unlike a stub calc or a dropped visual binding, an unresolved
+    # M partition means the table has ZERO rows -- and it carries a named manual completion step
+    # the engine already wrote down (issue #326).
+    ranked = sorted(rows, key=lambda r: (-r[9], -r[7], -r[5], -r[4], -r[3], -(r[1] + r[2]), r[0].lower()))
     budget = max_bytes - sum(_blen(x) + 1 for x in out)
     more = "    ... and {n} more workbook(s) not listed here; raise --max-bytes"
     return "\n".join(out + _fit_lines([_list_line(r) for r in ranked], budget, more))
@@ -1236,6 +1378,10 @@ def build_json(wb_name: str, wb: dict, category: str | None) -> dict:
         "measure_filter_items": _measure_filter_work_items(wb),
         "pbip_warnings": wb.get("pbip_warnings") if "pbip_warnings" in wb else PBIP_WARNING_MISSING,
         "pbip_warning_items": _pbip_warning_work_items(wb),
+        "partitions_needs_review": wb.get("partitions_needs_review")
+        if "partitions_needs_review" in wb
+        else PARTITION_REVIEW_MISSING,
+        "partitions_needs_review_groups": _partition_review_groups(partitions_needs_review_status(wb)[1]),
         "viz_fidelity": [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)],
     }
 

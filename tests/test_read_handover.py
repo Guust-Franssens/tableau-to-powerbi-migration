@@ -826,6 +826,137 @@ def test_pbip_warning_command_failure_is_not_scored_as_expected_output():
 
 
 # --------------------------------------------------------------------------------------------
+# Model-side partition scaffold deferrals (issue #326)
+#
+# `partitions_needs_review[]` shape confirmed against a real slice:
+# `_bundle-208/handover/Admin_Insights_Starter.json` -> `workbook.partitions_needs_review` ==
+# `[{"kind": "m_partition", "reason": "flat-file source; set the file path ...", "table": "sqlproxy"}, ...]`.
+# The specific "custom SQL native query for this connector isn't verified" reason used below comes
+# from the engine source (`connection_to_m.py`'s `_scaffold_review` call sites) rather than a slice
+# on this machine, since no local slice happened to carry a live-connector deferral -- it is the
+# same field and shape, just a different member of the reason FAMILY.
+# --------------------------------------------------------------------------------------------
+
+
+def test_partition_review_ranks_first_and_groups_tables_under_one_reason(tmp_path, capsys):
+    """Kills: printing the reason once per table (the engine's own repetition), and burying it
+    below the calc-stub queue instead of ranking it ahead of a mere stub (which still evaluates)."""
+    wb = make_workbook([make_request("A")])
+    wb["partitions_needs_review"] = [
+        {
+            "kind": "m_partition",
+            "reason": "custom SQL native query for this connector isn't verified; complete it manually",
+            "table": "sqlproxy (Sales)",
+        },
+        {
+            "kind": "m_partition",
+            "reason": "custom SQL native query for this connector isn't verified; complete it manually",
+            "table": "sqlproxy (Costs)",
+        },
+        {
+            "kind": "m_partition",
+            "reason": "generic ODBC source carried neither a DSN nor a driver name, so no connection "
+            "string could be reconstructed; set the ODBC connection manually",
+            "table": "OtherTable",
+        },
+    ]
+    path = write_slice(tmp_path, wb)
+
+    _, out = run([str(path)], capsys)
+
+    assert out.count("isn't verified; complete it manually") == 1, "reason must print once, not per table"
+    assert "sqlproxy (Sales)" in out and "sqlproxy (Costs)" in out
+    assert "OtherTable" in out
+    assert "3 table partition(s) across 2 distinct reason(s)" in out
+    partition_idx = out.index("NEED MANUAL COMPLETION")
+    model_idx = out.index("MODEL:")
+    assert partition_idx < model_idx, "an unresolved M partition (zero rows) must outrank a mere stub calc"
+
+
+def test_partition_review_missing_is_not_a_false_zero(tmp_path, capsys):
+    """Kills: printing a clean '0 table partitions' when the engine never emitted the key at all.
+
+    This repo has shipped exactly this false-green three times (#276, #299, #309); the rule per
+    `check_stub_measures.py:68-69` is that 'no stubs' and 'no model' must never print the same way.
+    """
+    path = write_slice(tmp_path, make_workbook([]))
+
+    _, out = run([str(path)], capsys)
+
+    assert "partition scaffolds: NOT RECORDED" in out
+    assert "0 table" not in out
+    assert "NEED MANUAL COMPLETION" not in out
+
+
+def test_partition_review_present_empty_prints_no_section(tmp_path, capsys):
+    """Kills: treating an engine-recorded empty list the same as a missing key (or vice versa)."""
+    wb = make_workbook([])
+    wb["partitions_needs_review"] = []
+    path = write_slice(tmp_path, wb)
+
+    _, out = run([str(path)], capsys)
+
+    assert "partition scaffolds: NOT RECORDED" not in out
+    assert "NEED MANUAL COMPLETION" not in out
+    assert "partition scaffolds:" not in out
+
+
+def test_partition_review_invalid_shape_is_reported_not_silently_dropped(tmp_path, capsys):
+    """Kills: a non-list `partitions_needs_review` (engine schema drift) rendering as clean-empty."""
+    wb = make_workbook([])
+    wb["partitions_needs_review"] = {"unexpected": "shape"}
+    path = write_slice(tmp_path, wb)
+
+    _, out = run([str(path)], capsys)
+
+    assert "partition scaffolds: INVALID SHAPE" in out
+
+
+def test_partition_review_json_preserves_present_vs_missing(tmp_path, capsys):
+    """Kills: reducing a missing `partitions_needs_review` key to the same JSON shape as zero rows."""
+    present_wb = make_workbook([])
+    present_wb["partitions_needs_review"] = [
+        {"kind": "m_partition", "reason": "R1", "table": "T1"},
+        {"kind": "m_partition", "reason": "R1", "table": "T2"},
+    ]
+    present = write_slice(tmp_path, present_wb, "present.json")
+    missing = write_slice(tmp_path, make_workbook([]), "missing.json")
+    present_json = tmp_path / "present-out.json"
+    missing_json = tmp_path / "missing-out.json"
+
+    assert run([str(present), "--json", str(present_json)], capsys)[0] == 0
+    assert run([str(missing), "--json", str(missing_json)], capsys)[0] == 0
+
+    present_payload = json.loads(present_json.read_text(encoding="utf-8"))
+    missing_payload = json.loads(missing_json.read_text(encoding="utf-8"))
+    assert len(present_payload["partitions_needs_review"]) == 2
+    assert present_payload["partitions_needs_review_groups"] == {"R1": ["T1", "T2"]}
+    assert missing_payload["partitions_needs_review"] == rh.PARTITION_REVIEW_MISSING
+    assert missing_payload["partitions_needs_review_groups"] == {}
+
+
+def test_partition_review_outranks_pbip_warnings_in_list(tmp_path, capsys):
+    """Kills: leaving partition scaffolds out of `--list` urgency, or ranking them below PBIP
+    warnings -- an unresolved partition means zero rows, which this repo's field incident (#326)
+    showed gets silently "fixed" by materializing the wrong data source unless it outranks noise."""
+    handover = tmp_path / "handover"
+    handover.mkdir()
+    warned_only = make_workbook([], name="WarnedOnly")
+    warned_only["pbip_warnings"] = ["manual attention required: table 'T' landed with NO relationship to any other"]
+    scaffolded = make_workbook([], name="Scaffolded")
+    scaffolded["partitions_needs_review"] = [{"kind": "m_partition", "reason": "R", "table": "T"}]
+    write_slice(handover, warned_only, "warned.json")
+    write_slice(handover, scaffolded, "scaffolded.json")
+
+    _, out = run([str(tmp_path), "--list"], capsys)
+
+    lines = [line for line in out.splitlines() if "calc request" in line]
+    assert "Scaffolded" in lines[0], "an unresolved M partition must outrank a PBIP-warning-only workbook"
+    assert "PARTITION-SCAFFOLDS" in lines[0]
+    assert "Partition scaffolds: 1 table(s)" in out
+
+
+# --------------------------------------------------------------------------------------------
 # --fidelity
 # --------------------------------------------------------------------------------------------
 
