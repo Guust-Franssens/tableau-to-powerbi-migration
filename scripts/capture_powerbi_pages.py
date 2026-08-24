@@ -2,7 +2,8 @@
 """
 purpose: Capture every Power BI report page, waiting until each page's render has actually stabilised.
 usage:   python scripts/capture_powerbi_pages.py <report.Report> <output-dir> [--pid PID]
-                                                [--poll 4] [--stable-seconds 20] [--max-wait 75]
+                                                [--pages <id>[,<id>...]] [--poll 4]
+                                                [--stable-seconds 20] [--max-wait 75]
 
 Why this exists - and why the obvious version is wrong
 ------------------------------------------------------
@@ -43,7 +44,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import shutil
 import subprocess
 import sys
 import time
@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 Screenshotter = Callable[[str, str, Path], bool]
+BRIDGE_WAIT_SECONDS = 90
+SCREENSHOT_TIMEOUT_SECONDS = BRIDGE_WAIT_SECONDS + 30
 
 
 @dataclass(frozen=True)
@@ -66,11 +68,12 @@ class CaptureResult:
 
 @dataclass(frozen=True)
 class CaptureOptions:
-    """Timing options for one page capture."""
+    """Capture options for each selected report page."""
 
     poll: float
     stable_seconds: float
     max_wait: float
+    page_ids: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -94,23 +97,27 @@ def pages(report: Path) -> list[tuple[str, str]]:
 
 def screenshot(page_id: str, pid: str, dest: Path) -> bool:
     """Capture one report page through the Desktop bridge."""
-    proc = subprocess.run(
-        [
-            "powerbi-desktop",
-            "screenshot",
-            page_id,
-            "--pid",
-            pid,
-            "--output",
-            str(dest),
-            "--wait-seconds",
-            "90",
-        ],
-        capture_output=True,
-        text=True,
-        shell=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "powerbi-desktop",
+                "screenshot",
+                page_id,
+                "--pid",
+                pid,
+                "--output",
+                str(dest),
+                "--wait-seconds",
+                str(BRIDGE_WAIT_SECONDS),
+            ],
+            capture_output=True,
+            text=True,
+            shell=True,
+            check=False,
+            timeout=SCREENSHOT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return proc.returncode == 0 and dest.exists()
 
 
@@ -122,6 +129,11 @@ def frame_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _staged_destination(dest: Path) -> Path:
+    """Return the hidden sibling path used before a capture becomes report evidence."""
+    return dest.with_name(f".{dest.stem}.capturing{dest.suffix}")
+
+
 def capture_stable(
     page_id: str,
     pid: str,
@@ -130,48 +142,58 @@ def capture_stable(
     runtime: CaptureRuntime = DEFAULT_RUNTIME,
 ) -> CaptureResult:
     """Screenshot until one frame digest remains stable for the configured dwell."""
-    scratch = dest.parent / f".{dest.stem}.frames"
-    if scratch.exists():
-        shutil.rmtree(scratch)
-    scratch.mkdir(parents=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staged_dest = _staged_destination(dest)
+    staged_dest.unlink(missing_ok=True)
 
     started = runtime.clock()
     stable_digest: str | None = None
     stable_idle_seconds = 0.0
     frames = 0
-    newest_frame: Path | None = None
+    captured_frame = False
     previous_frame_finished = started
-    try:
-        while runtime.clock() - started < options.max_wait:
-            capture_started = runtime.clock()
-            frame = scratch / f"{frames}.png"
-            frames += 1
-            if not runtime.screenshotter(page_id, pid, frame):
-                return CaptureResult(False, False, runtime.clock() - started, frames)
-            newest_frame = frame
-            digest = frame_digest(frame)
-            if digest != stable_digest:
-                stable_digest = digest
-                stable_idle_seconds = 0.0
-            else:
-                stable_idle_seconds += max(0.0, capture_started - previous_frame_finished)
-            previous_frame_finished = runtime.clock()
-            if stable_idle_seconds >= options.stable_seconds:
-                shutil.copyfile(frame, dest)
-                return CaptureResult(True, True, runtime.clock() - started, frames)
-            runtime.sleep(options.poll)
+    while runtime.clock() - started < options.max_wait:
+        capture_started = runtime.clock()
+        frames += 1
+        if not runtime.screenshotter(page_id, pid, staged_dest):
+            staged_dest.unlink(missing_ok=True)
+            return CaptureResult(False, False, runtime.clock() - started, frames)
+        captured_frame = True
+        digest = frame_digest(staged_dest)
+        if digest != stable_digest:
+            stable_digest = digest
+            stable_idle_seconds = 0.0
+        else:
+            stable_idle_seconds += max(0.0, capture_started - previous_frame_finished)
+        previous_frame_finished = runtime.clock()
+        if stable_idle_seconds >= options.stable_seconds:
+            staged_dest.replace(dest)
+            return CaptureResult(True, True, runtime.clock() - started, frames)
+        runtime.sleep(options.poll)
 
-        if newest_frame is not None:
-            shutil.copyfile(newest_frame, dest)
-            return CaptureResult(True, False, runtime.clock() - started, frames)
-        return CaptureResult(False, False, runtime.clock() - started, frames)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    if captured_frame:
+        staged_dest.replace(dest)
+        return CaptureResult(True, False, runtime.clock() - started, frames)
+    staged_dest.unlink(missing_ok=True)
+    return CaptureResult(False, False, runtime.clock() - started, frames)
 
 
 def _safe_filename(name: str) -> str:
     """Return a readable filename stem for a report page display name."""
     return "".join(char if char not in '<>:"/\\|?*' else "_" for char in name).strip() or "page"
+
+
+def _selected_pages(
+    report_pages: list[tuple[str, str]], requested_page_ids: frozenset[str] | None
+) -> list[tuple[str, str]]:
+    """Return requested page IDs or raise when an exact ID is absent."""
+    if requested_page_ids is None:
+        return report_pages
+    available_page_ids = {page_id for page_id, _ in report_pages}
+    missing_page_ids = sorted(requested_page_ids - available_page_ids)
+    if missing_page_ids:
+        raise ValueError(", ".join(missing_page_ids))
+    return [(page_id, name) for page_id, name in report_pages if page_id in requested_page_ids]
 
 
 def capture_report(
@@ -190,6 +212,12 @@ def capture_report(
     if not report_pages:
         print(f"FAILED: no pages found under {report / 'definition' / 'pages'}")
         return 1
+
+    try:
+        report_pages = _selected_pages(report_pages, options.page_ids)
+    except ValueError as error:
+        print(f"FAILED: requested page id(s) not found: {error}")
+        return 2
 
     for page_id, name in report_pages:
         result = capture_stable(page_id, pid, out_dir / f"{_safe_filename(name)}.png", options, runtime)
@@ -212,12 +240,25 @@ def capture_report(
     return 1 if failed or unstable else 0
 
 
+def _page_ids(value: str) -> frozenset[str]:
+    """Parse a non-empty, comma-separated list of PBIR page folder names."""
+    page_ids = [page_id.strip() for page_id in value.split(",")]
+    if not all(page_ids):
+        raise argparse.ArgumentTypeError("page ids must be non-empty and comma-separated")
+    return frozenset(page_ids)
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("report", type=Path, help="Path to a .Report folder")
     parser.add_argument("outdir", type=Path, help="Folder where page PNGs should be written")
     parser.add_argument("--pid", required=True, help="Power BI Desktop PID to capture from")
+    parser.add_argument(
+        "--pages",
+        type=_page_ids,
+        help="Comma-separated PBIR page IDs (folder names) to capture; display names are not matched",
+    )
     parser.add_argument("--poll", type=float, default=4.0, help="Seconds between frames for one page")
     parser.add_argument(
         "--stable-seconds",
@@ -232,7 +273,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    options = CaptureOptions(poll=args.poll, stable_seconds=args.stable_seconds, max_wait=args.max_wait)
+    options = CaptureOptions(
+        poll=args.poll,
+        stable_seconds=args.stable_seconds,
+        max_wait=args.max_wait,
+        page_ids=args.pages,
+    )
     return capture_report(args.report, args.outdir, args.pid, options)
 
 
