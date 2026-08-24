@@ -125,7 +125,12 @@ reasoning or self-report of success.
   variable), and never close a sibling's instance or one mid validator↔builder handoff. Run-owned
   leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch/temp files you
   created; keep only committed deliverables plus re-runnable `_build/` scripts, and confirm nothing
-  scratch leaked into git before reporting done.
+  scratch leaked into git before reporting done. ⚠️ **Never `git add -A` after a gapped pull** —
+  measured: a merge staged **111** untracked scratch paths (a whole engine bundle, loose `_tmp_*.py`)
+  because `-A` cannot tell "files this merge introduces" from "files that happened to be lying
+  around". Stage from `git diff --name-status <old-HEAD> origin/master`. If you must undo one,
+  `reset --soft HEAD~1` **clears `MERGE_HEAD` even on a merge commit**, so recreate it or the next
+  commit is silently single-parent and the ancestry breaks.
 <!-- END:shared-conventions -->
 
 ## Inputs you require from the orchestrator

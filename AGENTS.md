@@ -495,7 +495,7 @@ overstated (issue #194). Do not quietly drop this, and do not inflate it.
 > **Running the pipeline by hand, or standing behind someone who is?**
 > [`docs/operator-runbook.md`](docs/operator-runbook.md) is the command-by-command version of this
 > section: the day-before checklist, expected timings, the failure playbook (the `estate_survey.py`
-> credential hang, the `exit 3` DoD gate, the storage-decision/union skip), the verification
+> site-wide silent sweep, the `exit 3` DoD gate, the storage-decision/union skip), the verification
 > checklist and — importantly — what that checklist does **not** prove.
 
 ### Gate B — after parse + probe, before building
@@ -589,5 +589,10 @@ exists so each question is answered once per migration, not once per session.
   variable), and never close a sibling's instance or one mid validator↔builder handoff. Run-owned
   leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch/temp files you
   created; keep only committed deliverables plus re-runnable `_build/` scripts, and confirm nothing
-  scratch leaked into git before reporting done.
+  scratch leaked into git before reporting done. ⚠️ **Never `git add -A` after a gapped pull** —
+  measured: a merge staged **111** untracked scratch paths (a whole engine bundle, loose `_tmp_*.py`)
+  because `-A` cannot tell "files this merge introduces" from "files that happened to be lying
+  around". Stage from `git diff --name-status <old-HEAD> origin/master`. If you must undo one,
+  `reset --soft HEAD~1` **clears `MERGE_HEAD` even on a merge commit**, so recreate it or the next
+  commit is silently single-parent and the ancestry breaks.
 <!-- END:shared-conventions -->
