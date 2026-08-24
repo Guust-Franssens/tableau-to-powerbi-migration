@@ -34,14 +34,14 @@ examples, not hypothetical ones.
   where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | engine truth | `<bundle>/reports/`; `<bundle>/semantic_models/` (if emitted) | **NEVER edit an existing baseline** |
   | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**. Keep
-  `reports/` pristine so it remains the exact answer to *"what did our tier change versus what the
-  engine produced?"* — rewriting it cost a retracted upstream bug on 2026-08-10. Use git for that
-  comparison; the mechanics live in `powerbi-report-gotchas` §3.
+  A bundle may contain `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**;
+  `<bundle>/semantic_models/` is conditional (absent for 8/12 workbooks), and absent baseline ≠ no
+  changes — see `AGENTS.md`. Keep `<bundle>/reports/` pristine and compare it with git
+  (`powerbi-report-gotchas` §3).
 
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a

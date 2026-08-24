@@ -72,7 +72,7 @@ Three locations, one direction (from `AGENTS.md`, and it is enforced):
 
 | stage | path | rule |
 |---|---|---|
-| engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **never edited, by anyone** |
+| engine truth | `<bundle>/reports/` (reliable); `<bundle>/semantic_models/` (only if emitted) | **never edit an existing baseline** |
 | working copy | `<bundle>/pbip/` | agents edit here; this is what `deploy_estate.py` reads |
 | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | copied at sign-off |
 
@@ -602,7 +602,8 @@ What a bundle contains ✅ verified against the reference bundle by listing it, 
 | `report.json` | the engine's full estate report (~1.8 MB for 38 workbooks) — the machine-readable form of the above | no |
 | `handover/` | one slice per workbook, so a per-workbook agent never loads the whole report | no |
 | `pbip/` | **the working copy** — one folder per deployable unit; what `deploy_estate.py` reads | **yes** |
-| `reports/`, `semantic_models/` | the engine's pristine output — the free baseline for `diff` | **never** |
+| `reports/` | the engine's pristine report output — reliable baseline for `diff` | **never** |
+| `semantic_models/` (when emitted) | pristine model output — baseline only for a working model with a counterpart | **never** |
 | `data/` | flat-file data landed next to the models that import it (4 folders on the reference bundle) | no |
 | `empty-model-check.json` | the exit-6 verdict: every model, its partitions, and why any of them would load zero rows. **Written on every run, pass or fail** | — |
 | `phase-timings.json` | per-phase elapsed seconds — see the note under §2's table for what it does *not* cover | — |
@@ -611,6 +612,24 @@ What a bundle contains ✅ verified against the reference bundle by listing it, 
 | `input_manifest.json`, `source-provenance.json` | what went in, and where upstream it came from | — |
 | `deploy-journal.jsonl` | written by step 6, not step 5: intent-then-outcome per item (§6.1) | — |
 | `deploy-estate-id.txt` | **minted at first deploy — keep it with the bundle** (§3.3) | — |
+
+#### Engine model-baseline availability
+
+`reports/` is a reliable engine-truth baseline. `semantic_models/` is conditional: a 12-workbook
+estate audited on 2026-08-24 had report baselines for all 12, but only 4 model pairs (33%); the
+remaining 8 working models had no engine-truth counterpart. An unpaired model does **not** mean
+“no changes were needed” — it means model churn is unmeasurable for that unit.
+
+Before diffing a model, verify its engine-truth counterpart exists. Record an absent counterpart as
+**BASELINE UNAVAILABLE**, distinctly from a clean/no-change diff; a tool using exit codes must give
+that state its own non-success/skip result, following `check_stub_measures.py`'s rule that “no stubs”
+and “no model” never print or exit the same way. Only an existing pair can produce “no changes.”
+
+For an engine-gap distribution, publish separate report and model denominators, state the paired-model
+coverage, and do not generalize model churn from the paired subset to the whole estate. The first
+field distribution in [issue #274](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/274)
+is report-complete but model-covered for 4 of 12 workbooks; treat any estate-level reading as
+report-biased unless that coverage is made explicit.
 
 **`pbip/` is not one folder per workbook.** On the reference bundle it held **39** folders = **23**
 converted workbooks + **16** datasource-only semantic models ✅ verified by reconciling `pbip/`
