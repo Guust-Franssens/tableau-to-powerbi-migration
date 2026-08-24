@@ -19,6 +19,7 @@ outcome, so the negative case is asserted beside every positive one.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -318,8 +319,36 @@ def test_the_band_sits_below_the_cap() -> None:
     assert 0 < sac.PROMPT_NEAR_CAP_LIMIT < sac.PROMPT_CHAR_LIMIT
 
 
-def test_this_repo_is_not_currently_in_the_band() -> None:
-    """No monkeypatching. If this fails, the warning is doing its job - buy headroom, do not delete
-    this test. Shipped sizes were 27,414-28,414 when the band was introduced.
+def test_the_repo_personas_stay_under_the_HARD_cap() -> None:
+    """No monkeypatching, and deliberately the hard cap rather than the band.
+
+    An earlier version of this test asserted the shipped personas were not in the 97% BAND. Blind
+    review on PR #316 showed that defeats the whole design: `pytest -q` is a blocking step in
+    `.github/workflows/checks.yml`, so a persona at 98% - still inside its documented limit - would
+    turn CI red through pytest, exactly the build-break `report_sizes` is written to avoid. The band
+    is advisory; only the hard cap may fail a build, and it already does via `report_sizes`.
     """
-    assert sac.near_cap(sorted((REPO_ROOT / ".github" / "agents").glob("*.agent.md"))) == []
+    assert sac.report_sizes(sorted((REPO_ROOT / ".github" / "agents").glob("*.agent.md"))) == []
+
+
+def test_the_near_cap_warning_is_actually_EMITTED(tmp_path: Path, caplog) -> None:
+    """The band's whole value is the message a human reads, and list membership does not prove it.
+
+    Blind review deleted the `log.warning` call outright and all 30 tests still passed: every other
+    test here asserts a return value, and the warning is a side effect none of them observe. This
+    pins the visible behaviour - the file name and its exact remaining headroom.
+    """
+    agent = _persona_of_size(tmp_path / "loud.agent.md", sac.PROMPT_NEAR_CAP_LIMIT + 250)
+    with caplog.at_level(logging.WARNING, logger=sac.log.name):
+        sac.report_sizes([agent])
+    warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "loud.agent.md" in warnings, "the warning must name the file, not just count personas"
+    assert "650 left" in warnings, "the warning must state the exact remaining headroom"
+
+
+def test_no_near_cap_warning_when_nothing_is_in_the_band(tmp_path: Path, caplog) -> None:
+    """The negative case beside the positive one: a comfortable persona must produce silence."""
+    agent = _persona_of_size(tmp_path / "quiet.agent.md", 20_000)
+    with caplog.at_level(logging.WARNING, logger=sac.log.name):
+        sac.report_sizes([agent])
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
