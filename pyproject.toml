@@ -41,6 +41,9 @@ py-modules = []
 # folder a real gate rather than a claim. `ruff`/`pylint` need the same treatment in
 # `.github/workflows/checks.yml`; keep the two lists in step.
 testpaths = ["tests", ".github/skills"]
+markers = [
+    "slow: joined offline Tableau-to-Fabric mock integration tests",
+]
 
 [tool.ruff]
 exclude = [

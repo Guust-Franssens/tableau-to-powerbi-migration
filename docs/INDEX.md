@@ -44,6 +44,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/migration-programme.md`](../docs/migration-programme.md) | Programme phases and operating model. |
 | Find migration guidance | [`docs/migration-spec.md`](../docs/migration-spec.md) | `migration-spec.json` contract. |
 | Find migration guidance | [`docs/operator-runbook.md`](../docs/operator-runbook.md) | Manual pipeline operation. |
+| Test the offline deployment rehearsal | [`docs/offline-mock-harness.md`](offline-mock-harness.md) | Offline Tableau-to-Fabric mock harness and fidelity boundary. |
 | Find migration guidance | [`docs/reference-capture.md`](../docs/reference-capture.md) | Tableau reference capture and evidence grading. |
 | Find migration guidance | [`docs/review-remediation-plan.md`](../docs/review-remediation-plan.md) | Route validation/review findings. |
 | Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Translate Tableau calcs/LODs/table calcs. |
