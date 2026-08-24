@@ -59,6 +59,16 @@ things a conversation cannot be trusted to remember every time:
    in phase 3, one phase AFTER this gate runs, so globbing them made the check a no-op on every
    fresh run and, on a re-used `--output` folder, correlated the previous estate's entries.
 
+7. **`--slice-only` skipped the generated-artifact baseline entirely (issue #230).** It never runs
+   `record_engine_output`, so `input_manifest.json` never carried a `generated_artifacts` key for a
+   bundle built this way - `check_migration_progress.py --tamper` returned `NO_BASELINE` (exit 2) for
+   every such bundle's whole life, even though nothing was tampered with. A field-measured SES estate
+   had to caveat its own first engine-gap distribution as "usable signal, not cryptographically
+   attested signal" as a direct result. `backfill_slice_only_baseline`, wired in below, records a
+   best-effort baseline scoped to whatever is on disk at that moment (never overwriting a real one a
+   prior full run already wrote), and `check_migration_progress.py` now tells the two cases apart -
+   see its `NO_BASELINE_BY_DESIGN` state.
+
 Deliberately NOT here
 ---------------------
 No migration logic. This never writes TMDL, never writes PBIR, never opens Power BI Desktop. It runs
@@ -181,12 +191,20 @@ def generated_artifact_hashes(bundle: Path, earliest_mtime: float | None = None)
 
 
 def write_generated_artifact_manifest(
-    bundle: Path, report: dict | None = None, earliest_mtime: float | None = None
+    bundle: Path,
+    report: dict | None = None,
+    earliest_mtime: float | None = None,
+    coverage: str | None = None,
 ) -> Path:
     """Upsert generated-file hashes into ``input_manifest.json`` after the engine run.
 
     The deterministic engine already owns this manifest for source inputs. Adding a separate key keeps
     that contract intact while giving downstream checks a baseline for generated TMDL/PBIR drift.
+
+    ``coverage`` records how the baseline was captured when it is NOT a normal full-engine run - e.g.
+    ``"slice_only_backfill"`` (issue #230) for a ``--slice-only`` invocation that has no engine-run
+    boundary to hash from. ``check_migration_progress.py --tamper`` surfaces this so a bundle that
+    passes still says its coverage is partial instead of silently claiming full attestation.
     """
     manifest_path = bundle / "input_manifest.json"
     if manifest_path.is_file():
@@ -195,7 +213,7 @@ def write_generated_artifact_manifest(
             manifest = {"engine_input_manifest": manifest}
     else:
         manifest = {}
-    manifest[GENERATED_ARTIFACTS_KEY] = {
+    generated = {
         "version": 1,
         "run_id": uuid.uuid4().hex,
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -203,8 +221,47 @@ def write_generated_artifact_manifest(
         "report_sha256": sha256_file(bundle / "report.json") if (bundle / "report.json").is_file() else None,
         "files": generated_artifact_hashes(bundle, earliest_mtime),
     }
+    if coverage:
+        generated["coverage"] = coverage
+    manifest[GENERATED_ARTIFACTS_KEY] = generated
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest_path
+
+
+def backfill_slice_only_baseline(bundle: Path, report: dict | None, phases: list[dict]) -> Path | None:
+    """Record a best-effort generated-artifact baseline for a ``--slice-only`` bundle (issue #230).
+
+    ``--slice-only`` skips the engine phase entirely (see ``resolve_run_engine``), so there is no run
+    boundary to hash FROM - the bundle's TMDL/PBIR may have been produced by ``migrate_estate.py`` run
+    directly, or by an earlier ``run_estate.py`` invocation this process never saw. Before this fix,
+    that meant ``input_manifest.json`` never carried a ``generated_artifacts`` key at all, and every
+    declaration path built on ``check_migration_progress.py``'s baseline became unusable for the
+    bundle's whole life - a field-measured SES estate had to caveat its own output as "usable signal,
+    not cryptographically attested signal" as a result.
+
+    Rather than leave that permanent, record a baseline now, scoped to whatever generated artifacts
+    already exist on disk at THIS moment. It cannot attest to the bundle's state before this moment -
+    that coverage gap is real, so it is recorded in the baseline itself (``coverage:
+    "slice_only_backfill"``) rather than silently claimed away.
+
+    Never overwrites an EXISTING ``generated_artifacts`` key, valid or not: a prior full engine run
+    through ``run_estate.py`` already recorded a real baseline, and a manifest whose key fails
+    validation is potential tamper evidence in its own right - either way, clobbering it here would
+    destroy exactly the evidence a tamper check depends on.
+    """
+    manifest_path = bundle / "input_manifest.json"
+    if manifest_path.is_file():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = None
+        if isinstance(existing, dict) and GENERATED_ARTIFACTS_KEY in existing:
+            return None
+    started = time.monotonic()
+    written = write_generated_artifact_manifest(bundle, report, earliest_mtime=None, coverage="slice_only_backfill")
+    phases.append({"phase": "slice_only_baseline_backfill", "elapsed_sec": round(time.monotonic() - started, 1)})
+    log.info("GENERATED_ARTIFACTS: backfilled slice-only baseline -> %s", written)
+    return written
 
 
 def check_definition_of_done(report: dict) -> tuple[bool, str]:
@@ -637,6 +694,8 @@ def main(argv: list[str] | None = None) -> int:
     report = read_report(args.output)
     if not args.slice_only:
         record_engine_output(args.output, report, phases, engine)
+    else:
+        backfill_slice_only_baseline(args.output, report, phases)
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------
     # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)

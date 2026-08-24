@@ -171,13 +171,52 @@ def load_generated_artifact_baseline(bundle: Path) -> dict[str, Any] | None:
     manifest_path = bundle / "input_manifest.json"
     if not manifest_path.is_file():
         return None
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
     generated = manifest.get(GENERATED_ARTIFACTS_KEY) if isinstance(manifest, dict) else None
     if not _valid_generated_baseline(bundle, generated):
         return None
     files = generated["files"]
     generated["files"] = {str(path).replace("\\", "/"): str(digest) for path, digest in files.items()}
     return generated
+
+
+def _no_baseline_verdict(bundle: Path) -> tuple[str, list[str]]:
+    """Distinguish 'no baseline was ever attempted' (by design) from 'the baseline is unusable'.
+
+    Doctrine (``check_stub_measures.py``): "'no stubs' and 'no model' must never print or exit the
+    same way." Applied here (issue #230): a bundle shape that structurally never records a baseline -
+    one produced by ``run_estate.py --slice-only`` before it started backfilling one, or by running
+    the engine outside ``run_estate.py`` entirely - is EXPECTED ABSENCE, not tampering: the manifest
+    is fine, it simply never carried this key. A missing/corrupt ``input_manifest.json``, or a
+    ``generated_artifacts`` entry that IS present but does not validate (wrong version, unparsable
+    timestamp, bound to a different report), stays the ORIGINAL, more suspicious ``NO_BASELINE``:
+    something that should be there is broken, absent, or was tampered with.
+    """
+    manifest_path = bundle / "input_manifest.json"
+    if not manifest_path.is_file():
+        return "NO_BASELINE", ["no input_manifest.json in bundle - cannot check for a baseline at all"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return "NO_BASELINE", [f"input_manifest.json is not valid JSON ({exc}) - cannot check for a baseline"]
+    if not isinstance(manifest, dict):
+        return "NO_BASELINE", ["input_manifest.json is not a JSON object - cannot check for a baseline"]
+    if GENERATED_ARTIFACTS_KEY not in manifest:
+        return "NO_BASELINE_BY_DESIGN", [
+            "no generated_artifacts baseline in input_manifest.json, and none was ever recorded - this "
+            "bundle shape (e.g. built with `run_estate.py --slice-only` before it backfilled one, or an "
+            "engine run outside run_estate.py) never had one. This is EXPECTED ABSENCE, not tampering: "
+            "tamper detection was never armed for this bundle. Re-run `run_estate.py --slice-only "
+            f"--output {bundle}` to backfill a best-effort baseline, or treat any signal drawn from "
+            "this bundle as usable but NOT cryptographically attested (issue #230)."
+        ]
+    return "NO_BASELINE", [
+        "generated_artifacts baseline in input_manifest.json is present but invalid, or does not match "
+        "this bundle's report.json"
+    ]
 
 
 def load_generated_edit_declarations(bundle: Path) -> list[dict[str, Any]]:
@@ -245,12 +284,28 @@ def tamper_check(bundle: Path) -> tuple[str, list[str]]:
     """Detect generated artifacts that changed without structured declaration evidence."""
     generated = load_generated_artifact_baseline(bundle)
     if generated is None:
-        return "NO_BASELINE", ["no generated_artifacts baseline in input_manifest.json"]
+        return _no_baseline_verdict(bundle)
+
+    # A baseline `run_estate.py --slice-only` backfills has no engine-run boundary behind it - it can
+    # prove nothing changed SINCE it was recorded, but not before. Say so on every verdict this
+    # baseline produces, pass or fail, rather than only on the ones that would otherwise look silent.
+    coverage_notes = (
+        [
+            "PARTIAL COVERAGE: this baseline was backfilled by `run_estate.py --slice-only` rather "
+            "than recorded at the engine's own run boundary, so it can prove nothing changed SINCE the "
+            "backfill but cannot see drift from before it. Treat as usable signal, not full attestation."
+        ]
+        if generated.get("coverage") == "slice_only_backfill"
+        else []
+    )
 
     baseline = generated["files"]
     drift = _artifact_drift(bundle, baseline)
     if not drift:
-        return "CLEAN", [f"{len(baseline)} generated artifact(s) are pristine against their engine-run hashes"]
+        return "CLEAN", [
+            f"{len(baseline)} generated artifact(s) are pristine against their engine-run hashes",
+            *coverage_notes,
+        ]
 
     declarations = load_generated_edit_declarations(bundle)
     notes = []
@@ -272,7 +327,7 @@ def tamper_check(bundle: Path) -> tuple[str, list[str]]:
                 f"UNDECLARED {kind}: {relative} - record target, baseline hash and expected post-fix hash in "
                 f"{GENERATED_EDIT_DECLARATIONS.as_posix()}"
             )
-    return ("DRIFT" if undeclared else "DECLARED_DRIFT"), notes
+    return ("DRIFT" if undeclared else "DECLARED_DRIFT"), [*notes, *coverage_notes]
 
 
 def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dict[str, Any]:
@@ -539,11 +594,16 @@ def run_tamper_mode(bundle: Path, as_json: bool) -> int:
     """Run the generated-artifact drift gate and return its process exit code."""
     state, notes = tamper_check(bundle)
     _emit_notes("TAMPER", bundle, state, notes, as_json)
-    return {"CLEAN": 0, "DECLARED_DRIFT": 0, "DRIFT": 1, "NO_BASELINE": 2}[state]
+    return {"CLEAN": 0, "DECLARED_DRIFT": 0, "DRIFT": 1, "NO_BASELINE": 2, "NO_BASELINE_BY_DESIGN": 3}[state]
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Exit 0 PROGRESSING/THINKING/READY, 1 STALLED/NOT_READY, 2 SILENT/NO_MODEL."""
+    """Exit 0 PROGRESSING/THINKING/READY, 1 STALLED/NOT_READY, 2 SILENT/NO_MODEL.
+
+    ``--tamper`` has its own exit map: 0 CLEAN/DECLARED_DRIFT, 1 DRIFT, 2 NO_BASELINE (a baseline
+    that should exist is missing, corrupt, or invalid), 3 NO_BASELINE_BY_DESIGN (this bundle shape
+    never records one - expected absence, not tampering; see ``_no_baseline_verdict``).
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="the migration's output directory")
     parser.add_argument("--since-minutes", type=int, default=20, help="observation window (default 20)")
