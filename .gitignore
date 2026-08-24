@@ -105,6 +105,27 @@ candidates.json
 /_bundle*/
 /_estate*/
 
+# THE GENERAL RULE, added after the five specific ones above proved the pattern does not scale.
+# Each of those was a separate near-miss patched separately - `/_harvest*/` and `/_sweep*/` both cite
+# issue #125, and `/_sweep*/`'s own comment says "one folder documented for two tools is how a name
+# collision starts". Nobody ever generalised, so the next tool to invent a prefix was unprotected by
+# construction. Measured 2026-08-24 on a customer machine: 14 `_*` roots plus loose `_probe_*.py` and
+# an 11 MB `_calibration-*.jsonl` at the repo root, and a reflexive `git add -A` after a gapped pull
+# staged 111 of them into a merge commit. `_probe_acmu` slipped past the existing `_probe-lab/`
+# purely because one uses an underscore and the other a hyphen.
+#
+# Root-anchored and deliberately covers FILES as well as directories, because the loose files were
+# the half nothing caught. ✅ Verified safe before adding: all 96 tracked underscore paths are NESTED
+# (`examples/*/_work/`, `.github/skills/*/scripts/_*.py`); there are ZERO top-level `_*` tracked
+# entries, so this cannot un-track anything that exists. If a root `_*` file ever needs committing,
+# negate it explicitly (`!/_thing`) rather than deleting this rule.
+#
+# ⚠️ This is a BACKSTOP, not the control. It cannot protect an output that does not start with `_` -
+# see the `ses-prep/` near-miss in issue #322, where a deliverable naming 17 real customer servers
+# landed unprefixed and unignored. Scripts that emit customer-identifying data must refuse to write
+# to an unignored path (`refuse_unignored_output`), not rely on someone choosing a lucky name.
+/_*
+
 # Power BI Desktop local cache/settings - machine-specific, regenerated automatically on open
 **/.pbi/cache.abf
 **/.pbi/localSettings.json
@@ -125,7 +146,6 @@ scripts/provision_snowflake_fixture.py
 scripts/setup_snowflake_keypair.py
 scripts/snowflake_fixture.sql
 tests/test_gate_matrix.py
-_probe-lab/
 _matrix/
 
 # Credential material. `.env` alone was not enough: a real secret arrived as a loose
@@ -160,7 +180,10 @@ Thumbs.db
 # (UV_INDEX_URL=https://pypi.org/simple uv lock).
 uv.lock
 
-# Throwaway agent-behaviour test fixtures (see scripts/probe_lab.py)
+# Throwaway agent-behaviour test fixtures (see scripts/probe_lab.py).
+# Kept although `/_*` above already covers it at the repo root: this pattern is UNANCHORED, so it
+# also matches a nested `_probe-lab/` inside a fixture tree, which the root-anchored rule does not.
+# (A second, duplicate copy of this line was removed in the same change.)
 _probe-lab/
 
 # Live multi-source test fixture: embeds real endpoint hostnames, so it is generated
