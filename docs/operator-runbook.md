@@ -401,6 +401,26 @@ alone. It is genuinely required only for a **direct** `estate_survey.py` call th
 wrapper — there the `--env-file` layer is consulted for *secrets* only, never the name, and omitting
 it raises an immediate `SystemExit` naming both options ✅ verified by direct call.
 
+⚠️ **It surveys the WHOLE site and prints NOTHING until it finishes. A working run is
+indistinguishable from a hung one.** Field-measured 2026-08-24 on a 273-workbook site: the survey
+issues **~275+ REST calls** — one site sweep plus a `/workbooks/{id}/connections` call for *every*
+workbook — and takes **6+ minutes** during which it emits **zero bytes**. ✅ Verified against the
+installed engine: the whole module holds exactly two `print` statements and both run *after* the
+survey completes.
+
+**Do not kill it, and do not go debugging your `.env`.** The rational reaction to several silent
+minutes is to assume a credential prompt or a bad URL, and an experienced engineer lost a session to
+exactly that — the cause was neither. Bare hostname and `https://…` normalise identically
+(`fetch_tds.py:103-112`), so the URL form is not it either. Time it against the site size (~1.3 s per
+workbook) and let it run.
+
+There is **no scoping flag** — no `--project`, no `--workbook` — so 12 workbooks on a 273-workbook
+site still costs the full sweep. Requested upstream as
+[`Yarbrdab000/tableau-fabric-skills#175`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/175),
+together with progress output. If you only need one project's data and the wait is not acceptable,
+a scoped REST script against `/projects` + `/workbooks?filter=projectName:eq:<name>` is a few dozen
+lines; that is a workaround, not the supported path.
+
 Expect on success: `[SURVEY] N workbook(s); M depend on a published datasource; K datasource(s) must
 be fetched first.` then one `[DEPENDS]` line per dependent workbook, then `[OK] survey written to …`.
 
