@@ -382,12 +382,39 @@ def _extract_args_text(payload: dict) -> str:
     return "\n".join(parts)
 
 
-# Any path-ish token ending in a guarded suffix, however it is quoted or escaped.
+# Any path-ish token ending in a guarded suffix, however it is quoted or escaped. Used ONLY for
+# shell commands now - see `_candidate_paths` - because a shell command line genuinely IS text with
+# no structured path argument to read instead.
 _PATH_RE = re.compile(
     r"[A-Za-z]:[\\/][^\"'\s,;)]+?(?:\.tmdl|\.pbism|\.pbir|\.pbip|\.platform)"
     r"|[^\"'\s,;)]*?(?:\.tmdl|\.pbism|\.pbir|\.pbip|\.platform)",
     re.IGNORECASE,
 )
+
+# apply_patch's payload is raw patch text, not a structured object (see `_extract_args_text`'s
+# docstring), so it has no "path" key for `_path_arguments` to read. Its target is the FILE HEADER
+# line only - "*** Add File: <path>", "*** Update File: <path>", "*** Delete File: <path>", and a
+# rename's "*** Move to: <path>" - never the `+`/`-` diff body, which is exactly where an added
+# line's CONTENT could mention a guarded suffix without the patch touching that file at all.
+_APPLY_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\*\s*(?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _apply_patch_paths(payload: dict) -> list[str]:
+    """Pull only the patch HEADER paths out of an apply_patch payload, never the diff body."""
+    text = ""
+    raw = payload.get("toolArgs") or payload.get("tool_args")
+    if isinstance(raw, str):
+        text = raw
+    else:
+        args = payload.get("toolInput") or payload.get("tool_input")
+        if isinstance(args, dict):
+            value = args.get("patch") or args.get("input") or args.get("text")
+            if isinstance(value, str):
+                text = value
+    return [match.strip() for match in _APPLY_PATCH_HEADER_RE.findall(text)]
 
 
 def _candidate_paths(tool: str, payload: dict) -> list[Path]:
@@ -395,17 +422,30 @@ def _candidate_paths(tool: str, payload: dict) -> list[Path]:
 
     Read tools are excluded deliberately: `view` legitimately carries a .tmdl path, and denying
     reads would break the agent's ability to inspect a model without protecting anything.
+
+    For a WRITE tool the target is read from structured path-shaped ARGUMENT KEYS only (via
+    `_path_arguments`, or the patch header for `apply_patch`) - never from the file body/content.
+    Measured: a write whose CONTENT merely mentions a guarded suffix (a doc, a code comment, a test
+    fixture, a commit message) was being denied for a path it never touches, because the old
+    flattened-text regex scanned the whole payload including the bytes being written. Reusing
+    `_path_arguments` is deliberate: it is the same structural extraction `_writes_a_control_file`
+    already relies on, proven against both measured payload shapes (preToolUse `toolArgs` string,
+    permissionRequest `toolInput` object).
+
+    For a SHELL tool there is no structured path argument to read - the command line genuinely IS
+    the artifact description (`Set-Content Model.tmdl -Value ...`) - so the flattened-text regex
+    scan is kept as-is.
     """
     tool_l = tool.lower()
-    is_write = tool_l in WRITE_TOOLS
-    is_shell = tool_l in SHELL_TOOLS
-    if not (is_write or is_shell):
+    if tool_l in WRITE_TOOLS:
+        raw_values = _apply_patch_paths(payload) if tool_l == "apply_patch" else _path_arguments(payload)
+        return [Path(value) for value in raw_values]
+
+    if tool_l not in SHELL_TOOLS:
         return []
 
     text = _extract_args_text(payload)
-    if not text:
-        return []
-    if is_shell and not any(h in text.lower() for h in SHELL_WRITE_HINTS):
+    if not text or not any(h in text.lower() for h in SHELL_WRITE_HINTS):
         return []
 
     seen: list[Path] = []

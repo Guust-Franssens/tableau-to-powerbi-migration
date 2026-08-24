@@ -827,6 +827,101 @@ def test_a_write_tool_is_judged_on_its_path_not_its_content(migration: Path) -> 
     assert deleted.get("permissionDecision") == "deny", "deleting the marker must still be denied"
 
 
+def test_a_write_tool_is_judged_on_its_path_not_a_mention_of_a_guarded_suffix(migration: Path) -> None:
+    """Issue #228, class 2: content that merely NAMES a guarded suffix must not be denied.
+
+    `_candidate_paths` used to run `_extract_args_text` (the WHOLE payload, including the file body
+    being written) through a regex that matches any token ending in `.tmdl`/`.pbism`/etc. So writing
+    `docs/notes.md` whose CONTENT documented "the Model.tmdl layout" was denied for a path
+    ("Model.tmdl") the write never touched - reproduced against the hook before this fix landed.
+
+    Every assertion here has its negative twin: a write that genuinely targets a guarded suffix, and
+    a shell command that genuinely writes one, must both still be denied.
+    """
+    run_gate("block", str(migration), "--sources", "shipment")
+
+    mentions_only = run_hook(
+        {
+            "toolName": "create",
+            "toolArgs": json.dumps(
+                {
+                    "path": str(migration / "docs" / "notes.md"),
+                    "file_text": "This note documents the Model.tmdl layout for future readers.",
+                }
+            ),
+            "cwd": str(migration),
+        }
+    )
+    assert mentions_only.get("permissionDecision") != "deny", (
+        "a write whose CONTENT merely mentions a guarded suffix must be allowed"
+    )
+
+    real_write = run_hook(
+        {
+            "toolName": "create",
+            "toolArgs": json.dumps({"path": str(migration / "fabric" / "Model.tmdl"), "file_text": "table Foo"}),
+            "cwd": str(migration),
+        }
+    )
+    assert real_write.get("permissionDecision") == "deny", "a genuine write to a guarded suffix must still be denied"
+
+    shell_write = run_hook(
+        {
+            "toolName": "powershell",
+            "toolArgs": json.dumps(
+                {"command": f"Set-Content -Path {migration / 'fabric' / 'Model.tmdl'} -Value 'table Foo'"}
+            ),
+            "cwd": str(migration),
+        }
+    )
+    assert shell_write.get("permissionDecision") == "deny", "a shell command that genuinely writes one must be denied"
+
+    read_only = run_hook(
+        {
+            "toolName": "view",
+            "toolArgs": json.dumps({"path": str(migration / "fabric" / "Model.tmdl")}),
+            "cwd": str(migration),
+        }
+    )
+    assert read_only.get("permissionDecision") != "deny", "a read-only tool must remain unaffected"
+
+
+def test_apply_patch_target_is_read_from_the_header_not_the_diff_body(migration: Path) -> None:
+    """apply_patch has no structured path key - its target lives in the patch HEADER line only.
+
+    Its `toolArgs` is raw patch text, not JSON (see `_extract_args_text`'s docstring), so
+    `_path_arguments` finds nothing for it; `_apply_patch_paths` reads the `*** Add/Update/Delete
+    File:` header instead. Scanning the diff BODY as before would deny a patch that only ADDS a
+    line mentioning a guarded suffix to an unrelated file - the same false positive, one tool over.
+    """
+    run_gate("block", str(migration), "--sources", "shipment")
+
+    unrelated_target = migration / "docs" / "notes.md"
+    mentions_only = run_hook(
+        {
+            "toolName": "apply_patch",
+            "toolArgs": (
+                f"*** Begin Patch\n*** Add File: {unrelated_target}\n"
+                "+This note documents the Model.tmdl layout for future readers.\n*** End Patch\n"
+            ),
+            "cwd": str(migration),
+        }
+    )
+    assert mentions_only.get("permissionDecision") != "deny", (
+        "a patch whose ADDED LINE merely mentions a guarded suffix must be allowed"
+    )
+
+    real_target = migration / "fabric" / "Model.tmdl"
+    real_write = run_hook(
+        {
+            "toolName": "apply_patch",
+            "toolArgs": f"*** Begin Patch\n*** Add File: {real_target}\n+table Foo\n*** End Patch\n",
+            "cwd": str(migration),
+        }
+    )
+    assert real_write.get("permissionDecision") == "deny", "a patch that genuinely adds a guarded suffix file must deny"
+
+
 def test_the_hook_lets_the_agent_inspect_the_gate_it_is_under(migration: Path) -> None:
     """Reading the audit log and the ACL is how an agent reports honestly - never deny it.
 
