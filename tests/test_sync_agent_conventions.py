@@ -249,3 +249,77 @@ def test_a_conditionally_written_root_file_warns_but_does_not_fail(repo, tmp_pat
 def test_this_repo_passes_its_own_gate() -> None:
     """No monkeypatching: the shipped AGENTS.md and personas must satisfy the rule they publish."""
     assert sac.check_bundle_paths(None) == []
+
+
+# ---------------------------------------------------------------------------
+# The near-cap warning band (issue #181).
+#
+# `pbi-report-builder` reached 29,941/30,000 - 59 characters - and nothing said so until an edit
+# would have turned CI red. Worse, the shared block is GENERATED, so an edit aimed at AGENTS.md
+# fails the build via a persona the author never opened. These tests pin the two properties that
+# make the band useful rather than merely present: it must exclude the over-cap files that already
+# fail loudly, and it must NEVER reach the exit code.
+# ---------------------------------------------------------------------------
+
+
+def _persona_of_size(path: Path, size: int) -> Path:
+    """Write a file whose `prompt_size` is exactly `size`, so boundaries can be asserted."""
+    path.write_text("x" * size, encoding="utf-8")
+    assert sac.prompt_size(path) == size, "fixture must hit the size exactly or the boundary tests lie"
+    return path
+
+
+def test_near_cap_band_catches_a_file_just_inside_it(tmp_path: Path) -> None:
+    """One character past the line is the whole point: the warning must fire BEFORE the cap."""
+    agent = _persona_of_size(tmp_path / "tight.agent.md", sac.PROMPT_NEAR_CAP_LIMIT + 1)
+    assert sac.near_cap([agent]) == [agent]
+
+
+def test_the_near_cap_line_itself_is_not_in_the_band(tmp_path: Path) -> None:
+    """Exclusive boundary. Pins `>` against a `>=` mutation that would warn a character early."""
+    agent = _persona_of_size(tmp_path / "exact.agent.md", sac.PROMPT_NEAR_CAP_LIMIT)
+    assert sac.near_cap([agent]) == []
+
+
+def test_a_comfortable_persona_is_not_in_the_band(tmp_path: Path) -> None:
+    """The negative case beside the positive one: a normal persona must stay silent."""
+    agent = _persona_of_size(tmp_path / "roomy.agent.md", sac.PROMPT_NEAR_CAP_LIMIT - 1)
+    assert sac.near_cap([agent]) == []
+
+
+def test_a_file_exactly_at_the_cap_is_near_cap_and_not_over(tmp_path: Path) -> None:
+    """`> PROMPT_CHAR_LIMIT` is what fails, so the cap itself is the last warnable size."""
+    agent = _persona_of_size(tmp_path / "brink.agent.md", sac.PROMPT_CHAR_LIMIT)
+    assert sac.near_cap([agent]) == [agent]
+    assert sac.report_sizes([agent]) == []
+
+
+def test_an_over_cap_persona_is_excluded_from_the_band(tmp_path: Path) -> None:
+    """It already fails loudly. Listing it twice puts an advisory in competition with a verdict.
+
+    This also pins the upper bound of the band: drop `<= PROMPT_CHAR_LIMIT` and this test fails.
+    """
+    agent = _persona_of_size(tmp_path / "over.agent.md", sac.PROMPT_CHAR_LIMIT + 1)
+    assert sac.near_cap([agent]) == []
+    assert sac.report_sizes([agent]) == [agent]
+
+
+def test_near_cap_never_reaches_the_exit_code(tmp_path: Path) -> None:
+    """The load-bearing property. `report_sizes`'s return drives `main`'s exit code, so a near-cap
+    persona must come back as zero over-cap files - a warning that fails the build is not a warning.
+    """
+    agent = _persona_of_size(tmp_path / "warnonly.agent.md", sac.PROMPT_NEAR_CAP_LIMIT + 500)
+    assert sac.near_cap([agent]) == [agent]
+    assert sac.report_sizes([agent]) == []
+
+
+def test_the_band_sits_below_the_cap() -> None:
+    """A near-cap limit at or above the cap would make the warning unreachable."""
+    assert 0 < sac.PROMPT_NEAR_CAP_LIMIT < sac.PROMPT_CHAR_LIMIT
+
+
+def test_this_repo_is_not_currently_in_the_band() -> None:
+    """No monkeypatching. If this fails, the warning is doing its job - buy headroom, do not delete
+    this test. Shipped sizes were 27,414-28,414 when the band was introduced.
+    """
+    assert sac.near_cap(sorted((REPO_ROOT / ".github" / "agents").glob("*.agent.md"))) == []

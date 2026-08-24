@@ -69,6 +69,15 @@ SKILL_INDEX_TARGETS = {
 # and in these files the tail is the accumulated `## Gotchas` - precisely the hard-won learnings.
 PROMPT_CHAR_LIMIT = 30_000
 
+# Warn before it is urgent. Measured 2026-08-15 (issue #181): `pbi-report-builder` reached
+# 29,941/30,000 - **59 characters** of headroom - and nothing said so until a one-word edit would have
+# turned CI red. The trap is that the shared-conventions block is GENERATED, so an edit that targets
+# `AGENTS.md` propagates into all four personas and fails the build via a file the author never
+# opened. A band below the hard cap turns that ambush into notice.
+# 97% leaves ~900 characters, which is roughly one paragraph - enough to land the edit in hand and
+# then buy headroom back, rather than discovering it mid-change.
+PROMPT_NEAR_CAP_LIMIT = 29_100
+
 # The canonical bundle layout, so a documented path can be checked against reality rather than only
 # against the other copies of itself. `<bundle>/out/pbip/` survived in AGENTS.md and all four personas
 # for weeks (issue #123) precisely because every copy agreed: consistency was the ONLY thing checked,
@@ -358,12 +367,31 @@ def sync_agent_files(agents: list[Path], write: bool) -> list[Path]:
     return drifted
 
 
+def near_cap(agents: list[Path]) -> list[Path]:
+    """Personas inside the warning band: past the near-cap line but still UNDER the hard cap.
+
+    Deliberately excludes over-cap files. Those already fail loudly via `report_sizes`, and listing
+    a file under both headings would put a quiet advisory in competition with a hard verdict - the
+    reader then has to work out which one governs.
+    """
+    return [p for p in agents if PROMPT_NEAR_CAP_LIMIT < prompt_size(p) <= PROMPT_CHAR_LIMIT]
+
+
 def report_sizes(agents: list[Path]) -> list[Path]:
-    """Warn about personas over the documented prompt cap. Returns the over-cap files."""
+    """Warn about personas over the documented prompt cap. Returns the over-cap files.
+
+    The near-cap band is advisory ONLY: it is never added to the returned list, because that list
+    drives the exit code. A warning that fails the build is not a warning.
+    """
     over = [p for p in agents if prompt_size(p) > PROMPT_CHAR_LIMIT]
     for path in sorted(agents, key=prompt_size, reverse=True):
         size = prompt_size(path)
-        marker = "  OVER CAP" if size > PROMPT_CHAR_LIMIT else ""
+        if size > PROMPT_CHAR_LIMIT:
+            marker = "  OVER CAP"
+        elif size > PROMPT_NEAR_CAP_LIMIT:
+            marker = "  NEAR CAP"
+        else:
+            marker = ""
         log.info("  %6d chars (%3d%% of cap)  %s%s", size, 100 * size // PROMPT_CHAR_LIMIT, path.name, marker)
     if over:
         log.warning(
@@ -372,6 +400,22 @@ def report_sizes(agents: list[Path]) -> list[Path]:
             "files is the accumulated Gotchas. Trim before relying on the hosted path.",
             len(over),
             PROMPT_CHAR_LIMIT,
+        )
+    close = near_cap(agents)
+    if close:
+        log.warning(
+            "%d persona(s) are within %d chars of the %d-char cap and will fail on the next small "
+            "edit - including one aimed at AGENTS.md, which regenerates the shared block into ALL "
+            "four personas and so fails the build via a file you never opened. Buy headroom now: "
+            "move craft knowledge into a .github/skills/ bundle the persona already invokes by name "
+            "(that is how pbi-report-builder went from 153%% to under the cap). Not a failure: %s",
+            len(close),
+            PROMPT_CHAR_LIMIT - PROMPT_NEAR_CAP_LIMIT,
+            PROMPT_CHAR_LIMIT,
+            ", ".join(
+                f"{p.name} ({PROMPT_CHAR_LIMIT - prompt_size(p)} left)"
+                for p in sorted(close, key=prompt_size, reverse=True)
+            ),
         )
     return over
 
