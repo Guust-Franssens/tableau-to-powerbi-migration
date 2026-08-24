@@ -67,9 +67,10 @@ def test_known_blocking_preflight_checks_are_critical() -> None:
     Windows/Power BI Desktop primitives.
 
     ``PBI_DESKTOP_PATH (bridge exe pin)`` was on this list until #124 and is deliberately no longer
-    here: it is a Desktop-only pin, and the estate pipeline never opens Desktop. Its tier is pinned
-    from the other side by `test_the_desktop_pin_warns_rather_than_blocking_a_run_that_never_opens_it`,
-    so it cannot drift back to critical *or* fade to an invisible optional.
+    a FIXED entry here: it is a Desktop-only pin, and the estate pipeline never opens Desktop, so an
+    UNSET pin must not block. #86 gave it a SECOND, data-dependent tier for a DEAD pin instead of
+    putting it back on this static list - see `test_the_desktop_pin_is_critical_only_when_dead` for
+    the executed proof that unset/valid stay ``recommended`` while dead becomes ``critical``.
     """
     source = _preflight_source()
 
@@ -86,20 +87,27 @@ def test_known_blocking_preflight_checks_are_critical() -> None:
         _assert_add_cli_tier(source, command, "critical")
 
 
-def test_the_desktop_pin_warns_rather_than_blocking_a_run_that_never_opens_it() -> None:
-    """A Desktop-only pin must not exit 1 on a pipeline that never opens Desktop (#124).
+def test_the_desktop_pins_tier_comes_from_get_desktop_pin_verdict_not_a_literal() -> None:
+    """The tier must be data-dependent (#86), so a literal ``'recommended'``/``'critical'`` next to
+    the check name would be a REGRESSION, not an improvement - it would mean someone hard-coded a
+    single tier again, exactly the shape of the bug #124 fixed and #86 later refined.
 
-    Measured: a machine with the engine, both plugins, both CLIs at known-good versions, Desktop
-    installed, `az`, `uv` and ODBC 18 was reported NOT READY over this one unset variable - while
-    `run_estate.py`'s own docstring says it "never opens Power BI Desktop". Spending exit 1, which the
-    runbook defines as "resolve before migrating", on an item the runbook never names is how an
-    operator learns to ignore exit 1.
-
-    ``recommended`` is the exact tier this needs: still rendered, still counted in the summary line,
-    but not a blocker. ``optional`` would be a downgrade too far - the failure it prevents (Desktop
-    auto-updates, the bridge can no longer find the exe) is real.
+    A machine with the engine, both plugins, both CLIs at known-good versions, Desktop installed,
+    `az`, `uv` and ODBC 18 was once reported NOT READY over one unset variable - while
+    `run_estate.py`'s own docstring says it "never opens Power BI Desktop" (#124). That is still true
+    for UNSET; it is not true for a DEAD pin, which is why the tier now has to come from a function
+    that can see which state it is. `test_the_desktop_pin_is_critical_only_when_dead` executes that
+    function directly for all three states.
     """
-    _assert_add_check_tier(_preflight_source(), DESKTOP_PIN_CHECK, "recommended")
+    source = _preflight_source()
+    literal_tier = re.findall(rf"Add-Check\s+'{re.escape(DESKTOP_PIN_CHECK)}'\s+'(\w+)'", source)
+    assert literal_tier == [], (
+        f"the tier must come from Get-DesktopPinVerdict, not a literal string next to the check name: {literal_tier}"
+    )
+    assert (
+        f"Add-Check '{DESKTOP_PIN_CHECK}' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint" in source
+    )
+    assert "function Get-DesktopPinVerdict(" in source
 
 
 def test_amo_warns_rather_than_blocking_a_run_that_never_opens_desktop() -> None:
@@ -153,9 +161,12 @@ def test_the_desktop_pin_hint_is_actionable_in_the_shell_that_reads_it() -> None
     left preflight failing in the very session that printed it. `$env:` is the form that takes effect
     immediately, so it must lead, and any `setx` offered alongside must say it does not affect the
     current shell.
+
+    The hint now lives inside `Get-DesktopPinVerdict` (#86 made the tier data-dependent, so the whole
+    decision - tier, detail and hint - moved into one function), not inline in the `Add-Check` call.
     """
     source = _preflight_source()
-    hint = source[source.index(f"Add-Check '{DESKTOP_PIN_CHECK}'") :].split("\n\n")[0]
+    hint = source[source.index("function Get-DesktopPinVerdict(") : source.index("$desktop = $null")]
     assert "$env:PBI_DESKTOP_PATH = " in hint, "the hint must give the form that works in THIS shell"
     if "setx" in hint:
         assert re.search(r"(?i)new shells|does NOT affect this one", hint), (
@@ -173,13 +184,22 @@ def test_a_dead_desktop_pin_is_named_as_a_dead_pin_not_as_an_unset_pin() -> None
     assert "The bridge honours this variable and will fail to launch" in source
 
 
-def test_a_dead_desktop_pin_is_still_recommended_not_critical() -> None:
-    """The dead-pin warning is louder, but #124's no-false-blocker severity decision still holds."""
+def test_a_dead_desktop_pin_is_now_critical_not_recommended() -> None:
+    """#86 overturns the *dead-pin* half of #124's invariant; the *unset* half is untouched.
+
+    #124 decided ``recommended`` for an UNSET pin, and that still holds - MSIX discovery is exactly
+    what an operator gets and expects when nothing is pinned. A DEAD pin is a different belief: the
+    operator set PBI_DESKTOP_PATH deliberately, believing a specific build is selected, and it
+    silently is not - the exact false-green class this script exists to prevent. Only the code AFTER
+    the desktop-install block (the pin decision, not the "is Desktop installed" check above it) may
+    carry a literal ``'critical'`` here, and it must not, because #86 made the tier data-dependent.
+    """
     source = _preflight_source()
-    _assert_add_check_tier(source, DESKTOP_PIN_CHECK, "recommended")
     desktop_block = source[source.index("$desktopPathConfigured") : source.index("# --- Privacy Levels")]
     critical_lines = [line for line in desktop_block.splitlines() if "'critical'" in line]
-    assert critical_lines == ["Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `"]
+    assert critical_lines == ["Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `"], (
+        "the pin decision itself must not hard-code 'critical' - it comes from Get-DesktopPinVerdict"
+    )
 
 
 def test_the_correctness_floor_says_where_report_version_at_import_belongs() -> None:
@@ -527,6 +547,57 @@ def _emitted(raw: str) -> str:
     marked = re.search(r"<<(.*)>>", raw, re.DOTALL)
     assert marked, f"harness produced no marked value: {raw!r}"
     return marked.group(1)
+
+
+def _desktop_pin_verdict(
+    *,
+    configured: bool,
+    valid: bool,
+    configured_path: str = r"C:\PBI\PBIDesktop.exe",
+    installed_desktop: str = r"1.2.3.4 at C:\PBI\PBIDesktop.exe",
+    fallback_exe: str = r"C:\PBI\PBIDesktop.exe",
+) -> dict:
+    raw = _run_ps(
+        "Get-DesktopPinVerdict",
+        "$v = Get-DesktopPinVerdict -Configured ([bool]::Parse($env:D_CONFIGURED)) "
+        "-Valid ([bool]::Parse($env:D_VALID)) -ConfiguredPath $env:D_PATH "
+        "-InstalledDesktop $env:D_INSTALLED -FallbackExe $env:D_FALLBACK\n"
+        "Emit ($v | ConvertTo-Json -Compress)\n",
+        {
+            "D_CONFIGURED": str(configured),
+            "D_VALID": str(valid),
+            "D_PATH": configured_path,
+            "D_INSTALLED": installed_desktop,
+            "D_FALLBACK": fallback_exe,
+        },
+    )
+    return json.loads(_emitted(raw))
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_the_desktop_pin_is_critical_only_when_dead() -> None:
+    """Execute `Get-DesktopPinVerdict` for all three states (#86) - this is the settled decision.
+
+    The distinguishing principle is operator BELIEF, not merely "is the pin missing": an UNSET
+    variable tells the truth - nothing is pinned, MSIX discovery is exactly what the operator gets.
+    A DEAD pin asserts that a specific build IS selected when it is not on disk, and the operator set
+    it deliberately, so they have every reason to believe it is handled. #124's unset-must-not-block
+    decision is untouched; only the dead state is new.
+    """
+    unset = _desktop_pin_verdict(configured=False, valid=False)
+    valid = _desktop_pin_verdict(configured=True, valid=True)
+    dead = _desktop_pin_verdict(configured=True, valid=False)
+
+    assert (unset["Tier"], unset["Ok"]) == ("recommended", False), "unset must stay a non-blocking WARN (#124)"
+    assert "not set" in unset["Detail"]
+
+    assert (valid["Tier"], valid["Ok"]) == ("recommended", True), "a valid pin is OK and stays recommended-tiered"
+
+    assert (dead["Tier"], dead["Ok"]) == ("critical", False), "a dead pin must now block (#86)"
+    assert "which is not on disk" in dead["Detail"]
+    assert "re-pinned" in dead["Detail"]
+    # The hint must be the actionable, THIS-shell-first form regardless of tier.
+    assert "$env:PBI_DESKTOP_PATH = " in dead["Hint"]
 
 
 def _verdict(

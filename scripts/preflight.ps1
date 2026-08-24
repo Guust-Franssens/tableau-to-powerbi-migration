@@ -393,6 +393,43 @@ if ($CheckUpstream) {
 }
 
 
+# Get-DesktopPinVerdict decides PBI_DESKTOP_PATH's severity from operator BELIEF, not from whether
+# Desktop was eventually found via some OTHER path. Extracted to a function (not inlined) so the
+# three states (#86: unset / valid / dead) can be executed directly by
+# tests/test_preflight_contract.py without a real Desktop install, mirroring Get-TenantVerdict below.
+#
+# UNSET tells the truth: nothing is pinned, MSIX discovery is exactly what the operator gets and
+# expects (#124) - RECOMMENDED, a visible WARN, never a blocker.
+# VALID means the bridge and this script resolve the SAME exe - OK.
+# DEAD is a different belief, not a stricter version of unset: the operator set PBI_DESKTOP_PATH
+# deliberately, so they believe a specific build is selected and handled - and it silently is not.
+# The MSIX fallback papers over that belief with a DIFFERENT exe than the one named, which is
+# precisely the false-green class this whole script exists to prevent (#86) - CRITICAL, exit 1.
+function Get-DesktopPinVerdict([bool]$Configured, [bool]$Valid, [string]$ConfiguredPath, [string]$InstalledDesktop, [string]$FallbackExe) {
+    $dead = $Configured -and -not $Valid
+    $tier = if ($dead) { 'critical' } else { 'recommended' }
+    $detail = if ($Valid) {
+        $ConfiguredPath
+    } elseif ($dead) {
+        "PBI_DESKTOP_PATH points at `"$ConfiguredPath`" which is not on disk; installed Desktop: $InstalledDesktop. The bridge honours this variable and will fail to launch until it is re-pinned."
+    } else {
+        'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline'
+    }
+    # The hint must work IN THE SHELL THAT READS IT. `setx` writes the user profile and is inherited
+    # only by processes started LATER - and an agent's tool shells inherit the environment of a
+    # parent that is already running, so "then reopen the shell" is advice they cannot act on.
+    # `$env:` is the fix that takes effect immediately; `setx` is offered second, for persistence,
+    # correctly labelled. It fires for BOTH the unset and the dead case (whenever Valid is false) - a
+    # critical dead pin needs the same actionable fix as a recommended unset one, just with a harder
+    # stop attached to it.
+    $hint = if ($FallbackExe) {
+        "THIS shell (takes effect now): `$env:PBI_DESKTOP_PATH = `"$FallbackExe`"   |   persist for NEW shells only (does NOT affect this one): setx PBI_DESKTOP_PATH `"$FallbackExe`""
+    } else {
+        'install Power BI Desktop first'
+    }
+    [pscustomobject]@{ Tier = $tier; Ok = $Valid; Detail = $detail; Hint = $hint }
+}
+
 #
 # TWO things are checked here, and the second one is the one that bites.
 #
@@ -441,37 +478,12 @@ if ($appx) {
 }
 
 # The mismatch-remover. A set PBI_DESKTOP_PATH means the bridge and this script resolve the SAME exe;
-# unset means the bridge is guessing from a version-pinned list and may already be wrong.
-#
-# RECOMMENDED, not critical (#124). It was critical, and that made a machine with the engine, both
-# plugins, both CLIs at known-good versions, Desktop installed, az, uv and ODBC 18 report NOT READY
-# over one unset variable. Two things are wrong with that:
-#   * it is a DESKTOP-only pin, and the estate pipeline (steps 1-6) never opens Desktop -
-#     `run_estate.py`'s own docstring says "never opens Power BI Desktop". Blocking a run on a
-#     dependency that run cannot use is a false blocker, and the operator who proceeded anyway was
-#     right - nothing in the estate pipeline needed it;
-#   * exit 1 means "resolve before migrating", so spending it on an item the operator runbook never
-#     names teaches people to ignore exit 1 - which is the one signal this script has.
-# It stays VISIBLE (a WARN, counted in the summary line) because the failure it prevents is real:
-# Desktop auto-updates and the bridge then cannot find the exe. The phase that actually needs it -
-# report authoring / Desktop verification - is where it must be resolved, and `powerbi-desktop open`
-# fails loudly there rather than silently.
-$pathPinned = $desktopPathValid
+# unset means the bridge is guessing from a version-pinned list and may already be wrong. See
+# Get-DesktopPinVerdict above for the tier decision (#124 unset -> recommended; #86 dead -> critical).
 $installedDesktop = if ($desktop -and $appx) { "$($appx.Version) at $desktop" } elseif ($desktop) { $desktop } else { 'not found' }
-$pinDetail = if ($pathPinned) {
-    $env:PBI_DESKTOP_PATH
-} elseif ($desktopPathDead) {
-    "PBI_DESKTOP_PATH points at `"$env:PBI_DESKTOP_PATH`" which is not on disk; installed Desktop: $installedDesktop. The bridge honours this variable and will fail to launch until it is re-pinned."
-} else {
-    'not set - the bridge is using its own version-pinned discovery; needed only for the Desktop refresh/screenshot phase, not for the estate pipeline'
-}
-# The hint must work IN THE SHELL THAT READS IT. `setx` writes the user profile and is inherited only
-# by processes started LATER - and an agent's tool shells inherit the environment of a parent that is
-# already running, so "then reopen the shell" is advice they cannot act on. `$env:` is the fix that
-# takes effect immediately; `setx` is offered second, for persistence, correctly labelled.
-Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' 'recommended' $pathPinned `
-    $pinDetail `
-    $(if ($desktop) { "THIS shell (takes effect now): `$env:PBI_DESKTOP_PATH = `"$desktop`"   |   persist for NEW shells only (does NOT affect this one): setx PBI_DESKTOP_PATH `"$desktop`"" } else { 'install Power BI Desktop first' })
+$pinVerdict = Get-DesktopPinVerdict -Configured $desktopPathConfigured -Valid $desktopPathValid `
+    -ConfiguredPath $env:PBI_DESKTOP_PATH -InstalledDesktop $installedDesktop -FallbackExe $desktop
+Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint
 
 # --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
 # Opening a model that spans more than one data source raises a modal ("Potential security risk: This
