@@ -531,6 +531,54 @@ operational procedure in [`docs/operator-runbook.md`](docs/operator-runbook.md#e
 
 ---
 
+## Canonical work layout (pre-bundle stages, scratch, deliverables)
+
+Issue #291 named two gaps: the stages **before** `run_estate.py` have no shared convention (each
+script invents its own `_assessment*/` / `_sweep*/` / `_oracle*/` name), and per-run **scratch** has
+no home or lifecycle — 31 ad-hoc `_*` roots accumulated with nothing recording what any is for.
+Issue #234 designed the fix and corrected itself twice in review (own the corrections, not just the
+original text): **`_runs/<NNN>-<slug>/`**, never `_work/` — `.gitignore`'s existing `**/_work/` rule
+means the OPPOSITE thing (its `.py` transform scripts are deliberately tracked). The number is the
+identity (never renamed/reused — bundle output embeds absolute self-paths); the slug is decoration
+only, because a display name is never unique (two projects or two workbooks can share one).
+
+```
+_runs/<NNN>-<slug>/
+    run.json          <- the one authoritative description of this run
+    assessment/        assess_estate.py-shaped output
+    assets/             harvest_estate_assets.py-shaped downloads
+    bundle/              run_estate.py-shaped conversion output
+    oracle/               capture_tableau_oracle.py-shaped reference capture
+    deliverables/          operator-facing outputs meant for the CUSTOMER, never for git —
+                            the `ses-prep/` near-miss (issue #322): a `connections.json`/`.md`
+                            naming 17 real customer servers landed unprefixed, unignored, at the
+                            repo root, one `git add -A` away from being committed
+    scratch/                disposable, run-owned — the only subdir a future `--prune` may delete
+```
+
+`/_*` in `.gitignore` already covers the whole tree by construction — verified,
+`git check-ignore -v -- _runs/<NNN>-<slug>/deliverables/connections.json` reports `.gitignore:.../_*`
+— **without** a trailing slash (a trailing slash makes `git check-ignore` report every path as
+ignored, which proves nothing; see `harvest_estate_assets.py`'s own guard for the same trap).
+
+**`scripts/work_dirs.py`** is the single source of truth for these paths — `sanitize_unit_key`,
+`allocate_run` (atomic `mkdir`-exclusive, retry on collision, never a read-then-write race),
+`RunPaths` (the six subdirs above as properties), and `list_runs`. It resolves the repo root from
+its **own file location**, never from `Path.cwd()` — an empty stray `fabric/` was once written at
+the repo root by a script that resolved a relative path against whatever CWD an agent happened to
+invoke it from, which is exactly the failure a single importable resolver removes.
+
+**Scope landed so far:** the convention plus the helper only. `assess_estate.py`,
+`harvest_estate_assets.py`, `capture_tableau_oracle.py` and `run_estate.py` keep their documented
+`_assessment*/` / `_sweep*/` / `_oracle*/` / `_bundle*/` defaults **unchanged** — migrating them onto
+`work_dirs.py`, generating `_runs/INDEX.md`, and a legacy-migration helper are separate follow-up
+work (issue #234's remaining acceptance criteria), deliberately not bundled with the convention
+itself so as not to collide with unrelated in-flight changes to those exact files. `_estate/`,
+`_build/` and `migrations/` are explicitly **exempt** — persistent test infra, a bundle-internal
+replay convention, and committed deliverables respectively, none of them per-run scratch.
+
+---
+
 <!-- BEGIN:shared-conventions -->
 ## Shared agent conventions (all agents inherit these)
 
