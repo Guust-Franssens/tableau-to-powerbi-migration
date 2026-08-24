@@ -342,8 +342,12 @@ def test_the_near_cap_warning_is_actually_EMITTED(tmp_path: Path, caplog) -> Non
     with caplog.at_level(logging.WARNING, logger=sac.log.name):
         sac.report_sizes([agent])
     warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    # Assert the INVARIANT (which file, how much headroom), never the phrasing around it. Blind
+    # review demonstrated that pinning "650 left" fails on a behaviour-preserving reword to
+    # "650 chars remaining" - a false alarm on a harmless edit. The looser form still catches both
+    # realistic regressions: a deleted warning and one downgraded to log.info both yield "".
     assert "loud.agent.md" in warnings, "the warning must name the file, not just count personas"
-    assert "650 left" in warnings, "the warning must state the exact remaining headroom"
+    assert "650" in warnings, "the warning must state the exact remaining headroom"
 
 
 def test_no_near_cap_warning_when_nothing_is_in_the_band(tmp_path: Path, caplog) -> None:
