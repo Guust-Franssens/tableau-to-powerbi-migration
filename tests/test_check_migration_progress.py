@@ -549,6 +549,112 @@ def test_tamper_ignores_refresh_cache_and_desktop_sidecars(tmp_path):
     assert "pristine" in notes[0]
 
 
+# --- issue #230: a --slice-only bundle must not read as tampered -------------------------------
+
+
+def test_slice_only_shaped_manifest_is_NO_BASELINE_BY_DESIGN_not_NO_BASELINE(tmp_path):
+    """A `--slice-only` bundle (pre-backfill) has a valid manifest with no `generated_artifacts` key.
+
+    This is the exact shape `migrate_estate.py` itself writes (sort_keys=True, no generated_artifacts
+    key at all) - `run_estate.py`'s wrapper is what adds that key, and `--slice-only` used to skip it
+    entirely (issue #230). That must read as EXPECTED ABSENCE, not as a suspicious missing baseline.
+    """
+    _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    (tmp_path / "report.json").write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps({"assets": [], "root": str(tmp_path), "source_kind": "folder"}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "NO_BASELINE_BY_DESIGN"
+    assert "EXPECTED ABSENCE" in notes[0]
+    assert "not tampering" in notes[0]
+
+
+def test_missing_input_manifest_stays_NO_BASELINE_not_by_design(tmp_path):
+    """No input_manifest.json at all is more suspicious than 'never had this key' - keep it distinct."""
+    _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    (tmp_path / "report.json").write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "NO_BASELINE"
+    assert "no input_manifest.json" in notes[0]
+
+
+def test_corrupt_input_manifest_stays_NO_BASELINE_not_by_design(tmp_path):
+    """Unparsable JSON must not crash the check, and must not read as 'expected absence' either."""
+    _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    (tmp_path / "report.json").write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+    (tmp_path / "input_manifest.json").write_text("{not valid json", encoding="utf-8")
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "NO_BASELINE"
+    assert "not valid JSON" in notes[0]
+
+
+def test_tamper_still_detects_drift_on_a_slice_only_backfilled_baseline(tmp_path):
+    """The regression that matters most: a real DRIFT must not be softened by the new partial state."""
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    baseline_hash = cmp_mod.sha256_file(generated)
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "generated_artifacts": {
+                    "version": 1,
+                    "run_id": "slice-run-1",
+                    "recorded_at": datetime.now().isoformat(timespec="seconds"),
+                    "report_generated_at": "2026-08-10T08:00:00Z",
+                    "report_sha256": cmp_mod.sha256_file(report),
+                    "coverage": "slice_only_backfill",
+                    "files": {"M.SemanticModel/definition/tables/Orders.tmdl": baseline_hash},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    generated.write_text("changed after the slice-only backfill", encoding="utf-8")
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "DRIFT"
+    assert any("UNDECLARED" in note for note in notes)
+    assert any("PARTIAL COVERAGE" in note for note in notes)
+
+
+def test_tamper_flags_partial_coverage_on_a_clean_slice_only_backfilled_baseline(tmp_path):
+    """A pass drawn from a backfilled baseline must still say its coverage is partial."""
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "generated_artifacts": {
+                    "version": 1,
+                    "run_id": "slice-run-2",
+                    "recorded_at": datetime.now().isoformat(timespec="seconds"),
+                    "report_generated_at": "2026-08-10T08:00:00Z",
+                    "report_sha256": cmp_mod.sha256_file(report),
+                    "coverage": "slice_only_backfill",
+                    "files": {"M.SemanticModel/definition/tables/Orders.tmdl": cmp_mod.sha256_file(generated)},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "CLEAN"
+    assert any("PARTIAL COVERAGE" in note for note in notes)
+
+
 # --- the CLI contract -----------------------------------------------------------------------------
 
 
@@ -581,6 +687,18 @@ def test_progress_mode_fails_closed_without_a_baseline(tmp_path):
     proc = _run("--bundle", str(tmp_path), "--json")
     assert proc.returncode == 2
     assert "--baseline" in proc.stderr + proc.stdout
+
+
+def test_tamper_cli_exit_code_for_a_slice_only_shaped_bundle_is_distinct_from_no_baseline(tmp_path):
+    """The process-level contract for issue #230: 3, not 2 - a caller gating on exit code must see it."""
+    _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    (tmp_path / "report.json").write_text(json.dumps({"generated_at": "2026-08-10T08:00:00Z"}), encoding="utf-8")
+    (tmp_path / "input_manifest.json").write_text(json.dumps({"assets": []}), encoding="utf-8")
+
+    proc = _run("--bundle", str(tmp_path), "--tamper", "--json")
+
+    assert proc.returncode == 3
+    assert json.loads(proc.stdout)["state"] == "NO_BASELINE_BY_DESIGN"
 
 
 def test_modes_are_mutually_exclusive(tmp_path):

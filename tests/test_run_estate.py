@@ -302,6 +302,64 @@ def test_slice_only_needs_no_engine_at_all(tmp_path: Path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# issue #230: --slice-only skipped the generated-artifact baseline entirely
+# ---------------------------------------------------------------------------
+
+
+def test_slice_only_backfills_a_missing_baseline(tmp_path: Path) -> None:
+    """The defect: a bundle built with --slice-only never carried a generated_artifacts baseline.
+
+    Reproduces the exact shape ``migrate_estate.py`` itself writes - an ``input_manifest.json`` with
+    no ``generated_artifacts`` key at all - and asserts ``run_estate.py --slice-only`` now backfills
+    one instead of leaving ``check_migration_progress.py --tamper`` permanently unable to check it.
+    """
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report()))
+    _write(out / "input_manifest.json", json.dumps({"assets": [], "root": str(out)}))
+    _write(out / "fabric" / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl", "table Orders")
+
+    assert run_estate.main(["--output", str(out), "--slice-only"]) == run_estate.EXIT_OK
+
+    manifest = json.loads((out / "input_manifest.json").read_text(encoding="utf-8"))
+    generated = manifest["generated_artifacts"]
+    assert generated["coverage"] == "slice_only_backfill"
+    assert "fabric/M.SemanticModel/definition/tables/Orders.tmdl" in generated["files"]
+
+
+def test_slice_only_backfill_never_overwrites_an_existing_baseline(tmp_path: Path) -> None:
+    """A prior full engine run through run_estate.py already recorded real evidence - never clobber it."""
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report()))
+    original = {
+        "version": 1,
+        "run_id": "original-run",
+        "recorded_at": "2026-08-01T00:00:00+00:00",
+        "report_generated_at": _report().get("generated_at"),
+        "report_sha256": run_estate.sha256_file(out / "report.json"),
+        "files": {"fabric/Stale.SemanticModel/definition/t.tmdl": "deadbeef"},
+    }
+    _write(out / "input_manifest.json", json.dumps({"generated_artifacts": original}))
+
+    assert run_estate.main(["--output", str(out), "--slice-only"]) == run_estate.EXIT_OK
+
+    manifest = json.loads((out / "input_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["generated_artifacts"] == original
+
+
+def test_slice_only_backfill_does_not_clobber_an_invalid_baseline_either(tmp_path: Path) -> None:
+    """Even a broken/mismatched generated_artifacts entry might be tamper evidence - leave it in place."""
+    out = tmp_path / "bundle"
+    _write(out / "report.json", json.dumps(_report()))
+    invalid = {"version": 999, "files": {}}
+    _write(out / "input_manifest.json", json.dumps({"generated_artifacts": invalid}))
+
+    run_estate.backfill_slice_only_baseline(out, _report(), [])
+
+    manifest = json.loads((out / "input_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["generated_artifacts"] == invalid
+
+
+# ---------------------------------------------------------------------------
 # The empty-model gate: a bundle that passes everything above and holds no data
 # ---------------------------------------------------------------------------
 
