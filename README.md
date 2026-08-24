@@ -413,8 +413,11 @@ workbooks; the patterns live in `docs/tableau-dax-translation-guide.md`.
 - **In progress:** re-rendering the origin-destination line map (`telecommunications-analytics`,
   `superstore-sales-performance`) and the Azure Maps choropleths, whose Desktop renders are being
   redone before they are featured as verified.
-- **Not built yet:** a `pbi-deployer` agent to publish to a Fabric workspace, refresh, and run a
-  screenshot-based fidelity check as an automated closing step.
+- **Not built yet:** a `pbi-deployer` *agent*. The deployment **script** already exists —
+  `scripts/deploy_estate.py` lands an estate in a Fabric landing-zone workspace (models first, each
+  report rebound to its deployed model), with `verify_bindings.py` as the post-deploy check. What is
+  missing is the agent that drives them, refreshes, and runs a screenshot-based fidelity check as an
+  automated closing step — plus the multi-workspace topology decisions tracked in #57.
 
 Contributions, especially additional worked examples against different Tableau workbooks, are welcome.
 
