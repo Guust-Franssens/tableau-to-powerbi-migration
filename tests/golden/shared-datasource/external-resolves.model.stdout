@@ -1,0 +1,51 @@
+UNIT CHECK (model scope): NOT_CHECKED - <UNIT>
+  scoped automated checks only; omitted checks: desktop-orphans, engine-receipt, finalized, occlusion, oracle-coverage, page-parity, pbir-layout, pbir-valid, visual-comparison-done, visual-layer-done
+  scoped PASS is not unit completion or cross-layer sign-off
+  model-reference: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: integration (report -> semantic model reference)
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  blank-placeholders: NOT_CHECKED (native INCOMPLETE exit 3)
+      suspected owner: integration (model placeholder referenced by report)
+      rerun: <PY> <REPO>/scripts/check_blank_placeholders.py <UNIT>
+  field-bindings: PASS (native OK exit 0)
+  sqlproxy-connections: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  relationship-health: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  data-model: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  empty-model: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  stub-measures: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  ai-descriptions: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  ai-instructions: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+  cache-freshness: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+      suspected owner: model
+      detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
+SUMMARY: findings_by_owner=none; not_checked_structural=0; not_checked_external=9; not_checked_missing_input=1; ladder=NOT_CHECKED exit=2
+
+BROWNFIELD DISCOVERY (read-only):
+  expected a migration unit or engine bundle shaped as one of:
+    - unit root: migration-spec.json plus fabric/<Name>.Report and/or fabric/<Name>.SemanticModel
+    - engine bundle root: report.json or engine-output-receipt.json plus {pbip,reports,semantic_models,handover,data}
+    - direct artifact: <Name>.Report/definition or <Name>.SemanticModel/definition
+    - partial unit: any subset of those phases, reported as evidenced rather than failed
+  found instead:
+    - source intent: NOT_EVIDENCED (no migration-spec.json found)
+    - engine bundle marker: NOT_EVIDENCED (no engine report.json or receipt found)
+    - handover queue: NOT_EVIDENCED (no handover/*.json slices found)
+    - PBIR reports: EVIDENCED
+        fabric/Sales.Report
+    - semantic models: EVIDENCED (external)
+        tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel
+  reorganisation plan (not applied): no recognised artifacts to place
