@@ -1,0 +1,17 @@
+table FLIGHTS
+	column flight_id
+		dataType: string
+		sourceColumn: flight_id
+
+	column carrier
+		dataType: string
+		sourceColumn: carrier
+
+	partition FLIGHTS = m
+		mode: import
+		source =
+			let
+			    Source = Csv.Document(File.Contents("public_FLIGHTS.csv"), [Delimiter = ",", Encoding = 65001]),
+			    Promoted = Table.PromoteHeaders(Source, [PromoteAllScalars = true])
+			in
+			    Promoted

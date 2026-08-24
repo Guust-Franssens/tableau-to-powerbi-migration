@@ -87,7 +87,7 @@ MODEL_CHECK_IDS = frozenset(
     }
 )
 REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
-INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings"})
+INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings", "connection-fidelity"})
 ALL_ONLY_CHECK_IDS = frozenset(
     {"engine-receipt", "desktop-orphans", "visual-layer-done", "visual-comparison-done", "finalized"}
 )
@@ -96,6 +96,7 @@ OWNER_HINTS = {
     "blank-placeholders": "integration (model placeholder referenced by report)",
     "field-bindings": "integration (report reference vs model field)",
     MODEL_REFERENCE_ID: "integration (report -> semantic model reference)",
+    "connection-fidelity": "integration (spec connection target vs emitted model M)",
     "sqlproxy-connections": "model",
     "relationship-health": "model",
     "data-model": "model",
@@ -152,6 +153,17 @@ GATES = (
         frozenset({1}),
         frozenset({"SKIPPED", "ERROR"}),
         frozenset({0, 2, 3}),
+    ),
+    Gate(
+        "connection-fidelity",
+        "check_connection_fidelity.py",
+        (),
+        frozenset({"OK"}),
+        frozenset({0}),
+        frozenset({"DOWNGRADED"}),
+        frozenset({1}),
+        frozenset({"SKIPPED"}),
+        frozenset({3}),
     ),
     Gate(
         "sqlproxy-connections",
