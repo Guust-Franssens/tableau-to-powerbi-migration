@@ -68,6 +68,7 @@ def test_capture_stable_ignores_a_partial_plateau_until_final_frame_dwells() -> 
         assert result.frames == 5
         assert dest.read_bytes() == b"complete-nationwide"
         assert not (out_dir / ".Map.frames").exists()
+        assert not (out_dir / ".Map.capturing.png").exists()
     finally:
         shutil.rmtree(out_dir.parent, ignore_errors=True)
 
@@ -105,6 +106,7 @@ def test_capture_stable_does_not_count_screenshot_duration_as_dwell() -> None:
         assert result.frames == 5
         assert dest.read_bytes() == b"complete-nationwide"
         assert not (out_dir / ".Map.frames").exists()
+        assert not (out_dir / ".Map.capturing.png").exists()
     finally:
         shutil.rmtree(out_dir.parent, ignore_errors=True)
 
@@ -136,6 +138,88 @@ def test_capture_stable_flags_newest_frame_when_page_never_converges() -> None:
         assert result.frames == 2
         assert dest.read_bytes() == b"frame-1"
         assert not (out_dir / ".Map.frames").exists()
+        assert not (out_dir / ".Map.capturing.png").exists()
+    finally:
+        shutil.rmtree(out_dir.parent, ignore_errors=True)
+
+
+def test_capture_stable_discards_partial_frames_after_a_later_failure() -> None:
+    """A failed page never promotes a plausible partial frame to the evidence path."""
+    out_dir = _workspace("capture-later-failure")
+    dest = out_dir / "Map.png"
+    calls = 0
+
+    def flaky_screenshot(_page_id: str, _pid: str, frame: Path) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            frame.write_bytes(f"PARTIAL-FRAME-{calls}".encode("utf-8"))
+            return True
+        return False
+
+    try:
+        result = capture.capture_stable(
+            "ReportSection1",
+            "1234",
+            dest,
+            capture.CaptureOptions(poll=0.0, stable_seconds=20.0, max_wait=75.0),
+            capture.CaptureRuntime(flaky_screenshot, lambda _seconds: None, lambda: 0.0),
+        )
+
+        assert result == capture.CaptureResult(captured=False, converged=False, seconds=0.0, frames=3)
+        assert not dest.exists()
+        assert not (out_dir / ".Map.capturing.png").exists()
+    finally:
+        shutil.rmtree(out_dir.parent, ignore_errors=True)
+
+
+def test_capture_stable_discards_a_partial_file_from_the_first_failed_screenshot() -> None:
+    """A bridge error after writing a truncated image cannot leave output evidence."""
+    out_dir = _workspace("capture-first-failure")
+    dest = out_dir / "Map.png"
+
+    def partial_then_fail(_page_id: str, _pid: str, frame: Path) -> bool:
+        frame.write_bytes(b"TRUNCATED-FRAME")
+        return False
+
+    try:
+        result = capture.capture_stable(
+            "ReportSection1",
+            "1234",
+            dest,
+            capture.CaptureOptions(poll=0.0, stable_seconds=20.0, max_wait=75.0),
+            capture.CaptureRuntime(partial_then_fail, lambda _seconds: None, lambda: 0.0),
+        )
+
+        assert result == capture.CaptureResult(captured=False, converged=False, seconds=0.0, frames=1)
+        assert not dest.exists()
+        assert not (out_dir / ".Map.capturing.png").exists()
+    finally:
+        shutil.rmtree(out_dir.parent, ignore_errors=True)
+
+
+def test_capture_stable_preserves_prior_evidence_when_a_new_capture_fails() -> None:
+    """A failed recapture cannot delete a previously settled output PNG."""
+    out_dir = _workspace("capture-preserves-prior-evidence")
+    dest = out_dir / "Map.png"
+    dest.write_bytes(b"PREVIOUSLY-SETTLED")
+
+    def partial_then_fail(_page_id: str, _pid: str, frame: Path) -> bool:
+        frame.write_bytes(b"TRUNCATED-FRAME")
+        return False
+
+    try:
+        result = capture.capture_stable(
+            "ReportSection1",
+            "1234",
+            dest,
+            capture.CaptureOptions(poll=0.0, stable_seconds=20.0, max_wait=75.0),
+            capture.CaptureRuntime(partial_then_fail, lambda _seconds: None, lambda: 0.0),
+        )
+
+        assert not result.captured
+        assert dest.read_bytes() == b"PREVIOUSLY-SETTLED"
+        assert not (out_dir / ".Map.capturing.png").exists()
     finally:
         shutil.rmtree(out_dir.parent, ignore_errors=True)
 

@@ -129,6 +129,11 @@ def frame_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _staged_destination(dest: Path) -> Path:
+    """Return the hidden sibling path used before a capture becomes report evidence."""
+    return dest.with_name(f".{dest.stem}.capturing{dest.suffix}")
+
+
 def capture_stable(
     page_id: str,
     pid: str,
@@ -138,6 +143,8 @@ def capture_stable(
 ) -> CaptureResult:
     """Screenshot until one frame digest remains stable for the configured dwell."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    staged_dest = _staged_destination(dest)
+    staged_dest.unlink(missing_ok=True)
 
     started = runtime.clock()
     stable_digest: str | None = None
@@ -148,10 +155,11 @@ def capture_stable(
     while runtime.clock() - started < options.max_wait:
         capture_started = runtime.clock()
         frames += 1
-        if not runtime.screenshotter(page_id, pid, dest):
+        if not runtime.screenshotter(page_id, pid, staged_dest):
+            staged_dest.unlink(missing_ok=True)
             return CaptureResult(False, False, runtime.clock() - started, frames)
         captured_frame = True
-        digest = frame_digest(dest)
+        digest = frame_digest(staged_dest)
         if digest != stable_digest:
             stable_digest = digest
             stable_idle_seconds = 0.0
@@ -159,11 +167,14 @@ def capture_stable(
             stable_idle_seconds += max(0.0, capture_started - previous_frame_finished)
         previous_frame_finished = runtime.clock()
         if stable_idle_seconds >= options.stable_seconds:
+            staged_dest.replace(dest)
             return CaptureResult(True, True, runtime.clock() - started, frames)
         runtime.sleep(options.poll)
 
     if captured_frame:
+        staged_dest.replace(dest)
         return CaptureResult(True, False, runtime.clock() - started, frames)
+    staged_dest.unlink(missing_ok=True)
     return CaptureResult(False, False, runtime.clock() - started, frames)
 
 
