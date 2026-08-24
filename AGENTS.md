@@ -515,6 +515,22 @@ exists so each question is answered once per migration, not once per session.
 
 ---
 
+### Engine model-baseline availability
+
+`reports/` is reliable engine truth; `semantic_models/` is not a per-workbook guarantee. In a
+12-workbook estate audited on 2026-08-24, all report baselines existed but only 4 models (33%) had
+an engine-truth counterpart; the other 8 working models were unpaired. This is a baseline-coverage
+fact, not evidence that those eight models needed no changes.
+
+Before calculating model churn, check that each working model has an engine-truth counterpart. A
+missing counterpart must be reported as **BASELINE UNAVAILABLE**, never as a clean/no-change diff;
+only an existing pair may yield “no changes.” Report model-pair coverage beside every engine-gap
+distribution and do not generalize model churn from the paired subset to the estate; see
+[issue #274](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/274) and the
+operational procedure in [`docs/operator-runbook.md`](docs/operator-runbook.md#engine-model-baseline-availability).
+
+---
+
 <!-- BEGIN:shared-conventions -->
 ## Shared agent conventions (all agents inherit these)
 
@@ -532,11 +548,13 @@ exists so each question is answered once per migration, not once per session.
   where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/reports/`, `<bundle>/semantic_models/` | **NEVER edited, by anyone** — a free pristine baseline the engine writes anyway |
+  | engine truth | `<bundle>/reports/` (reliable); `<bundle>/semantic_models/` (if emitted) | **NEVER edit an existing baseline** |
   | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
-  A bundle is `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**. Keep
+  A bundle may contain `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**.
+  `reports/` is reliable; `semantic_models/` is conditional (4/12 pairs, 2026-08-24), so model
+  diffs must report a missing baseline—not no changes—and #274 totals must disclose coverage; keep
   `reports/` pristine so it remains the exact answer to *"what did our tier change versus what the
   engine produced?"* — rewriting it cost a retracted upstream bug on 2026-08-10. Use git for that
   comparison; the mechanics live in `powerbi-report-gotchas` §3.
