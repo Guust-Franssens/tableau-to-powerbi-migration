@@ -670,7 +670,9 @@ def _judge(
     connection_class: str = "snowflake",
 ) -> ccf.SourceVerdict:
     source = _live_source("ds.sf", connection_class, tables=list(tables))
-    ctx = ccf.UnitContext(models, limitations, declarations)
+    # The sibling ids are part of the context on purpose: `ds.sf_ORDERS` and `ds.sf_archive` are both
+    # plausible sibling sources, and the second ownership guard only exists when the unit knows them.
+    ctx = ccf.UnitContext(models, limitations, declarations, frozenset({"ds.sf", "ds.sf_ORDERS", "ds.sf_archive"}))
     return ccf._judge_source(source, "live_source", connection_class, "live", ctx)
 
 
@@ -939,6 +941,10 @@ _DECLS = (
     # normalised substring, so `ds.sf_archive` claimed source-wide scope over `ds.sf` and certified an
     # unexamined sibling table. The space had no such item, so I7 could not reach the class at all.
     (({"stage": "semantic_build", "item": "ds.sf_archive", "issue": "archive-table decision"},), ()),
+    # The underscore-qualified form, which is ALSO a valid sibling source id. Round 11 removed `_` as
+    # a delimiter in production; round 12 found the harness had kept it and the space had no point
+    # where the two disagreed, so restoring `_` left the enumeration green.
+    (({"stage": "semantic_build", "item": "ds.sf_ORDERS", "issue": "sibling source decision"},), ()),
 )
 
 
@@ -976,12 +982,17 @@ def _precise_forms(declared: tuple[str, ...]) -> set[str]:
 
     Written out independently of production: the source id, each declared table, and each
     source-qualified table. Anything else is imprecise and must not produce DECLARED.
+
+    ⚠️ `_` is NOT a delimiter here, and that mattered: round 12 found this oracle still accepting
+    `ds.sf_ORDERS` after production had dropped it, with no point in the space to separate them - so
+    restoring `_` in production left the harness green. Failure mode 3, in the harness written to
+    prevent failure mode 3.
     """
     forms = {"ds.sf"}
     for name in declared:
         folded = name.strip().casefold()
         forms.add(folded)
-        forms.update(f"ds.sf{delimiter}{folded}" for delimiter in (".", "__", "_"))
+        forms.update(f"ds.sf{delimiter}{folded}" for delimiter in (".", "__"))
     return forms
 
 
@@ -1310,6 +1321,23 @@ def _mutations():
         setattr(ccf, "_declared_by_edit", stem_only)
         return lambda: setattr(ccf, "_declared_by_edit", original)
 
+    def restore_underscore_delimiter():
+        """Round 11's regression, restored (round 12) so I8 must fire on the ambiguous form."""
+        original = ccf._declaration_scope
+
+        def with_underscore(item, source_id, table_names, sibling_ids=frozenset()):
+            result = original(item, source_id, table_names, sibling_ids)
+            if result is not None:
+                return result
+            folded = item.strip().casefold()
+            own = source_id.strip().casefold()
+            tables = {(name or "").strip().casefold() for name in table_names if name}
+            prefix = f"{own}_"
+            return "table" if folded.startswith(prefix) and folded[len(prefix) :] in tables else None
+
+        setattr(ccf, "_declaration_scope", with_underscore)
+        return lambda: setattr(ccf, "_declaration_scope", original)
+
     return [
         ("I1", drop_file_parts),
         ("I2", lambda: swap(ccf, "_strip_m_comments", lambda text: text)),
@@ -1320,6 +1348,7 @@ def _mutations():
         ("I7", ignore_incompleteness),
         ("I8", loose_declaration),
         ("I8", loose_edit_matching),
+        ("I8", restore_underscore_delimiter),
     ]
 
 
