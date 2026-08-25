@@ -1157,6 +1157,20 @@ Remove one-off probe scripts, `%TEMP%` harnesses, and `.pbip` cache/backups. Kee
 deliverables and the re-runnable `_build/` scripts. Confirm nothing scratch leaked into git before
 reporting done.
 
+**Canonical pre-bundle layout (issue #291/#234):** new work allocates a numbered, per-run home under
+`_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,deliverables,scratch}/` via
+`python scripts/work_dirs.py <unit-name> --json`, rather than inventing another `_*` root. The number
+is the identity — never renamed or reused — and the whole tree is ignored by construction (`/_*` in
+`.gitignore`; verify with `git check-ignore -v -- <path>`, **no trailing slash**, before trusting it).
+`deliverables/` is specifically for operator-facing outputs that name real customer infrastructure
+(e.g. `connections_manifest.py`'s `connections.json`/`.md`) — the `ses-prep/` near-miss (#322) landed
+exactly that kind of output unprefixed and unignored at the repo root.
+
+⚠️ **Today's tools have not been migrated onto this yet.** `assess_estate.py --out _assessment`,
+`harvest_estate_assets.py --out _sweep`, `capture_tableau_oracle.py --out _oracle` and
+`run_estate.py --output _bundle` keep working exactly as documented in §2 below — migrating them onto
+`work_dirs.py` is separate follow-up work, deliberately not bundled with landing the convention.
+
 ---
 
 ## 7. Public-repo hygiene
@@ -1173,6 +1187,7 @@ plan and a prerequisites email were pushed before anyone noticed, and required a
 | `_sweep*/` | `harvest_estate_assets.py` output — downloaded `.twbx`/`.tdsx` from a real site |
 | `_harvest*/` | ⚠️ **a different tool's** output (`harvest_tableau_public.py`'s public corpus). Ignored, but not where §2 step 4 should write |
 | `_bundle*/`, `_estate*/` | convert output — `report.json` carries every workbook name and calc formula |
+| `_runs/` | the canonical per-run layout (§6.4) — covered by the general `/_*` rule, not its own entry |
 | `migrations/workshop-*/`, `engagement-*/`, `customer-*/` | engagement notes |
 | `**/data/`, `**/source/*.twb` | extracted customer data and source workbooks |
 
