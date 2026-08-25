@@ -808,7 +808,11 @@ def _violations() -> list[str]:
             bad.append(f"I3 unmappable class certified as {pt.verdict.verdict} :: {pt.label}")
         if connected and pt.mine is None:
             bad.append(f"I4 CONNECTED while unattributable :: {pt.label}")
-        parse_only = pt.lims and all(entry.get("stage") not in ccf.DECISION_STAGES for entry in pt.lims)
+        # The stage name is hard-coded, NOT read from ccf.DECISION_STAGES. Reading the module constant
+        # made this invariant vacuous: a mutation that adds "parse" to DECISION_STAGES also flipped
+        # this test to False, so the oracle excused the very behaviour it exists to forbid. Measured:
+        # 0 own-tag violations under its own mutation. Fourth instance of oracle-coupling in this file.
+        parse_only = bool(pt.lims) and all(entry.get("stage") == "parse" for entry in pt.lims)
         if pt.verdict.verdict == ccf.SOURCE_DECLARED and parse_only:
             bad.append(f"I5 parse-stage limitation excused a downgrade :: {pt.label}")
         outcomes = {
@@ -886,7 +890,7 @@ def test_enumeration_is_falsifiable_via_dropped_file_partitions() -> None:
     assert _violations() == []
 
 
-# --- blind review round 5: the same false green, one level up at the root merge --------------------
+# --- blind review round 5: the same false green, one level up at the root merge ---------------------
 #
 # I6 permutes models WITHIN one unit, so it is structurally unable to see an aggregation defect. This
 # block enumerates the merge separately. The lesson is the round-4 lesson again: a harness only covers
@@ -968,3 +972,82 @@ def test_merge_enumeration_is_falsifiable() -> None:
     finally:
         ccf.merge = original
     assert _merge_violations() == []
+
+
+# --- every invariant proven non-vacuous INDIVIDUALLY -----------------------------------------------
+#
+# The falsifiability tests above each prove that SOME invariant fires. That is weaker than it looks:
+# it cannot distinguish a working invariant from a dead one standing next to a working neighbour.
+# Running this per-invariant probe found I5 dead - its `parse_only` test read `ccf.DECISION_STAGES`,
+# the very constant its mutation changes, so the oracle excused the behaviour it exists to forbid.
+# That was the FOURTH oracle-coupling defect in this file, and the first one found here rather than
+# by review. Hence this test: each invariant must fire under a mutation aimed squarely at it.
+
+
+def _mutations():
+    """(tag, apply, restore) for a mutation that must trip exactly that invariant."""
+
+    def swap(module, name, value):
+        original = getattr(module, name)
+        setattr(module, name, value)
+        return lambda: setattr(module, name, original)
+
+    def drop_file_parts():
+        original = ccf._attribute
+        setattr(
+            ccf,
+            "_attribute",
+            lambda m, t: (
+                None
+                if original(m, t) is None
+                else [p for p in original(m, t) if p["category"] not in ccf.FILE_CATEGORIES]
+            ),
+        )
+        return lambda: setattr(ccf, "_attribute", original)
+
+    def loose_connectivity():
+        original = ccf._connectivity
+
+        def loose(models, token, tables):
+            conn, file_backed, file_tables, attributable = original(models, token, tables)
+            if not attributable:
+                return any(m.has_connector(token) for m in models), False, [], True
+            return conn, file_backed, file_tables, attributable
+
+        setattr(ccf, "_connectivity", loose)
+        return lambda: setattr(ccf, "_connectivity", original)
+
+    def collapse():
+        original = ccf._attribute
+
+        def collapsing(models, tables):
+            if not tables:
+                return None
+            by_exact = {ccf._normalise_table(p["table"]): p for m in models for p in m.partitions}
+            mine = [by_exact[k] for k in (ccf._normalise_table(t) for t in tables) if k in by_exact]
+            return mine if len(mine) == len(tables) and mine else None
+
+        setattr(ccf, "_attribute", collapsing)
+        return lambda: setattr(ccf, "_attribute", original)
+
+    return [
+        ("I1", drop_file_parts),
+        ("I2", lambda: swap(ccf, "_strip_m_comments", lambda text: text)),
+        ("I3", lambda: swap(ccf, "CLASS_TO_CONNECTOR", {**ccf.CLASS_TO_CONNECTOR, "mysteryengine": "Snowflake"})),
+        ("I4", loose_connectivity),
+        ("I5", lambda: swap(ccf, "DECISION_STAGES", frozenset({*ccf.DECISION_STAGES, "parse"}))),
+        ("I6", collapse),
+    ]
+
+
+@pytest.mark.parametrize("tag,mutate", _mutations(), ids=[t for t, _ in _mutations()])
+def test_each_invariant_fires_under_its_own_mutation(tag: str, mutate) -> None:
+    """A dead invariant is worse than a missing one: it is counted as coverage."""
+    assert _violations() == [], "baseline must be clean or the result below means nothing"
+    restore = mutate()
+    try:
+        own = [v for v in _violations() if v.startswith(tag)]
+        assert own, f"{tag} is VACUOUS - it did not fire under a mutation aimed at it"
+    finally:
+        restore()
+    assert _violations() == []
