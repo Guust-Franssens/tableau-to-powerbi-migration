@@ -799,33 +799,52 @@ def test_a_table_scoped_declaration_still_passes_when_coverage_is_complete() -> 
     assert verdict.verdict == ccf.SOURCE_DECLARED
 
 
-def test_a_source_id_like_item_does_not_claim_source_wide_scope() -> None:
-    """`ds.sf_archive` must not speak for `ds.sf`.
+def test_a_source_id_like_item_declares_nothing() -> None:
+    """`ds.sf_archive` must not speak for `ds.sf` - not as scope, and not as association either.
 
-    Blind review round 9. `_item_names_source` matches a normalised SUBSTRING, so an archive-table
-    decision claimed whole-source scope, bypassed the incomplete-coverage rule, and certified an
-    unexamined sibling as DECLARED / OK / exit 0. Relatedness and scope are different questions: the
-    loose match still decides "was a downgrade recorded at all", but scope now needs strict equality.
+    Blind review rounds 9 and 10 walked through the two imprecise predicates in turn. Round 9 was the
+    source-wide SCOPE test; round 10 was the ASSOCIATION test, which still used normalised-substring
+    matching and so let an unrelated archive record certify a complete, positively-evidenced
+    downgrade as DECLARED / OK / exit 0. Both now go through `_declaration_scope`, which accepts only
+    precise forms, so an archive record declares nothing and the downgrade stands as a FINDING.
     """
-    assert ccf._item_names_source("ds.sf_archive", "ds.sf", []) is True  # still related
-    assert ccf._item_is_source_scoped("ds.sf_archive", "ds.sf") is False  # but does not speak for it
+    assert ccf._declaration_scope("ds.sf_archive", "ds.sf", ["ORDERS"]) is None
+    assert ccf._declaration_scope("ds.sf", "ds.sf", ["ORDERS"]) == "source"
+    assert ccf._declaration_scope("ORDERS", "ds.sf", ["ORDERS"]) == "table"
+    assert ccf._declaration_scope("ds.sf__ORDERS", "ds.sf", ["ORDERS"]) == "table"
     flat = _model("m", (("ORDERS", "file_ok"),), "")
     lims = ({"stage": "semantic_build", "item": "ds.sf_archive", "issue": "archive-table decision"},)
-    verdict = _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=lims)
-    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+    verdict = _judge((flat,), tables=("ORDERS",), limitations=lims)
+    assert verdict.verdict == ccf.SOURCE_DOWNGRADED
     unit = ccf._finalize_unit(Path("u/migration-spec.json"), [verdict])
     assert ccf.merge([unit])["status"] != ccf.STATUS_OK
 
 
-def test_enumeration_is_falsifiable_via_loose_source_scope() -> None:
-    """Round 9's mutation must turn the space red - the dimension that reaches it is new."""
-    original = ccf._item_is_source_scoped
+def test_sibling_source_ids_do_not_declare_for_each_other() -> None:
+    """Grounded in a committed example, not a hypothetical.
+
+    The airline workbook ships two near-duplicate sources whose ids differ only by a `_1` suffix, so
+    the shorter is a substring of the longer. Under the old matcher a decision recorded about one
+    silently vouched for the other.
+    """
+    assert ccf._declaration_scope("ds.airline_x_2022_2025_1", "ds.airline_x_2022_2025", ["T"]) is None
+    assert ccf._declaration_scope("ds.airline_x_2022_2025", "ds.airline_x_2022_2025", ["T"]) == "source"
+
+
+def test_enumeration_is_falsifiable_via_loose_declaration_matching() -> None:
+    """Restore substring association and the space must go red."""
+    original = ccf._declaration_scope
+
+    def loose(item, source_id, table_names):
+        if ccf._item_names_source(item, source_id, table_names):
+            return "source" if item.strip().casefold() != source_id.strip().casefold() else "source"
+        return None
+
     try:
-        ccf._item_is_source_scoped = lambda item, sid: ccf._item_names_source(item, sid, [])
-        breaches = [v for v in _violations() if v.startswith("I7")]
-        assert breaches, "the space cannot reach a source-id-LIKE limitation item"
+        ccf._declaration_scope = loose
+        assert _violations(), "the space cannot reach an imprecise declaration record"
     finally:
-        ccf._item_is_source_scoped = original
+        ccf._declaration_scope = original
     assert _violations() == []
 
 
@@ -919,6 +938,20 @@ def _raw_partitions(models: tuple[ccf.Model, ...], declared: tuple[str, ...]) ->
     return [p for m in models for p in m.partitions if p["table"].strip("[]\"'").casefold() in keys]
 
 
+def _precise_forms(declared: tuple[str, ...]) -> set[str]:
+    """Every item string that legitimately declares something about the enumeration's source.
+
+    Written out independently of production: the source id, each declared table, and each
+    source-qualified table. Anything else is imprecise and must not produce DECLARED.
+    """
+    forms = {"ds.sf"}
+    for name in declared:
+        folded = name.strip().casefold()
+        forms.add(folded)
+        forms.update(f"ds.sf{delimiter}{folded}" for delimiter in (".", "__", "_"))
+    return forms
+
+
 def _raw_unmatched(models: tuple[ccf.Model, ...], declared: tuple[str, ...]) -> list[str]:
     """Declared tables with no emitted counterpart - again computed independently of `_attribute`."""
     emitted = {p["table"].strip("[]\"'").casefold() for m in models for p in m.partitions}
@@ -959,6 +992,18 @@ def _violations() -> list[str]:
         )
         if passing and not source_wide and _raw_unmatched(pt.models, pt.declared):
             bad.append(f"I7 {pt.verdict.verdict} while coverage is incomplete :: {pt.label}")
+        # I8: DECLARED is a pass, so it needs a PRECISE record - exact source id, or exact declared
+        # table name, optionally source-qualified. Rounds 9 and 10 were the same imprecision at two
+        # different sites (scope, then association), so this asserts the property directly instead of
+        # trusting whichever matcher happens to be wired in. Computed here, not read from production.
+        if pt.verdict.verdict == ccf.SOURCE_DECLARED and not pt.decls:
+            precise = any(
+                str(e.get("item") or "").strip().casefold() in _precise_forms(pt.declared)
+                and str(e.get("stage")) in {"semantic_build", "validate", "deploy"}
+                for e in pt.lims
+            )
+            if not precise:
+                bad.append(f"I8 DECLARED on an imprecise record :: {pt.label}")
         outcomes = {
             (v.verdict, tuple(v.tables))
             for v in (
@@ -1185,6 +1230,16 @@ def _mutations():
         setattr(ccf, "_attribute", hide_unmatched)
         return lambda: setattr(ccf, "_attribute", original)
 
+    def loose_declaration():
+        """Restore substring association (rounds 9/10) so I8 must fire."""
+        original = ccf._declaration_scope
+
+        def loose(item, source_id, table_names):
+            return "source" if ccf._item_names_source(item, source_id, table_names) else None
+
+        setattr(ccf, "_declaration_scope", loose)
+        return lambda: setattr(ccf, "_declaration_scope", original)
+
     return [
         ("I1", drop_file_parts),
         ("I2", lambda: swap(ccf, "_strip_m_comments", lambda text: text)),
@@ -1193,6 +1248,7 @@ def _mutations():
         ("I5", lambda: swap(ccf, "DECISION_STAGES", frozenset({*ccf.DECISION_STAGES, "parse"}))),
         ("I6", collapse),
         ("I7", ignore_incompleteness),
+        ("I8", loose_declaration),
     ]
 
 

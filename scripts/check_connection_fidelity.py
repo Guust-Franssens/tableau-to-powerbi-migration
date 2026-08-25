@@ -244,8 +244,51 @@ def load_model(model_dir: Path) -> Model:
     return Model(name=model_dir.name, path=str(model_dir), partitions=tuple(partitions), m_text="\n".join(m_chunks))
 
 
+def _declaration_scope(item: str, source_id: str, table_names: list[str]) -> str | None:
+    """What a limitation item DECLARES: "source", "table", or None for "nothing precise".
+
+    `SOURCE_DECLARED` is a PASS, so every predicate that can produce one must be precise. Blind review
+    rounds 9 and 10 walked through the two imprecise ones in turn: first the source-wide SCOPE test,
+    then this ASSOCIATION test. Both used `_item_names_source`, whose normalised-substring branch
+    treats `ds.orders_archive` as naming `ds.orders`.
+
+    That is not hypothetical. In a committed example the airline workbook has two near-duplicate
+    sources, `ds.airline_alliance_performance_2022_2025` and the same id with a `_1` suffix, and the
+    shorter is a substring of the longer - so a decision recorded about one silently vouched for the
+    other. 63 of the 70 associations in real specs come from that substring branch.
+
+    Tightening is free here: every one of the 16 committed specs is extract-based, so the gate reports
+    SKIPPED for all of them and no real DECLARED verdict depends on the loose branch today.
+
+    Precise forms only:
+      * `item == source_id`                       -> "source" (attests to every declared table)
+      * `item == <a declared table name>`         -> "table"
+      * `item == <source_id><delimiter><table>`   -> "table"
+    Anything else declares nothing, and the downgrade stands as a finding.
+    """
+    item = item.strip()
+    if not item:
+        return None
+    folded = item.casefold()
+    if folded == source_id.strip().casefold():
+        return "source"
+    tables = {(name or "").strip().casefold() for name in table_names if name}
+    if folded in tables:
+        return "table"
+    for delimiter in (".", "__", "_"):
+        prefix = f"{source_id.strip().casefold()}{delimiter}"
+        if folded.startswith(prefix) and folded[len(prefix) :] in tables:
+            return "table"
+    return None
+
+
 def _item_names_source(item: str, source_id: str, table_names: list[str]) -> bool:
-    """Whether a `limitations_encountered` item string references this data source or a table."""
+    """Whether a `limitations_encountered` item string references this data source or a table.
+
+    ⚠️ DELIBERATELY LOOSE, and no longer used to decide anything that can produce a pass - see
+    `_declaration_scope`. Kept because "is this record about this source at all" is a fair question
+    for reporting, but substring containment must never certify a downgrade as decided.
+    """
     item = item.strip()
     if not item:
         return False
@@ -256,21 +299,6 @@ def _item_names_source(item: str, source_id: str, table_names: list[str]) -> boo
     if source_norm and source_norm in normalized:
         return True
     return any(table and _NON_ALNUM.sub("", table.lower()) in normalized for table in table_names)
-
-
-def _item_is_source_scoped(item: str, source_id: str) -> bool:
-    """Whether a limitation item is an attestation about the WHOLE data source.
-
-    STRICT equality (trimmed, case-folded). Deliberately not `_item_names_source`, which also matches
-    a normalised SUBSTRING and so treats `ds.orders_archive` as naming `ds.orders`. Blind review round
-    9 used exactly that: an archive-table decision claimed source-wide scope, bypassed the
-    incomplete-coverage rule and certified an unexamined sibling table as DECLARED / OK / exit 0.
-
-    Substring containment is fine for "does this record relate to this source at all", which is what
-    decides whether a downgrade was recorded. It is not fine for "does this record speak for every
-    table this source declares", which is a much stronger claim and needs a much stricter test.
-    """
-    return item.strip().casefold() == source_id.strip().casefold()
 
 
 def _declared_by_limitation(
@@ -291,9 +319,10 @@ def _declared_by_limitation(
             continue
         item = str(entry.get("item") or "")
         text = str(entry.get("issue") or "recorded downgrade")
-        if _item_is_source_scoped(item, source_id):
+        scope = _declaration_scope(item, source_id, table_names)
+        if scope == "source":
             return text, True
-        if fallback is None and _item_names_source(item, source_id, table_names):
+        if scope == "table" and fallback is None:
             fallback = (text, False)
     return fallback
 
