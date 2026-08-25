@@ -244,39 +244,46 @@ def load_model(model_dir: Path) -> Model:
     return Model(name=model_dir.name, path=str(model_dir), partitions=tuple(partitions), m_text="\n".join(m_chunks))
 
 
-def _declaration_scope(item: str, source_id: str, table_names: list[str]) -> str | None:
+def _declaration_scope(
+    item: str, source_id: str, table_names: list[str], sibling_ids: frozenset[str] = frozenset()
+) -> str | None:
     """What a limitation item DECLARES: "source", "table", or None for "nothing precise".
 
     `SOURCE_DECLARED` is a PASS, so every predicate that can produce one must be precise. Blind review
-    rounds 9 and 10 walked through the two imprecise ones in turn: first the source-wide SCOPE test,
-    then this ASSOCIATION test. Both used `_item_names_source`, whose normalised-substring branch
-    treats `ds.orders_archive` as naming `ds.orders`.
-
-    That is not hypothetical. In a committed example the airline workbook has two near-duplicate
-    sources, `ds.airline_alliance_performance_2022_2025` and the same id with a `_1` suffix, and the
-    shorter is a substring of the longer - so a decision recorded about one silently vouched for the
-    other. 63 of the 70 associations in real specs come from that substring branch.
-
-    Tightening is free here: every one of the 16 committed specs is extract-based, so the gate reports
-    SKIPPED for all of them and no real DECLARED verdict depends on the loose branch today.
+    rounds 9, 10 and 11 walked through three imprecise variants in turn: the source-wide SCOPE test,
+    the ASSOCIATION test, and then the source-qualified-table syntax below.
 
     Precise forms only:
       * `item == source_id`                       -> "source" (attests to every declared table)
       * `item == <a declared table name>`         -> "table"
-      * `item == <source_id><delimiter><table>`   -> "table"
-    Anything else declares nothing, and the downgrade stands as a finding.
+      * `item == <source_id>.<table>` or `__`     -> "table"
+
+    ⚠️ `_` is NOT a qualifier delimiter. Round 11: `ds.sf_ORDERS` parsed as "source `ds.sf`, table
+    `ORDERS`" while being a perfectly good id for a SIBLING source, so a decision recorded for that
+    sibling declared a downgrade for `ds.sf`. Real specs use `.` and `__`; measured, none rely on `_`.
+
+    ⚠️ And an item that EXACTLY equals another known source id is never reinterpreted as a qualified
+    table, whatever the delimiter. Dropping `_` alone would leave the same ambiguity available to a
+    sibling literally named `ds.sf.ORDERS`, so the id set is the general guard and the delimiter rule
+    is the specific one.
+
+    In a committed example the airline workbook ships two near-duplicate sources whose ids differ only
+    by a `_1` suffix, so this family of collisions is real, not theoretical.
     """
     item = item.strip()
     if not item:
         return None
     folded = item.casefold()
-    if folded == source_id.strip().casefold():
+    own = source_id.strip().casefold()
+    if folded == own:
         return "source"
+    if any(folded == other.strip().casefold() for other in sibling_ids if other.strip().casefold() != own):
+        return None
     tables = {(name or "").strip().casefold() for name in table_names if name}
     if folded in tables:
         return "table"
-    for delimiter in (".", "__", "_"):
-        prefix = f"{source_id.strip().casefold()}{delimiter}"
+    for delimiter in (".", "__"):
+        prefix = f"{own}{delimiter}"
         if folded.startswith(prefix) and folded[len(prefix) :] in tables:
             return "table"
     return None
@@ -302,7 +309,10 @@ def _item_names_source(item: str, source_id: str, table_names: list[str]) -> boo
 
 
 def _declared_by_limitation(
-    limitations: list[dict[str, Any]], source_id: str, table_names: list[str]
+    limitations: list[dict[str, Any]],
+    source_id: str,
+    table_names: list[str],
+    sibling_ids: frozenset[str] = frozenset(),
 ) -> tuple[str, bool] | None:
     """`(issue text, names_the_source)` for a decision-stage entry covering this source.
 
@@ -319,7 +329,7 @@ def _declared_by_limitation(
             continue
         item = str(entry.get("item") or "")
         text = str(entry.get("issue") or "recorded downgrade")
-        scope = _declaration_scope(item, source_id, table_names)
+        scope = _declaration_scope(item, source_id, table_names, sibling_ids)
         if scope == "source":
             return text, True
         if scope == "table" and fallback is None:
@@ -327,15 +337,36 @@ def _declared_by_limitation(
     return fallback
 
 
-def _declared_by_edit(declarations: list[dict[str, Any]], file_tables: set[str]) -> str | None:
-    """Return a declaration target when a generated-edit declaration touches a file-backed table."""
+def _owning_model_names(models: tuple[Model, ...], file_tables: set[str]) -> set[str]:
+    """Names of the emitted models that actually hold these file-backed tables."""
+    owners: set[str] = set()
+    for model in models:
+        if any(part["table"] in file_tables and part["category"] in FILE_CATEGORIES for part in model.partitions):
+            owners.add(model.name.casefold())
+    return owners
+
+
+def _declared_by_edit(declarations: list[dict[str, Any]], file_tables: set[str], owners: set[str]) -> str | None:
+    """A generated-edit declaration that provably touches THIS source's file-backed table.
+
+    Round 11: matching on `Path(target).stem` alone discarded every other path component, so a target
+    inside `OtherSource.SemanticModel/definition/tables/ORDERS.tmdl` declared a downgrade for a
+    same-named table in a DIFFERENT model - DECLARED / OK / exit 0 on someone else's edit.
+
+    `DECLARED` is a pass, so ownership has to be proven rather than assumed: some segment of the
+    target path must name a model that actually holds the file-backed table. If ownership cannot be
+    established the declaration does not apply, and the downgrade stands as a finding.
+    """
     for declaration in declarations:
         target = str(declaration.get("target") or "")
         if not target:
             continue
-        stem = Path(target).stem
-        if stem in file_tables:
-            return target
+        path = Path(target)
+        if path.stem not in file_tables:
+            continue
+        if owners and not owners & {segment.casefold() for segment in path.parts}:
+            continue
+        return target
     return None
 
 
@@ -346,6 +377,7 @@ class UnitContext:
     models: tuple[Model, ...]
     limitations: tuple[dict[str, Any], ...]
     declarations: tuple[dict[str, Any], ...]
+    source_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -515,12 +547,12 @@ def _declared_reason(
     which is why this distinguishes them rather than simply refusing every declaration on incomplete
     coverage - that would add noise to the only shape real specs actually use.
     """
-    limitation = _declared_by_limitation(ctx.limitations, source_id, _table_names(data_source))
+    limitation = _declared_by_limitation(ctx.limitations, source_id, _table_names(data_source), ctx.source_ids)
     if limitation:
         text, names_source = limitation
         scope = "source" if names_source else "table"
         return f"downgrade recorded in limitations_encountered: {text}", scope
-    edit = _declared_by_edit(ctx.declarations, set(file_tables))
+    edit = _declared_by_edit(ctx.declarations, set(file_tables), _owning_model_names(ctx.models, set(file_tables)))
     if edit:
         return f"downgrade recorded via generated-edit declaration: {edit}", "table"
     return None
@@ -619,7 +651,12 @@ def _live_verdicts(
     declarations: list[dict[str, Any]],
 ) -> list[SourceVerdict]:
     """Judge every live-source data source; flat_file/unknown sources are not this gate's concern."""
-    ctx = UnitContext(tuple(models), tuple(limitations), tuple(declarations))
+    ctx = UnitContext(
+        tuple(models),
+        tuple(limitations),
+        tuple(declarations),
+        frozenset(str(ds.get("id") or "") for ds in data_sources),
+    )
     verdicts: list[SourceVerdict] = []
     for data_source in data_sources:
         target, connection_class, mode = _expected_target(data_source.get("connection") or {})

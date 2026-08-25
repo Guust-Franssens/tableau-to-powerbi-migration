@@ -446,8 +446,8 @@ def test_mutation_row4_ignore_escape_hatch_survives_is_caught(tmp_path: Path, mo
         limitations=limitations,
     )
     assert _run(unit)["status"] == ccf.STATUS_OK  # baseline: declared -> OK
-    monkeypatch.setattr(ccf, "_declared_by_limitation", lambda lims, sid, tables: None)
-    assert ccf._declared_by_limitation(limitations, "ds.sf", []) is None  # landed
+    monkeypatch.setattr(ccf, "_declared_by_limitation", lambda lims, sid, tables, ids=frozenset(): None)
+    assert ccf._declared_by_limitation(limitations, "ds.sf", [], frozenset()) is None  # landed
     assert _run(unit)["status"] == ccf.STATUS_DOWNGRADED  # the escape-hatch test would fail
 
 
@@ -759,7 +759,7 @@ def test_the_unattributable_message_is_only_used_when_nothing_matched() -> None:
 @pytest.mark.parametrize(
     "label,limitations,declarations",
     [
-        ("generated-edit target", (), ({"target": "ORDERS.tmdl"},)),
+        ("generated-edit target", (), ({"target": "m/definition/tables/ORDERS.tmdl"},)),
         ("limitation naming a table", ({"stage": "semantic_build", "item": "ORDERS", "issue": "x"},), ()),
     ],
 )
@@ -795,7 +795,7 @@ def test_a_source_scoped_declaration_still_stands_on_incomplete_coverage() -> No
 def test_a_table_scoped_declaration_still_passes_when_coverage_is_complete() -> None:
     """The round-8 fix must not add noise to the ordinary complete case."""
     flat = _model("m", (("ORDERS", "file_ok"),), "")
-    verdict = _judge((flat,), tables=("ORDERS",), declarations=({"target": "ORDERS.tmdl"},))
+    verdict = _judge((flat,), tables=("ORDERS",), declarations=({"target": "m/definition/tables/ORDERS.tmdl"},))
     assert verdict.verdict == ccf.SOURCE_DECLARED
 
 
@@ -831,11 +831,44 @@ def test_sibling_source_ids_do_not_declare_for_each_other() -> None:
     assert ccf._declaration_scope("ds.airline_x_2022_2025", "ds.airline_x_2022_2025", ["T"]) == "source"
 
 
+def test_underscore_is_not_a_qualifier_delimiter() -> None:
+    """`ds.sf_ORDERS` is a perfectly good SIBLING source id, so it must not parse as source+table.
+
+    Blind review round 11. Two guards, because either alone leaves a gap: `_` is dropped as a
+    qualifier delimiter, AND an item that exactly equals another known source id is never
+    reinterpreted as a qualified table whatever the delimiter (a sibling could be named
+    `ds.sf.ORDERS`). Real specs use `.` and `__`; measured, none rely on `_`.
+    """
+    ids = frozenset({"ds.sf", "ds.sf_ORDERS"})
+    assert ccf._declaration_scope("ds.sf_ORDERS", "ds.sf", ["ORDERS"], ids) is None
+    assert ccf._declaration_scope("ds.sf_ORDERS", "ds.sf", ["ORDERS"]) is None  # delimiter guard alone
+    assert ccf._declaration_scope("ds.sf.ORDERS", "ds.sf", ["ORDERS"], frozenset({"ds.sf", "ds.sf.ORDERS"})) is None
+    assert ccf._declaration_scope("ds.sf__ORDERS", "ds.sf", ["ORDERS"], ids) == "table"  # legit form kept
+    flat = _model("m", (("ORDERS", "file_ok"),), "")
+    lims = ({"stage": "semantic_build", "item": "ds.sf_ORDERS", "issue": "decision for the sibling"},)
+    assert _judge((flat,), tables=("ORDERS",), limitations=lims).verdict == ccf.SOURCE_DOWNGRADED
+
+
+def test_a_generated_edit_in_another_model_declares_nothing_here() -> None:
+    """Ownership must be proven, not assumed from a matching file stem.
+
+    Blind review round 11: `_declared_by_edit` matched on `Path(target).stem` alone, so an edit inside
+    `OtherSource.SemanticModel/.../ORDERS.tmdl` declared a downgrade for a same-named table in THIS
+    model. Real targets are bundle-relative and always carry the model folder
+    (`declare_generated_edit.py` writes `target.relative_to(bundle)`), so requiring it costs nothing.
+    """
+    owned = _model("OrdersModel.SemanticModel", (("ORDERS", "file_ok"),), "")
+    foreign = ({"target": "OtherSource.SemanticModel/definition/tables/ORDERS.tmdl"},)
+    mine = ({"target": "OrdersModel.SemanticModel/definition/tables/ORDERS.tmdl"},)
+    assert _judge((owned,), tables=("ORDERS",), declarations=foreign).verdict == ccf.SOURCE_DOWNGRADED
+    assert _judge((owned,), tables=("ORDERS",), declarations=mine).verdict == ccf.SOURCE_DECLARED
+
+
 def test_enumeration_is_falsifiable_via_loose_declaration_matching() -> None:
     """Restore substring association and the space must go red."""
     original = ccf._declaration_scope
 
-    def loose(item, source_id, table_names):
+    def loose(item, source_id, table_names, sibling_ids=frozenset()):
         if ccf._item_names_source(item, source_id, table_names):
             return "source" if item.strip().casefold() != source_id.strip().casefold() else "source"
         return None
@@ -901,7 +934,7 @@ _DECLS = (
     ((), ()),
     (({"stage": "semantic_build", "item": "ds.sf", "issue": "materialised on purpose"},), ()),
     (({"stage": "parse", "item": "ds.sf", "issue": "parse-stage note"},), ()),
-    ((), ({"target": "ORDERS.tmdl"},)),
+    ((), ({"target": "m0/definition/tables/ORDERS.tmdl"},)),
     # A source-id-LIKE item that is not the source. Round 9: `_item_names_source` matched it by
     # normalised substring, so `ds.sf_archive` claimed source-wide scope over `ds.sf` and certified an
     # unexamined sibling table. The space had no such item, so I7 could not reach the class at all.
@@ -952,6 +985,29 @@ def _precise_forms(declared: tuple[str, ...]) -> set[str]:
     return forms
 
 
+def _precise_edit(pt: "_Point") -> bool:
+    """Whether a generated-edit declaration provably touches THIS source's file-backed table.
+
+    Computed from the raw models, independently of `_declared_by_edit`. Round 11: that function
+    matched on `Path(target).stem` alone, so an edit inside a DIFFERENT semantic model declared a
+    downgrade here. I8 could not see it because it exempted every point that carried a declaration -
+    the exact hole the defect came through.
+    """
+    file_tables = {
+        part["table"] for part in _raw_partitions(pt.models, pt.declared) if part["category"] in ccf.FILE_CATEGORIES
+    }
+    owners = {
+        model.name.casefold()
+        for model in pt.models
+        if any(p["table"] in file_tables and p["category"] in ccf.FILE_CATEGORIES for p in model.partitions)
+    }
+    for declaration in pt.decls:
+        path = Path(str(declaration.get("target") or ""))
+        if path.stem in file_tables and owners & {segment.casefold() for segment in path.parts}:
+            return True
+    return False
+
+
 def _raw_unmatched(models: tuple[ccf.Model, ...], declared: tuple[str, ...]) -> list[str]:
     """Declared tables with no emitted counterpart - again computed independently of `_attribute`."""
     emitted = {p["table"].strip("[]\"'").casefold() for m in models for p in m.partitions}
@@ -996,13 +1052,13 @@ def _violations() -> list[str]:
         # table name, optionally source-qualified. Rounds 9 and 10 were the same imprecision at two
         # different sites (scope, then association), so this asserts the property directly instead of
         # trusting whichever matcher happens to be wired in. Computed here, not read from production.
-        if pt.verdict.verdict == ccf.SOURCE_DECLARED and not pt.decls:
-            precise = any(
+        if pt.verdict.verdict == ccf.SOURCE_DECLARED:
+            precise_limitation = any(
                 str(e.get("item") or "").strip().casefold() in _precise_forms(pt.declared)
                 and str(e.get("stage")) in {"semantic_build", "validate", "deploy"}
                 for e in pt.lims
             )
-            if not precise:
+            if not (precise_limitation or _precise_edit(pt)):
                 bad.append(f"I8 DECLARED on an imprecise record :: {pt.label}")
         outcomes = {
             (v.verdict, tuple(v.tables))
@@ -1234,11 +1290,25 @@ def _mutations():
         """Restore substring association (rounds 9/10) so I8 must fire."""
         original = ccf._declaration_scope
 
-        def loose(item, source_id, table_names):
+        def loose(item, source_id, table_names, sibling_ids=frozenset()):
             return "source" if ccf._item_names_source(item, source_id, table_names) else None
 
         setattr(ccf, "_declaration_scope", loose)
         return lambda: setattr(ccf, "_declaration_scope", original)
+
+    def loose_edit_matching():
+        """Restore stem-only generated-edit matching (round 11) so I8 must fire."""
+        original = ccf._declared_by_edit
+
+        def stem_only(declarations, file_tables, owners):  # noqa: ARG001
+            for declaration in declarations:
+                target = str(declaration.get("target") or "")
+                if target and Path(target).stem in file_tables:
+                    return target
+            return None
+
+        setattr(ccf, "_declared_by_edit", stem_only)
+        return lambda: setattr(ccf, "_declared_by_edit", original)
 
     return [
         ("I1", drop_file_parts),
@@ -1249,6 +1319,7 @@ def _mutations():
         ("I6", collapse),
         ("I7", ignore_incompleteness),
         ("I8", loose_declaration),
+        ("I8", loose_edit_matching),
     ]
 
 
