@@ -36,7 +36,11 @@ from work_dirs import (
         ("Sales / Q1 Report", "sales-q1-report"),
         ("  leading and trailing  ", "leading-and-trailing"),
         ("Depot Genève", "depot-geneve"),
-        ("C:\\Users\\bad\\path", "c-users-bad-path"),
+        # `<name>` rather than a bare word: the absolute-user-path gate
+        # (`set_data_folder.py --check`) exempts syntactically unambiguous placeholders but NOT bare
+        # words, because `bad`, `user` and `username` are all real registrable account names. This
+        # repo is public and the gate caught the earlier literal in CI.
+        ("C:\\Users\\<name>\\path", "c-users-name-path"),
         ("../../etc/passwd", "etc-passwd"),
         ("****!!!!####", "unit"),
         ("", "unit"),
