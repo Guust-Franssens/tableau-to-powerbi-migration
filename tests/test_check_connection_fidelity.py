@@ -799,6 +799,36 @@ def test_a_table_scoped_declaration_still_passes_when_coverage_is_complete() -> 
     assert verdict.verdict == ccf.SOURCE_DECLARED
 
 
+def test_a_source_id_like_item_does_not_claim_source_wide_scope() -> None:
+    """`ds.sf_archive` must not speak for `ds.sf`.
+
+    Blind review round 9. `_item_names_source` matches a normalised SUBSTRING, so an archive-table
+    decision claimed whole-source scope, bypassed the incomplete-coverage rule, and certified an
+    unexamined sibling as DECLARED / OK / exit 0. Relatedness and scope are different questions: the
+    loose match still decides "was a downgrade recorded at all", but scope now needs strict equality.
+    """
+    assert ccf._item_names_source("ds.sf_archive", "ds.sf", []) is True  # still related
+    assert ccf._item_is_source_scoped("ds.sf_archive", "ds.sf") is False  # but does not speak for it
+    flat = _model("m", (("ORDERS", "file_ok"),), "")
+    lims = ({"stage": "semantic_build", "item": "ds.sf_archive", "issue": "archive-table decision"},)
+    verdict = _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=lims)
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+    unit = ccf._finalize_unit(Path("u/migration-spec.json"), [verdict])
+    assert ccf.merge([unit])["status"] != ccf.STATUS_OK
+
+
+def test_enumeration_is_falsifiable_via_loose_source_scope() -> None:
+    """Round 9's mutation must turn the space red - the dimension that reaches it is new."""
+    original = ccf._item_is_source_scoped
+    try:
+        ccf._item_is_source_scoped = lambda item, sid: ccf._item_names_source(item, sid, [])
+        breaches = [v for v in _violations() if v.startswith("I7")]
+        assert breaches, "the space cannot reach a source-id-LIKE limitation item"
+    finally:
+        ccf._item_is_source_scoped = original
+    assert _violations() == []
+
+
 # --- the decision space, enumerated -----------------------------------------------------------------
 #
 # Three review rounds found five defects because each pass tested the cases its author thought of.
@@ -853,6 +883,10 @@ _DECLS = (
     (({"stage": "semantic_build", "item": "ds.sf", "issue": "materialised on purpose"},), ()),
     (({"stage": "parse", "item": "ds.sf", "issue": "parse-stage note"},), ()),
     ((), ({"target": "ORDERS.tmdl"},)),
+    # A source-id-LIKE item that is not the source. Round 9: `_item_names_source` matched it by
+    # normalised substring, so `ds.sf_archive` claimed source-wide scope over `ds.sf` and certified an
+    # unexamined sibling table. The space had no such item, so I7 could not reach the class at all.
+    (({"stage": "semantic_build", "item": "ds.sf_archive", "issue": "archive-table decision"},), ()),
 )
 
 

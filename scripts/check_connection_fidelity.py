@@ -258,6 +258,21 @@ def _item_names_source(item: str, source_id: str, table_names: list[str]) -> boo
     return any(table and _NON_ALNUM.sub("", table.lower()) in normalized for table in table_names)
 
 
+def _item_is_source_scoped(item: str, source_id: str) -> bool:
+    """Whether a limitation item is an attestation about the WHOLE data source.
+
+    STRICT equality (trimmed, case-folded). Deliberately not `_item_names_source`, which also matches
+    a normalised SUBSTRING and so treats `ds.orders_archive` as naming `ds.orders`. Blind review round
+    9 used exactly that: an archive-table decision claimed source-wide scope, bypassed the
+    incomplete-coverage rule and certified an unexamined sibling table as DECLARED / OK / exit 0.
+
+    Substring containment is fine for "does this record relate to this source at all", which is what
+    decides whether a downgrade was recorded. It is not fine for "does this record speak for every
+    table this source declares", which is a much stronger claim and needs a much stricter test.
+    """
+    return item.strip().casefold() == source_id.strip().casefold()
+
+
 def _declared_by_limitation(
     limitations: list[dict[str, Any]], source_id: str, table_names: list[str]
 ) -> tuple[str, bool] | None:
@@ -276,7 +291,7 @@ def _declared_by_limitation(
             continue
         item = str(entry.get("item") or "")
         text = str(entry.get("issue") or "recorded downgrade")
-        if _item_names_source(item, source_id, []):
+        if _item_is_source_scoped(item, source_id):
             return text, True
         if fallback is None and _item_names_source(item, source_id, table_names):
             fallback = (text, False)
