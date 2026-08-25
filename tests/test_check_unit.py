@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
+import check_field_bindings  # noqa: E402  # pylint: disable=wrong-import-position
 
 ORIGINAL_CHECK_OCCLUSION = cu.check_occlusion
 ORIGINAL_GATES = cu.GATES
@@ -358,9 +359,11 @@ def test_summary_line_counts_findings_and_not_checked_classes(tmp_path: Path, mo
 
     rendered = cu.render(cu.run_all(tmp_path))
 
+    # not_checked_external is a third bucket (issue #317) so a model deferred to its datasource unit
+    # stops inflating missing_input; here nothing is external, so the bucket is 0.
     assert rendered.splitlines()[-1] == (
         "SUMMARY: findings_by_owner=model=1; not_checked_structural=1; "
-        "not_checked_missing_input=0; ladder=FINDINGS exit=1"
+        "not_checked_external=0; not_checked_missing_input=0; ladder=FINDINGS exit=1"
     )
 
 
@@ -739,3 +742,153 @@ def test_cli_missing_path_is_usage_not_a_mutation_success(tmp_path: Path) -> Non
     assert result.returncode == cu.EXIT_USAGE
     assert "ERROR: not a directory" in result.stderr
     assert "UNIT CHECK" not in result.stdout
+
+
+# --- issue #317: a shared/published datasource model lands once and each report byPath-hops to it. ---
+# check_unit built its model inventory with a local *.SemanticModel glob and never resolved
+# definition.pbir byPath, so for a split shared datasource (model under datasources/<ds>/fabric/, each
+# report under workbooks/<wb>/fabric/) eight model-layer gates called the model absent while
+# check_field_bindings resolved and PASSed it in the SAME run. These hand-written minimal fixtures pin
+# all four states a report unit's model can be in - the negative (genuinely modelless) one included on
+# purpose, so "model lives elsewhere, by design" and "this unit has no model" never look the same:
+#
+#   fixture                          state     check_unit.py --scope model
+#   -------------------------------- --------- ------------------------------------------------------
+#   model-local/                     LOCAL     model gates run for real (data-model: PASS); external=0
+#   external-resolves/.../sales-wb   EXTERNAL  8 gates NOT_CHECKED "model is EXTERNAL", field-bindings
+#                                              PASS, not_checked_external=9, brownfield EVIDENCED
+#                                              (external); exit 2
+#   external-broken/.../sales-wb     BROKEN    model-reference FINDINGS "byPath does not resolve";
+#                                              exit 1
+#   no-model/                        NONE      ai-descriptions "no semantic model found", no
+#                                              model-reference row, external=0; exit 2
+#
+# The report references Sales[Order Date] and Sales[Total Revenue] so field-bindings genuinely resolves
+# and PASSes against the external model. The golden snapshot below locks the actionable EXTERNAL
+# wording; it is normalized so it is portable across Windows and the Linux CI runner.
+SHARED_DS = REPO_ROOT / "tests" / "fixtures" / "shared-datasource"
+STATE_TARGETS = {
+    "model-local": SHARED_DS / "model-local",
+    "external-resolves": SHARED_DS / "external-resolves" / "workbooks" / "sales-wb",
+    "external-broken": SHARED_DS / "external-broken" / "workbooks" / "sales-wb",
+    "no-model": SHARED_DS / "no-model",
+}
+
+
+def _run_unit(target: Path, scope: str) -> CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(target), "--scope", scope],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_model_location_classifies_all_four_states() -> None:
+    """The resolver tells 'model here', 'model elsewhere', 'reference broken', and 'no model' apart."""
+    local = cu._model_location(STATE_TARGETS["model-local"])  # pylint: disable=protected-access
+    external = cu._model_location(STATE_TARGETS["external-resolves"])  # pylint: disable=protected-access
+    broken = cu._model_location(STATE_TARGETS["external-broken"])  # pylint: disable=protected-access
+    none = cu._model_location(STATE_TARGETS["no-model"])  # pylint: disable=protected-access
+
+    assert local.state == cu.MODEL_LOC_LOCAL
+    assert external.state == cu.MODEL_LOC_EXTERNAL
+    assert external.model_path is not None and external.model_path.is_dir()
+    external_unit = STATE_TARGETS["external-resolves"]
+    assert not cu._path_within(external.model_path, external_unit)  # pylint: disable=protected-access
+    assert broken.state == cu.MODEL_LOC_BROKEN
+    assert broken.declared == "../../../../datasources/sales-ds/fabric/Sales.SemanticModel"
+    assert broken.model_path is None
+    assert none.state == cu.MODEL_LOC_NONE
+
+
+def test_external_model_reuses_field_bindings_resolver() -> None:
+    """The fix must not fork byPath resolution: it resolves through the gate that already works."""
+    report = STATE_TARGETS["external-resolves"] / "fabric" / "Sales.Report"
+    loc = cu._model_location(STATE_TARGETS["external-resolves"])  # pylint: disable=protected-access
+
+    assert cu.model_for_report is check_field_bindings.model_for_report
+    assert loc.model_path == cu.model_for_report(report)
+
+
+def test_external_model_is_reported_external_not_missing() -> None:
+    """Kills the #317 defect: eight model gates calling a resolvable model absent in one run."""
+    result = _run_unit(STATE_TARGETS["external-resolves"], "model")
+
+    assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
+    # field-bindings resolved the very model the model gates are being told to check elsewhere.
+    assert "field-bindings: PASS" in result.stdout
+    for gate in ("sqlproxy-connections", "data-model", "empty-model", "stub-measures", "ai-descriptions"):
+        assert f"{gate}: NOT_CHECKED - model is EXTERNAL (shared datasource)" in result.stdout
+    assert "no semantic model found" not in result.stdout
+    assert "check it with: python scripts/check_unit.py" in result.stdout
+    assert "not_checked_external=9" in result.stdout
+    assert "not_checked_missing_input=1" in result.stdout
+
+
+def test_external_model_brownfield_is_evidenced_not_missing() -> None:
+    """Brownfield discovery must credit an external model, not report it as absent."""
+    brownfield = cu.inspect_brownfield(STATE_TARGETS["external-resolves"])
+    phase = next(row for row in brownfield["phases"] if row["phase"] == "semantic models")
+
+    assert phase["status"] == "EVIDENCED (external)"
+    assert phase["paths"] == [
+        "tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel"
+    ]
+
+
+def test_broken_bypath_is_a_finding_not_not_checked() -> None:
+    """A dangling byPath is a genuine defect: it must exit as a finding, never a silent NOT_CHECKED."""
+    result = _run_unit(STATE_TARGETS["external-broken"], "model")
+
+    assert result.returncode == cu.EXIT_FINDINGS, result.stdout + result.stderr
+    assert "model-reference: FINDINGS" in result.stdout
+    assert "byPath does not resolve" in result.stdout
+    # A broken reference is NOT an external deferral, so it must not populate that bucket.
+    assert "not_checked_external=0" in result.stdout
+
+
+def test_genuinely_modelless_unit_is_not_called_external() -> None:
+    """The negative case: no model reference at all stays 'no semantic model found', never EXTERNAL."""
+    result = _run_unit(STATE_TARGETS["no-model"], "model")
+
+    assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
+    assert "ai-descriptions: NOT_CHECKED - no semantic model found" in result.stdout
+    assert "model is EXTERNAL" not in result.stdout
+    assert f"{cu.MODEL_REFERENCE_ID}:" not in result.stdout
+    assert "not_checked_external=0" in result.stdout
+
+
+def test_local_model_unit_is_unchanged_by_the_fix() -> None:
+    """A per-workbook unit whose model ships beside it still runs its model gates for real."""
+    result = _run_unit(STATE_TARGETS["model-local"], "model")
+
+    assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
+    assert "data-model: PASS" in result.stdout
+    assert "sqlproxy-connections: PASS" in result.stdout
+    assert "model is EXTERNAL" not in result.stdout
+    assert f"{cu.MODEL_REFERENCE_ID}:" not in result.stdout
+    assert "not_checked_external=0" in result.stdout
+
+
+def _normalize_unit_stdout(text: str, target: Path) -> str:
+    """Make check_unit stdout portable: strip machine paths, the interpreter, and OS separators."""
+    return (
+        text.replace("\r\n", "\n")
+        .replace(sys.executable, "<PY>")
+        .replace(str(target), "<UNIT>")
+        .replace(str(REPO_ROOT), "<REPO>")
+        .replace("\\", "/")
+    )
+
+
+def test_external_resolves_scope_model_matches_golden() -> None:
+    """Lock the actionable EXTERNAL wording, per-gate rows, summary buckets, and brownfield line."""
+    target = STATE_TARGETS["external-resolves"]
+    golden = REPO_ROOT / "tests" / "golden" / "shared-datasource" / "external-resolves.model.stdout"
+
+    result = _run_unit(target, "model")
+
+    assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
+    assert _normalize_unit_stdout(result.stdout, target) == golden.read_text(encoding="utf-8")

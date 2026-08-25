@@ -1,0 +1,4 @@
+cultureInfo en-US
+
+	linguisticMetadata = {"Version":"2.0.0","Language":"en-US","CustomInstructions":"# For Copilot\nUse `Sales` and [Total Revenue] for revenue questions.\n\n# Avoid\nDo not invent dimensions not present in the model."}
+		contentType: json

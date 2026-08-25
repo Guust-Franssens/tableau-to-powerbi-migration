@@ -1,0 +1,9 @@
+/// Sales fact table for the shared-datasource fixture.
+table Sales
+
+	/// Order date used to group sales.
+	column 'Order Date'
+		dataType: dateTime
+
+	/// Total revenue amount for sales.
+	measure 'Total Revenue' = SUM(Sales[Amount])

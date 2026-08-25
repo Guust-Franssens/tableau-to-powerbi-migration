@@ -35,6 +35,7 @@ from typing import Any
 
 import check_desktop_orphans as check_desktop_orphans_module
 from bundle_corpus import shipping_models, shipping_reports
+from check_field_bindings import model_for_report
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,6 +45,20 @@ STATUS_AUTOMATED_PASS = "AUTOMATED_CHECKS_PASS"
 STATUS_FINDINGS = "FINDINGS"
 STATUS_NOT_CHECKED = "NOT_CHECKED"
 STATUS_PRECONDITION_FAILED = "PRECONDITION_FAILED"
+
+# A model check that is deferred to another unit is neither a PASS nor a missing input. It is tagged
+# so the summary bucket and _is_blocking_not_checked can tell "model lives elsewhere, by design" apart
+# from "this unit has no model" - the two demand opposite actions (issue #317).
+VERIFICATION_CLAIMED_ONLY = "CLAIMED_ONLY"
+VERIFICATION_EXTERNAL = "EXTERNAL"
+
+# Where a report unit's semantic model actually lives, resolved via definition.pbir byPath.
+MODEL_LOC_LOCAL = "LOCAL"
+MODEL_LOC_EXTERNAL = "EXTERNAL"
+MODEL_LOC_BROKEN = "BROKEN"
+MODEL_LOC_NONE = "NONE"
+
+MODEL_REFERENCE_ID = "model-reference"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -80,6 +95,7 @@ ALL_ONLY_CHECK_IDS = frozenset(
 OWNER_HINTS = {
     "blank-placeholders": "integration (model placeholder referenced by report)",
     "field-bindings": "integration (report reference vs model field)",
+    MODEL_REFERENCE_ID: "integration (report -> semantic model reference)",
     "sqlproxy-connections": "model",
     "relationship-health": "model",
     "data-model": "model",
@@ -332,6 +348,133 @@ def _brownfield_plan(target: Path, inventory: dict[str, list[Path]]) -> list[str
     return lines
 
 
+@dataclass(frozen=True)
+class ModelLocation:
+    """Where a report unit's semantic model actually lives, resolved via ``definition.pbir``."""
+
+    state: str
+    model_path: Path | None = None
+    ds_unit: Path | None = None
+    declared: str | None = None
+    report: Path | None = None
+
+
+def _display_path(path: Path | None) -> str:
+    """Repo-relative, POSIX-style rendering so paths outside the target stay portable in output."""
+    if path is None:
+        return "<unknown>"
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _declared_by_path(report_dir: Path) -> str | None:
+    """The declared ``datasetReference.byPath.path`` string, read WITHOUT resolving it on disk.
+
+    Resolution (does the path point at a real model folder?) is left to
+    ``check_field_bindings.model_for_report`` - the single resolver that already works. This reads only
+    whether a reference was *declared*, which is what tells a dangling reference apart from no model.
+    """
+    payload = _json_object(report_dir / "definition.pbir")
+    if payload is None:
+        return None
+    by_path = payload.get("datasetReference", {}).get("byPath", {})
+    rel = by_path.get("path") if isinstance(by_path, dict) else None
+    return rel.strip() if isinstance(rel, str) and rel.strip() else None
+
+
+def _ds_unit_for_model(model_path: Path) -> Path:
+    """The migration unit that owns a model: the parent of its ``fabric/`` folder, else its parent."""
+    parent = model_path.parent
+    return parent.parent if parent.name == "fabric" else parent
+
+
+def _model_location(target: Path) -> ModelLocation:
+    """Classify where this unit's model is: local, external (shared datasource), broken, or absent.
+
+    A local model (the ordinary per-workbook or datasource-only shape) short-circuits to ``LOCAL`` so
+    nothing downstream changes for it. Otherwise each shipping report is resolved through
+    ``model_for_report``; a model that resolves OUTSIDE the target is ``EXTERNAL`` (correctly-split
+    shared datasource), a declared byPath that resolves to nothing is ``BROKEN`` (a genuine defect),
+    and a report with no reference and no sibling contributes ``NONE``.
+    """
+    target = target.resolve()
+    if shipping_models(target, include_standalone=True):
+        return ModelLocation(MODEL_LOC_LOCAL)
+    external: tuple[Path, Path] | None = None
+    broken: tuple[str, Path] | None = None
+    for report in shipping_reports(target):
+        resolved = model_for_report(report)
+        if resolved is not None:
+            if not _path_within(resolved, target):
+                external = external or (resolved.resolve(), report)
+            continue
+        declared = _declared_by_path(report)
+        if declared is not None:
+            broken = broken or (declared, report)
+    if external is not None:
+        model_path, report = external
+        return ModelLocation(
+            MODEL_LOC_EXTERNAL, model_path=model_path, ds_unit=_ds_unit_for_model(model_path), report=report
+        )
+    if broken is not None:
+        return ModelLocation(MODEL_LOC_BROKEN, declared=broken[0], report=broken[1])
+    return ModelLocation(MODEL_LOC_NONE)
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _external_next_command(loc: ModelLocation) -> str:
+    unit = loc.ds_unit or (loc.model_path.parent if loc.model_path else None)
+    return f"python scripts/check_unit.py {_display_path(unit)} --scope model"
+
+
+def _external_headline(loc: ModelLocation) -> str:
+    where = _display_path(loc.model_path) if loc.model_path else (loc.declared or "?")
+    return f"model is EXTERNAL (shared datasource) at {where} - check it with: {_external_next_command(loc)}"
+
+
+def _external_model_check(check_id: str, loc: ModelLocation) -> dict[str, Any]:
+    """A model check deferred to the datasource unit: not a pass, not a missing input (issue #317)."""
+    return {
+        "id": check_id,
+        "status": STATUS_NOT_CHECKED,
+        "verification": VERIFICATION_EXTERNAL,
+        "detail": _external_headline(loc),
+    }
+
+
+def _model_reference_check(loc: ModelLocation) -> dict[str, Any]:
+    """One row that states the report -> model reference verdict for a unit with no local model."""
+    if loc.state == MODEL_LOC_EXTERNAL:
+        return {
+            "id": MODEL_REFERENCE_ID,
+            "status": STATUS_NOT_CHECKED,
+            "verification": VERIFICATION_EXTERNAL,
+            "detail": _external_headline(loc),
+            "model_path": _display_path(loc.model_path),
+            "report": _display_path(loc.report),
+        }
+    return {
+        "id": MODEL_REFERENCE_ID,
+        "status": STATUS_FINDINGS,
+        "detail": (
+            f"report definition.pbir byPath does not resolve: '{loc.declared}' "
+            f"(report {_display_path(loc.report)}) - fix the reference or migrate the datasource first"
+        ),
+        "declared": loc.declared,
+        "report": _display_path(loc.report),
+    }
+
+
 def inspect_brownfield(target: Path) -> dict[str, Any]:
     """Read-only inventory for migration output whose layout may not match this toolkit."""
     target = target.resolve()
@@ -360,6 +503,7 @@ def inspect_brownfield(target: Path) -> dict[str, Any]:
     recognized = bool(
         canonical_markers or canonical_pbip or (target / "migration-spec.json").is_file() or direct_artifact
     )
+    model_loc = _model_location(target)
     return {
         "expected_shape": list(EXPECTED_BUNDLE_SHAPE),
         "recognized_target_shape": recognized,
@@ -372,10 +516,23 @@ def inspect_brownfield(target: Path) -> dict[str, Any]:
             ),
             _phase_row("handover queue", handovers, target, "no handover/*.json slices found"),
             _phase_row("PBIR reports", inventory["reports"], target, "no *.Report/definition folders found"),
-            _phase_row("semantic models", inventory["models"], target, "no *.SemanticModel/definition folders found"),
+            _semantic_model_phase(inventory["models"], target, model_loc),
         ],
         "plan": _brownfield_plan(target, inventory),
     }
+
+
+def _semantic_model_phase(models: list[Path], target: Path, model_loc: ModelLocation) -> dict[str, Any]:
+    """Report a locally-shipped model as EVIDENCED, an external one as EVIDENCED (external) (issue #317)."""
+    if models:
+        return _phase_row("semantic models", models, target, "no *.SemanticModel/definition folders found")
+    if model_loc.state == MODEL_LOC_EXTERNAL:
+        return {
+            "phase": "semantic models",
+            "status": "EVIDENCED (external)",
+            "paths": [_display_path(model_loc.model_path)],
+        }
+    return _phase_row("semantic models", models, target, "no *.SemanticModel/definition folders found")
 
 
 def expected_pages(target: Path) -> list[dict[str, str]] | None:
@@ -1039,14 +1196,30 @@ def _omitted_checks(scope: str) -> list[str]:
     return sorted(_all_check_ids() - _scope_check_ids(scope))
 
 
-def _append_cli_checks(checks: list[dict[str, Any]], target: Path, exemptions: dict[str, Any], scope: str) -> None:
-    """Append native CLI-backed checks for the selected scope."""
+def _append_cli_checks(
+    checks: list[dict[str, Any]],
+    target: Path,
+    exemptions: dict[str, Any],
+    scope: str,
+    model_loc: ModelLocation,
+) -> None:
+    """Append native CLI-backed checks for the selected scope.
+
+    When the unit's model is EXTERNAL (a shared datasource, checked in its own unit), the model-owned
+    gates are recorded as EXTERNAL instead of being run against an absent model - otherwise eight gates
+    would each report the model missing while it demonstrably resolves (issue #317). Following the hop
+    is deliberately NOT the default: a model shared by N reports would be re-checked N times.
+    """
+    external = model_loc.state == MODEL_LOC_EXTERNAL
     cli_gates = [gate for gate in GATES if _in_scope(gate.check_id, scope)]
     if not cli_gates and not _in_scope("occlusion", scope):
         return
     output_dir = _temp_json_dir(target)
     try:
         for gate in cli_gates:
+            if external and gate.check_id in MODEL_CHECK_IDS:
+                checks.append(_external_model_check(gate.check_id, model_loc))
+                continue
             check = _run_cli_gate(gate, target, output_dir)
             if gate.check_id == "stub-measures":
                 check = _apply_stub_exemptions(check, exemptions)
@@ -1057,14 +1230,21 @@ def _append_cli_checks(checks: list[dict[str, Any]], target: Path, exemptions: d
         _remove_json_dir(output_dir)
 
 
-def _append_model_readiness_checks(checks: list[dict[str, Any]], target: Path, scope: str) -> None:
-    """Append model readiness checks for the selected scope."""
+def _append_model_readiness_checks(
+    checks: list[dict[str, Any]], target: Path, scope: str, model_loc: ModelLocation
+) -> None:
+    """Append model readiness checks for the selected scope (EXTERNAL model is deferred, not missing)."""
+    external = model_loc.state == MODEL_LOC_EXTERNAL
     for check_id, check_func in (
         ("ai-descriptions", check_ai_descriptions),
         ("ai-instructions", check_ai_instructions),
         ("cache-freshness", check_cache_freshness),
     ):
-        if _in_scope(check_id, scope):
+        if not _in_scope(check_id, scope):
+            continue
+        if external and check_id in MODEL_CHECK_IDS:
+            checks.append(_external_model_check(check_id, model_loc))
+        else:
             checks.append(check_func(target))
 
 
@@ -1079,6 +1259,7 @@ def run_all(
         raise ValueError(f"unknown scope: {scope}")
     target = target.resolve()
     exemptions = load_exemptions(target)
+    model_loc = _model_location(target)
     checks: list[dict[str, Any]] = []
     if exemptions["invalid"]:
         checks.append(
@@ -1098,8 +1279,10 @@ def run_all(
         checks.append(check_oracle_coverage(target, reference_dir, oracle_dir))
     if _in_scope("engine-receipt", scope):
         checks.append(check_engine_receipt(target))
-    _append_cli_checks(checks, target, exemptions, scope)
-    _append_model_readiness_checks(checks, target, scope)
+    if _in_scope("field-bindings", scope) and model_loc.state in (MODEL_LOC_EXTERNAL, MODEL_LOC_BROKEN):
+        checks.append(_model_reference_check(model_loc))
+    _append_cli_checks(checks, target, exemptions, scope, model_loc)
+    _append_model_readiness_checks(checks, target, scope, model_loc)
     if _in_scope("desktop-orphans", scope):
         checks.append(check_desktop_orphans(target))
     if scope == SCOPE_ALL:
@@ -1212,31 +1395,41 @@ def _count_suffix(missing: int) -> str:
     return f"   [{missing} MISSING]" if missing else ""
 
 
-def _summary_counts(report: dict[str, Any]) -> tuple[dict[str, int], int, int]:
-    """Counts behind the stable summary line and shape-guidance trigger."""
+def _summary_counts(report: dict[str, Any]) -> tuple[dict[str, int], int, int, int]:
+    """Counts behind the stable summary line and shape-guidance trigger.
+
+    NOT_CHECKED rows split three ways so a deferred-to-another-unit model no longer inflates
+    ``missing_input`` (issue #317): structural (claimed-only, not machine-verifiable), external (this
+    unit's model lives elsewhere, by design), and missing_input (a genuinely absent input).
+    """
     owner_findings: dict[str, int] = {}
     structural = 0
     missing_input = 0
+    external = 0
     for check in report["checks"]:
         owner = OWNER_HINTS.get(check["id"], "unknown")
         if check["status"] in {STATUS_FINDINGS, STATUS_PRECONDITION_FAILED}:
             owner_findings[owner] = owner_findings.get(owner, 0) + 1
         if check["status"] == STATUS_NOT_CHECKED:
-            if check.get("verification") == "CLAIMED_ONLY":
+            verification = check.get("verification")
+            if verification == VERIFICATION_CLAIMED_ONLY:
                 structural += 1
+            elif verification == VERIFICATION_EXTERNAL:
+                external += 1
             else:
                 missing_input += 1
-    return owner_findings, structural, missing_input
+    return owner_findings, structural, missing_input, external
 
 
 def _summary_line(report: dict[str, Any]) -> str:
     """Stable one-line aggregate for comparing repeated gate runs."""
-    owner_findings, structural, missing_input = _summary_counts(report)
+    owner_findings, structural, missing_input, external = _summary_counts(report)
     findings = ",".join(f"{owner}={count}" for owner, count in sorted(owner_findings.items())) or "none"
     return (
         "SUMMARY: "
         f"findings_by_owner={findings}; "
         f"not_checked_structural={structural}; "
+        f"not_checked_external={external}; "
         f"not_checked_missing_input={missing_input}; "
         f"ladder={report['status']} exit={report['exit_code']}"
     )
@@ -1245,7 +1438,7 @@ def _summary_line(report: dict[str, Any]) -> str:
 def _render_brownfield(report: dict[str, Any]) -> list[str]:
     """Actionable read-only guidance for non-canonical or partial migration folders."""
     brownfield = report.get("brownfield") or {}
-    _, _, missing_input = _summary_counts(report)
+    _, _, missing_input, _ = _summary_counts(report)
     if brownfield.get("recognized_target_shape") and not brownfield.get("plan") and missing_input == 0:
         return []
     if missing_input == 0 and not brownfield.get("found_count"):
