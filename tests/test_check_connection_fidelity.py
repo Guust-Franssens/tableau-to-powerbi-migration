@@ -756,6 +756,49 @@ def test_the_unattributable_message_is_only_used_when_nothing_matched() -> None:
     assert "none of this source's declared tables match" in _judge((flat,), tables=("NOPE",)).detail
 
 
+@pytest.mark.parametrize(
+    "label,limitations,declarations",
+    [
+        ("generated-edit target", (), ({"target": "ORDERS.tmdl"},)),
+        ("limitation naming a table", ({"stage": "semantic_build", "item": "ORDERS", "issue": "x"},), ()),
+    ],
+)
+def test_a_table_scoped_declaration_cannot_certify_an_unexamined_sibling(
+    label: str, limitations: tuple, declarations: tuple
+) -> None:
+    """DECLARED is a pass, so it needs complete coverage too.
+
+    Blind review round 8: "a pass requires complete evidence" had been enforced only on the CONNECTED
+    path, so an explicit decision about ORDERS made the unit OK / exit 0 while CUSTOMERS was never
+    examined. Both sanctioned record types are table-scoped, and both did it.
+    """
+    flat = _model("m", (("ORDERS", "file_ok"),), "")
+    verdict = _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=limitations, declarations=declarations)
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED, label
+    assert "CUSTOMERS" in verdict.detail
+    unit = ccf._finalize_unit(Path("u/migration-spec.json"), [verdict])
+    assert ccf.merge([unit])["status"] != ccf.STATUS_OK
+
+
+def test_a_source_scoped_declaration_still_stands_on_incomplete_coverage() -> None:
+    """A record naming the SOURCE attests to the whole source, so it is not blocked.
+
+    Measured across every spec in this repo: 4 decision-stage limitations name a data-source id and 0
+    name a table. Refusing every declaration on incomplete coverage would therefore add noise to the
+    only shape that actually occurs, while the dangerous table-scoped shape occurs zero times.
+    """
+    flat = _model("m", (("ORDERS", "file_ok"),), "")
+    lims = ({"stage": "semantic_build", "item": "ds.sf", "issue": "materialised on purpose"},)
+    assert _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=lims).verdict == ccf.SOURCE_DECLARED
+
+
+def test_a_table_scoped_declaration_still_passes_when_coverage_is_complete() -> None:
+    """The round-8 fix must not add noise to the ordinary complete case."""
+    flat = _model("m", (("ORDERS", "file_ok"),), "")
+    verdict = _judge((flat,), tables=("ORDERS",), declarations=({"target": "ORDERS.tmdl"},))
+    assert verdict.verdict == ccf.SOURCE_DECLARED
+
+
 # --- the decision space, enumerated -----------------------------------------------------------------
 #
 # Three review rounds found five defects because each pass tested the cases its author thought of.
@@ -870,11 +913,18 @@ def _violations() -> list[str]:
         if pt.verdict.verdict == ccf.SOURCE_DECLARED and parse_only:
             bad.append(f"I5 parse-stage limitation excused a downgrade :: {pt.label}")
         # I7: a PASS is a statement about the whole source, so it needs evidence about every declared
-        # table. Found by probing the space's own dimensions: `_DECLARED` topped out at one table, so
-        # a partial match was unreachable, and a source declaring ORDERS+CUSTOMERS against a
-        # file-backed ORDERS reported NOT_CHECKED where the single-table form reported DOWNGRADED.
-        if connected and _raw_unmatched(pt.models, pt.declared):
-            bad.append(f"I7 CONNECTED while coverage is incomplete :: {pt.label}")
+        # table. Round 8 showed why this must cover EVERY pass-equivalent verdict, not just CONNECTED:
+        # enforcing it on the connected branch alone let a table-scoped declaration certify an
+        # unexamined sibling table and exit 0. The pass set is written out literally here rather than
+        # read from a production constant - reading `ccf.DECISION_STAGES` is exactly what made I5 dead.
+        passing = pt.verdict.verdict in {ccf.SOURCE_CONNECTED, ccf.SOURCE_DECLARED}
+        source_wide = any(
+            str(entry.get("item") or "") == "ds.sf"
+            and str(entry.get("stage")) in {"semantic_build", "validate", "deploy"}
+            for entry in pt.lims
+        )
+        if passing and not source_wide and _raw_unmatched(pt.models, pt.declared):
+            bad.append(f"I7 {pt.verdict.verdict} while coverage is incomplete :: {pt.label}")
         outcomes = {
             (v.verdict, tuple(v.tables))
             for v in (

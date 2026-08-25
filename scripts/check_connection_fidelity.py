@@ -258,16 +258,29 @@ def _item_names_source(item: str, source_id: str, table_names: list[str]) -> boo
     return any(table and _NON_ALNUM.sub("", table.lower()) in normalized for table in table_names)
 
 
-def _declared_by_limitation(limitations: list[dict[str, Any]], source_id: str, table_names: list[str]) -> str | None:
-    """Return a decision limitation's issue text when a build-stage entry names this source."""
+def _declared_by_limitation(
+    limitations: list[dict[str, Any]], source_id: str, table_names: list[str]
+) -> tuple[str, bool] | None:
+    """`(issue text, names_the_source)` for a decision-stage entry covering this source.
+
+    The boolean is the SCOPE: True when the item names the data source itself - an attestation about
+    the whole source - and False when it only matched one of its table names. A source-wide record
+    still stands when some declared table is unmatched; a table-scoped one must not vouch for a table
+    nobody examined. A source-wide match wins over a table-only one, so the strongest record applies.
+    """
+    fallback: tuple[str, bool] | None = None
     for entry in limitations:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("stage")) not in DECISION_STAGES:
             continue
-        if _item_names_source(str(entry.get("item") or ""), source_id, table_names):
-            return str(entry.get("issue") or "recorded downgrade")
-    return None
+        item = str(entry.get("item") or "")
+        text = str(entry.get("issue") or "recorded downgrade")
+        if _item_names_source(item, source_id, []):
+            return text, True
+        if fallback is None and _item_names_source(item, source_id, table_names):
+            fallback = (text, False)
+    return fallback
 
 
 def _declared_by_edit(declarations: list[dict[str, Any]], file_tables: set[str]) -> str | None:
@@ -444,17 +457,54 @@ def _connected_verdict(token: str, cov: "Coverage") -> tuple[str, str]:
 
 def _declared_reason(
     ctx: "UnitContext", source_id: str, data_source: dict[str, Any], file_tables: list[str]
-) -> str | None:
-    """Why this downgrade counts as DECIDED rather than drifted, or None if nobody recorded it.
+) -> tuple[str, str] | None:
+    """`(reason, scope)` for why this downgrade counts as DECIDED, or None if nobody recorded it.
 
-    Two sanctioned records, checked in order of specificity: a `limitations_encountered` entry naming
-    the source, then a generated-edit declaration naming one of its file-backed tables.
+    `scope` is "source" or "table", and it decides whether the record can certify tables the model
+    never showed us. A record naming the SOURCE attests to the whole source, so it still stands when
+    some declared table is unmatched. A record naming ONE TABLE - a generated-edit target, or a
+    limitation whose item is a table name - attests only to that table, and must not vouch for a
+    sibling nobody examined.
+
+    Measured across every spec in this repo: 4 decision-stage limitations name a data-source id and
+    **0** name a table. So the dangerous form does not occur in practice while the safe form does,
+    which is why this distinguishes them rather than simply refusing every declaration on incomplete
+    coverage - that would add noise to the only shape real specs actually use.
     """
     limitation = _declared_by_limitation(ctx.limitations, source_id, _table_names(data_source))
     if limitation:
-        return f"downgrade recorded in limitations_encountered: {limitation}"
+        text, names_source = limitation
+        scope = "source" if names_source else "table"
+        return f"downgrade recorded in limitations_encountered: {text}", scope
     edit = _declared_by_edit(ctx.declarations, set(file_tables))
-    return f"downgrade recorded via generated-edit declaration: {edit}" if edit else None
+    if edit:
+        return f"downgrade recorded via generated-edit declaration: {edit}", "table"
+    return None
+
+
+def _declared_verdict(
+    ctx: "UnitContext", source_id: str, data_source: dict[str, Any], cov: "Coverage"
+) -> tuple[str, str] | None:
+    """Verdict for a downgrade somebody recorded, or None when nobody did.
+
+    A PASS requires complete evidence, and DECLARED is a pass. Blind review round 8 found that rule
+    enforced only on the CONNECTED path, so an explicit decision about ORDERS silently certified an
+    unexamined CUSTOMERS and the unit exited 0. A SOURCE-wide record does cover the whole source and
+    still stands; a TABLE-scoped one cannot vouch for a table nobody examined.
+    """
+    declared = _declared_reason(ctx, source_id, data_source, cov.file_tables)
+    if not declared:
+        return None
+    reason, scope = declared
+    if scope == "source" or cov.complete:
+        return SOURCE_DECLARED, reason
+    return (
+        SOURCE_NOT_CHECKED,
+        f"{reason} - but that record is scoped to a single table, and "
+        f"{len(cov.unmatched)} declared table(s) match no emitted partition "
+        f"({', '.join(cov.unmatched)}). A table-scoped decision cannot certify a table nobody "
+        "examined; record the decision against the data source, or fix the spec-to-TMDL naming",
+    )
 
 
 def _judge_source(
@@ -504,9 +554,9 @@ def _judge_source(
             "no live connection found, but no file-backed partition either - the source's rows were "
             "not clearly materialised to a file (another gate owns an empty/stub model)",
         )
-    declared = _declared_reason(ctx, source_id, data_source, cov.file_tables)
+    declared = _declared_verdict(ctx, source_id, data_source, cov)
     if declared:
-        return make(SOURCE_DECLARED, declared)
+        return make(*declared)
     # A FINDING is reported even on partial coverage. The tables that matched carry positive evidence
     # of a downgrade, and refusing to report it because a SIBLING table did not match is how adding a
     # second table to a spec used to silence a real finding.
