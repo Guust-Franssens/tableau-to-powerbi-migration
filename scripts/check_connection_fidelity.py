@@ -298,32 +298,52 @@ def _strip_m_comments(text: str) -> str:
 
 
 def _normalise_table(name: str) -> str:
-    """Comparable form of a table name: unqualified and case-folded.
+    """Comparable form of a table name, qualifiers PRESERVED and case folded.
 
-    A spec says `DB.PUBLIC.FLIGHTS` where the emitted TMDL says `FLIGHTS`, and case varies freely
-    between the two. Without normalisation those look like different tables and attribution fails on
-    ordinary, correct input.
+    Deliberately does NOT drop qualifiers. An earlier version returned only the last dot-segment, and
+    blind review showed that collapses genuinely different tables: `SALES.ORDERS` and `HR.ORDERS` both
+    became `orders`, so a downgraded HR source matched the preserved SALES partition and was certified
+    CONNECTED with the unit exiting 0. Unqualified matching still happens, but only as an explicit,
+    ambiguity-checked fallback in `_attribute` - never as the primary key.
     """
-    return name.rsplit(".", 1)[-1].strip("[]\"'").casefold()
+    return name.strip("[]\"'").casefold()
+
+
+def _attribute(models: tuple[Model, ...], tables: set[str]) -> list[dict[str, str]] | None:
+    """Partitions belonging to ONE source, or None when attribution is not safe.
+
+    EXACT match only, qualifiers preserved, case-folded. No unqualified fallback - an earlier version
+    matched on the last dot-segment and blind review showed it collapses distinct tables: `SALES.ORDERS`
+    and `HR.ORDERS` both became `orders`, so a downgraded HR source matched the preserved SALES
+    partition and was certified CONNECTED with the unit exiting 0.
+
+    The fallback was there to absorb a spec saying `DB.PUBLIC.FLIGHTS` against an emitted `FLIGHTS`.
+    ⚠️ That justification was asserted, not measured, and the data contradicts it: across every spec in
+    this repo, 58 of 65 declared table names are unqualified, and all 7 containing a dot are CSV
+    FILENAMES (`tree.csv`) - for which a leaf match is actively wrong, since every one would collapse to
+    `csv`. So the fallback solved nothing real while creating two ways to mis-attribute.
+
+    Returns None for: no declared tables, or any declared table with no exact emitted counterpart.
+    Both are reported as NOT_CHECKED by the caller rather than guessed - a source that cannot be
+    attributed must never borrow a sibling's verdict.
+    """
+    if not tables:
+        return None
+    by_exact = {_normalise_table(part["table"]): part for model in models for part in model.partitions}
+    mine = [by_exact[key] for key in (_normalise_table(t) for t in tables) if key in by_exact]
+    return mine if len(mine) == len(tables) and mine else None
 
 
 def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> tuple[bool, bool, list[str], bool]:
     """Return (connected, file_backed, file_tables, attributable) for ONE source, scoped to its tables.
 
-    BOTH sides are scoped. An earlier fix scoped only the file side while connector detection stayed
-    model-wide, and blind review showed that is a false PASS in its own right: with two live sources of
-    the same class, source A's preserved connector vouched for source B, and if B's declared table name
-    did not match the emitted one (renamed, qualified, or merely different case) B's file evidence was
-    empty - so a downgraded source reported CONNECTED and the unit exited 0.
-
-    `attributable` is False when NO declared table of this source matches any emitted partition. That is
-    reported rather than guessed: an unattributable source must never borrow another source's verdict.
+    BOTH sides are scoped. Scoping only the file side is its own false PASS: with two live sources of
+    the same class, source A's preserved connector vouched for source B, and if B's declared table did
+    not match the emitted one, B had no file evidence either - so a downgraded source reported
+    CONNECTED and the unit exited 0.
     """
-    wanted = {_normalise_table(name) for name in tables}
-    mine = [
-        part for model in models for part in model.partitions if not wanted or _normalise_table(part["table"]) in wanted
-    ]
-    if not mine:
+    mine = _attribute(models, tables)
+    if mine is None:
         return False, False, [], False
     connected = any(part["category"] in CONNECTED_CATEGORIES for part in mine) and any(
         model.has_connector(token) for model in models
@@ -464,8 +484,17 @@ def scan_unit(spec_path: Path) -> dict[str, Any]:
 
 
 def _finalize_unit(spec_path: Path, verdicts: list[SourceVerdict]) -> dict[str, Any]:
-    """Fold per-source verdicts into one unit result."""
+    """Fold per-source verdicts into one unit result.
+
+    An UNCHECKED source keeps the unit off a clean OK. Blind review round 3 surfaced a unit with one
+    connected and one unattributable source reporting OK/exit 0 - the gate announcing a pass over a
+    source it could not examine, which is the false-green shape this repo has shipped three times
+    (#276, #299, #309). `check_stub_measures.py:68-69` states the rule: "no stubs" and "no model" must
+    never print or exit the same way. A finding still outranks it: a real downgrade is worth more than
+    a partial-coverage note.
+    """
     downgraded = [v for v in verdicts if v.verdict == SOURCE_DOWNGRADED]
+    unchecked = [v for v in verdicts if v.verdict == SOURCE_NOT_CHECKED]
     checked = [v for v in verdicts if v.verdict in {SOURCE_CONNECTED, SOURCE_DECLARED, SOURCE_DOWNGRADED}]
     if downgraded:
         status = STATUS_DOWNGRADED
@@ -473,6 +502,12 @@ def _finalize_unit(spec_path: Path, verdicts: list[SourceVerdict]) -> dict[str, 
     elif not checked:
         status = STATUS_SKIPPED
         detail = "no live-source data source was checkable (all flat_file, unknown, or unattributable)"
+    elif unchecked:
+        status = STATUS_SKIPPED
+        detail = (
+            f"{len(checked)} live source(s) checked, but {len(unchecked)} could NOT be attributed to an "
+            f"emitted table ({', '.join(v.source_id for v in unchecked)}) - partial coverage, not a pass"
+        )
     else:
         status = STATUS_OK
         detail = None

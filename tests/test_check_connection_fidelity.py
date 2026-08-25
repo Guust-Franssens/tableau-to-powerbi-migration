@@ -540,17 +540,19 @@ def _two_source_unit(declared_b: str) -> tuple[list[dict], ccf.UnitContext]:
 
 def test_one_sources_connector_does_not_vouch_for_another() -> None:
     """The round-2 finding: a downgraded source must not inherit a sibling's connector."""
-    sources, ctx = _two_source_unit("DB.PUBLIC.FLIGHTS")
+    sources, ctx = _two_source_unit("FLIGHTS")
     verdicts = [ccf._judge_source(s, "live_source", "snowflake", "live", ctx) for s in sources]
     assert [v.verdict for v in verdicts] == [ccf.SOURCE_CONNECTED, ccf.SOURCE_DOWNGRADED]
 
 
-@pytest.mark.parametrize("declared", ["flights", "FLIGHTS", "DB.PUBLIC.FLIGHTS", "[db].[public].[Flights]"])
+@pytest.mark.parametrize("declared", ["flights", "FLIGHTS", "[Flights]"])
 def test_benign_table_name_differences_still_attribute(declared: str) -> None:
-    """Case and qualification differ freely between a spec and emitted TMDL on correct input.
+    """CASE and bracket-quoting differ freely between a spec and emitted TMDL on correct input.
 
     If those broke attribution the gate would go quiet on ordinary migrations, so they are normalised
-    rather than treated as a mismatch.
+    rather than treated as a mismatch. QUALIFIED names are deliberately NOT normalised - see
+    test_a_shared_table_leaf_does_not_let_one_source_borrow_another for why, and the measurement
+    showing 58 of 65 real declared names are unqualified while all 7 dotted ones are CSV filenames.
     """
     sources, ctx = _two_source_unit(declared)
     assert ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx).verdict == ccf.SOURCE_DOWNGRADED
@@ -572,15 +574,76 @@ def test_a_renamed_table_is_unattributable_and_says_so() -> None:
     assert "borrow another source's verdict" in verdict.detail
 
 
-def test_a_source_declaring_no_tables_is_not_checked_as_a_PARTIAL() -> None:
+def test_a_source_declaring_no_tables_is_unattributable() -> None:
     """Different reason, same safe verdict - and worth pinning separately.
 
-    A source with no declared tables cannot be scoped, so every partition is attributed to it and it
-    sees both a connector and a file-backed table: a PARTIAL, not an attribution failure. An earlier
-    version of this test parametrised the two cases together and failed, because they are genuinely
-    different paths that happen to share a verdict.
+    Round 3 changed this deliberately. It used to mean "every emitted table belongs to me", which let
+    such a source borrow a sibling's connector and report CONNECTED. Nothing to scope by now means
+    unattributable.
     """
     sources, ctx = _two_source_unit("")
     verdict = ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx)
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
-    assert "PARTIAL" in verdict.detail
+    assert "declared tables match an emitted model partition" in verdict.detail
+
+
+# --------------------------------------------------------------------------- round-3 review findings
+
+
+def _qualified_collision_unit():
+    """Two sources whose table names share a leaf; the HR one was renamed and materialised to CSV."""
+    sources = [
+        _live_source("ds.sales", "snowflake", tables=["SALES.ORDERS"]),
+        _live_source("ds.hr", "snowflake", tables=["HR.ORDERS"]),
+    ]
+    model = ccf.Model(
+        "m",
+        "m",
+        ({"table": "SALES.ORDERS", "category": "live"}, {"table": "HR_ORDERS_EXPORT", "category": "file_ok"}),
+        'Snowflake.Databases("s","d")',
+    )
+    return sources, ccf.UnitContext((model,), (), ())
+
+
+def test_a_shared_table_leaf_does_not_let_one_source_borrow_another() -> None:
+    """SALES.ORDERS and HR.ORDERS are different tables and must not collapse to `orders`.
+
+    The earlier leaf-matching fallback certified the downgraded HR source as CONNECTED off the
+    preserved SALES partition. Exact matching removed the whole class - and measurement showed the
+    fallback protected nothing: across every spec in this repo 58 of 65 declared table names are
+    unqualified, and all 7 containing a dot are CSV filenames.
+    """
+    sources, ctx = _qualified_collision_unit()
+    verdicts = [ccf._judge_source(s, "live_source", "snowflake", "live", ctx) for s in sources]
+    assert [v.verdict for v in verdicts] == [ccf.SOURCE_CONNECTED, ccf.SOURCE_NOT_CHECKED]
+
+
+def test_an_unattributable_source_keeps_the_unit_off_a_clean_pass() -> None:
+    """A unit must not exit 0 while announcing a pass over a source it could not examine."""
+    sources, ctx = _qualified_collision_unit()
+    verdicts = [ccf._judge_source(s, "live_source", "snowflake", "live", ctx) for s in sources]
+    unit = ccf._finalize_unit(Path("migration-spec.json"), verdicts)
+    assert unit["status"] == ccf.STATUS_SKIPPED
+    assert ccf.merge([unit])["status"] != ccf.STATUS_OK
+    assert "partial coverage, not a pass" in unit["detail"]
+
+
+def test_csv_filenames_are_not_collapsed_to_their_extension() -> None:
+    """`tree.csv` and `orders.csv` share the leaf `csv` - leaf matching would have merged every one."""
+    source = _live_source("ds.t", "snowflake", tables=["tree.csv"])
+    model = ccf.Model(
+        "m",
+        "m",
+        ({"table": "tree.csv", "category": "file_ok"}, {"table": "orders.csv", "category": "live"}),
+        'Snowflake.Databases("s","d")',
+    )
+    verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
+    assert verdict.verdict == ccf.SOURCE_DOWNGRADED
+
+
+def test_a_source_with_no_declared_tables_cannot_borrow_a_sibling_connector() -> None:
+    """No declared tables means nothing to scope by - not "every table belongs to me"."""
+    source = _live_source("ds.empty", "snowflake", tables=[])
+    model = ccf.Model("m", "m", ({"table": "UNRELATED", "category": "live"},), 'Snowflake.Databases("s","d")')
+    verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
