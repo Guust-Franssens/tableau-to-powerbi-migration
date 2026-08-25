@@ -844,3 +844,60 @@ def test_enumeration_is_falsifiable_via_the_round4_collapse() -> None:
     finally:
         ccf._attribute = original
     assert _violations() == []
+
+
+# --- blind review round 5: the same false green, one level up at the root merge --------------------
+#
+# I6 permutes models WITHIN one unit, so it is structurally unable to see an aggregation defect. This
+# block enumerates the merge separately. The lesson is the round-4 lesson again: a harness only covers
+# the layer it calls, and "the enumeration is green" says nothing about a layer it never enters.
+
+
+def _unit(status: str) -> dict:
+    return {"status": status, "downgraded": 0, "declared": 0, "connected": 0}
+
+
+_STATUSES = (ccf.STATUS_OK, ccf.STATUS_DOWNGRADED, ccf.STATUS_SKIPPED)
+
+
+def _merge_violations() -> list[str]:
+    """A clean OK must mean every scanned unit was checked and passed - nothing weaker."""
+    bad = []
+    for size in range(4):
+        for combo in itertools.product(_STATUSES, repeat=size):
+            merged = ccf.merge([_unit(s) for s in combo])["status"]
+            if merged == ccf.STATUS_OK and not (combo and all(s == ccf.STATUS_OK for s in combo)):
+                bad.append(f"OK merged from {combo}")
+            if ccf.STATUS_DOWNGRADED in combo and merged != ccf.STATUS_DOWNGRADED:
+                bad.append(f"a downgrade was outranked: {combo} -> {merged}")
+    return bad
+
+
+def test_one_unchecked_unit_keeps_the_whole_root_off_a_clean_pass() -> None:
+    """One clean unit beside one unattributable unit must not report OK / exit 0."""
+    merged = ccf.merge([_unit(ccf.STATUS_OK), _unit(ccf.STATUS_SKIPPED)])
+    assert merged["status"] == ccf.STATUS_SKIPPED
+    assert merged["units_unchecked"] == 1
+
+
+def test_merge_precedence_holds_across_every_combination() -> None:
+    """40 combinations of up to three units: DOWNGRADED > SKIPPED > OK, with no exceptions."""
+    assert _merge_violations() == []
+
+
+def test_merge_enumeration_is_falsifiable() -> None:
+    """Restore the ok-before-skipped precedence; the enumeration must go red."""
+    original = ccf.merge
+
+    def ok_wins(units):
+        report = original(units)
+        if report["status"] == ccf.STATUS_SKIPPED and any(u["status"] == ccf.STATUS_OK for u in units):
+            report["status"] = ccf.STATUS_OK
+        return report
+
+    try:
+        ccf.merge = ok_wins
+        assert _merge_violations(), "the merge enumeration cannot detect an OK-outranks-SKIPPED bug"
+    finally:
+        ccf.merge = original
+    assert _merge_violations() == []

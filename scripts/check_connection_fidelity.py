@@ -563,21 +563,29 @@ def scan(root: Path) -> dict[str, Any]:
 
 
 def merge(units: list[dict[str, Any]]) -> dict[str, Any]:
-    """Fold per-unit results into one verdict."""
+    """Fold per-unit results into one verdict.
+
+    Precedence is DOWNGRADED > SKIPPED > OK, and the middle rung is load-bearing. An earlier version
+    checked `ok` before `skipped`, so a root holding one clean unit and one unit whose live source
+    could not be attributed reported OK and exited 0 - re-opening at the root exactly the false green
+    that `_finalize_unit` had just closed at the unit. A clean OK must mean every scanned unit was
+    checked and passed, never "at least one passed and the rest were unexaminable".
+    """
     downgraded = [u for u in units if u["status"] == STATUS_DOWNGRADED]
-    ok = [u for u in units if u["status"] == STATUS_OK]
+    skipped = [u for u in units if u["status"] == STATUS_SKIPPED]
     if not units:
         status = STATUS_SKIPPED
     elif downgraded:
         status = STATUS_DOWNGRADED
-    elif ok:
-        status = STATUS_OK
-    else:
+    elif skipped:
         status = STATUS_SKIPPED
+    else:
+        status = STATUS_OK
     return {
         "status": status,
         "units_scanned": len(units),
         "units_with_downgrade": len(downgraded),
+        "units_unchecked": len(skipped),
         "downgraded_sources": sum(u["downgraded"] for u in units),
         "declared_sources": sum(u["declared"] for u in units),
         "connected_sources": sum(u["connected"] for u in units),
