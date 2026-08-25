@@ -1,0 +1,18 @@
+table FLIGHTS
+	column flight_id
+		dataType: string
+		sourceColumn: flight_id
+
+	column carrier
+		dataType: string
+		sourceColumn: carrier
+
+	partition FLIGHTS = m
+		mode: import
+		source =
+			let
+			    Source = Snowflake.Databases("ses.snowflakecomputing.com", "COMPUTE_WH"),
+			    Catalog = Source{[Name = "SCORECARD", Kind = "Database"]}[Data],
+			    Result = Value.NativeQuery(Catalog, "SELECT flight_id, carrier FROM public.FLIGHTS", null, [EnableFolding = true])
+			in
+			    Result

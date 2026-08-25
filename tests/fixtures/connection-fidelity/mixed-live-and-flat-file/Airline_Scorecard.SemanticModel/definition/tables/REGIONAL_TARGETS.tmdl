@@ -1,0 +1,17 @@
+table REGIONAL_TARGETS
+	column region
+		dataType: string
+		sourceColumn: region
+
+	column target_amount
+		dataType: double
+		sourceColumn: target_amount
+
+	partition REGIONAL_TARGETS = m
+		mode: import
+		source =
+			let
+			    Source = Csv.Document(File.Contents("regional_targets.csv"), [Delimiter = ",", Encoding = 65001]),
+			    Promoted = Table.PromoteHeaders(Source, [PromoteAllScalars = true])
+			in
+			    Promoted

@@ -56,7 +56,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Invoke subagent | [`.github/agents/tableau-migrator.agent.md`](../.github/agents/tableau-migrator.agent.md) | Workbook/datasource migration worker persona. |
 | Use fixture | [`fixtures/large-refresh/README.md`](../fixtures/large-refresh/README.md) | Large refresh/cache behavior fixture. |
 | Use fixture | [`tests/fixtures/check-gates-dirty/README.md`](../tests/fixtures/check-gates-dirty/README.md) | Dirty gate golden-output fixture. |
-| Use fixture | [`tests/fixtures/connection-fidelity/silent-downgrade/README.md`](../tests/fixtures/connection-fidelity/silent-downgrade/README.md) | Silent live-source-to-flat-file downgrade fixture (issue #328). |
+| Use fixture | [`tests/fixtures/connection-fidelity/README.md`](../tests/fixtures/connection-fidelity/README.md) | Silent live-source-to-flat-file downgrade fixture (issue #328). |
 
 ## Explicit exclusions
 | Task | Path | Exclusion reason |

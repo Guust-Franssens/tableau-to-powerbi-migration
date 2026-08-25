@@ -331,6 +331,42 @@ def test_committed_fixture_reports_downgrade() -> None:
     assert "Snowflake.*" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("state", "expected_exit"),
+    [
+        ("live-preserved", ccf.EXIT_OK),
+        ("mixed-live-and-flat-file", ccf.EXIT_OK),
+        ("declared-downgrade", ccf.EXIT_OK),
+        ("silent-downgrade", ccf.EXIT_DOWNGRADED),
+    ],
+)
+def test_every_committed_state_holds_its_verdict(state: str, expected_exit: int) -> None:
+    """Each committed state is inspectable by hand and pinned by exit code.
+
+    The `tmp_path` tests above already cover the same logic, so these are not redundant coverage -
+    they are the version a human can READ. A reviewer asking "what does a silent downgrade actually
+    look like?" gets a real spec + real TMDL instead of assembling one from test helpers, and can run
+    `python scripts/check_connection_fidelity.py tests/fixtures/connection-fidelity/<state>` directly.
+    """
+    result = _cli(FIXTURE_DIR / state)
+    assert result.returncode == expected_exit, result.stdout + result.stderr
+
+
+def test_a_legitimate_flat_file_is_not_flagged_beside_a_measured_live_source() -> None:
+    """The discrimination the whole gate turns on, as a committed artifact.
+
+    In the estate that prompted this gate, 3 CSV-backed tables were legitimately CSV in the Tableau
+    source while 3 others were live Snowflake silently materialised to CSV. A gate that flagged CSV
+    would fire on the correct half, get muted, and then miss the real one - so `mixed-...` deliberately
+    pairs BOTH in one unit. Note it must contain a live source too: with only a flat file there is
+    nothing to measure and the gate honestly SKIPs, which would prove nothing about discrimination.
+    """
+    result = _cli(FIXTURE_DIR / "mixed-live-and-flat-file")
+    assert result.returncode == ccf.EXIT_OK, result.stdout + result.stderr
+    assert "DOWNGRADED" not in result.stdout
+    assert "REGIONAL_TARGETS" not in result.stdout, "the legitimate flat file must not be named as a finding"
+
+
 def test_cli_exit_codes_follow_the_house_ladder(tmp_path: Path) -> None:
     """0 pass / 1 findings / 3 not-checked, judged by exit code not printed text."""
     ok = _build_unit(tmp_path / "ok", [_live_source("ds.sf", "snowflake", tables=["S"])], {"S": "snowflake"})

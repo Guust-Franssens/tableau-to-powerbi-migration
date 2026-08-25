@@ -851,7 +851,10 @@ def test_external_model_is_reported_external_not_missing() -> None:
     assert "no semantic model found" not in result.stdout
     assert "check it with: python scripts/check_unit.py" in result.stdout
     assert "not_checked_external=9" in result.stdout
-    assert "not_checked_missing_input=1" in result.stdout
+    # 2, not 1: `connection-fidelity` (#328) also cannot check this fixture, but for a DIFFERENT
+    # reason than externality - the fixture carries no migration-spec.json, so that gate has no
+    # declared connection to compare against and honestly reports missing input rather than EXTERNAL.
+    assert "not_checked_missing_input=2" in result.stdout
 
 
 def test_external_model_brownfield_is_evidenced_not_missing() -> None:
