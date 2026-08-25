@@ -1,6 +1,6 @@
 # connection-fidelity fixtures
 
-A committed, inspectable copy of the SES Airborne Services defect (issue #328). The Tableau source
+A committed, inspectable copy of the a live customer estate defect (issue #328). The Tableau source
 `ds.snowflake_scorecard` is a **Snowflake** custom-SQL data source stamped
 `connection.powerbi_target = live_source` — the packaged `.hyper` is only Tableau's cache, so the
 migrated model must connect to Snowflake.

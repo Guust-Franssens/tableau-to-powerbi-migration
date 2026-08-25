@@ -11,7 +11,7 @@ table FLIGHTS
 		mode: import
 		source =
 			let
-			    Source = Snowflake.Databases("ses.snowflakecomputing.com", "COMPUTE_WH"),
+			    Source = Snowflake.Databases("acme-fixture.snowflakecomputing.com", "COMPUTE_WH"),
 			    Catalog = Source{[Name = "SCORECARD", Kind = "Database"]}[Data],
 			    Result = Value.NativeQuery(Catalog, "SELECT flight_id, carrier FROM public.FLIGHTS", null, [EnableFolding = true])
 			in

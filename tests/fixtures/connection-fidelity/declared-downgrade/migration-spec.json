@@ -1,6 +1,6 @@
 {
   "migration_spec_version": "1.0",
-  "source": { "workbook": "Airline_Scorecard_Dashboard.twbx" },
+  "source": { "workbook": "Regional_Scorecard_Dashboard.twbx" },
   "data_sources": [
     {
       "id": "ds.snowflake_scorecard",
@@ -8,7 +8,7 @@
       "connection": {
         "class": "snowflake",
         "mode": "extract",
-        "server": "ses.snowflakecomputing.com",
+        "server": "acme-fixture.snowflakecomputing.com",
         "database": "SCORECARD",
         "powerbi_target": "live_source",
         "powerbi_target_reason": "'snowflake' is a LIVE system. The semantic model MUST connect to it directly; the packaged .hyper is only Tableau's cache."

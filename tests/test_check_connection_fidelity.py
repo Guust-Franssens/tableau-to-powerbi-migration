@@ -31,7 +31,7 @@ def _snowflake_m() -> str:
         "\t\tmode: import\n"
         "\t\tsource =\n"
         "\t\t\tlet\n"
-        '\t\t\t    Source = Snowflake.Databases("ses.snowflakecomputing.com", "WH"),\n'
+        '\t\t\t    Source = Snowflake.Databases("acme-fixture.snowflakecomputing.com", "WH"),\n'
         '\t\t\t    Data = Source{[Name = "SCORECARD"]}[Data]\n'
         "\t\t\tin\n"
         "\t\t\t    Data\n"
@@ -208,7 +208,7 @@ def test_absent_spec_is_not_checked(tmp_path: Path) -> None:
 
 
 def test_mixed_unit_flags_only_the_downgraded_live_source(tmp_path: Path) -> None:
-    """SES shape: a downgraded snowflake source AND a legitimate csv source in one unit.
+    """the field shape: a downgraded snowflake source AND a legitimate csv source in one unit.
 
     The gate must fire on the snowflake source and stay silent on the csv - flagging CSV per se would
     make it worse than no gate.
@@ -324,7 +324,7 @@ def _cli(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_committed_fixture_reports_downgrade() -> None:
-    """The committed SES-shaped fixture is a stable, inspectable DOWNGRADED case, exit 1."""
+    """The committed field-shaped fixture is a stable, inspectable DOWNGRADED case, exit 1."""
     result = _cli(FIXTURE_DIR / "silent-downgrade")
     assert result.returncode == ccf.EXIT_DOWNGRADED, result.stdout + result.stderr
     assert "DOWNGRADED" in result.stdout
@@ -417,7 +417,7 @@ def test_mutation_row1_ignore_connector_survives_is_caught(tmp_path: Path, monke
 def test_mutation_mode_keying_bug_survives_is_caught(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Discriminator mutant: the naive `mode`-keyed implementation the brief warns against.
 
-    A gate that treats `mode == "extract"` as flat_file misclassifies the SES incident (Snowflake WITH
+    A gate that treats `mode == "extract"` as flat_file misclassifies that incident (Snowflake WITH
     an extract) and misses the downgrade. Keying off powerbi_target/class is exactly what defeats it.
     """
     unit = _downgrade_unit(tmp_path)  # snowflake, mode=extract, powerbi_target=live_source, shipped as CSV
@@ -447,3 +447,68 @@ def test_mutation_row4_ignore_escape_hatch_survives_is_caught(tmp_path: Path, mo
     monkeypatch.setattr(ccf, "_declared_by_limitation", lambda lims, sid, tables: None)
     assert ccf._declared_by_limitation(limitations, "ds.sf", []) is None  # landed
     assert _run(unit)["status"] == ccf.STATUS_DOWNGRADED  # the escape-hatch test would fail
+
+
+# --------------------------------------------------------------------------- blind-review findings
+#
+# Both were FALSE PASSES - the one direction that matters for a gate whose whole purpose is catching a
+# silent failure. A false finding costs an engineer a minute; a false pass ships stale data.
+
+
+def test_a_partial_downgrade_is_not_checked_never_connected() -> None:
+    """One live table + one file-backed table in the same source must NOT read as connected.
+
+    This is the shape of the incident that motivated the gate: three Snowflake tables were
+    materialised to CSV. If any OTHER table of that source had kept its connector, the pre-fix gate
+    returned CONNECTED and hid every downgraded table.
+    """
+    source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
+    model = ccf.Model(
+        "m",
+        "m",
+        ({"table": "A", "category": "live"}, {"table": "B", "category": "file_ok"}),
+        'Snowflake.Databases("s","d")',
+    )
+    verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+    assert "PARTIAL" in verdict.detail
+
+
+def test_a_connector_named_only_in_a_comment_does_not_count_as_connected() -> None:
+    """`// prior source was Snowflake.Databases(...)` is prose, not a connection."""
+    source = _live_source("ds.sf", "snowflake", tables=["A"])
+    model = ccf.Model(
+        "m", "m", ({"table": "A", "category": "file_ok"},), '// prior source was Snowflake.Databases("s","d")'
+    )
+    verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
+    assert verdict.verdict != ccf.SOURCE_CONNECTED
+
+
+def test_a_genuinely_connected_source_still_passes() -> None:
+    """The negative case beside the positive one: the fix must not make everything NOT_CHECKED."""
+    source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
+    model = ccf.Model(
+        "m",
+        "m",
+        ({"table": "A", "category": "live"}, {"table": "B", "category": "live"}),
+        'Snowflake.Databases("s","d")',
+    )
+    verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
+    assert verdict.verdict == ccf.SOURCE_CONNECTED
+
+
+def test_a_file_table_belonging_to_ANOTHER_source_does_not_taint_this_one() -> None:
+    """Per-source scoping, which is why the partial rule cannot simply be model-wide.
+
+    `mixed-live-and-flat-file` depends on exactly this: a legitimately-CSV source sits in the same
+    model as a preserved live one, and must not drag it to NOT_CHECKED.
+    """
+    source = _live_source("ds.sf", "snowflake", tables=["A"])
+    model = ccf.Model(
+        "m",
+        "m",
+        ({"table": "A", "category": "live"}, {"table": "ZZ_OTHER", "category": "file_ok"}),
+        'Snowflake.Databases("s","d")',
+    )
+    verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
+    assert verdict.verdict == ccf.SOURCE_CONNECTED

@@ -14,8 +14,8 @@ land, `check_datamodel.py` confirms the M is well-formed, `powerbi-report-author
 the report opens. The model refreshes and returns rows. It is simply no longer connected to the
 customer's database and goes stale the moment new rows land upstream.
 
-Real incident, SES Airborne Services, 2026-08-24: three Snowflake custom-SQL tables in
-`Airline_Scorecard_Dashboard` were materialised from the packaged `.hyper` extract to CSV
+Real incident, a live customer estate, 2026-08-24: three Snowflake custom-SQL tables in
+`Regional_Scorecard_Dashboard` were materialised from the packaged `.hyper` extract to CSV
 (1,957,003 + 350,781 rows) because the engine deferred the custom-SQL translation and nothing
 surfaced it. It validated clean, refreshed clean, was stale-by-construction, and was found by a
 human reading a migration brief.
@@ -29,7 +29,7 @@ and then misses the real case.
 
 Why the discriminator is `powerbi_target`, NOT `connection.mode`
 ----------------------------------------------------------------
-The obvious key is `connection.mode` (extract | live). It is WRONG, and the SES incident is the
+The obvious key is `connection.mode` (extract | live). It is WRONG, and that incident is the
 proof: a Snowflake source WITH an extract has `mode: extract` - the extract is Tableau's cache - so
 keying on `mode == "live"` would classify the exact incident as a legitimate extract and miss it.
 `docs/migration-spec.schema.json` says as much on `powerbi_target`: "Do NOT infer this from
@@ -158,12 +158,28 @@ class Model:
         return sum(1 for part in self.partitions if part["category"] in FILE_CATEGORIES)
 
     def has_connector(self, token: str) -> bool:
-        """Whether the emitted M references a specific connector token (e.g. `Snowflake.Databases`)."""
-        return bool(re.search(rf"\b{re.escape(token)}\.[A-Za-z]", self.m_text))
+        """Whether the emitted M references a specific connector token (e.g. `Snowflake.Databases`).
 
-    def file_tables(self) -> list[str]:
-        """Distinct table names whose partitions are file-backed, for finding evidence."""
-        return sorted({part["table"] for part in self.partitions if part["category"] in FILE_CATEGORIES})
+        Comments are stripped first. Blind review demonstrated that a connector name sitting in an M
+        comment - `// prior source was Snowflake.Databases("s","d")` - made a fully file-backed source
+        report CONNECTED, which is a false PASS in the exact direction this gate exists to prevent.
+        """
+        return bool(re.search(rf"\b{re.escape(token)}\.[A-Za-z]", _strip_m_comments(self.m_text)))
+
+    def file_tables(self, only: set[str] | None = None) -> list[str]:
+        """Distinct table names whose partitions are file-backed, for finding evidence.
+
+        `only` restricts the answer to one data source's declared tables, so a source is never judged
+        by a partition belonging to a DIFFERENT source - the case that keeps a legitimately-flat
+        source from tainting a live one that sits beside it in the same model.
+        """
+        return sorted(
+            {
+                part["table"]
+                for part in self.partitions
+                if part["category"] in FILE_CATEGORIES and (only is None or part["table"] in only)
+            }
+        )
 
 
 @dataclass
@@ -275,12 +291,41 @@ class UnitContext:
     declarations: tuple[dict[str, Any], ...]
 
 
-def _connectivity(models: tuple[Model, ...], token: str) -> tuple[bool, bool, list[str]]:
-    """Return (connected, any_file_backed, file_tables) for a source with connector `token`."""
+def _strip_m_comments(text: str) -> str:
+    """Remove M line and block comments so a connector NAME in prose cannot read as a connection."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", " ", text)
+
+
+def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> tuple[bool, bool, list[str]]:
+    """Return (connected, any_file_backed, file_tables) for ONE source, scoped to its own tables.
+
+    `tables` is that data source's declared table names. Scoping matters both ways: an unscoped scan
+    let a legitimately-flat source's partition count against a live one in the same model, and let a
+    live one's connector vouch for tables it does not own.
+    """
     connected = any(model.has_connector(token) for model in models)
-    file_backed = any(model.file_backed for model in models)
-    file_tables = sorted({name for model in models for name in model.file_tables()})
-    return connected, file_backed, file_tables
+    file_tables = sorted({name for model in models for name in model.file_tables(tables or None)})
+    return connected, bool(file_tables), file_tables
+
+
+def _connected_verdict(token: str, file_backed: bool, file_tables: list[str]) -> tuple[str, str]:
+    """Verdict for a source whose connector IS present: connected, or a partial downgrade.
+
+    A PARTIAL downgrade is NOT_CHECKED, never PASS. The module contract says so in its header, but the
+    connected-branch used to return before file-backed partitions were considered, so it passed. Blind
+    review caught it, and it is the shape of the incident that motivated this gate: a model where SOME
+    tables of a live source kept their connector while others were materialised to CSV would have
+    reported CONNECTED and hidden every downgraded table.
+    """
+    if file_backed:
+        return (
+            SOURCE_NOT_CHECKED,
+            f"PARTIAL: a `{token}.*` connector is present AND {len(file_tables)} table(s) of this "
+            f"source are file-backed ({', '.join(file_tables)}). Per-partition attribution to a "
+            "source is not reliable enough to call this either way - inspect it by hand",
+        )
+    return SOURCE_CONNECTED, f"live source is connected in the model (a `{token}.*` connector is present)"
 
 
 def _judge_source(
@@ -309,14 +354,14 @@ def _judge_source(
             "attribute a downgrade offline; verify this source connects live by hand",
             [],
         )
-    connected, file_backed, file_tables = _connectivity(ctx.models, token)
+    connected, file_backed, file_tables = _connectivity(ctx.models, token, set(_table_names(data_source)))
 
     def make(verdict: str, detail: str) -> SourceVerdict:
         """Build the verdict for this source, carrying the shared identity fields."""
         return SourceVerdict(source_id, caption, connection_class, mode, target, verdict, detail, list(file_tables))
 
     if connected:
-        return make(SOURCE_CONNECTED, f"live source is connected in the model (a `{token}.*` connector is present)")
+        return make(*_connected_verdict(token, file_backed, file_tables))
     if not file_backed:
         return make(
             SOURCE_NOT_CHECKED,
