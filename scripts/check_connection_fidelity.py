@@ -596,10 +596,29 @@ def merge(units: list[dict[str, Any]]) -> dict[str, Any]:
 def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     """Human-readable verdict, matching the sibling offline gates."""
     if report["status"] == STATUS_SKIPPED:
-        return (
-            "CONNECTION FIDELITY CHECK: SKIPPED - nothing measured "
-            "(no spec with data_sources, no shipped model, or no live source to check)"
+        unchecked = report.get("units_unchecked", 0)
+        checked = report["units_scanned"] - unchecked
+        if not checked:
+            return (
+                "CONNECTION FIDELITY CHECK: SKIPPED - nothing measured "
+                "(no spec with data_sources, no shipped model, or no live source to check)"
+            )
+        # PARTIAL COVERAGE is not "nothing measured", and saying so told the operator the opposite of
+        # what happened: some units WERE checked and passed, others could not be attributed at all.
+        lines = [
+            f"CONNECTION FIDELITY CHECK: SKIPPED - partial coverage: {checked} of "
+            f"{report['units_scanned']} unit(s) checked, {unchecked} could not be checked."
+        ]
+        for unit in report["units"]:
+            if unit["status"] != STATUS_SKIPPED:
+                continue
+            lines.append(f"  {unit['unit']}: {unit['detail']}")
+        lines.append(
+            "  A unit is unchecked when no live source could be attributed to the emitted model - "
+            "usually a spec table name that does not match any emitted table. Inspect it by hand; a "
+            "downgrade cannot be ruled out here."
         )
+        return "\n".join(lines)
     if report["status"] == STATUS_OK:
         return (
             f"CONNECTION FIDELITY CHECK: OK - every live source stays connected across "

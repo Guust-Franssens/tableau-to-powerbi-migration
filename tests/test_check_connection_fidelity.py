@@ -781,12 +781,26 @@ def _enumerate_space():
         yield _Point(label, verdict, ccf._attribute(models, set(declared)), m_text, lims, models, declared, decls, cls)
 
 
+def _raw_partitions(models: tuple[ccf.Model, ...], declared: tuple[str, ...]) -> list[dict[str, str]]:
+    """Partitions matching this source's declared tables, computed WITHOUT `_attribute`.
+
+    Deliberately a separate implementation. I1's whole job is to police the attribution, so reading
+    its evidence from `_attribute` output makes it blind to any regression that drops partitions:
+    blind review round 6 mutated `_attribute` to filter out file-backed partitions, the gate certified
+    a live+file source as CONNECTED/OK, and the harness stayed green because its oracle had been
+    filtered too. An oracle must not be computed by the code it judges.
+    """
+    keys = {name.strip("[]\"'").casefold() for name in declared}
+    return [p for m in models for p in m.partitions if p["table"].strip("[]\"'").casefold() in keys]
+
+
 def _violations() -> list[str]:
     """Invariant breaches across the whole space. Empty list == the gate held everywhere."""
     bad = []
     for pt in _enumerate_space():
         connected = pt.verdict.verdict == ccf.SOURCE_CONNECTED
-        if connected and pt.mine and any(p["category"] in ccf.FILE_CATEGORIES for p in pt.mine):
+        raw = _raw_partitions(pt.models, pt.declared)
+        if connected and any(p["category"] in ccf.FILE_CATEGORIES for p in raw):
             bad.append(f"I1 CONNECTED while owning a file-backed partition :: {pt.label}")
         if connected and pt.m_text == _COMMENTED_M:
             bad.append(f"I2 CONNECTED on a commented-out connector :: {pt.label}")
@@ -846,6 +860,32 @@ def test_enumeration_is_falsifiable_via_the_round4_collapse() -> None:
     assert _violations() == []
 
 
+def test_enumeration_is_falsifiable_via_dropped_file_partitions() -> None:
+    """Round 6: a regression that stably HIDES file-backed partitions must still be caught.
+
+    This is the mutation that proved I1 was vacuous. It is order-independent, so I6 cannot see it,
+    and it filters the very evidence I1 used to read from `_attribute` - so before `_raw_partitions`
+    existed, the gate certified a live+file source as CONNECTED/OK with the harness fully green.
+    """
+    original = ccf._attribute
+
+    def drop_file_parts(models, tables):
+        mine = original(models, tables)
+        return None if mine is None else [p for p in mine if p["category"] not in ccf.FILE_CATEGORIES]
+
+    try:
+        ccf._attribute = drop_file_parts
+        source = _live_source("ds.sf", "snowflake", tables=["ORDERS"])
+        flat = _model("file", (("ORDERS", "file_ok"),), "")
+        live = _model("live", (("ORDERS", "live"),), _CONN_M)
+        mutated = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((flat, live), (), ()))
+        assert mutated.verdict == ccf.SOURCE_CONNECTED, "mutation did not land"
+        assert _violations(), "harness is blind to a stable loss of file-backed evidence"
+    finally:
+        ccf._attribute = original
+    assert _violations() == []
+
+
 # --- blind review round 5: the same false green, one level up at the root merge --------------------
 #
 # I6 permutes models WITHIN one unit, so it is structurally unable to see an aggregation defect. This
@@ -878,6 +918,33 @@ def test_one_unchecked_unit_keeps_the_whole_root_off_a_clean_pass() -> None:
     merged = ccf.merge([_unit(ccf.STATUS_OK), _unit(ccf.STATUS_SKIPPED)])
     assert merged["status"] == ccf.STATUS_SKIPPED
     assert merged["units_unchecked"] == 1
+
+
+def test_partial_coverage_is_not_rendered_as_nothing_measured() -> None:
+    """The operator must not be told the opposite of what happened.
+
+    A root with one checked unit and one unattributable unit is SKIPPED, but "nothing measured" is
+    false: one unit WAS measured and passed. Blind review round 6 found the CLI saying exactly that.
+    """
+    source = _live_source("ds.sf", "snowflake", tables=["ORDERS"])
+    live = _model("live", (("ORDERS", "live"),), _CONN_M)
+    renamed = _model("m", (("RENAMED", "file_ok"),), "")
+    checked = ccf._finalize_unit(
+        Path("ok/migration-spec.json"),
+        [ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((live,), (), ()))],
+    )
+    unchecked = ccf._finalize_unit(
+        Path("un/migration-spec.json"),
+        [ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((renamed,), (), ()))],
+    )
+    text = ccf.render(ccf.merge([checked, unchecked]))
+    assert "nothing measured" not in text
+    assert "partial coverage" in text
+    assert "1 of 2 unit(s) checked" in text
+    assert "un/migration-spec.json" in text or "un" in text
+
+    # the genuinely-empty case must keep its original wording
+    assert "nothing measured" in ccf.render(ccf.merge([]))
 
 
 def test_merge_precedence_holds_across_every_combination() -> None:
