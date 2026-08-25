@@ -1,28 +1,126 @@
 {
   "migration_spec_version": "1.0",
-  "source": { "workbook": "Airline_Scorecard_Dashboard.twbx" },
+  "source": {
+    "workbook": "Snowflake-Superstore.tdsx"
+  },
+  "parameters": [],
   "data_sources": [
     {
-      "id": "ds.snowflake_scorecard",
-      "caption": "Snowflake Scorecard (custom SQL)",
+      "id": "ds.snowflake_superstore",
+      "caption": "Snowflake Superstore (published)",
+      "internal_name": "",
       "connection": {
         "class": "snowflake",
-        "mode": "extract",
-        "server": "ses.snowflakecomputing.com",
-        "database": "SCORECARD",
+        "mode": "live",
+        "server": "acme-fixture.snowflakecomputing.com",
+        "database": "TABLEAUCONNECT",
+        "note": null,
+        "schema": "PUBLIC",
         "powerbi_target": "live_source",
-        "powerbi_target_reason": "'snowflake' is a LIVE system. The semantic model MUST connect to it directly; the packaged .hyper is only Tableau's cache."
+        "powerbi_target_reason": "'snowflake' is a LIVE system. The semantic model MUST connect to it directly.",
+        "connections": [
+          {
+            "class": "snowflake",
+            "server": "acme-fixture.snowflakecomputing.com",
+            "database": "TABLEAUCONNECT",
+            "mode": "live",
+            "schema": "PUBLIC",
+            "powerbi_target": "live_source",
+            "powerbi_target_reason": "'snowflake' is a LIVE system. The semantic model MUST connect to it directly."
+          }
+        ]
       },
       "tables": [
-        { "id": "tbl.flights", "name": "FLIGHTS", "source_relation": "custom-sql" }
-      ]
+        {
+          "id": "tbl.orders",
+          "name": "ORDERS",
+          "source_relation": "table",
+          "custom_sql": null,
+          "row_count": {
+            "source": "unknown"
+          }
+        }
+      ],
+      "joins": [],
+      "fields": [
+        {
+          "id": "fld.ds__category",
+          "internal_name": "[CATEGORY]",
+          "caption": "Category",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        },
+        {
+          "id": "fld.ds__city",
+          "internal_name": "[CITY]",
+          "caption": "City",
+          "table_id": null,
+          "kind": "column",
+          "data_type": "string",
+          "role": "dimension",
+          "default_aggregation": null,
+          "hidden": false,
+          "semantic_role": null,
+          "formatting": {},
+          "aliases": {}
+        }
+      ],
+      "published_datasource": {
+        "id": "Snowflake-Superstore",
+        "site": "fixture-site",
+        "path": "/t/fixture-site/datasources",
+        "derived_from": null,
+        "revision": "1.0",
+        "key": "fixture-site/snowflake-superstore",
+        "name_source": "repository-location.id",
+        "id_attribute": "Snowflake-Superstore"
+      }
     }
   ],
+  "worksheets": [],
+  "dashboards": [],
+  "theme": {
+    "palette_hexes": [],
+    "font_family": null,
+    "background": null,
+    "source_note": "Tableau has no single global theme file - aggregated from per-worksheet mark-color formats; treat as a starting palette, not an authoritative theme to clone."
+  },
   "limitations_encountered": [
     {
-      "item": "ds.snowflake_scorecard",
-      "issue": "extract-based (.hyper) data source - row data requires a separate extraction step",
-      "severity": "info",
+      "item": "ds.",
+      "issue": "PUBLISHED Tableau data source ('Snowflake-Superstore' on site 'fixture-site', dedup key 'fixture-site/snowflake-superstore'): this workbook only POINTS at a server-side datasource (connection class 'sqlproxy'). Its connection details, custom SQL and calculated-field formulas live in the published datasource, NOT in this workbook, so parsing the .twb alone under-reports them (workbook-local calcs built on top of it DO appear here, which makes the gap partial and easy to miss). ACTION: export the published data source (.tds/.tdsx) from Tableau Server/Cloud and parse it too. NOTE: several workbooks typically share ONE published datasource - migrate it ONCE to a single Power BI semantic model and bind every downstream report to that model; do not rebuild an identical model per workbook. Match on the dedup key above.",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "ds.",
+      "issue": "LIVE source ('snowflake' @ acme-fixture.snowflakecomputing.com / TABLEAUCONNECT): the Power BI semantic model MUST connect to this system directly. Do NOT migrate the model onto extracted rows/CSVs - that silently freezes the data at export time and produces a model that can never refresh, which is not a faithful migration. The .hyper is for SCHEMA DISCOVERY and VALIDATION BASELINES only (`python scripts/extract_hyper_data.py --schema ...`). ACTION: get the credential for this system from the user before building (`python scripts/preflight_source_credentials.py --spec <spec>`).",
+      "severity": "high",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds__orders",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds__people",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
+      "stage": "parse"
+    },
+    {
+      "item": "fld.ds__returns",
+      "issue": "data_type 'table' is Tableau's internal relationship-model table-anchor pseudo-column (not real data) - exclude from the semantic model entirely, do not create a column/measure for it",
+      "severity": "low",
       "stage": "parse"
     }
   ]

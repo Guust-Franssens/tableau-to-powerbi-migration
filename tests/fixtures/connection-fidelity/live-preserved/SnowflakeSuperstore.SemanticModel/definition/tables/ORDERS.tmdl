@@ -1,0 +1,21 @@
+table ORDERS
+	column CATEGORY
+		dataType: string
+		sourceColumn: CATEGORY
+
+	column CITY
+		dataType: string
+		sourceColumn: CITY
+
+	/// THE CORRECT TRANSLATION of the same source: the live Snowflake connection survives migration.
+	/// Same spec as `silent-downgrade` - only this partition differs, which is the point.
+	partition ORDERS = m
+		mode: import
+		source =
+			let
+			    Source = Snowflake.Databases("acme-fixture.snowflakecomputing.com", "COMPUTE_WH"),
+			    Catalog = Source{[Name = "TABLEAUCONNECT", Kind = "Database"]}[Data],
+			    Schema = Catalog{[Name = "PUBLIC", Kind = "Schema"]}[Data],
+			    Data = Schema{[Name = "ORDERS", Kind = "Table"]}[Data]
+			in
+			    Data

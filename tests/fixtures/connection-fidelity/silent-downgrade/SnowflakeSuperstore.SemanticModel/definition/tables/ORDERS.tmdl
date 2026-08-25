@@ -1,0 +1,21 @@
+table ORDERS
+	column CATEGORY
+		dataType: string
+		sourceColumn: CATEGORY
+
+	column CITY
+		dataType: string
+		sourceColumn: CITY
+
+	/// THE DEFECT. The Tableau source is a LIVE Snowflake published datasource
+	/// (connection.mode = live, powerbi_target = live_source), but this partition reads a flat file.
+	/// The model opens, refreshes and returns rows - it is simply no longer connected to Snowflake,
+	/// and freezes at export time. Nothing recorded the decision, so it is drift, not a choice.
+	partition ORDERS = m
+		mode: import
+		source =
+			let
+			    Source = Csv.Document(File.Contents("public_ORDERS.csv"), [Delimiter = ",", Encoding = 65001]),
+			    Promoted = Table.PromoteHeaders(Source, [PromoteAllScalars = true])
+			in
+			    Promoted
