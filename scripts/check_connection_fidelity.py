@@ -326,12 +326,28 @@ def _attribute(models: tuple[Model, ...], tables: set[str]) -> list[dict[str, st
     Returns None for: no declared tables, or any declared table with no exact emitted counterpart.
     Both are reported as NOT_CHECKED by the caller rather than guessed - a source that cannot be
     attributed must never borrow a sibling's verdict.
+
+    EVERY matching partition is returned, not one per name. An earlier version keyed a dict by
+    normalised table name, so duplicates silently collapsed last-write-wins, and blind review showed
+    that makes the verdict ORDER-DEPENDENT: one table emitted as a file-backed partition in one model
+    and a live partition in another reported CONNECTED (exit 0) when the file partition was visited
+    first, and DOWNGRADED when it was visited second. The same held for two partitions of a single
+    table. Both shapes are real - a source table can appear in more than one semantic model, and a
+    table can have several partitions - so the aggregate must see all of them. With every partition
+    present, a table that is both live and file-backed lands on the existing PARTIAL branch
+    (NOT_CHECKED, never PASS), which is the honest answer for evidence that points both ways.
     """
     if not tables:
         return None
-    by_exact = {_normalise_table(part["table"]): part for model in models for part in model.partitions}
-    mine = [by_exact[key] for key in (_normalise_table(t) for t in tables) if key in by_exact]
-    return mine if len(mine) == len(tables) and mine else None
+    by_exact: dict[str, list[dict[str, str]]] = {}
+    for model in models:
+        for part in model.partitions:
+            by_exact.setdefault(_normalise_table(part["table"]), []).append(part)
+    keys = {_normalise_table(name) for name in tables}
+    if not keys <= by_exact.keys():
+        return None
+    mine = [part for key in sorted(keys) for part in by_exact[key]]
+    return mine or None
 
 
 def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> tuple[bool, bool, list[str], bool]:

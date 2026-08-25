@@ -8,10 +8,12 @@ would fail each time, after first asserting the mutation actually landed.
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -647,3 +649,198 @@ def test_a_source_with_no_declared_tables_cannot_borrow_a_sibling_connector() ->
     model = ccf.Model("m", "m", ({"table": "UNRELATED", "category": "live"},), 'Snowflake.Databases("s","d")')
     verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+
+
+# --- blind review round 4: duplicate table names made the verdict order-dependent ------------------
+
+_CONN_M = 'Snowflake.Databases("acme-fixture.snowflakecomputing.com", "WH")'
+_COMMENTED_M = f"// Source = {_CONN_M}"
+
+
+def _model(name: str, parts: tuple[tuple[str, str], ...], m_text: str) -> ccf.Model:
+    """A Model from (table, category) pairs - the shape load_model produces."""
+    return ccf.Model(name, name, tuple({"table": t, "category": c} for t, c in parts), m_text)
+
+
+def _judge(
+    models: tuple[ccf.Model, ...],
+    tables: tuple[str, ...] = ("ORDERS",),
+    limitations: tuple[dict, ...] = (),
+    declarations: tuple[dict, ...] = (),
+    connection_class: str = "snowflake",
+) -> ccf.SourceVerdict:
+    source = _live_source("ds.sf", connection_class, tables=list(tables))
+    ctx = ccf.UnitContext(models, limitations, declarations)
+    return ccf._judge_source(source, "live_source", connection_class, "live", ctx)
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_one_table_live_in_one_model_and_file_in_another_is_order_independent(swap: bool) -> None:
+    """Both orders must agree, and neither may be a clean pass.
+
+    An earlier `_attribute` keyed a dict by normalised table name, so the second partition with a
+    given name overwrote the first. Visiting the file-backed model first therefore reported
+    CONNECTED and exited 0; visiting it second reported DOWNGRADED. Same inputs, opposite verdicts.
+    """
+    live = _model("live", (("ORDERS", "live"),), _CONN_M)
+    flat = _model("flat", (("ORDERS", "file_ok"),), "")
+    verdict = _judge((flat, live) if swap else (live, flat))
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+    assert "PARTIAL" in verdict.detail
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_two_partitions_of_one_table_are_order_independent(swap: bool) -> None:
+    """The same collapse happened WITHIN a model, across partitions of a single table."""
+    parts = (("ORDERS", "file_ok"), ("ORDERS", "live")) if swap else (("ORDERS", "live"), ("ORDERS", "file_ok"))
+    verdict = _judge((_model("m", parts, _CONN_M),))
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+
+
+def test_every_permutation_of_models_yields_one_verdict() -> None:
+    """Order-independence asserted mechanically rather than on the two orders I happened to try."""
+    models = [
+        _model("m0", (("ORDERS", "file_ok"),), ""),
+        _model("m1", (("ORDERS", "live"),), _CONN_M),
+        _model("m2", (("ORDERS", "file_ok"),), _CONN_M),
+        _model("m3", (("OTHER", "live"),), _CONN_M),
+    ]
+    outcomes = {(v.verdict, tuple(v.tables)) for v in (_judge(perm) for perm in itertools.permutations(models))}
+    assert len(outcomes) == 1, f"verdict depends on model order: {outcomes}"
+
+
+def test_duplicate_table_that_is_file_backed_everywhere_is_still_a_finding() -> None:
+    """Aggregating all partitions must not blunt the gate: file-only across two models is a downgrade."""
+    flat_a = _model("a", (("ORDERS", "file_ok"),), "")
+    flat_b = _model("b", (("ORDERS", "file_ok"),), _CONN_M)
+    assert _judge((flat_a, flat_b)).verdict == ccf.SOURCE_DOWNGRADED
+
+
+# --- the decision space, enumerated ----------------------------------------------------------------
+#
+# Three review rounds found five defects because each pass tested the cases its author thought of.
+# This enumerates the whole finite space instead and asserts invariants over every point in it. The
+# dimensions below are the input axes; `test_enumeration_*_is_falsifiable` proves the harness can
+# actually fail, because a green result from a check that cannot go red is worth nothing.
+#
+# ⚠️ I6 exists because the first draft of this harness could NOT catch the round-4 defect, and the
+# falsifiability test is what exposed that. I1 and I4 reason about `mine` - the attribution computed
+# by `_attribute`, the very function that was broken - so under the collapsing mutation the oracle
+# collapsed with it: the file-backed partition simply vanished from `mine`, and "CONNECTED while
+# owning a file-backed partition" was true of nothing. An invariant evaluated through the code under
+# test cannot see that code's blind spot. I6 is computed from the raw models instead, so it holds
+# independently of any attribution logic.
+
+
+class _Point(NamedTuple):
+    """One combination in the decision space, with its verdict and the raw inputs that produced it."""
+
+    label: str
+    verdict: ccf.SourceVerdict
+    mine: list[dict[str, str]] | None
+    m_text: str
+    lims: tuple[dict, ...]
+    models: tuple[ccf.Model, ...]
+    declared: tuple[str, ...]
+    decls: tuple[dict, ...]
+    cls: str
+
+
+_CLASSES = ("snowflake", "mysteryengine")  # mappable / unmappable
+_DECLARED = (("ORDERS",), ("MISSING",), ())  # attributable / unattributable / nothing to scope by
+_M_TEXTS = (_CONN_M, _COMMENTED_M, "")
+_PARTITION_SETS = (
+    ((("ORDERS", "live"),),),
+    ((("ORDERS", "file_ok"),),),
+    ((("ORDERS", "live"), ("ORDERS", "file_ok")),),
+    ((("ORDERS", "live"),), (("ORDERS", "file_ok"),)),
+    ((("ORDERS", "file_ok"),), (("ORDERS", "live"),)),
+    ((("ORDERS", "file_ok"),), (("ORDERS", "file_ok"),)),
+)
+_DECLS = (
+    ((), ()),
+    (({"stage": "semantic_build", "item": "ds.sf", "issue": "materialised on purpose"},), ()),
+    (({"stage": "parse", "item": "ds.sf", "issue": "parse-stage note"},), ()),
+    ((), ({"target": "ORDERS.tmdl"},)),
+)
+
+
+def _enumerate_space():
+    """Yield a Point for every combination in the space.
+
+    The raw inputs are yielded alongside the verdict deliberately. An earlier draft recovered them by
+    substring-matching the label, and the truncation in that label made one invariant vacuously true -
+    the exact class of silently-unfalsifiable check this harness exists to avoid.
+    """
+    for cls, declared, m_text, part_sets, (lims, decls) in itertools.product(
+        _CLASSES, _DECLARED, _M_TEXTS, _PARTITION_SETS, _DECLS
+    ):
+        models = tuple(_model(f"m{i}", parts, m_text) for i, parts in enumerate(part_sets))
+        verdict = _judge(models, tables=declared, limitations=lims, declarations=decls, connection_class=cls)
+        label = f"cls={cls} declared={declared} m={m_text!r} parts={part_sets} decl={(lims, decls)}"
+        yield _Point(label, verdict, ccf._attribute(models, set(declared)), m_text, lims, models, declared, decls, cls)
+
+
+def _violations() -> list[str]:
+    """Invariant breaches across the whole space. Empty list == the gate held everywhere."""
+    bad = []
+    for pt in _enumerate_space():
+        connected = pt.verdict.verdict == ccf.SOURCE_CONNECTED
+        if connected and pt.mine and any(p["category"] in ccf.FILE_CATEGORIES for p in pt.mine):
+            bad.append(f"I1 CONNECTED while owning a file-backed partition :: {pt.label}")
+        if connected and pt.m_text == _COMMENTED_M:
+            bad.append(f"I2 CONNECTED on a commented-out connector :: {pt.label}")
+        if pt.verdict.connection_class == "mysteryengine" and pt.verdict.verdict != ccf.SOURCE_NOT_CHECKED:
+            bad.append(f"I3 unmappable class certified as {pt.verdict.verdict} :: {pt.label}")
+        if connected and pt.mine is None:
+            bad.append(f"I4 CONNECTED while unattributable :: {pt.label}")
+        parse_only = pt.lims and all(entry.get("stage") not in ccf.DECISION_STAGES for entry in pt.lims)
+        if pt.verdict.verdict == ccf.SOURCE_DECLARED and parse_only:
+            bad.append(f"I5 parse-stage limitation excused a downgrade :: {pt.label}")
+        outcomes = {
+            (v.verdict, tuple(v.tables))
+            for v in (
+                _judge(perm, tables=pt.declared, limitations=pt.lims, declarations=pt.decls, connection_class=pt.cls)
+                for perm in itertools.permutations(pt.models)
+            )
+        }
+        if len(outcomes) > 1:
+            bad.append(f"I6 verdict depends on model order {sorted(outcomes)} :: {pt.label}")
+    return bad
+
+
+def test_decision_space_holds_every_invariant() -> None:
+    """432 combinations, five invariants, zero tolerated breaches."""
+    assert len(list(_enumerate_space())) == 432
+    assert _violations() == []
+
+
+def test_enumeration_is_falsifiable_via_comment_stripping() -> None:
+    """Proof the harness can go red: a connector named only inside an M comment must not count."""
+    original = ccf._strip_m_comments
+    try:
+        ccf._strip_m_comments = lambda text: text  # mutation: stop stripping comments
+        assert ccf.Model("m", "m", (), _COMMENTED_M).has_connector("Snowflake"), "mutation did not land"
+        assert _violations(), "harness reported clean under a mutation that should break it"
+    finally:
+        ccf._strip_m_comments = original
+    assert _violations() == []
+
+
+def test_enumeration_is_falsifiable_via_the_round4_collapse() -> None:
+    """Proof the harness now covers the axis round 4 found - restore the collapse, it must go red."""
+    original = ccf._attribute
+
+    def collapsing(models, tables):
+        if not tables:
+            return None
+        by_exact = {ccf._normalise_table(p["table"]): p for m in models for p in m.partitions}
+        mine = [by_exact[k] for k in (ccf._normalise_table(t) for t in tables) if k in by_exact]
+        return mine if len(mine) == len(tables) and mine else None
+
+    try:
+        ccf._attribute = collapsing
+        assert _violations(), "the enumeration does not cover duplicate table names"
+    finally:
+        ccf._attribute = original
+    assert _violations() == []
