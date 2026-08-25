@@ -291,6 +291,28 @@ class UnitContext:
     declarations: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class Coverage:
+    """What the model actually tells us about ONE source, and how completely.
+
+    `unmatched` is the load-bearing field and the reason this is a type rather than a 4-tuple: the
+    verdict rules differ for a finding and for a pass. A FINDING may rest on partial coverage - the
+    matched tables carry real evidence. A PASS may not, because a declared table we could not find in
+    the model could be exactly the one that was downgraded.
+    """
+
+    connected: bool
+    file_backed: bool
+    file_tables: list[str]
+    attributable: bool
+    unmatched: list[str]
+
+    @property
+    def complete(self) -> bool:
+        """True when every declared table was found in the emitted model."""
+        return not self.unmatched
+
+
 def _strip_m_comments(text: str) -> str:
     """Remove M line and block comments so a connector NAME in prose cannot read as a connection."""
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
@@ -309,8 +331,8 @@ def _normalise_table(name: str) -> str:
     return name.strip("[]\"'").casefold()
 
 
-def _attribute(models: tuple[Model, ...], tables: set[str]) -> list[dict[str, str]] | None:
-    """Partitions belonging to ONE source, or None when attribution is not safe.
+def _attribute(models: tuple[Model, ...], tables: set[str]) -> tuple[list[dict[str, str]], list[str]]:
+    """Partitions belonging to ONE source, plus the declared tables that matched nothing.
 
     EXACT match only, qualifiers preserved, case-folded. No unqualified fallback - an earlier version
     matched on the last dot-segment and blind review showed it collapses distinct tables: `SALES.ORDERS`
@@ -323,9 +345,17 @@ def _attribute(models: tuple[Model, ...], tables: set[str]) -> list[dict[str, st
     FILENAMES (`tree.csv`) - for which a leaf match is actively wrong, since every one would collapse to
     `csv`. So the fallback solved nothing real while creating two ways to mis-attribute.
 
-    Returns None for: no declared tables, or any declared table with no exact emitted counterpart.
-    Both are reported as NOT_CHECKED by the caller rather than guessed - a source that cannot be
-    attributed must never borrow a sibling's verdict.
+    Returns `(matched, unmatched)`. `matched` is EVERY partition whose table is declared by this
+    source; `unmatched` is the declared names with no emitted counterpart. It is deliberately NOT
+    all-or-nothing any more: an earlier version returned None the moment ONE declared table failed to
+    match, and that discarded real evidence about the tables that DID match. Measured - a source
+    declaring `ORDERS` + `CUSTOMERS` against a model emitting only a file-backed `ORDERS` reported
+    NOT_CHECKED, while the identical model with a single-table source reported DOWNGRADED. Adding a
+    second, unmatched table to the spec silenced a positively-evidenced downgrade, and the detail line
+    claimed "none of this source's declared tables match" when one of them matched exactly.
+
+    The caller applies the asymmetry that makes this safe: a FINDING may be reported on partial
+    evidence, a PASS may not. See `_judge_source`.
 
     EVERY matching partition is returned, not one per name. An earlier version keyed a dict by
     normalised table name, so duplicates silently collapsed last-write-wins, and blind review showed
@@ -333,56 +363,81 @@ def _attribute(models: tuple[Model, ...], tables: set[str]) -> list[dict[str, st
     and a live partition in another reported CONNECTED (exit 0) when the file partition was visited
     first, and DOWNGRADED when it was visited second. The same held for two partitions of a single
     table. Both shapes are real - a source table can appear in more than one semantic model, and a
-    table can have several partitions - so the aggregate must see all of them. With every partition
-    present, a table that is both live and file-backed lands on the existing PARTIAL branch
-    (NOT_CHECKED, never PASS), which is the honest answer for evidence that points both ways.
+    table can have several partitions - so the aggregate must see all of them.
     """
     if not tables:
-        return None
+        return [], []
     by_exact: dict[str, list[dict[str, str]]] = {}
     for model in models:
         for part in model.partitions:
             by_exact.setdefault(_normalise_table(part["table"]), []).append(part)
-    keys = {_normalise_table(name) for name in tables}
-    if not keys <= by_exact.keys():
-        return None
-    mine = [part for key in sorted(keys) for part in by_exact[key]]
-    return mine or None
+    matched: list[dict[str, str]] = []
+    unmatched: list[str] = []
+    for name in sorted(tables):
+        key = _normalise_table(name)
+        if key in by_exact:
+            matched.extend(by_exact[key])
+        else:
+            unmatched.append(name)
+    return matched, unmatched
 
 
-def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> tuple[bool, bool, list[str], bool]:
-    """Return (connected, file_backed, file_tables, attributable) for ONE source, scoped to its tables.
+def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> Coverage:
+    """Connectivity evidence for ONE source, scoped to the tables it declares.
 
     BOTH sides are scoped. Scoping only the file side is its own false PASS: with two live sources of
     the same class, source A's preserved connector vouched for source B, and if B's declared table did
     not match the emitted one, B had no file evidence either - so a downgraded source reported
     CONNECTED and the unit exited 0.
     """
-    mine = _attribute(models, tables)
-    if mine is None:
-        return False, False, [], False
-    connected = any(part["category"] in CONNECTED_CATEGORIES for part in mine) and any(
+    matched, unmatched = _attribute(models, tables)
+    if not matched:
+        return Coverage(False, False, [], False, unmatched)
+    connected = any(part["category"] in CONNECTED_CATEGORIES for part in matched) and any(
         model.has_connector(token) for model in models
     )
-    file_tables = sorted({part["table"] for part in mine if part["category"] in FILE_CATEGORIES})
-    return connected, bool(file_tables), file_tables, True
+    file_tables = sorted({part["table"] for part in matched if part["category"] in FILE_CATEGORIES})
+    return Coverage(connected, bool(file_tables), file_tables, True, unmatched)
 
 
-def _connected_verdict(token: str, file_backed: bool, file_tables: list[str]) -> tuple[str, str]:
-    """Verdict for a source whose connector IS present: connected, or a partial downgrade.
+def _coverage_note(cov: "Coverage") -> str:
+    """Say plainly when a verdict rests on incomplete coverage."""
+    if not cov.unmatched:
+        return ""
+    return (
+        f". NOTE partial coverage: {len(cov.unmatched)} declared table(s) match no emitted partition "
+        f"({', '.join(cov.unmatched)}), so this source's other tables could not be examined"
+    )
+
+
+def _connected_verdict(token: str, cov: "Coverage") -> tuple[str, str]:
+    """Verdict for a source whose connector IS present: connected, or a downgrade we cannot rule out.
 
     A PARTIAL downgrade is NOT_CHECKED, never PASS. The module contract says so in its header, but the
     connected-branch used to return before file-backed partitions were considered, so it passed. Blind
     review caught it, and it is the shape of the incident that motivated this gate: a model where SOME
     tables of a live source kept their connector while others were materialised to CSV would have
     reported CONNECTED and hidden every downgraded table.
+
+    INCOMPLETE COVERAGE is the same refusal for the same reason. A clean bill of health is a statement
+    about the WHOLE source, so it requires evidence about every table the source declares; a table we
+    could not find could be the downgraded one. This is the asymmetry the module runs on - a finding
+    may rest on partial evidence, a pass may not.
     """
-    if file_backed:
+    if cov.file_backed:
         return (
             SOURCE_NOT_CHECKED,
-            f"PARTIAL: a `{token}.*` connector is present AND {len(file_tables)} table(s) of this "
-            f"source are file-backed ({', '.join(file_tables)}). Per-partition attribution to a "
+            f"PARTIAL: a `{token}.*` connector is present AND {len(cov.file_tables)} table(s) of this "
+            f"source are file-backed ({', '.join(cov.file_tables)}). Per-partition attribution to a "
             "source is not reliable enough to call this either way - inspect it by hand",
+        )
+    if cov.unmatched:
+        return (
+            SOURCE_NOT_CHECKED,
+            f"a `{token}.*` connector is present and no matched table is file-backed, but "
+            f"{len(cov.unmatched)} declared table(s) match no emitted partition "
+            f"({', '.join(cov.unmatched)}). A pass must cover every declared table - one of these "
+            "could be the downgraded one. Check the spec-to-TMDL table naming by hand",
         )
     return SOURCE_CONNECTED, f"live source is connected in the model (a `{token}.*` connector is present)"
 
@@ -428,34 +483,38 @@ def _judge_source(
             "attribute a downgrade offline; verify this source connects live by hand",
             [],
         )
-    connected, file_backed, file_tables, attributable = _connectivity(ctx.models, token, set(_table_names(data_source)))
+    cov = _connectivity(ctx.models, token, set(_table_names(data_source)))
 
     def make(verdict: str, detail: str) -> SourceVerdict:
         """Build the verdict for this source, carrying the shared identity fields."""
-        return SourceVerdict(source_id, caption, connection_class, mode, target, verdict, detail, list(file_tables))
+        return SourceVerdict(source_id, caption, connection_class, mode, target, verdict, detail, list(cov.file_tables))
 
-    if not attributable:
+    if not cov.attributable:
         return make(
             SOURCE_NOT_CHECKED,
             "none of this source's declared tables match an emitted model partition, so no evidence "
             "can be attributed to it - it must not borrow another source's verdict. Check the "
             "spec-to-TMDL table naming by hand",
         )
-    if connected:
-        return make(*_connected_verdict(token, file_backed, file_tables))
-    if not file_backed:
+    if cov.connected:
+        return make(*_connected_verdict(token, cov))
+    if not cov.file_backed:
         return make(
             SOURCE_NOT_CHECKED,
             "no live connection found, but no file-backed partition either - the source's rows were "
             "not clearly materialised to a file (another gate owns an empty/stub model)",
         )
-    declared = _declared_reason(ctx, source_id, data_source, file_tables)
+    declared = _declared_reason(ctx, source_id, data_source, cov.file_tables)
     if declared:
         return make(SOURCE_DECLARED, declared)
+    # A FINDING is reported even on partial coverage. The tables that matched carry positive evidence
+    # of a downgrade, and refusing to report it because a SIBLING table did not match is how adding a
+    # second table to a spec used to silence a real finding.
     return make(
         SOURCE_DOWNGRADED,
         f"a '{connection_class}' live source, but the model has no `{token}.*` connector and its rows "
-        "land in a flat file - the connection was silently downgraded and the model can never refresh",
+        "land in a flat file - the connection was silently downgraded and the model can never refresh"
+        + _coverage_note(cov),
     )
 
 

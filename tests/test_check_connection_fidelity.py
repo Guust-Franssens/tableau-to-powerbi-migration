@@ -716,7 +716,47 @@ def test_duplicate_table_that_is_file_backed_everywhere_is_still_a_finding() -> 
     assert _judge((flat_a, flat_b)).verdict == ccf.SOURCE_DOWNGRADED
 
 
-# --- the decision space, enumerated ----------------------------------------------------------------
+# --- a finding may rest on partial coverage; a pass may not ----------------------------------------
+#
+# Found by probing the enumeration's own dimensions rather than by review: `_DECLARED` topped out at
+# ONE table, so a partial match was unreachable and this whole class was invisible. 9% of the data
+# sources in this repo's specs declare more than one table, and none of those are live -- but a
+# multi-table live source is entirely ordinary in the field, which is exactly the profile of a defect
+# that ships silently.
+
+
+def test_a_finding_survives_partial_coverage() -> None:
+    """Adding an unmatched table to the spec must not silence a positively-evidenced downgrade.
+
+    Measured before the fix: declaring ORDERS+CUSTOMERS against a model emitting a file-backed ORDERS
+    returned NOT_CHECKED, while the identical model with a single-table source returned DOWNGRADED -
+    and the detail claimed "none of this source's declared tables match" when ORDERS matched exactly.
+    """
+    flat = _model("m", (("ORDERS", "file_ok"),), "")
+    partial = _judge((flat,), tables=("ORDERS", "CUSTOMERS"))
+    assert partial.verdict == ccf.SOURCE_DOWNGRADED
+    assert "partial coverage" in partial.detail
+    assert "CUSTOMERS" in partial.detail
+    assert _judge((flat,), tables=("ORDERS",)).verdict == ccf.SOURCE_DOWNGRADED
+
+
+def test_a_pass_does_not_survive_partial_coverage() -> None:
+    """A clean bill of health covers the WHOLE source, so an unfound table blocks it."""
+    live = _model("m", (("ORDERS", "live"),), _CONN_M)
+    assert _judge((live,), tables=("ORDERS", "CUSTOMERS")).verdict == ccf.SOURCE_NOT_CHECKED
+    assert _judge((live,), tables=("ORDERS",)).verdict == ccf.SOURCE_CONNECTED
+    both = _model("m", (("ORDERS", "live"), ("OTHER", "live")), _CONN_M)
+    assert _judge((both,), tables=("ORDERS", "OTHER")).verdict == ccf.SOURCE_CONNECTED
+
+
+def test_the_unattributable_message_is_only_used_when_nothing_matched() -> None:
+    """The old message was factually false whenever one declared table matched."""
+    flat = _model("m", (("ORDERS", "file_ok"),), "")
+    assert "none of this source's declared tables match" not in _judge((flat,), tables=("ORDERS", "CUSTOMERS")).detail
+    assert "none of this source's declared tables match" in _judge((flat,), tables=("NOPE",)).detail
+
+
+# --- the decision space, enumerated -----------------------------------------------------------------
 #
 # Three review rounds found five defects because each pass tested the cases its author thought of.
 # This enumerates the whole finite space instead and asserts invariants over every point in it. The
@@ -747,7 +787,13 @@ class _Point(NamedTuple):
 
 
 _CLASSES = ("snowflake", "mysteryengine")  # mappable / unmappable
-_DECLARED = (("ORDERS",), ("MISSING",), ())  # attributable / unattributable / nothing to scope by
+_DECLARED = (
+    ("ORDERS",),  # attributable, complete
+    ("MISSING",),  # nothing matches
+    (),  # nothing to scope by
+    ("ORDERS", "CUSTOMERS"),  # PARTIAL: one matches, one does not
+    ("ORDERS", "OTHER"),  # both match (OTHER is emitted by one partition set)
+)
 _M_TEXTS = (_CONN_M, _COMMENTED_M, "")
 _PARTITION_SETS = (
     ((("ORDERS", "live"),),),
@@ -756,6 +802,8 @@ _PARTITION_SETS = (
     ((("ORDERS", "live"),), (("ORDERS", "file_ok"),)),
     ((("ORDERS", "file_ok"),), (("ORDERS", "live"),)),
     ((("ORDERS", "file_ok"),), (("ORDERS", "file_ok"),)),
+    ((("ORDERS", "live"), ("OTHER", "live")),),  # lets a MULTI-table source match completely
+    ((("ORDERS", "live"), ("OTHER", "file_ok")),),  # multi-table, one live one file
 )
 _DECLS = (
     ((), ()),
@@ -794,6 +842,12 @@ def _raw_partitions(models: tuple[ccf.Model, ...], declared: tuple[str, ...]) ->
     return [p for m in models for p in m.partitions if p["table"].strip("[]\"'").casefold() in keys]
 
 
+def _raw_unmatched(models: tuple[ccf.Model, ...], declared: tuple[str, ...]) -> list[str]:
+    """Declared tables with no emitted counterpart - again computed independently of `_attribute`."""
+    emitted = {p["table"].strip("[]\"'").casefold() for m in models for p in m.partitions}
+    return [name for name in declared if name.strip("[]\"'").casefold() not in emitted]
+
+
 def _violations() -> list[str]:
     """Invariant breaches across the whole space. Empty list == the gate held everywhere."""
     bad = []
@@ -806,8 +860,8 @@ def _violations() -> list[str]:
             bad.append(f"I2 CONNECTED on a commented-out connector :: {pt.label}")
         if pt.verdict.connection_class == "mysteryengine" and pt.verdict.verdict != ccf.SOURCE_NOT_CHECKED:
             bad.append(f"I3 unmappable class certified as {pt.verdict.verdict} :: {pt.label}")
-        if connected and pt.mine is None:
-            bad.append(f"I4 CONNECTED while unattributable :: {pt.label}")
+        if connected and not raw:
+            bad.append(f"I4 CONNECTED while nothing could be attributed :: {pt.label}")
         # The stage name is hard-coded, NOT read from ccf.DECISION_STAGES. Reading the module constant
         # made this invariant vacuous: a mutation that adds "parse" to DECISION_STAGES also flipped
         # this test to False, so the oracle excused the very behaviour it exists to forbid. Measured:
@@ -815,6 +869,12 @@ def _violations() -> list[str]:
         parse_only = bool(pt.lims) and all(entry.get("stage") == "parse" for entry in pt.lims)
         if pt.verdict.verdict == ccf.SOURCE_DECLARED and parse_only:
             bad.append(f"I5 parse-stage limitation excused a downgrade :: {pt.label}")
+        # I7: a PASS is a statement about the whole source, so it needs evidence about every declared
+        # table. Found by probing the space's own dimensions: `_DECLARED` topped out at one table, so
+        # a partial match was unreachable, and a source declaring ORDERS+CUSTOMERS against a
+        # file-backed ORDERS reported NOT_CHECKED where the single-table form reported DOWNGRADED.
+        if connected and _raw_unmatched(pt.models, pt.declared):
+            bad.append(f"I7 CONNECTED while coverage is incomplete :: {pt.label}")
         outcomes = {
             (v.verdict, tuple(v.tables))
             for v in (
@@ -828,8 +888,9 @@ def _violations() -> list[str]:
 
 
 def test_decision_space_holds_every_invariant() -> None:
-    """432 combinations, five invariants, zero tolerated breaches."""
-    assert len(list(_enumerate_space())) == 432
+    """The full cross-product of input axes, seven invariants, zero tolerated breaches."""
+    expected = len(_CLASSES) * len(_DECLARED) * len(_M_TEXTS) * len(_PARTITION_SETS) * len(_DECLS)
+    assert len(list(_enumerate_space())) == expected
     assert _violations() == []
 
 
@@ -851,10 +912,11 @@ def test_enumeration_is_falsifiable_via_the_round4_collapse() -> None:
 
     def collapsing(models, tables):
         if not tables:
-            return None
+            return [], []
         by_exact = {ccf._normalise_table(p["table"]): p for m in models for p in m.partitions}
         mine = [by_exact[k] for k in (ccf._normalise_table(t) for t in tables) if k in by_exact]
-        return mine if len(mine) == len(tables) and mine else None
+        unmatched = [t for t in sorted(tables) if ccf._normalise_table(t) not in by_exact]
+        return (mine, unmatched) if len(mine) == len(tables) - len(unmatched) else ([], unmatched)
 
     try:
         ccf._attribute = collapsing
@@ -874,8 +936,8 @@ def test_enumeration_is_falsifiable_via_dropped_file_partitions() -> None:
     original = ccf._attribute
 
     def drop_file_parts(models, tables):
-        mine = original(models, tables)
-        return None if mine is None else [p for p in mine if p["category"] not in ccf.FILE_CATEGORIES]
+        matched, unmatched = original(models, tables)
+        return [p for p in matched if p["category"] not in ccf.FILE_CATEGORIES], unmatched
 
     try:
         ccf._attribute = drop_file_parts
@@ -994,25 +1056,22 @@ def _mutations():
 
     def drop_file_parts():
         original = ccf._attribute
-        setattr(
-            ccf,
-            "_attribute",
-            lambda m, t: (
-                None
-                if original(m, t) is None
-                else [p for p in original(m, t) if p["category"] not in ccf.FILE_CATEGORIES]
-            ),
-        )
+
+        def dropped(models, tables):
+            matched, unmatched = original(models, tables)
+            return [p for p in matched if p["category"] not in ccf.FILE_CATEGORIES], unmatched
+
+        setattr(ccf, "_attribute", dropped)
         return lambda: setattr(ccf, "_attribute", original)
 
     def loose_connectivity():
         original = ccf._connectivity
 
         def loose(models, token, tables):
-            conn, file_backed, file_tables, attributable = original(models, token, tables)
-            if not attributable:
-                return any(m.has_connector(token) for m in models), False, [], True
-            return conn, file_backed, file_tables, attributable
+            cov = original(models, token, tables)
+            if not cov.attributable:
+                return ccf.Coverage(any(m.has_connector(token) for m in models), False, [], True, [])
+            return cov
 
         setattr(ccf, "_connectivity", loose)
         return lambda: setattr(ccf, "_connectivity", original)
@@ -1022,12 +1081,24 @@ def _mutations():
 
         def collapsing(models, tables):
             if not tables:
-                return None
+                return [], []
             by_exact = {ccf._normalise_table(p["table"]): p for m in models for p in m.partitions}
             mine = [by_exact[k] for k in (ccf._normalise_table(t) for t in tables) if k in by_exact]
-            return mine if len(mine) == len(tables) and mine else None
+            unmatched = [t for t in sorted(tables) if ccf._normalise_table(t) not in by_exact]
+            return (mine, unmatched) if mine else ([], unmatched)
 
         setattr(ccf, "_attribute", collapsing)
+        return lambda: setattr(ccf, "_attribute", original)
+
+    def ignore_incompleteness():
+        """Certify a source whose coverage is incomplete - the round-8 defect, restored."""
+        original = ccf._attribute
+
+        def hide_unmatched(models, tables):
+            matched, _ = original(models, tables)
+            return matched, []
+
+        setattr(ccf, "_attribute", hide_unmatched)
         return lambda: setattr(ccf, "_attribute", original)
 
     return [
@@ -1037,6 +1108,7 @@ def _mutations():
         ("I4", loose_connectivity),
         ("I5", lambda: swap(ccf, "DECISION_STAGES", frozenset({*ccf.DECISION_STAGES, "parse"}))),
         ("I6", collapse),
+        ("I7", ignore_incompleteness),
     ]
 
 
