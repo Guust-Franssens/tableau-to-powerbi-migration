@@ -43,7 +43,7 @@ git clone --filter=blob:none --sparse https://github.com/Guust-Franssens/tableau
 cd tableau-to-powerbi-migration
 git sparse-checkout set .github .vscode docs scripts tests migrations
 # want one example to look at? pull just that folder:
-git sparse-checkout add examples/health-tracker
+git sparse-checkout add examples/eea-urban-adaptation
 ```
 
 For the full repo (all examples + showcase), use a normal `git clone …`. Then set up the Python env:

@@ -14,7 +14,7 @@ observed on a specific workbook, that workbook's slug is cited so the claim is c
 1. **Structural extraction (deterministic, reliable).** `scripts/parse_tableau.py` captures every data
    source, field, calculated-field formula, worksheet encoding, dashboard layout element, and reference
    line from the raw `.twb` XML into a normalized `migration-spec.json`. This runs with zero manual
-   effort on all 16 workbooks and is covered by a 27-test `pytest` suite, so it is the reproducible
+   effort on all 16 workbooks and is covered by a 47-test `pytest` suite, so it is the reproducible
    foundation the fuzzy AI steps build on.
 2. **Real data extraction from `.hyper` extracts.** `scripts/extract_hyper_data.py` pulls actual row
    data out of packaged extracts via `tableauhyperapi`, so a migrated model shows real numbers rather
@@ -38,7 +38,7 @@ observed on a specific workbook, that workbook's slug is cited so the claim is c
    - Bucketed conditional coloring (GOOD/OK/BAD in `shipping-kpis`, 4-bucket quota attainment in
      `sales-commission-model`) is reproduced with Power BI conditional formatting.
 5. **Reusing verified PBIR JSON instead of guessing.** The `pbi-report-builder` agent draws on the
-   `.github/pbi.kb/` visual cookbook (26 known-good `visual.json` templates harvested from real
+   `.github/pbi.kb/` visual cookbook (27 known-good `visual.json` templates harvested from real
    migrations) so structurally unusual visuals are built from proven encodings rather than
    invented ones.
 6. **Preparing the model for AI/Copilot.** The
@@ -122,10 +122,11 @@ a single pass does.
   output before the translated measure is trusted; the automation gets you a first draft, not a
   guarantee.
 - **IronViz infographics and custom geometry parse and build, but render capture may lag.**
-  `broadway-stage-to-screen` (IronViz), `spiraling-satellites` (custom spiral geometry),
-  `fast-fashion-impact`, and `wind-energy-utilization` all produce a semantic model and report, but
-  their Power BI Desktop render verification is still pending, so they are marked built-but-not-yet-
-  render-verified.
+  `broadway-stage-to-screen` (IronViz), `spiraling-satellites` (custom spiral geometry) and
+  `fast-fashion-impact` all produce a semantic model and report, but their Power BI Desktop render
+  verification is still pending, so they are marked built-but-not-yet-render-verified.
+  (`wind-energy-utilization` IS render-verified - its committed before/after pair is
+  `docs/showcase/assets/wind-energy-utilization-1.png` - and the README lists it as such.)
 - **Extract-based data sources with no live upstream** migrate structurally, but real row data requires
   the separate `.hyper` extraction step (or repointing to a true upstream if one exists behind the
   extract).
