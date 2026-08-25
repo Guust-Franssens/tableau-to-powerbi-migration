@@ -1,0 +1,267 @@
+<?xml version='1.0' encoding='utf-8' ?>
+
+<!-- build 20262.26.0623.1517                               -->
+<datasource formatted-name='Complex Custom SQL example' inline='true' source-platform='linux' version='18.1' xml:base='http://10ay.online.tableau.com' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <document-format-change-manifest>
+    <DatabricksCatalog />
+    <ObjectModelEncapsulateLegacy />
+    <ObjectModelTableType />
+    <SchemaViewerObjectModel />
+  </document-format-change-manifest>
+  <repository-location derived-from='/datasources/CustomSQLParametertest?rev=1.0' id='CustomSQLParametertest' path='/t/fabricmigration-cc8fc056b6/datasources' revision='1.1' site='fabricmigration-cc8fc056b6' />
+  <connection class='federated'>
+    <named-connections>
+      <named-connection caption='adb-000000000000000.0.azuredatabricks.net' name='databricks.1m8fiiq0gddv4d17k40wf0ptqxg4'>
+        <connection authentication='oauth' authentication-type='' class='databricks' dbname='fixture_catalog' instanceurl='https://adb-000000000000000.0.azuredatabricks.net/oidc' oauth-config-id='default' odbc-connect-string-extras='' one-time-sql='' schema='default' server='adb-000000000000000.0.azuredatabricks.net' server-oauth='server-custom' username='fixture-user@example.invalid' usesPrivateConnect='' v-auth-scope='' v-http-path='/sql/1.0/warehouses/240f0d0d01d9e8dd' v-oidc-discovery-endpoint='' v-query-tags='' workgroup-auth-mode=''>
+          <connection-customization class='databricks' enabled='false' version='18.1'>
+            <vendor name='databricks' />
+            <driver name='databricks' />
+            <customizations>
+              <customization name='CAP_AUTH_DB_IMPERSONATE' value='no' />
+              <customization name='CAP_AUTH_KERBEROS_IMPERSONATE' value='yes' />
+              <customization name='CAP_COLLECT_TABLE_STATISTICS' value='no' />
+              <customization name='CAP_CONNECT_STORED_PROCEDURE' value='no' />
+              <customization name='CAP_CREATE_TEMP_TABLES' value='no' />
+              <customization name='CAP_DATASERVER_MAGIC_NUMBER' value='no' />
+              <customization name='CAP_DEFERS_CONNECTION_VERIFICATION' value='no' />
+              <customization name='CAP_DISABLE_EXTRACT_TABLE_INDEXING' value='no' />
+              <customization name='CAP_EQUALITY_JOINS_ONLY' value='no' />
+              <customization name='CAP_EQUIJOINS_ONLY' value='no' />
+              <customization name='CAP_FAST_METADATA' value='no' />
+              <customization name='CAP_FORCE_COUNT_FOR_NUMBEROFRECORDS' value='no' />
+              <customization name='CAP_GREENPLUM_TRUST_METADATA_CONTAINSNULL' value='no' />
+              <customization name='CAP_HIVE_FIX_METADATA_NAMES' value='no' />
+              <customization name='CAP_INCLUDE_OTHER_CATALOG_NAME' value='no' />
+              <customization name='CAP_INDEX_TEMP_TABLES' value='no' />
+              <customization name='CAP_INSERT_TEMP_EXEC_STORED_PROCEDURE' value='no' />
+              <customization name='CAP_JDBC_QUERY_USE_PREPARE_PARAMETER_MARKER' value='no' />
+              <customization name='CAP_LOCAL_ALIASES_CASE_INSENSITIVE' value='no' />
+              <customization name='CAP_METADATA_SHOW_OTHER_CATALOGS' value='no' />
+              <customization name='CAP_OAUTH_FEDERATE_ACCCESS_TOKEN' value='no' />
+              <customization name='CAP_OAUTH_FEDERATE_ID_TOKEN' value='no' />
+              <customization name='CAP_OAUTH_VALIDATE_ALWAYS' value='no' />
+              <customization name='CAP_ODBC_ALWAYS_THROW_CONNECT_ERRORS' value='no' />
+              <customization name='CAP_ODBC_BIND_FORCE_DATETIME_AS_CHAR' value='no' />
+              <customization name='CAP_ODBC_BIND_FORCE_DATE_AS_CHAR' value='no' />
+              <customization name='CAP_ODBC_BIND_FORCE_MAX_STRING_BUFFERS' value='no' />
+              <customization name='CAP_ODBC_BIND_FORCE_MEDIUM_STRING_BUFFERS' value='no' />
+              <customization name='CAP_ODBC_BIND_FORCE_SIGNED' value='no' />
+              <customization name='CAP_ODBC_BIND_FORCE_SMALL_STRING_BUFFERS' value='no' />
+              <customization name='CAP_ODBC_BIND_SUPPRESS_INT64' value='no' />
+              <customization name='CAP_ODBC_BIND_SUPPRESS_PREFERRED_TYPES' value='no' />
+              <customization name='CAP_ODBC_BIND_SUPPRESS_WIDE_CHAR' value='no' />
+              <customization name='CAP_ODBC_CURSOR_DYNAMIC' value='no' />
+              <customization name='CAP_ODBC_CURSOR_FORWARD_ONLY' value='yes' />
+              <customization name='CAP_ODBC_CURSOR_KEYSET_DRIVEN' value='no' />
+              <customization name='CAP_ODBC_CURSOR_STATIC' value='no' />
+              <customization name='CAP_ODBC_DRIVER_HIVE_ASSUME_LATEST' value='no' />
+              <customization name='CAP_ODBC_ERROR_IGNORE_FALSE_ALARM' value='no' />
+              <customization name='CAP_ODBC_FETCH_BUFFERS_RESIZABLE' value='no' />
+              <customization name='CAP_ODBC_FETCH_BUFFERS_SIZE_MASSIVE' value='no' />
+              <customization name='CAP_ODBC_FETCH_CONTINUE_ON_ERROR' value='no' />
+              <customization name='CAP_ODBC_FETCH_FORCE_VERIFY_TRUNCATE_BY_CELLSTATUS' value='no' />
+              <customization name='CAP_ODBC_FETCH_INT_TRUNCATION_AS_ERROR' value='yes' />
+              <customization name='CAP_ODBC_FORCE_SINGLE_ROW_BINDING' value='no' />
+              <customization name='CAP_ODBC_IMPORT_GETDATA_BUFFER_LARGE' value='no' />
+              <customization name='CAP_ODBC_METADATA_STRING_LENGTH_UNKNOWN' value='no' />
+              <customization name='CAP_ODBC_METADATA_SUPPRESS_SQLCOLUMNS_API' value='no' />
+              <customization name='CAP_ODBC_METADATA_SUPPRESS_SQLFOREIGNKEYS_API' value='no' />
+              <customization name='CAP_ODBC_METADATA_SUPPRESS_SQLPRIMARYKEYS_API' value='no' />
+              <customization name='CAP_ODBC_METADATA_SUPPRESS_SQLSTATISTICS_API' value='yes' />
+              <customization name='CAP_ODBC_QUERY_USE_PREPARE_PARAMETER_MARKER' value='no' />
+              <customization name='CAP_ODBC_REBIND_SKIP_UNBIND' value='no' />
+              <customization name='CAP_ODBC_SCHEMAS_OPTIONAL' value='no' />
+              <customization name='CAP_ODBC_TRIM_VARCHAR_PADDING' value='no' />
+              <customization name='CAP_ODBC_UNBIND_AUTO' value='no' />
+              <customization name='CAP_ODBC_UNBIND_BATCH' value='no' />
+              <customization name='CAP_ODBC_UNBIND_EACH' value='yes' />
+              <customization name='CAP_ODBC_USE_NATIVE_PROTOCOL' value='yes' />
+              <customization name='CAP_PADDED_SEMANTICS_NCHAR_NVARCHAR' value='no' />
+              <customization name='CAP_PERSIST_SQL_RELATION_ON_LEAF_CONNECTION' value='no' />
+              <customization name='CAP_QUERY_ALLOW_JOIN_REORDER' value='yes' />
+              <customization name='CAP_QUERY_ALLOW_PARTIAL_AGGREGATION' value='yes' />
+              <customization name='CAP_QUERY_ALWAYS_USE_AQ_CACHE' value='no' />
+              <customization name='CAP_QUERY_AVOID_EXPRESSION_INLINING' value='no' />
+              <customization name='CAP_QUERY_BLENDING_ALWAYS_USE_LOCAL_MAPPING_TABLES' value='no' />
+              <customization name='CAP_QUERY_BLENDING_PREFER_LOCAL_MAPPING_TABLES' value='yes' />
+              <customization name='CAP_QUERY_BLENDING_REMOTE_MAPPING_TABLES' value='yes' />
+              <customization name='CAP_QUERY_BOOLEXPR_TO_INTEXPR' value='no' />
+              <customization name='CAP_QUERY_BOOL_IDENTIFIER_TO_LOGICAL' value='no' />
+              <customization name='CAP_QUERY_CAST_MONEY_AS_NUMERIC' value='no' />
+              <customization name='CAP_QUERY_CONVERT_DATETIMES_TO_DATES' value='no' />
+              <customization name='CAP_QUERY_EMPTY_DOMAIN_TOP' value='no' />
+              <customization name='CAP_QUERY_FORCE_AGGREGATE_MEASURES' value='no' />
+              <customization name='CAP_QUERY_GROUP_BY_ALIAS' value='yes' />
+              <customization name='CAP_QUERY_GROUP_BY_DEGREE' value='yes' />
+              <customization name='CAP_QUERY_HAVING_REQUIRES_GROUP_BY' value='yes' />
+              <customization name='CAP_QUERY_HAVING_UNSUPPORTED' value='no' />
+              <customization name='CAP_QUERY_IGNORE_HINT_CHECK_NOT_NULL' value='no' />
+              <customization name='CAP_QUERY_IGNORE_HINT_MAKE_DOMAIN_PREDICATE' value='no' />
+              <customization name='CAP_QUERY_INLINE_COMPLEX_GROUPBYS_IN_SELECTS' value='yes' />
+              <customization name='CAP_QUERY_JOIN_ACROSS_SCHEMAS' value='yes' />
+              <customization name='CAP_QUERY_JOIN_ASSUME_CONSTRAINED' value='no' />
+              <customization name='CAP_QUERY_JOIN_PUSH_DOWN_CONDITION_EXPRESSIONS' value='no' />
+              <customization name='CAP_QUERY_JOIN_REQUIRES_SCOPE' value='no' />
+              <customization name='CAP_QUERY_JOIN_REQUIRES_SUBQUERY' value='no' />
+              <customization name='CAP_QUERY_MINMAX_FORCE_GROUPBYS' value='no' />
+              <customization name='CAP_QUERY_NULL_REQUIRES_CAST' value='yes' />
+              <customization name='CAP_QUERY_OUTER_JOIN_CONDITION_NO_TRIVIAL' value='no' />
+              <customization name='CAP_QUERY_RECOMPILE_FAILED_QUERY' value='no' />
+              <customization name='CAP_QUERY_SELECT_ALIASES_SORTED' value='no' />
+              <customization name='CAP_QUERY_SORT_BY' value='yes' />
+              <customization name='CAP_QUERY_SORT_BY_DEGREE' value='no' />
+              <customization name='CAP_QUERY_SUBQUERIES' value='yes' />
+              <customization name='CAP_QUERY_SUBQUERIES_WITH_TOP' value='yes' />
+              <customization name='CAP_QUERY_SUBQUERIES_WITH_TOP_ALTERNATIVE' value='no' />
+              <customization name='CAP_QUERY_SUBQUERY_QUERY_CONTEXT' value='yes' />
+              <customization name='CAP_QUERY_SUPPORTS_LODJOINS' value='yes' />
+              <customization name='CAP_QUERY_SUPPORT_ANALYTIC_FUNCTIONS' value='yes' />
+              <customization name='CAP_QUERY_SUPPORT_EMPTY_GROUPBY' value='no' />
+              <customization name='CAP_QUERY_SUPPRESS_CHECK_DOMAIN_LITERALS_THRESHOLD' value='no' />
+              <customization name='CAP_QUERY_SUPPRESS_NULL_CHECK_QUERIES' value='no' />
+              <customization name='CAP_QUERY_TAGS_IN_SQL_TEXT' value='no' />
+              <customization name='CAP_QUERY_TIME_REQUIRES_CAST' value='no' />
+              <customization name='CAP_QUERY_TOPSTYLE_LIMIT' value='no' />
+              <customization name='CAP_QUERY_TOPSTYLE_ROWNUM' value='no' />
+              <customization name='CAP_QUERY_TOPSTYLE_TOP' value='no' />
+              <customization name='CAP_QUERY_TOP_0_METADATA' value='yes' />
+              <customization name='CAP_QUERY_TOP_N' value='yes' />
+              <customization name='CAP_QUERY_USE_DOMAIN_EXCEPT_OPTIMIZATION' value='no' />
+              <customization name='CAP_QUERY_USE_DOMAIN_RANGES_OPTIMIZATION' value='yes' />
+              <customization name='CAP_QUERY_USE_DOMAIN_RANGES_OPTIMIZATION_STRINGS' value='no' />
+              <customization name='CAP_QUERY_USE_QUERY_FUSION' value='yes' />
+              <customization name='CAP_QUERY_USE_STRCMP_WITH_WHERE_EXISTS' value='no' />
+              <customization name='CAP_QUERY_WHERE_FALSE_METADATA' value='no' />
+              <customization name='CAP_RELDATEFILT_CASTTODATE' value='no' />
+              <customization name='CAP_RENAME_TABLE_USE_LEAF_CONNECTION_DIALECT' value='no' />
+              <customization name='CAP_SDK_SUPPORTS_PREP_WRITE_TO_DB' value='no' />
+              <customization name='CAP_SELECT_INTO' value='no' />
+              <customization name='CAP_SELECT_TOP_INTO' value='no' />
+              <customization name='CAP_STORED_PROCEDURE_PREFER_TEMP_TABLE' value='no' />
+              <customization name='CAP_STORED_PROCEDURE_REPAIR_TEMP_TABLE_STRINGS' value='no' />
+              <customization name='CAP_STORED_PROCEDURE_TEMP_TABLE_FROM_BUFFER' value='no' />
+              <customization name='CAP_STORED_PROCEDURE_TEMP_TABLE_FROM_NEW_PROTOCOL' value='no' />
+              <customization name='CAP_SUPPORTS_METRICS_ONLY' value='no' />
+              <customization name='CAP_SUPPRESS_CONNECTION_POOLING' value='yes' />
+              <customization name='CAP_SUPPRESS_DISCOVERY_QUERIES' value='no' />
+              <customization name='CAP_SUPPRESS_ENUMERATE_SCHEMAS_VIA_SQL' value='yes' />
+              <customization name='CAP_SUPPRESS_ENUMERATE_TABLES_VIA_SQL' value='yes' />
+              <customization name='CAP_SUPPRESS_GET_SERVER_TIME' value='yes' />
+              <customization name='CAP_SUPPRESS_QUICK_FILTER_ACCELERATION_VIEWS' value='no' />
+              <customization name='CAP_SUPPRESS_TEMP_TABLE_CHECKS' value='no' />
+            </customizations>
+          </connection-customization>
+        </connection>
+      </named-connection>
+    </named-connections>
+    <relation connection='databricks.1m8fiiq0gddv4d17k40wf0ptqxg4' name='Custom SQL Query' type='text'><![CDATA[SELECT
+    o.`Order ID`,
+    o.`Customer Name`,
+    o.Profit,
+    o.Sales
+FROM fixture_catalog.default.orders AS o
+WHERE o.Profit >> <[Parameters].[Parameter 0014036665946123]>   -- parameter
+  AND o.Sales  << 5000                                   -- literal control]]></relation>
+    <metadata-records>
+      <metadata-record class='column'>
+        <remote-name>Order ID</remote-name>
+        <remote-type>129</remote-type>
+        <local-name>[Order ID]</local-name>
+        <parent-name>[Custom SQL Query]</parent-name>
+        <remote-alias>Order ID</remote-alias>
+        <ordinal>1</ordinal>
+        <local-type>string</local-type>
+        <aggregation>Count</aggregation>
+        <width>255</width>
+        <contains-null>true</contains-null>
+        <collation flag='0' name='binary' />
+        <attributes>
+          <attribute datatype='string' name='DebugRemoteType'>&quot;SQL_VARCHAR&quot;</attribute>
+          <attribute datatype='string' name='DebugWireType'>&quot;SQL_C_CHAR&quot;</attribute>
+          <attribute datatype='string' name='TypeIsVarchar'>&quot;true&quot;</attribute>
+        </attributes>
+        <object-id>[_45B6D75ECD4D4E19AD476AA7331DF17A]</object-id>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Customer Name</remote-name>
+        <remote-type>129</remote-type>
+        <local-name>[Customer Name]</local-name>
+        <parent-name>[Custom SQL Query]</parent-name>
+        <remote-alias>Customer Name</remote-alias>
+        <ordinal>2</ordinal>
+        <local-type>string</local-type>
+        <aggregation>Count</aggregation>
+        <width>255</width>
+        <contains-null>true</contains-null>
+        <collation flag='0' name='binary' />
+        <attributes>
+          <attribute datatype='string' name='DebugRemoteType'>&quot;SQL_VARCHAR&quot;</attribute>
+          <attribute datatype='string' name='DebugWireType'>&quot;SQL_C_CHAR&quot;</attribute>
+          <attribute datatype='string' name='TypeIsVarchar'>&quot;true&quot;</attribute>
+        </attributes>
+        <object-id>[_45B6D75ECD4D4E19AD476AA7331DF17A]</object-id>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Profit</remote-name>
+        <remote-type>5</remote-type>
+        <local-name>[Profit]</local-name>
+        <parent-name>[Custom SQL Query]</parent-name>
+        <remote-alias>Profit</remote-alias>
+        <ordinal>3</ordinal>
+        <local-type>real</local-type>
+        <aggregation>Sum</aggregation>
+        <precision>4</precision>
+        <contains-null>true</contains-null>
+        <attributes>
+          <attribute datatype='string' name='DebugRemoteType'>&quot;SQL_DOUBLE&quot;</attribute>
+          <attribute datatype='string' name='DebugWireType'>&quot;SQL_C_DOUBLE&quot;</attribute>
+        </attributes>
+        <object-id>[_45B6D75ECD4D4E19AD476AA7331DF17A]</object-id>
+      </metadata-record>
+      <metadata-record class='column'>
+        <remote-name>Sales</remote-name>
+        <remote-type>5</remote-type>
+        <local-name>[Sales]</local-name>
+        <parent-name>[Custom SQL Query]</parent-name>
+        <remote-alias>Sales</remote-alias>
+        <ordinal>4</ordinal>
+        <local-type>real</local-type>
+        <aggregation>Sum</aggregation>
+        <precision>4</precision>
+        <contains-null>true</contains-null>
+        <attributes>
+          <attribute datatype='string' name='DebugRemoteType'>&quot;SQL_DOUBLE&quot;</attribute>
+          <attribute datatype='string' name='DebugWireType'>&quot;SQL_C_DOUBLE&quot;</attribute>
+        </attributes>
+        <object-id>[_45B6D75ECD4D4E19AD476AA7331DF17A]</object-id>
+      </metadata-record>
+    </metadata-records>
+  </connection>
+  <aliases enabled='yes' />
+  <column caption='Custom SQL Query' datatype='table' name='[__tableau_internal_object_id__].[_45B6D75ECD4D4E19AD476AA7331DF17A]' role='measure' type='quantitative' />
+  <layout dim-ordering='alphabetic' measure-ordering='alphabetic' show-structure='true' />
+  <semantic-values>
+    <semantic-value key='[Country].[Name]' value='&quot;United States&quot;' />
+  </semantic-values>
+  <datasource-dependencies datasource='Parameters'>
+    <column caption='Min Profit Threshold' datatype='real' name='[Parameter 0014036665946123]' param-domain-type='any' role='measure' type='quantitative' value='100.'>
+      <calculation class='tableau' formula='100.' />
+    </column>
+  </datasource-dependencies>
+  <object-graph>
+    <objects>
+      <object caption='Custom SQL Query' id='_45B6D75ECD4D4E19AD476AA7331DF17A'>
+        <properties context=''>
+          <relation connection='databricks.1m8fiiq0gddv4d17k40wf0ptqxg4' name='Custom SQL Query' type='text'><![CDATA[SELECT
+    o.`Order ID`,
+    o.`Customer Name`,
+    o.Profit,
+    o.Sales
+FROM fixture_catalog.default.orders AS o
+WHERE o.Profit >> <[Parameters].[Parameter 0014036665946123]>   -- parameter
+  AND o.Sales  << 5000                                   -- literal control]]></relation>
+        </properties>
+      </object>
+    </objects>
+  </object-graph>
+</datasource>
