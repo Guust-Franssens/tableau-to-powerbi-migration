@@ -297,16 +297,39 @@ def _strip_m_comments(text: str) -> str:
     return re.sub(r"//[^\n]*", " ", text)
 
 
-def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> tuple[bool, bool, list[str]]:
-    """Return (connected, any_file_backed, file_tables) for ONE source, scoped to its own tables.
+def _normalise_table(name: str) -> str:
+    """Comparable form of a table name: unqualified and case-folded.
 
-    `tables` is that data source's declared table names. Scoping matters both ways: an unscoped scan
-    let a legitimately-flat source's partition count against a live one in the same model, and let a
-    live one's connector vouch for tables it does not own.
+    A spec says `DB.PUBLIC.FLIGHTS` where the emitted TMDL says `FLIGHTS`, and case varies freely
+    between the two. Without normalisation those look like different tables and attribution fails on
+    ordinary, correct input.
     """
-    connected = any(model.has_connector(token) for model in models)
-    file_tables = sorted({name for model in models for name in model.file_tables(tables or None)})
-    return connected, bool(file_tables), file_tables
+    return name.rsplit(".", 1)[-1].strip("[]\"'").casefold()
+
+
+def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> tuple[bool, bool, list[str], bool]:
+    """Return (connected, file_backed, file_tables, attributable) for ONE source, scoped to its tables.
+
+    BOTH sides are scoped. An earlier fix scoped only the file side while connector detection stayed
+    model-wide, and blind review showed that is a false PASS in its own right: with two live sources of
+    the same class, source A's preserved connector vouched for source B, and if B's declared table name
+    did not match the emitted one (renamed, qualified, or merely different case) B's file evidence was
+    empty - so a downgraded source reported CONNECTED and the unit exited 0.
+
+    `attributable` is False when NO declared table of this source matches any emitted partition. That is
+    reported rather than guessed: an unattributable source must never borrow another source's verdict.
+    """
+    wanted = {_normalise_table(name) for name in tables}
+    mine = [
+        part for model in models for part in model.partitions if not wanted or _normalise_table(part["table"]) in wanted
+    ]
+    if not mine:
+        return False, False, [], False
+    connected = any(part["category"] in CONNECTED_CATEGORIES for part in mine) and any(
+        model.has_connector(token) for model in models
+    )
+    file_tables = sorted({part["table"] for part in mine if part["category"] in FILE_CATEGORIES})
+    return connected, bool(file_tables), file_tables, True
 
 
 def _connected_verdict(token: str, file_backed: bool, file_tables: list[str]) -> tuple[str, str]:
@@ -326,6 +349,21 @@ def _connected_verdict(token: str, file_backed: bool, file_tables: list[str]) ->
             "source is not reliable enough to call this either way - inspect it by hand",
         )
     return SOURCE_CONNECTED, f"live source is connected in the model (a `{token}.*` connector is present)"
+
+
+def _declared_reason(
+    ctx: "UnitContext", source_id: str, data_source: dict[str, Any], file_tables: list[str]
+) -> str | None:
+    """Why this downgrade counts as DECIDED rather than drifted, or None if nobody recorded it.
+
+    Two sanctioned records, checked in order of specificity: a `limitations_encountered` entry naming
+    the source, then a generated-edit declaration naming one of its file-backed tables.
+    """
+    limitation = _declared_by_limitation(ctx.limitations, source_id, _table_names(data_source))
+    if limitation:
+        return f"downgrade recorded in limitations_encountered: {limitation}"
+    edit = _declared_by_edit(ctx.declarations, set(file_tables))
+    return f"downgrade recorded via generated-edit declaration: {edit}" if edit else None
 
 
 def _judge_source(
@@ -354,12 +392,19 @@ def _judge_source(
             "attribute a downgrade offline; verify this source connects live by hand",
             [],
         )
-    connected, file_backed, file_tables = _connectivity(ctx.models, token, set(_table_names(data_source)))
+    connected, file_backed, file_tables, attributable = _connectivity(ctx.models, token, set(_table_names(data_source)))
 
     def make(verdict: str, detail: str) -> SourceVerdict:
         """Build the verdict for this source, carrying the shared identity fields."""
         return SourceVerdict(source_id, caption, connection_class, mode, target, verdict, detail, list(file_tables))
 
+    if not attributable:
+        return make(
+            SOURCE_NOT_CHECKED,
+            "none of this source's declared tables match an emitted model partition, so no evidence "
+            "can be attributed to it - it must not borrow another source's verdict. Check the "
+            "spec-to-TMDL table naming by hand",
+        )
     if connected:
         return make(*_connected_verdict(token, file_backed, file_tables))
     if not file_backed:
@@ -368,12 +413,9 @@ def _judge_source(
             "no live connection found, but no file-backed partition either - the source's rows were "
             "not clearly materialised to a file (another gate owns an empty/stub model)",
         )
-    declared = _declared_by_limitation(ctx.limitations, source_id, _table_names(data_source))
+    declared = _declared_reason(ctx, source_id, data_source, file_tables)
     if declared:
-        return make(SOURCE_DECLARED, f"downgrade recorded in limitations_encountered: {declared}")
-    edit = _declared_by_edit(ctx.declarations, set(file_tables))
-    if edit:
-        return make(SOURCE_DECLARED, f"downgrade recorded via generated-edit declaration: {edit}")
+        return make(SOURCE_DECLARED, declared)
     return make(
         SOURCE_DOWNGRADED,
         f"a '{connection_class}' live source, but the model has no `{token}.*` connector and its rows "

@@ -512,3 +512,75 @@ def test_a_file_table_belonging_to_ANOTHER_source_does_not_taint_this_one() -> N
     )
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_CONNECTED
+
+
+# --------------------------------------------------------------------------- round-2 review finding
+#
+# The round-1 fix scoped the FILE side per-source but left connector detection model-wide. Blind
+# review showed that is its own false PASS: with two live sources of the same class, source A's
+# preserved connector vouched for source B, and if B's declared table name did not match the emitted
+# one, B had no file evidence either - so a downgraded source reported CONNECTED and the unit exited 0.
+# A fix that moves the failure boundary instead of removing it is the thing to watch for.
+
+
+def _two_source_unit(declared_b: str) -> tuple[list[dict], ccf.UnitContext]:
+    """Two same-class live sources; ORDERS stays live, FLIGHTS is materialised to a file."""
+    sources = [
+        _live_source("ds.a", "snowflake", tables=["ORDERS"]),
+        _live_source("ds.b", "snowflake", tables=[declared_b] if declared_b else []),
+    ]
+    model = ccf.Model(
+        "m",
+        "m",
+        ({"table": "ORDERS", "category": "live"}, {"table": "FLIGHTS", "category": "file_ok"}),
+        'Snowflake.Databases("s","d")',
+    )
+    return sources, ccf.UnitContext((model,), (), ())
+
+
+def test_one_sources_connector_does_not_vouch_for_another() -> None:
+    """The round-2 finding: a downgraded source must not inherit a sibling's connector."""
+    sources, ctx = _two_source_unit("DB.PUBLIC.FLIGHTS")
+    verdicts = [ccf._judge_source(s, "live_source", "snowflake", "live", ctx) for s in sources]
+    assert [v.verdict for v in verdicts] == [ccf.SOURCE_CONNECTED, ccf.SOURCE_DOWNGRADED]
+
+
+@pytest.mark.parametrize("declared", ["flights", "FLIGHTS", "DB.PUBLIC.FLIGHTS", "[db].[public].[Flights]"])
+def test_benign_table_name_differences_still_attribute(declared: str) -> None:
+    """Case and qualification differ freely between a spec and emitted TMDL on correct input.
+
+    If those broke attribution the gate would go quiet on ordinary migrations, so they are normalised
+    rather than treated as a mismatch.
+    """
+    sources, ctx = _two_source_unit(declared)
+    assert ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx).verdict == ccf.SOURCE_DOWNGRADED
+
+
+def test_a_renamed_table_is_unattributable_and_says_so() -> None:
+    """A genuine rename is honestly unknowable - and must not fall back to a sibling's PASS.
+
+    The DETAIL is asserted, not just the verdict. Mutation testing showed why: deleting the
+    attribution guard entirely still yields NOT_CHECKED, because an unattributable source has neither
+    connector nor file evidence and falls through to the generic branch. So a verdict-only assertion
+    could not fail, and the guard's real value - telling an operator this is a spec-to-TMDL NAMING
+    mismatch rather than an empty model - was untested.
+    """
+    sources, ctx = _two_source_unit("Flights_Renamed")
+    verdict = ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx)
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+    assert "declared tables match an emitted model partition" in verdict.detail
+    assert "borrow another source's verdict" in verdict.detail
+
+
+def test_a_source_declaring_no_tables_is_not_checked_as_a_PARTIAL() -> None:
+    """Different reason, same safe verdict - and worth pinning separately.
+
+    A source with no declared tables cannot be scoped, so every partition is attributed to it and it
+    sees both a connector and a file-backed table: a PARTIAL, not an attribution failure. An earlier
+    version of this test parametrised the two cases together and failed, because they are genuinely
+    different paths that happen to share a verdict.
+    """
+    sources, ctx = _two_source_unit("")
+    verdict = ccf._judge_source(sources[1], "live_source", "snowflake", "live", ctx)
+    assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
+    assert "PARTIAL" in verdict.detail
