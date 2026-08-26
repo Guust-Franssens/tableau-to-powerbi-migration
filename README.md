@@ -12,7 +12,7 @@
 &nbsp;![Microsoft Fabric](https://img.shields.io/badge/Microsoft_Fabric-117865)
 &nbsp;![GitHub Copilot](https://img.shields.io/badge/GitHub_Copilot-000000?logo=githubcopilot&logoColor=white)
 &nbsp;![Migrations](https://img.shields.io/badge/migrations-16-2ea44f)
-&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-47%2F47-2ea44f)
+&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-48%2F48-2ea44f)
 
 **[TL;DR](#tldr)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[What you get](#what-you-get)** &nbsp;·&nbsp; **[Repo layout](#repo-layout)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Prerequisites](#prerequisites)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
 
@@ -133,7 +133,7 @@ original dashboards belongs to their respective Tableau Public authors.
   (see [`docs/migration-spec.md`](docs/migration-spec.md)). Also accepts a standalone `.tds`/`.tdsx`
   data source, and flags Tableau **published** data sources (`sqlproxy`) with a stable dedup key so one
   shared datasource becomes **one** semantic model instead of a duplicate per workbook
-  (`scripts/published_datasource_registry.py`). Covered by a 47-test `pytest` suite.
+  (`scripts/published_datasource_registry.py`). Covered by a 48-test `pytest` suite.
 - **Estate lineage discovery** (`scripts/tableau_lineage.py`): for a whole Tableau Server/Cloud estate,
   queries the **Metadata API** (`publishedDatasources { downstreamWorkbooks }`) and prints a
   **model-first migration plan** ordered by leverage — migrate each published data source once, then
@@ -356,7 +356,7 @@ than it is.
 uv sync --extra dev
 ruff format . ; ruff check . --fix
 pylint scripts
-pytest -q            # 47 parser tests
+pytest -q            # 48 parser tests
 ```
 
 ## 📊 Status: what's covered
