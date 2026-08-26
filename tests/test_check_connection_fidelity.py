@@ -838,27 +838,47 @@ _AUDITED_PASS_SURFACE = frozenset(
 # Constructs a name scan cannot see through. The module uses NONE of them, so the gate bans them
 # rather than trying to analyse them - see `_closure_violations`.
 _REFLECTIVE_BUILTINS = frozenset({"getattr", "setattr", "globals", "vars", "eval", "exec", "locals", "__import__"})
+_REFLECTIVE_ATTRS = frozenset({"import_module", "load_module", "get_data", "find_spec", "module_from_spec"})
+_REFLECTIVE_MODULES = frozenset({"importlib", "imp", "runpy", "ctypes", "pickle"})
 
 
 def _reflective_bypasses(source: str) -> list[str]:
-    """Uses of constructs that could reach a pass constant invisibly to an AST name scan."""
+    """Uses of constructs that could reach a pass constant invisibly to an AST name scan.
+
+    ⚠️ A BLOCKLIST, and therefore NOT a proof. Rounds 13-15 each produced another spelling - a local
+    variable, `getattr`, a module alias, `importlib.import_module`, an annotated alias - because
+    enumerating bans has exactly the same unbounded regress as enumerating detections. This covers
+    the constructs the module could plausibly acquire and every one review has demonstrated; it does
+    not claim exhaustiveness against an adversary. What is and is not claimed: see the test docstring.
+    """
     tree = ast.parse(source)
     bad = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _REFLECTIVE_BUILTINS:
-            bad.append(f"reflective builtin `{node.func.id}` at line {node.lineno}")
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in _REFLECTIVE_BUILTINS:
+                bad.append(f"reflective builtin `{node.func.id}` at line {node.lineno}")
+            if isinstance(node.func, ast.Attribute) and node.func.attr in _REFLECTIVE_ATTRS:
+                bad.append(f"reflective call `.{node.func.attr}()` at line {node.lineno}")
         if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
             bad.append(f"star import at line {node.lineno}")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                root = (alias.name or "").split(".")[0]
+                if root in _REFLECTIVE_MODULES:
+                    bad.append(f"import of reflective module `{alias.name}` at line {node.lineno}")
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "sys":
             if node.attr == "modules":
                 bad.append(f"sys.modules lookup at line {node.lineno}")
     for node in tree.body:
-        if (
-            isinstance(node, ast.Assign)
-            and {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)} & _PASS_NAMES
-        ):
-            targets = ", ".join(t.id for t in node.targets if isinstance(t, ast.Name))
-            bad.append(f"module-level alias of a pass constant: {targets} at line {node.lineno}")
+        targets: list[str] = []
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        if not targets or getattr(node, "value", None) is None:
+            continue
+        if {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)} & _PASS_NAMES:
+            bad.append(f"module-level alias of a pass constant: {', '.join(targets)} at line {node.lineno}")
     return bad
 
 
@@ -873,21 +893,30 @@ def _closure_violations(source: str) -> list[str]:
 
 
 def test_the_set_of_pass_producing_paths_is_closed() -> None:
-    """Every function that can touch a pass is known and audited, and reflection is banned.
+    """The pass surface is pinned, and the constructs that would hide one are banned.
 
-    ⚠️ THE HONEST CLAIM, because the previous two versions of this docstring over-claimed and blind
-    review broke both. A static scan CANNOT soundly prove closure over arbitrary Python - round 13
-    defeated a return-expression scan with a local variable, and round 14 defeated the function-level
-    name scan with `getattr(sys.modules[__name__], "STATUS_OK")` and a module-level alias. Chasing
-    bypasses one at a time is an infinite regress, because the language is dynamic.
+    ⚠️ WHAT THIS DOES AND DOES NOT CLAIM. Three earlier versions of this docstring over-claimed and
+    blind review broke all three: a return-expression scan fell to a local variable (r13), a
+    function-level name scan fell to `getattr` and a module alias (r14), and a ban-list fell to
+    `importlib.import_module` and an annotated alias (r15).
 
-    So the contract has two halves and the soundness is CONDITIONAL, not absolute:
-      1. the set of functions mentioning a pass constant is pinned (conservative, over-approximating)
-      2. the constructs a name scan cannot see through are BANNED outright, and that ban is checked
+    The lesson is not "add two more patterns". It is that **no syntactic check can prove a semantic
+    property**, and that swapping "enumerate the detections" for "enumerate the bans" kept the
+    identical unbounded regress - I claimed to have ended it in r14 and had not.
 
-    Half 2 is what makes half 1 meaningful. The module uses none of these constructs today, so the
-    ban costs nothing; if one is ever genuinely needed, this test fails and the closure argument must
-    be rebuilt rather than quietly assumed.
+    So, plainly:
+
+      NOT claimed - a proof of closure against an adversary. Someone determined to add a hidden pass
+      path in Python can, and no amount of AST pattern-matching changes that.
+
+      CLAIMED - a TRIPWIRE against the realistic failure, which is an ACCIDENTAL new pass path added
+      by someone who is not hiding it. That is the failure that actually happened here: eleven of the
+      twenty defects in this module were exactly that, none of them concealed.
+
+    The real assurance is BEHAVIOURAL, not syntactic: the 1440-point decision-space enumeration with
+    eight invariants, each proven non-vacuous under its own mutation, plus four committed fixtures
+    pinned to exit codes. Those observe what the gate DOES. This test only observes what it LOOKS
+    like, and is worth keeping for the same reason a smoke alarm is - not because it stops arson.
 
     Audited surface, with the guard or role that makes each safe:
       _connected_verdict  CONNECTED  refuses on any file-backed partition or unmatched table
@@ -911,8 +940,10 @@ def test_the_set_of_pass_producing_paths_is_closed() -> None:
         "def _sneaky_default(value=EXIT_OK):\n    return value\n",
         'def _sneaky_getattr():\n    return getattr(sys.modules[__name__], "STATUS_OK")\n',
         "PASS_ALIAS = STATUS_OK\ndef _sneaky_alias():\n    return PASS_ALIAS\n",
+        "import importlib\ndef _sneaky_importlib():\n    return importlib.import_module(__name__).STATUS_OK\n",
+        "PASS_ANN: int = STATUS_OK\ndef _sneaky_annotated():\n    return PASS_ANN\n",
     ],
-    ids=["direct", "variable", "dict", "default-arg", "getattr", "module-alias"],
+    ids=["direct", "variable", "dict", "default-arg", "getattr", "module-alias", "importlib", "annotated-alias"],
 )
 def test_the_closure_gate_catches_every_shape_of_new_pass_path(sneak: str) -> None:
     """The contract must fail on a new pass path however it is spelled.
