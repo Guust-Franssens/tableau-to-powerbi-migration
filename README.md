@@ -355,8 +355,16 @@ than it is.
 ```powershell
 uv sync --extra dev
 ruff format . ; ruff check . --fix
+
+# pylint runs over THREE roots in CI, and they are separate invocations on purpose:
+# scripts/probe_desktop_query.py is a forwarding shim sharing a module name with the
+# bundled script it forwards to, so one combined run resolves the import to the shim.
+# Linting only `scripts` is how a change inside a skill bundle passes locally and fails CI.
 pylint scripts
-pytest -q            # 48 parser tests
+pylint .github/skills/pbip-model-refresh/scripts
+pylint .github/skills/powerbi-ai-readiness/scripts
+
+pytest -q            # whole suite (~2,170 tests); `pytest -q tests/test_parse_tableau.py` for the 48 parser tests
 ```
 
 ## 📊 Status: what's covered
