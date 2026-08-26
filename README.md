@@ -352,24 +352,41 @@ than it is.
 
 ## 🛠️ Development
 
-This is the fast pre-push loop, and it mirrors the CI gates that fail most often — not the whole
-workflow. CI additionally runs the migration-spec, privacy, data-model, navigation, capability-wiring,
-convention-sync and AI-readiness gates plus a Windows bundle job; see
-[`.github/workflows/checks.yml`](.github/workflows/checks.yml) for the full set.
+This is a fast local subset of CI — not the whole workflow. CI additionally runs the migration-spec,
+privacy, data-model, navigation, capability-wiring, convention-sync and AI-readiness gates plus a
+Windows bundle job; see [`.github/workflows/checks.yml`](.github/workflows/checks.yml) for the full set.
+
+Every command goes through `uv run`, exactly as CI does. That is not a stylistic choice: `uv sync`
+populates `.venv` but does not activate it, so in a fresh shell a bare `pytest` is simply not found,
+and a bare `ruff`/`pylint` silently resolves to whatever is installed globally. Measured on this
+repository, on identical code:
+
+| command | exit | score | findings |
+|---|---|---|---|
+| `pylint scripts` (global) | **10** | 9.97 | **10** |
+| `uv run pylint scripts` | **0** | 10.00 | 0 |
+
+The global install cannot see the project's optional dependencies, so it invents import errors CI
+never reports. Chasing those is pure waste, and the real signal is buried among them.
+
+The paths are CI's paths, deliberately. Running `ruff format .` instead reformats fenced Python
+inside two committed markdown files under `docs/` and `.github/pbi.kb/` — measured — which CI neither
+checks nor fixes, so you would carry unrelated modifications in your diff forever.
 
 ```powershell
 uv sync --all-extras   # NOT --extra dev: several tests import tableauhyperapi, which lives in `extract`
-ruff format . ; ruff check . --fix
+uv run ruff format scripts tests .github/skills
+uv run ruff check scripts tests .github/skills --fix
 
 # pylint runs over THREE roots in CI, and they are separate invocations on purpose:
 # scripts/probe_desktop_query.py is a forwarding shim sharing a module name with the
 # bundled script it forwards to, so one combined run resolves the import to the shim.
 # Linting only `scripts` is how a change inside a skill bundle passes locally and fails CI.
-pylint scripts
-pylint .github/skills/pbip-model-refresh/scripts
-pylint .github/skills/powerbi-ai-readiness/scripts
+uv run pylint scripts
+uv run pylint .github/skills/pbip-model-refresh/scripts
+uv run pylint .github/skills/powerbi-ai-readiness/scripts
 
-pytest -q            # whole suite (~2,170 tests); `pytest -q tests/test_parse_tableau.py` for the 48 parser tests
+uv run pytest -q     # whole suite (~2,170 tests); add `tests/test_parse_tableau.py` for just the 48 parser tests
 ```
 
 ## 📊 Status: what's covered
