@@ -352,8 +352,13 @@ than it is.
 
 ## 🛠️ Development
 
+This is the fast pre-push loop, and it mirrors the CI gates that fail most often — not the whole
+workflow. CI additionally runs the migration-spec, privacy, data-model, navigation, capability-wiring,
+convention-sync and AI-readiness gates plus a Windows bundle job; see
+[`.github/workflows/checks.yml`](.github/workflows/checks.yml) for the full set.
+
 ```powershell
-uv sync --extra dev
+uv sync --all-extras   # NOT --extra dev: several tests import tableauhyperapi, which lives in `extract`
 ruff format . ; ruff check . --fix
 
 # pylint runs over THREE roots in CI, and they are separate invocations on purpose:
