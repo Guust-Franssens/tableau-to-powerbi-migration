@@ -674,9 +674,27 @@ def test_gate_registrations_match_native_exit_constants() -> None:
     assert gate.finding_statuses == {"FINDINGS"}
     assert gate.not_checked_statuses == {"ERROR"}
 
+    fidelity = _load_script_module("check_connection_fidelity.py")
+    gate = _gate_by_id("connection-fidelity")
+    assert gate.pass_statuses == {fidelity.STATUS_OK}
+    assert gate.pass_exit_codes == {fidelity.EXIT_OK}
+    assert gate.finding_statuses == {fidelity.STATUS_DOWNGRADED}
+    assert gate.finding_exit_codes == {fidelity.EXIT_DOWNGRADED}
+    assert gate.not_checked_statuses == {fidelity.STATUS_SKIPPED}
+    assert gate.not_checked_exit_codes == {fidelity.EXIT_SKIPPED}
 
-def test_cli_model_scope_exits_zero_on_committed_clean_fixture() -> None:
-    """Subprocess-level proof that model scope can go green with real native gate wiring."""
+
+def test_cli_model_scope_reports_not_checked_for_unattributable_connection_fixture() -> None:
+    """Subprocess-level proof that model scope runs real native gate wiring end to end.
+
+    This fixture's only table (`Sales`) is an inline `#table(...)` literal with no `data_sources`
+    entry in its spec at all - it was built to exercise the OTHER model-scope gates cheaply, not to
+    model a real Tableau connection. `check_connection_fidelity` has no honest spec counterpart to
+    check it against (an inline literal maps to no Tableau connection class), so it correctly reports
+    SKIPPED/NOT_CHECKED rather than fabricating a PASS - and `check_unit` correctly keeps that from
+    being silently absorbed into AUTOMATED_CHECKS_PASS (issue #328). Every other native gate on this
+    fixture still proves PASS on real wiring, so this is not a regression in what was already checked.
+    """
     fixture = _freshen_clean_fixture_cache()
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(fixture), "--scope", "model"],
@@ -686,14 +704,20 @@ def test_cli_model_scope_exits_zero_on_committed_clean_fixture() -> None:
         check=False,
     )
 
-    assert result.returncode == cu.EXIT_OK, result.stdout + result.stderr
-    assert "AUTOMATED_CHECKS_PASS" in result.stdout
+    assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
+    assert "UNIT CHECK (model scope): NOT_CHECKED" in result.stdout
+    assert "connection-fidelity: NOT_CHECKED (native SKIPPED exit 3)" in result.stdout
     assert "cache-freshness: PASS - mtime-only partial check" in result.stdout
     assert "data-model: PASS" in result.stdout
 
 
-def test_cli_integration_scope_exits_zero_on_committed_clean_fixture() -> None:
-    """Subprocess-level exit-0 proof with real native gate wiring, not monkeypatched passes."""
+def test_cli_integration_scope_reports_not_checked_for_unattributable_connection_fixture() -> None:
+    """Subprocess-level proof with real native gate wiring, not monkeypatched passes.
+
+    Same fixture and reasoning as the model-scope counterpart above: the `Sales` table's inline
+    `#table(...)` literal has no data source to attribute a connection to, so connection-fidelity
+    SKIPS honestly and the unit is legitimately NOT_CHECKED rather than a false AUTOMATED_CHECKS_PASS.
+    """
     fixture = REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(fixture), "--scope", "integration"],
@@ -703,8 +727,11 @@ def test_cli_integration_scope_exits_zero_on_committed_clean_fixture() -> None:
         check=False,
     )
 
-    assert result.returncode == cu.EXIT_OK, result.stdout + result.stderr
-    assert "AUTOMATED_CHECKS_PASS" in result.stdout
+    assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
+    assert "UNIT CHECK (integration scope): NOT_CHECKED" in result.stdout
+    assert "connection-fidelity: NOT_CHECKED (native SKIPPED exit 3)" in result.stdout
+    assert "blank-placeholders: PASS (native OK exit 0)" in result.stdout
+    assert "field-bindings: PASS (native OK exit 0)" in result.stdout
     assert "omitted checks:" in result.stdout
 
 
@@ -824,7 +851,10 @@ def test_external_model_is_reported_external_not_missing() -> None:
     assert "no semantic model found" not in result.stdout
     assert "check it with: python scripts/check_unit.py" in result.stdout
     assert "not_checked_external=9" in result.stdout
-    assert "not_checked_missing_input=1" in result.stdout
+    # 2, not 1: `connection-fidelity` (#328) also cannot check this fixture, but for a DIFFERENT
+    # reason than externality - the fixture carries no migration-spec.json, so that gate has no
+    # declared connection to compare against and honestly reports missing input rather than EXTERNAL.
+    assert "not_checked_missing_input=2" in result.stdout
 
 
 def test_external_model_brownfield_is_evidenced_not_missing() -> None:

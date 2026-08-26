@@ -1,0 +1,29 @@
+{
+  "migration_spec_version": "1.0",
+  "source": { "workbook": "Regional_Scorecard_Dashboard.twbx" },
+  "data_sources": [
+    {
+      "id": "ds.snowflake_scorecard",
+      "caption": "Snowflake Scorecard (custom SQL)",
+      "connection": {
+        "class": "snowflake",
+        "mode": "extract",
+        "server": "acme-fixture.snowflakecomputing.com",
+        "database": "SCORECARD",
+        "powerbi_target": "live_source",
+        "powerbi_target_reason": "'snowflake' is a LIVE system. The semantic model MUST connect to it directly; the packaged .hyper is only Tableau's cache."
+      },
+      "tables": [
+        { "id": "tbl.flights", "name": "FLIGHTS", "source_relation": "custom-sql" }
+      ]
+    }
+  ],
+  "limitations_encountered": [
+    {
+      "item": "ds.snowflake_scorecard",
+      "issue": "live Snowflake custom SQL could not be translated; materialised from the packaged .hyper to CSV so the model would refresh. DECIDED, not drifted.",
+      "severity": "info",
+      "stage": "semantic_build"
+    }
+  ]
+}

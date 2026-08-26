@@ -8,6 +8,9 @@ UNIT CHECK (model scope): NOT_CHECKED - <UNIT>
       suspected owner: integration (model placeholder referenced by report)
       rerun: <PY> <REPO>/scripts/check_blank_placeholders.py <UNIT>
   field-bindings: PASS (native OK exit 0)
+  connection-fidelity: NOT_CHECKED (native SKIPPED exit 3)
+      suspected owner: integration (spec connection target vs emitted model M)
+      rerun: <PY> <REPO>/scripts/check_connection_fidelity.py <UNIT>
   sqlproxy-connections: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
       suspected owner: model
       detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
@@ -32,7 +35,7 @@ UNIT CHECK (model scope): NOT_CHECKED - <UNIT>
   cache-freshness: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
       suspected owner: model
       detail: model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
-SUMMARY: findings_by_owner=none; not_checked_structural=0; not_checked_external=9; not_checked_missing_input=1; ladder=NOT_CHECKED exit=2
+SUMMARY: findings_by_owner=none; not_checked_structural=0; not_checked_external=9; not_checked_missing_input=2; ladder=NOT_CHECKED exit=2
 
 BROWNFIELD DISCOVERY (read-only):
   expected a migration unit or engine bundle shaped as one of:

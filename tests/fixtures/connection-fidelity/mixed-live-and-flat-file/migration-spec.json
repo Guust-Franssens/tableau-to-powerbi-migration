@@ -1,0 +1,36 @@
+{
+  "migration_spec_version": "1.0",
+  "source": { "workbook": "Regional_Scorecard_Dashboard.twbx" },
+  "data_sources": [
+    {
+      "id": "ds.snowflake_scorecard",
+      "caption": "Snowflake Scorecard (custom SQL)",
+      "connection": {
+        "class": "snowflake",
+        "mode": "extract",
+        "server": "acme-fixture.snowflakecomputing.com",
+        "database": "SCORECARD",
+        "powerbi_target": "live_source",
+        "powerbi_target_reason": "'snowflake' is a LIVE system. The semantic model MUST connect to it directly."
+      },
+      "tables": [
+        { "id": "tbl.flights", "name": "FLIGHTS", "source_relation": "custom-sql" }
+      ]
+    },
+    {
+      "id": "ds.regional_targets_csv",
+      "caption": "Regional Targets (Excel on a file share)",
+      "connection": {
+        "class": "excel-direct",
+        "mode": "extract",
+        "server": null,
+        "powerbi_target": "flat_file",
+        "powerbi_target_reason": "The Tableau source IS a workbook on a file share. There is no upstream system to connect to, so a file-reading partition is the FAITHFUL translation, not a downgrade."
+      },
+      "tables": [
+        { "id": "tbl.targets", "name": "REGIONAL_TARGETS", "source_relation": "table" }
+      ]
+    }
+  ],
+  "limitations_encountered": []
+}
