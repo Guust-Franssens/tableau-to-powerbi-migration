@@ -8,6 +8,7 @@ would fail each time, after first asserting the mutation actually landed.
 
 from __future__ import annotations
 
+import ast
 import itertools
 import json
 import subprocess
@@ -792,6 +793,61 @@ def test_a_source_scoped_declaration_still_stands_on_incomplete_coverage() -> No
     flat = _model("m", (("ORDERS", "file_ok"),), "")
     lims = ({"stage": "semantic_build", "item": "ds.sf", "issue": "materialised on purpose"},)
     assert _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=lims).verdict == ccf.SOURCE_DECLARED
+
+
+def test_the_set_of_pass_producing_paths_is_closed() -> None:
+    """Every code path that can yield a pass is known and audited - enforced, not asserted in prose.
+
+    Five review rounds found the same family of defect: a predicate that can produce a PASS while
+    being imprecise about ownership. Fixing site after site never converged, because nothing said how
+    many sites there were. This parses the module and pins the list.
+
+    Adding a new `return SOURCE_CONNECTED` / `SOURCE_DECLARED` / `STATUS_OK` / `EXIT_OK` fails this
+    test until it is added below, which is the point: the failure is the prompt to audit it against
+    the rule the whole module runs on - a finding may rest on partial evidence, a pass may not.
+
+    Audited, with the guard that makes each safe:
+      _connected_verdict  CONNECTED  - refuses on any file-backed partition or unmatched table
+      _declared_verdict   DECLARED   - refuses unless the record is precise AND (source-scoped or complete)
+      _finalize_unit      OK         - refuses while any live source is unchecked
+      merge               OK         - refuses while any unit is DOWNGRADED or SKIPPED
+      main                EXIT_OK    - derived from merge, plus the explicit `--warn-only` escape hatch
+    """
+    source = (REPO_ROOT / "scripts" / "check_connection_fidelity.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    pass_names = {"SOURCE_CONNECTED", "SOURCE_DECLARED", "STATUS_OK", "EXIT_OK"}
+    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        if not {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)} & pass_names:
+            continue
+        owner = max(
+            (f for f in functions if f.lineno <= node.lineno <= (f.end_lineno or 0)),
+            key=lambda f: f.lineno,
+            default=None,
+        )
+        found.add(owner.name if owner else "<module>")
+    assert found == {"_connected_verdict", "_declared_verdict", "_unit_result", "main"}, (
+        f"the set of pass-producing paths changed: {sorted(found)}. Audit the new one against "
+        "'a finding may rest on partial evidence, a pass may not', then update this test."
+    )
+
+
+def test_unit_result_only_counts_and_never_decides() -> None:
+    """`_unit_result` names both pass verdicts but must not be able to grant one.
+
+    It appears in the audit above only because it COUNTS verdicts. Pinning that keeps the audit
+    honest: if it ever starts deciding, this fails rather than the count silently looking fine.
+    """
+    verdicts = [
+        ccf.SourceVerdict("ds.a", "a", "snowflake", "live", "live_source", ccf.SOURCE_DOWNGRADED, "d", []),
+        ccf.SourceVerdict("ds.b", "b", "snowflake", "live", "live_source", ccf.SOURCE_CONNECTED, "c", []),
+    ]
+    result = ccf._unit_result(Path("u/migration-spec.json"), ccf.STATUS_DOWNGRADED, verdicts, detail=None)
+    assert result["status"] == ccf.STATUS_DOWNGRADED  # passed straight through, not re-derived
+    assert result["connected"] == 1 and result["downgraded"] == 1
 
 
 def test_a_table_scoped_declaration_still_passes_when_coverage_is_complete() -> None:
