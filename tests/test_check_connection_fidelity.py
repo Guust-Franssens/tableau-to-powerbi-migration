@@ -823,14 +823,73 @@ def _functions_touching_a_pass(source: str) -> dict[str, list[str]]:
     return touching
 
 
+_AUDITED_PASS_SURFACE = frozenset(
+    {
+        "_connected_verdict",
+        "_declared_verdict",
+        "_finalize_unit",
+        "merge",
+        "main",
+        "_unit_result",
+        "render",
+    }
+)
+
+# Constructs a name scan cannot see through. The module uses NONE of them, so the gate bans them
+# rather than trying to analyse them - see `_closure_violations`.
+_REFLECTIVE_BUILTINS = frozenset({"getattr", "setattr", "globals", "vars", "eval", "exec", "locals", "__import__"})
+
+
+def _reflective_bypasses(source: str) -> list[str]:
+    """Uses of constructs that could reach a pass constant invisibly to an AST name scan."""
+    tree = ast.parse(source)
+    bad = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _REFLECTIVE_BUILTINS:
+            bad.append(f"reflective builtin `{node.func.id}` at line {node.lineno}")
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            bad.append(f"star import at line {node.lineno}")
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "sys":
+            if node.attr == "modules":
+                bad.append(f"sys.modules lookup at line {node.lineno}")
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)} & _PASS_NAMES
+        ):
+            targets = ", ".join(t.id for t in node.targets if isinstance(t, ast.Name))
+            bad.append(f"module-level alias of a pass constant: {targets} at line {node.lineno}")
+    return bad
+
+
+def _closure_violations(source: str) -> list[str]:
+    """Everything that breaks the pass-surface contract, from either half of it."""
+    touching = set(_functions_touching_a_pass(source))
+    bad = []
+    if touching != set(_AUDITED_PASS_SURFACE):
+        bad.append(f"pass surface changed: {sorted(touching ^ set(_AUDITED_PASS_SURFACE))}")
+    bad.extend(_reflective_bypasses(source))
+    return bad
+
+
 def test_the_set_of_pass_producing_paths_is_closed() -> None:
-    """Every function that can touch a pass is known and audited - enforced, not asserted in prose.
+    """Every function that can touch a pass is known and audited, and reflection is banned.
 
-    Five review rounds found the same family of defect: a predicate that can produce a PASS while
-    being imprecise about ownership. Fixing site after site never converged, because nothing said how
-    many sites there were. This pins the surface so the class can be closed rather than chased.
+    ⚠️ THE HONEST CLAIM, because the previous two versions of this docstring over-claimed and blind
+    review broke both. A static scan CANNOT soundly prove closure over arbitrary Python - round 13
+    defeated a return-expression scan with a local variable, and round 14 defeated the function-level
+    name scan with `getattr(sys.modules[__name__], "STATUS_OK")` and a module-level alias. Chasing
+    bypasses one at a time is an infinite regress, because the language is dynamic.
 
-    Audited, with the guard or role that makes each safe:
+    So the contract has two halves and the soundness is CONDITIONAL, not absolute:
+      1. the set of functions mentioning a pass constant is pinned (conservative, over-approximating)
+      2. the constructs a name scan cannot see through are BANNED outright, and that ban is checked
+
+    Half 2 is what makes half 1 meaningful. The module uses none of these constructs today, so the
+    ban costs nothing; if one is ever genuinely needed, this test fails and the closure argument must
+    be rebuilt rather than quietly assumed.
+
+    Audited surface, with the guard or role that makes each safe:
       _connected_verdict  CONNECTED  refuses on any file-backed partition or unmatched table
       _declared_verdict   DECLARED   refuses unless the record is precise AND (source-scoped or complete)
       _finalize_unit      OK         refuses while any live source is unchecked
@@ -840,18 +899,7 @@ def test_the_set_of_pass_producing_paths_is_closed() -> None:
       render              -          COMPARES status to choose wording; never decides
     """
     source = (REPO_ROOT / "scripts" / "check_connection_fidelity.py").read_text(encoding="utf-8")
-    assert set(_functions_touching_a_pass(source)) == {
-        "_connected_verdict",
-        "_declared_verdict",
-        "_finalize_unit",
-        "merge",
-        "main",
-        "_unit_result",
-        "render",
-    }, (
-        "the pass surface changed. Audit the new function against 'a finding may rest on partial "
-        "evidence, a pass may not', then add it to this list."
-    )
+    assert _closure_violations(source) == []
 
 
 @pytest.mark.parametrize(
@@ -861,20 +909,22 @@ def test_the_set_of_pass_producing_paths_is_closed() -> None:
         "def _sneaky_variable():\n    verdict = SOURCE_CONNECTED\n    return verdict\n",
         "def _sneaky_dict():\n    table = {'ok': SOURCE_DECLARED}\n    return table['ok']\n",
         "def _sneaky_default(value=EXIT_OK):\n    return value\n",
+        'def _sneaky_getattr():\n    return getattr(sys.modules[__name__], "STATUS_OK")\n',
+        "PASS_ALIAS = STATUS_OK\ndef _sneaky_alias():\n    return PASS_ALIAS\n",
     ],
-    ids=["direct", "variable", "dict", "default-arg"],
+    ids=["direct", "variable", "dict", "default-arg", "getattr", "module-alias"],
 )
 def test_the_closure_gate_catches_every_shape_of_new_pass_path(sneak: str) -> None:
-    """The gate must fail on a new pass path however it is spelled.
+    """The contract must fail on a new pass path however it is spelled.
 
-    `variable` is round 13's finding verbatim; the other three are the shapes I named as likely
-    while flagging that weakness. A gate that only catches the shape you thought of is the same
-    unfalsifiable check this whole file exists to avoid.
+    `variable` is round 13's finding, `getattr` and `module-alias` are round 14's - all verbatim. The
+    other three are shapes I named as likely. Each must be caught by ONE OF the two halves: the
+    surface scan, or the reflection ban. A gate that only catches the shape its author imagined is
+    the same unfalsifiable check this file exists to prevent, and mine has now been that twice.
     """
     source = (REPO_ROOT / "scripts" / "check_connection_fidelity.py").read_text(encoding="utf-8")
-    assert "_sneaky" not in _functions_touching_a_pass(source)
-    mutated = _functions_touching_a_pass(f"{source}\n\n{sneak}")
-    assert any(name.startswith("_sneaky") for name in mutated), f"closure gate blind to:\n{sneak}"
+    assert _closure_violations(source) == []
+    assert _closure_violations(f"{source}\n\n{sneak}"), f"closure contract blind to:\n{sneak}"
 
 
 def test_unit_result_only_counts_and_never_decides() -> None:
