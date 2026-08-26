@@ -25,6 +25,8 @@ import check_connection_fidelity as ccf  # noqa: E402  # pylint: disable=wrong-i
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "connection-fidelity"
 
+_PASS_NAMES = frozenset({"SOURCE_CONNECTED", "SOURCE_DECLARED", "STATUS_OK", "EXIT_OK"})
+
 
 # --- partition M builders (verified against check_empty_model.classify_partition) -------------------
 
@@ -795,44 +797,84 @@ def test_a_source_scoped_declaration_still_stands_on_incomplete_coverage() -> No
     assert _judge((flat,), tables=("ORDERS", "CUSTOMERS"), limitations=lims).verdict == ccf.SOURCE_DECLARED
 
 
+def _functions_touching_a_pass(source: str) -> dict[str, list[str]]:
+    """Every function that so much as MENTIONS a pass constant, and which ones.
+
+    Deliberately over-approximating, at function granularity rather than return-expression
+    granularity. Blind review round 13 broke the previous version with three lines:
+
+        def _sneaky_pass():
+            verdict = SOURCE_CONNECTED
+            return verdict
+
+    `return verdict` names no constant, so scanning the return expression missed a brand-new
+    pass-producing path while the gate stayed green - the gate's own failure mode 3. An AST name scan
+    cannot soundly prove closure for arbitrary control flow, so this stops trying to be exact and
+    becomes conservative instead: touching a pass constant at all puts a function on the list. False
+    positives (a function that merely COMPARES against one) cost an audit entry, which is the right
+    price; false negatives cost a silent pass path, which is what we are here to prevent.
+    """
+    tree = ast.parse(source)
+    touching: dict[str, list[str]] = {}
+    for function in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        used = {n.id for n in ast.walk(function) if isinstance(n, ast.Name)} & _PASS_NAMES
+        if used:
+            touching[function.name] = sorted(used)
+    return touching
+
+
 def test_the_set_of_pass_producing_paths_is_closed() -> None:
-    """Every code path that can yield a pass is known and audited - enforced, not asserted in prose.
+    """Every function that can touch a pass is known and audited - enforced, not asserted in prose.
 
     Five review rounds found the same family of defect: a predicate that can produce a PASS while
     being imprecise about ownership. Fixing site after site never converged, because nothing said how
-    many sites there were. This parses the module and pins the list.
+    many sites there were. This pins the surface so the class can be closed rather than chased.
 
-    Adding a new `return SOURCE_CONNECTED` / `SOURCE_DECLARED` / `STATUS_OK` / `EXIT_OK` fails this
-    test until it is added below, which is the point: the failure is the prompt to audit it against
-    the rule the whole module runs on - a finding may rest on partial evidence, a pass may not.
-
-    Audited, with the guard that makes each safe:
-      _connected_verdict  CONNECTED  - refuses on any file-backed partition or unmatched table
-      _declared_verdict   DECLARED   - refuses unless the record is precise AND (source-scoped or complete)
-      _finalize_unit      OK         - refuses while any live source is unchecked
-      merge               OK         - refuses while any unit is DOWNGRADED or SKIPPED
-      main                EXIT_OK    - derived from merge, plus the explicit `--warn-only` escape hatch
+    Audited, with the guard or role that makes each safe:
+      _connected_verdict  CONNECTED  refuses on any file-backed partition or unmatched table
+      _declared_verdict   DECLARED   refuses unless the record is precise AND (source-scoped or complete)
+      _finalize_unit      OK         refuses while any live source is unchecked
+      merge               OK         refuses while any unit is DOWNGRADED or SKIPPED
+      main                EXIT_OK    derived from merge, plus the explicit `--warn-only` escape hatch
+      _unit_result        -          COUNTS verdicts; never decides (pinned by its own test below)
+      render              -          COMPARES status to choose wording; never decides
     """
     source = (REPO_ROOT / "scripts" / "check_connection_fidelity.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    pass_names = {"SOURCE_CONNECTED", "SOURCE_DECLARED", "STATUS_OK", "EXIT_OK"}
-    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-    found: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Return) or node.value is None:
-            continue
-        if not {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)} & pass_names:
-            continue
-        owner = max(
-            (f for f in functions if f.lineno <= node.lineno <= (f.end_lineno or 0)),
-            key=lambda f: f.lineno,
-            default=None,
-        )
-        found.add(owner.name if owner else "<module>")
-    assert found == {"_connected_verdict", "_declared_verdict", "_unit_result", "main"}, (
-        f"the set of pass-producing paths changed: {sorted(found)}. Audit the new one against "
-        "'a finding may rest on partial evidence, a pass may not', then update this test."
+    assert set(_functions_touching_a_pass(source)) == {
+        "_connected_verdict",
+        "_declared_verdict",
+        "_finalize_unit",
+        "merge",
+        "main",
+        "_unit_result",
+        "render",
+    }, (
+        "the pass surface changed. Audit the new function against 'a finding may rest on partial "
+        "evidence, a pass may not', then add it to this list."
     )
+
+
+@pytest.mark.parametrize(
+    "sneak",
+    [
+        "def _sneaky_direct():\n    return STATUS_OK\n",
+        "def _sneaky_variable():\n    verdict = SOURCE_CONNECTED\n    return verdict\n",
+        "def _sneaky_dict():\n    table = {'ok': SOURCE_DECLARED}\n    return table['ok']\n",
+        "def _sneaky_default(value=EXIT_OK):\n    return value\n",
+    ],
+    ids=["direct", "variable", "dict", "default-arg"],
+)
+def test_the_closure_gate_catches_every_shape_of_new_pass_path(sneak: str) -> None:
+    """The gate must fail on a new pass path however it is spelled.
+
+    `variable` is round 13's finding verbatim; the other three are the shapes I named as likely
+    while flagging that weakness. A gate that only catches the shape you thought of is the same
+    unfalsifiable check this whole file exists to avoid.
+    """
+    source = (REPO_ROOT / "scripts" / "check_connection_fidelity.py").read_text(encoding="utf-8")
+    assert "_sneaky" not in _functions_touching_a_pass(source)
+    mutated = _functions_touching_a_pass(f"{source}\n\n{sneak}")
+    assert any(name.startswith("_sneaky") for name in mutated), f"closure gate blind to:\n{sneak}"
 
 
 def test_unit_result_only_counts_and_never_decides() -> None:
