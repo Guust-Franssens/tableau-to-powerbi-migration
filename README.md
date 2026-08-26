@@ -12,9 +12,9 @@
 &nbsp;![Microsoft Fabric](https://img.shields.io/badge/Microsoft_Fabric-117865)
 &nbsp;![GitHub Copilot](https://img.shields.io/badge/GitHub_Copilot-000000?logo=githubcopilot&logoColor=white)
 &nbsp;![Migrations](https://img.shields.io/badge/migrations-16-2ea44f)
-&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-47%2F47-2ea44f)
+&nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-48%2F48-2ea44f)
 
-**[Showcase](docs/showcase/README.md)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Prerequisites](#prerequisites)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
+**[TL;DR](#tldr)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[What you get](#what-you-get)** &nbsp;·&nbsp; **[Repo layout](#repo-layout)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Prerequisites](#prerequisites)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
 
 </div>
 
@@ -28,21 +28,57 @@
 
 ---
 
-Point it at a Tableau `.twb` / `.twbx` and it produces a working **Fabric Power BI semantic model + report**. **16 real, publicly available Tableau Public dashboards** have been run through it end to end, spanning KPI dashboards, IronViz infographics, network and origin-destination maps, a what-if calculator, and a 91-worksheet enterprise workbook.
+## TL;DR
 
-- 🧩 &nbsp;**Deterministic parser, not a black box.** Tableau's `.twb` XML is extracted by code into a schema-validated `migration-spec.json` contract (27/27 parser tests), so the fuzzy LLM work is scoped to only what needs judgment.
-- 🤖 &nbsp;**Four Copilot CLI agents.** An orchestrator coordinates a semantic-model builder, a report builder, and an independent read-only fidelity validator.
-- 📊 &nbsp;**DAX + visual translation.** LOD expressions and table calculations become DAX; Tableau worksheets become native Power BI visuals via a 27-entry, render-verified PBIR cookbook.
-- 🔍 &nbsp;**Figure-by-figure validation.** The validator compares each built visual against the Tableau original, on both layout and numbers, and routes discrepancies back, catching bugs that would otherwise ship silently.
-- ✅ &nbsp;**AI (Copilot) ready.** Every model gets a descriptions + enum-domain pass so it works with Power BI Copilot and natural-language Q&A.
-- 📝 &nbsp;**Honest about limits.** Every bug and capability gap found along the way is documented, not hidden (see [capabilities &amp; limitations](docs/capabilities-and-limitations.md)).
+This toolkit turns a Tableau `.twb` or `.twbx` into a local **Fabric Power BI semantic model + report**. It combines a deterministic parser with Copilot CLI agents that translate DAX and visuals, then independently validate fidelity. You get a reviewable PBIP project, worked public examples, and an honest record of supported features and limits.
 
-This is not a generic "AI can do anything" claim. It is a working pipeline, run end to end against 16
-different workbooks, with the bugs found along the way documented honestly. The practical handoff
-today is a **local PBIP project** (`.SemanticModel` + `.Report`) that you can inspect in Power BI
-Desktop or publish manually; a polished publish/refresh/screenshot deployer agent is still roadmap.
+## Quickstart
 
-## 🖼️ Showcase
+**Clone.** The 16 worked examples under `examples/` are ~91% of the repo's files. If you're mainly
+here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
+the example blobs:
+
+```bash
+git clone --filter=blob:none --sparse https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
+cd tableau-to-powerbi-migration
+git sparse-checkout set .github .vscode docs scripts tests migrations
+# want one example to look at? pull just that folder:
+git sparse-checkout add examples/eea-urban-adaptation
+```
+
+For the full repo (all examples + showcase), use a normal `git clone …`. Then set up the Python env:
+
+```powershell
+uv venv
+.venv\Scripts\Activate.ps1
+uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
+
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+
+# Parse a workbook into the intermediate spec
+python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.twbx `
+    -o migrations\workbooks\<name>\migration-spec.json
+
+# If the workbook uses .hyper extracts (no live DB), pull the real row data too:
+python scripts\extract_hyper_data.py migrations\workbooks\<name>\source\<workbook>.twbx `
+    migrations\workbooks\<name>\migration-spec.json `
+    -o migrations\workbooks\<name>\data
+```
+
+Then, in [GitHub Copilot CLI](https://github.com/github/copilot-cli), run the orchestrator agent:
+
+```
+/agent tableau-migrator
+```
+
+and point it at `migrations\workbooks\<name>\migration-spec.json`.
+
+> **Migrating a whole Tableau *site*, not one workbook?** That is a different, mostly deterministic
+> pipeline — survey → assess → harvest → convert → deploy — and it has its own step-by-step
+> procedure with measured timings, exit codes, decision points and a failure playbook:
+> **[`docs/operator-runbook.md`](docs/operator-runbook.md)**. Read it before the day you need it.
+
+## What you get
 
 <table>
   <tr>
@@ -57,7 +93,26 @@ Desktop or publish manually; a polished publish/refresh/screenshot deployer agen
 
 **[See the full migration showcase →](docs/showcase/README.md)** for every before/after pair, each captioned with what translated faithfully and what needed a workaround.
 
-## 🔗 Sources & attribution
+
+### Try a worked example
+
+Every folder under `examples/<name>/` is a complete run: the parsed `migration-spec.json` plus the
+generated `fabric/<Name>.SemanticModel` and `fabric/<Name>.Report` PBIP project, ready to open in Power
+BI Desktop. A good first read is `examples/eea-urban-adaptation/`, a run against the European
+Environment Agency's public
+["Urban Audit city factsheets, Urban Adaptation Map Viewer"](https://public.tableau.com/app/profile/european.environment.agency/viz/test_20190116Urban_vulnerability_ideasFR_0/mainpage)
+workbook (16 worksheets, 7 data sources, 152 fields).
+
+**After cloning**, before you can refresh a model with live data, you must:
+
+1. Download the workbook yourself from its Tableau Public link (source `.twbx` and extracted data are
+   gitignored, not redistributed here) and re-run the two scripts above, **or** just open the report to
+   inspect the already-built semantic model/report structure without live data.
+2. Point the `DataFolder` Power Query parameter (Transform data → Manage Parameters) at your local
+   `examples/<name>/data/` path. It ships with a placeholder because M parameters cannot be relative
+   to the project file. The helper `scripts\set_data_folder.py` can set this for you.
+
+### Sources & attribution
 
 Every example is a **public Tableau Public workbook built by its original author**. This repo does **not**
 redistribute the source `.twb` / `.twbx` files or their extracted data (they are gitignored): to reproduce
@@ -70,7 +125,7 @@ The Tableau Public source URL for all 16 workbooks is listed in
 [showcase](docs/showcase/README.md) entry links back to the dashboard it was migrated from. Credit for the
 original dashboards belongs to their respective Tableau Public authors.
 
-## 🧰 What's in the repo
+### Toolkit components
 
 - **Deterministic Tableau parser + spec schema** (`scripts/parse_tableau.py`): extracts every data
   source, field, calculated-field formula, worksheet encoding, dashboard layout, reference line, and
@@ -78,7 +133,7 @@ original dashboards belongs to their respective Tableau Public authors.
   (see [`docs/migration-spec.md`](docs/migration-spec.md)). Also accepts a standalone `.tds`/`.tdsx`
   data source, and flags Tableau **published** data sources (`sqlproxy`) with a stable dedup key so one
   shared datasource becomes **one** semantic model instead of a duplicate per workbook
-  (`scripts/published_datasource_registry.py`). Covered by a 47-test `pytest` suite.
+  (`scripts/published_datasource_registry.py`). Covered by a 48-test `pytest` suite.
 - **Estate lineage discovery** (`scripts/tableau_lineage.py`): for a whole Tableau Server/Cloud estate,
   queries the **Metadata API** (`publishedDatasources { downstreamWorkbooks }`) and prints a
   **model-first migration plan** ordered by leverage — migrate each published data source once, then
@@ -113,12 +168,17 @@ original dashboards belongs to their respective Tableau Public authors.
   fix failure playbook, a verification checklist, and an explicit list of what that checklist does
   **not** prove. Start here if you are the one at the keyboard.
 
-## 🧩 Why a separate parser, not an all-LLM pipeline
 
-Tableau's `.twb` XML (datasources, shelves, zones) is exact and structural, so a deterministic parser
-is more reliable and reproducible than LLM reasoning for extraction. LLM reasoning is reserved for the
-genuinely fuzzy part: translating Tableau calculation formulas (including LOD expressions and table
-calculations) to DAX, and mapping chart intent to the right Power BI visual.
+## Repo layout
+
+| Path | What it is |
+| --- | --- |
+| [`examples/`](examples/) | 16 committed, worked migrations. Read-only reference — **not** where your work goes. |
+| [`migrations/{workbooks,datasources}/<slug>/fabric/`](migrations/README.md) | **Where your deliverables land**: workbook reports and shared datasource semantic models. |
+| [`scripts/`](scripts/) | The CLI surface; [`scripts/README.md`](scripts/README.md) is the map. |
+| [`docs/`](docs/) | Start with [`INDEX.md`](docs/INDEX.md), the map of maps. |
+| [`.github/{agents,skills}/`](.github/) | The Copilot agent personas and reusable knowledge bundles. |
+| `_runs/<NNN>-<slug>/` | Per-run working state. Gitignored by construction (`/_*`) and safe to delete. |
 
 ## How it works
 
@@ -147,6 +207,13 @@ The three subagents are orchestrated by `tableau-migrator`, a custom Copilot CLI
 (`.github/agents/tableau-migrator.agent.md`).
 
 ![Architecture: a deterministic parser extracts a schema-validated migration-spec.json contract, then LLM agents translate it to a Fabric Power BI semantic model + report](docs/architecture.png)
+
+## 🧩 Why a separate parser, not an all-LLM pipeline
+
+Tableau's `.twb` XML (datasources, shelves, zones) is exact and structural, so a deterministic parser
+is more reliable and reproducible than LLM reasoning for extraction. LLM reasoning is reserved for the
+genuinely fuzzy part: translating Tableau calculation formulas (including LOD expressions and table
+calculations) to DAX, and mapping chart intent to the right Power BI visual.
 
 <a id="prerequisites"></a>
 
@@ -283,102 +350,43 @@ than it is.
 > agent whose credentials are read-only service accounts; think harder before doing it on an analyst's
 > laptop.
 
-## Quickstart
-
-**Clone.** The 16 worked examples under `examples/` are ~91% of the repo's files. If you're mainly
-here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
-the example blobs:
-
-```bash
-git clone --filter=blob:none --sparse https://github.com/Guust-Franssens/tableau-to-powerbi-migration.git
-cd tableau-to-powerbi-migration
-git sparse-checkout set .github .vscode docs scripts tests migrations
-# want one example to look at? pull just that folder:
-git sparse-checkout add examples/health-tracker
-```
-
-For the full repo (all examples + showcase), use a normal `git clone …`. Then set up the Python env:
-
-```powershell
-uv venv
-.venv\Scripts\Activate.ps1
-uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
-
-powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
-
-# Parse a workbook into the intermediate spec
-python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.twbx `
-    -o migrations\workbooks\<name>\migration-spec.json
-
-# If the workbook uses .hyper extracts (no live DB), pull the real row data too:
-python scripts\extract_hyper_data.py migrations\workbooks\<name>\source\<workbook>.twbx `
-    migrations\workbooks\<name>\migration-spec.json `
-    -o migrations\workbooks\<name>\data
-```
-
-Then, in [GitHub Copilot CLI](https://github.com/github/copilot-cli), run the orchestrator agent:
-
-```
-/agent tableau-migrator
-```
-
-and point it at `migrations\workbooks\<name>\migration-spec.json`.
-
-> **Migrating a whole Tableau *site*, not one workbook?** That is a different, mostly deterministic
-> pipeline — survey → assess → harvest → convert → deploy — and it has its own step-by-step
-> procedure with measured timings, exit codes, decision points and a failure playbook:
-> **[`docs/operator-runbook.md`](docs/operator-runbook.md)**. Read it before the day you need it.
-
-## 🧪 Try a worked example
-
-Every folder under `examples/<name>/` is a complete run: the parsed `migration-spec.json` plus the
-generated `fabric/<Name>.SemanticModel` and `fabric/<Name>.Report` PBIP project, ready to open in Power
-BI Desktop. A good first read is `examples/eea-urban-adaptation/`, a run against the European
-Environment Agency's public
-["Urban Audit city factsheets, Urban Adaptation Map Viewer"](https://public.tableau.com/app/profile/european.environment.agency/viz/test_20190116Urban_vulnerability_ideasFR_0/mainpage)
-workbook (16 worksheets, 7 data sources, 152 fields).
-
-**After cloning**, before you can refresh a model with live data, you must:
-
-1. Download the workbook yourself from its Tableau Public link (source `.twbx` and extracted data are
-   gitignored, not redistributed here) and re-run the two scripts above, **or** just open the report to
-   inspect the already-built semantic model/report structure without live data.
-2. Point the `DataFolder` Power Query parameter (Transform data → Manage Parameters) at your local
-   `examples/<name>/data/` path. It ships with a placeholder because M parameters cannot be relative
-   to the project file. The helper `scripts\set_data_folder.py` can set this for you.
-
-<details>
-<summary><strong>📁 Repo layout</strong></summary>
-
-<br>
-
-Three migration trees, split by **what they produce** — so our examples never mix with your work:
-
-```
-.github/agents/          Four custom Copilot CLI agents (orchestrator + 3 subagents)
-.github/hooks/           preToolUse/permissionRequest hooks (the credential gate; loaded at CLI start)
-.github/pbi.kb/          PBIR visual cookbook (visual-cookbook.md + 27 visual.json templates)
-scripts/                 Python automation (parser, .hyper extractor, AI-readiness, showcase) + preflight.ps1
-docs/                    migration-spec schema, Tableau->DAX guide, credential gate, capabilities & limitations, showcase
-examples/<name>/              OUR 16 worked examples - reference material, read-only
-migrations/workbooks/<name>/  YOUR workbook migrations (.twbx -> semantic model + report). Starts empty.
-migrations/datasources/<name>/ YOUR published-data-source migrations (.tds -> shared semantic model). Starts empty.
-tests/                   pytest suite + XML fixtures for the parser
-```
-
-All three share the same shape (`source/`, `migration-spec.json`, `fabric/`); a data-source migration
-simply has no `.Report`. To start your own, see [`migrations/README.md`](migrations/README.md) — it
-routes you to the right tree and explains why data sources are migrated first.
-
-</details>
-
 ## 🛠️ Development
 
+This is a fast local subset of CI — not the whole workflow. CI additionally runs the migration-spec,
+privacy, data-model, navigation, capability-wiring, convention-sync and AI-readiness gates plus a
+Windows bundle job; see [`.github/workflows/checks.yml`](.github/workflows/checks.yml) for the full set.
+
+Every command goes through `uv run`, exactly as CI does. That is not a stylistic choice: `uv sync`
+populates `.venv` but does not activate it, so in a fresh shell a bare `pytest` is simply not found,
+and a bare `ruff`/`pylint` silently resolves to whatever is installed globally. Measured on this
+repository, on identical code:
+
+| command | exit | score | findings |
+|---|---|---|---|
+| `pylint scripts` (global) | **10** | 9.97 | **10** |
+| `uv run pylint scripts` | **0** | 10.00 | 0 |
+
+The global install cannot see the project's optional dependencies, so it invents import errors CI
+never reports. Chasing those is pure waste, and the real signal is buried among them.
+
+The paths are CI's paths, deliberately. Running `ruff format .` instead reformats fenced Python
+inside two committed markdown files under `docs/` and `.github/pbi.kb/` — measured — which CI neither
+checks nor fixes, so you would carry unrelated modifications in your diff forever.
+
 ```powershell
-uv sync --extra dev
-ruff format . ; ruff check . --fix
-pylint scripts
-pytest -q            # 47 parser tests
+uv sync --all-extras   # NOT --extra dev: several tests import tableauhyperapi, which lives in `extract`
+uv run ruff format scripts tests .github/skills
+uv run ruff check scripts tests .github/skills --fix
+
+# pylint runs over THREE roots in CI, and they are separate invocations on purpose:
+# scripts/probe_desktop_query.py is a forwarding shim sharing a module name with the
+# bundled script it forwards to, so one combined run resolves the import to the shim.
+# Linting only `scripts` is how a change inside a skill bundle passes locally and fails CI.
+uv run pylint scripts
+uv run pylint .github/skills/pbip-model-refresh/scripts
+uv run pylint .github/skills/powerbi-ai-readiness/scripts
+
+uv run pytest -q     # whole suite (~2,170 tests); add `tests/test_parse_tableau.py` for just the 48 parser tests
 ```
 
 ## 📊 Status: what's covered
