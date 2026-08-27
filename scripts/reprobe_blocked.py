@@ -4,7 +4,7 @@ purpose: after ONE machine-wide Power BI sign-in, re-run the reachability probe 
          This tool NEVER clears, authorizes, forces or mass-authorizes anything itself.
 usage:   python scripts/reprobe_blocked.py --unit <dir> [--unit <dir> ...]          # explicit, standalone
          python scripts/reprobe_blocked.py --units-from <file>                      # one path per line
-         # compose with the read-only `list` query (REQUIRES `credential_gate.py list` from PR #348):
+         # compose with the read-only `list` query:
          python scripts/credential_gate.py list <root> --json | \
              python scripts/reprobe_blocked.py --stdin --apply
          (DRY RUN by default - prints what WOULD be probed; pass --apply to actually run the probe)
@@ -95,12 +95,13 @@ Exit code (precedence: forged > anomaly/errored > blocked > clean; magnitude is 
     (4 is intentionally unused: it is the probe's OPERATOR_REQUIRED exit; this sweep folds
      operator-required into exit 1 and never emits 4.)
 
-    Cross-tool note (finding #6, OPEN): the sibling `credential_gate.py list` (PR #348) uses 2 =
-    forged-override and 3 = bad-root, which swaps two security-relevant codes against this tool's 2 =
-    usage / 3 = forged-override. This tool keeps 2 = usage because argparse hard-codes exit 2 for CLI
-    errors (so `list`'s 2 = forged already collides with its OWN argparse usage exit). Recommended
-    convergence: 2 = usage everywhere, 3 = forged-override everywhere, `list`'s bad-root -> 4. Not
-    renumbered unilaterally - the alignment change belongs on #348.
+    Cross-tool note (finding #6, RESOLVED): the sibling `credential_gate.py list` originally used
+    2 = forged-override and 3 = bad-root, swapping two security-relevant codes against this tool's
+    2 = usage / 3 = forged-override. This tool keeps 2 = usage because argparse hard-codes exit 2
+    for CLI errors -- which meant `list`'s 2 = forged also collided with its OWN argparse usage
+    exit, so documenting the overlap could not fix it. The recommended convergence was adopted on
+    the `list` side: **2 = usage everywhere, 3 = forged-override everywhere, `list`'s bad-root -> 4**.
+    Both tools now agree on the security-relevant code.
 
 What is NOT unit-tested here
 ----------------------------
@@ -700,7 +701,7 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     if not provided:
         log.error(
             "no input source given. Pass --unit <dir> (repeatable), --units-from <file|->, or pipe "
-            "`credential_gate.py list <root> --json` (from PR #348) and add --stdin."
+            "`credential_gate.py list <root> --json` and add --stdin."
         )
         return EXIT_USAGE
     options = SweepOptions(
