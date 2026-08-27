@@ -80,7 +80,7 @@ in a hand-written scaffold five days later; name the location every time.
 |---|---|---|
 | Session start (nothing in flight) | `preflight.ps1 -Update -CheckUpstream` | Safe; the CLI floor is a correctness floor, and this is the one moment upgrading is allowed |
 | Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without swapping tooling mid-flow — and without a network round trip on every migration |
-| Mid-migration | **never** | Swapping the validator under a half-built report is worse than a slightly old one |
+| Mid-migration | **don't upgrade the installed tooling** | The variable is not the calendar but *work already validated by the current CLI*: swap the validator mid-build and earlier results are no longer covered by the same check. A version-*comparison* run into a fresh output dir is not an upgrade (engine section) and is not forbidden here. |
 
 **`-CheckUpstream` answers a question the version matrix cannot.** Every other check compares an
 installed version against a **hard-coded** number — that says "is what I have good enough", never
@@ -120,9 +120,12 @@ before it can migrate with a broken environment.
 
 Keep only the judgement the gate cannot carry:
 
-- **Timing rule:** `-Update` is for session start only, before any migration is in flight. At migration
-  start run plain preflight; mid-migration, do not upgrade. Swapping the validator under a half-built
-  report is worse than a slightly old CLI.
+- **Timing rule (installed tooling):** `-Update` is for session start only, before any migration is in
+  flight; at migration start run plain preflight; mid-migration, do not re-arm it. What is at risk is
+  not the calendar position but *un-checkpointed work already validated by the current CLI* — swap the
+  validator underneath it and earlier results are no longer covered by the same check. This governs
+  *upgrading the installed CLIs*; running a second engine version into a fresh output dir to
+  **compare** is a different, always-safe operation (see the engine timing rule below).
 - **`powerbi-report-author >= 0.1.4` is a correctness floor, not hygiene.** Older builds returned
   `errorCount: 0` for PBIR that Power BI Desktop cannot open, so being below the floor silently
   green-lights broken reports. `-Update` repairs only below-floor npm bridge CLIs; it is not a blind
@@ -366,7 +369,22 @@ Keeping it current: `copilot plugin update tableau-fabric-skills@tableau-collect
 sessions** (a running Copilot session file-locks the plugin directory). Mid-session, only a *content*
 refresh is possible — `python scripts/sync_engine_plugin.py --source <checkout>` — and it refuses a
 downgrade, because walking the canonical engine backwards is how you would turn a cleanup into the
-regression above. Never upgrade the engine mid-migration.
+regression above.
+
+**Whether a version change is safe keys on downstream investment, not the calendar** — specifically,
+whether it would mix two engine versions inside one deliverable, or discard hand-authoring layered on
+the engine's output. Each verdict is checkable at the moment you decide, which is what lets this
+replace the blunt "never mid-migration" it used to read:
+
+| Doing this | Verdict | Check, right now |
+|---|---|---|
+| **Comparing** two versions — run the second via `--allow-noncanonical-engine` into a fresh `--output` dir, keep the old bundle, diff | ✅ always safe — not an upgrade; the installed canonical engine is untouched | is the installed plugin left as-is and `--output` a new dir? |
+| Re-running a unit on a newer engine with **~no hand-authoring since it ran** | ✅ re-run into a fresh dir; nothing hand-made is lost | the `<bundle>/reports/` vs `<bundle>/pbip/` diff (shared conventions) is ~empty |
+| Re-running a unit with **substantial hand-authored TMDL/PBIR** on top | ⛔ finish or checkpoint that unit first | that same diff is large |
+| **Partial** re-run into an **existing** bundle (some workbooks, not all) | ⛔ **never** | `write_engine_receipt` stamps one `engine.version` over the whole bundle, so it would claim a single version for artifacts two builds produced — the #107 shape, and `check_engine_receipts.py` cannot see an intra-bundle mix |
+
+So the escape hatch above is usable between migrations, and mid-migration when the diff shows little at
+risk; the one move that is *always* wrong is the last row — a partial re-run into a live bundle.
 
 Historic cost of not having this: **three** retracted or nearly-retracted defect reports. The engine
 went 2.60.0 → 2.72.0 unnoticed; then 2.113.0 → 2.126.0 (13 releases) *mid-dry-run*; then 2.113.0 →
