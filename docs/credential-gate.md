@@ -135,6 +135,54 @@ agent from lifting its own armed gate with the documented teardown verb. That is
 matches `clear`, and why it does so *target-aware* (only when the specific directory named by the
 command is currently armed).
 
+### After ONE sign-in: re-probe every blocked unit (the sweep)
+
+Power BI caches a credential **machine-wide** (DPAPI) once a human signs in interactively (see
+[`data-source-credentials.md`](data-source-credentials.md)). So on a large estate, one sign-in can
+make *every* unit sharing that source probeable at once — but each gate subcommand takes exactly one
+migration, so the only visible route was N hand-typed `authorize` calls, which **permanently stamps
+every unit UNVALIDATED**, including the ones whose credentials now work.
+
+`reprobe_blocked.py` closes that gap. It takes a set of gated units and re-runs the probe on the ones
+still **BLOCKED**, letting each gate **earn** its own `probe-cleared` where the probe now passes:
+
+```powershell
+# DRY RUN by default — prints what WOULD be probed, runs nothing
+python scripts/reprobe_blocked.py --unit _runs\001-ia\bundle --unit _runs\ia-policy\bundle
+
+# actually probe (opens Power BI Desktop per unit, sequentially)
+python scripts/reprobe_blocked.py --units-from blocked.txt --apply
+
+# compose with the read-only `list` query
+python scripts/credential_gate.py list _runs --json | python scripts/reprobe_blocked.py --stdin --apply
+```
+
+Three properties are load-bearing:
+
+- **It never lifts a gate itself.** It only runs `probe_live_source.py`, whose own machinery records
+  `probe-cleared` on DATA_OK. The sweep writes no marker, no override, no audit line, and no ACL — the
+  whole point is converting *unearned → earned by measurement*, so a shortcut would destroy the signal.
+  It never authorizes and never mass-authorizes; `authorize` stays one-human, one-decision,
+  agent-hostile.
+- **It is the supervising timer.** The probe self-bounds each refresh; the sweep runs probes
+  sequentially with a generous per-unit wall-clock backstop. Do **not** wrap it in a 2-minute cap — that
+  would kill a legitimately cold-starting warehouse. Each unit is probed once; a missing credential is
+  a final answer, never retried.
+- **It reports ground truth, honestly.** Per unit: `newly-earned`, `still-blocked` (with
+  `NO_CREDENTIAL` — a human must sign in — kept distinct from `UNREACHABLE`, a spec/DNS fix that needs
+  no sign-in), `anomaly`, `errored`, `skipped`. Exit `0` clean / `1` still blocked / `2` usage / `3`
+  forged-override / `5` anomaly.
+
+> ⚠️ **Known caveat the sweep surfaces (does not hide).** When the gate was armed with **named**
+> sources, a successful probe does **not** currently lift it: `run_probe` calls
+> `_lift_gate(migration, "N live source(s)")`, and that summary string never matches the marker's real
+> source names, so `clear_block` takes its partial-clear branch and leaves the ACL in place while
+> recording a phantom `probe-cleared`. A unit whose probe returns DATA_OK yet whose gate stays armed is
+> therefore reported as `anomaly` (never a false `newly-earned`, never a misdiagnosed
+> `NO_CREDENTIAL`). This is a defect in `probe_live_source._lift_gate` + `credential_gate.clear_block`,
+> tracked separately; the single-unit probe clears correctly only when the gate was armed with **empty**
+> `--sources`.
+
 ### Re-arming is idempotent
 
 Re-running the classifier on a migration whose **exact same sources** were already proven by a probe
