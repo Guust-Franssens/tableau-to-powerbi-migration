@@ -366,17 +366,6 @@ def _read_stdin() -> str:
     return sys.stdin.read()
 
 
-def _maybe_read_stdin() -> str | None:
-    """Read piped stdin when no other source was given; None on a TTY or when stdin is unavailable."""
-    stream = sys.stdin
-    try:
-        if stream is None or stream.isatty():
-            return None
-        return stream.read()
-    except (OSError, ValueError):  # pytest replaces stdin with a stream that raises on read
-        return None
-
-
 def gather_units(args: argparse.Namespace) -> tuple[list[UnitInput], bool]:
     """Collect units and report whether ANY input source was provided.
 
@@ -384,6 +373,13 @@ def gather_units(args: argparse.Namespace) -> tuple[list[UnitInput], bool]:
     given but was legitimately empty" (a clean estate - `list --json` of nothing gated is `{"units":
     []}`), which must NOT both collapse to the same exit code (finding #3). Raises `InputError` /
     `OSError` upward for structurally broken input (truncated JSON, an unreadable `--units-from`).
+
+    ⚠️ stdin is read ONLY when explicitly requested (`--stdin` or `--units-from -`). Blind review
+    2026-08-27: an implicit "read stdin when nothing else was given" fallback blocked forever on a
+    non-TTY pipe that stayed open - `isatty()` is False and `read()` never returns - instead of
+    printing the usage error. Agent and CI harnesses routinely hold stdin open, and this tool's
+    stated consumer is `tableau-migrator`, so the convenience cost an unkillable hang. The documented
+    invocation already passes `--stdin`.
     """
     units = [UnitInput(path=Path(raw)) for raw in (args.unit or [])]
     provided = bool(args.unit)
@@ -394,9 +390,6 @@ def gather_units(args: argparse.Namespace) -> tuple[list[UnitInput], bool]:
     elif args.units_from:
         text = Path(args.units_from).read_text(encoding="utf-8")
         provided = True
-    elif not units:
-        text = _maybe_read_stdin()
-        provided = provided or text is not None
     if text is not None:
         units.extend(read_units_source(text))
     return units, provided
@@ -412,6 +405,11 @@ def _errored(unit: Path, reason: str) -> UnitResult:
     return UnitResult(unit=unit, category=CAT_ERRORED, verdict=None, reason=reason, elapsed_sec=0.0)
 
 
+def _anomaly(unit: Path, reason: str) -> UnitResult:
+    """Caller-supplied state disagrees with the marker on disk (drives a non-zero exit)."""
+    return UnitResult(unit=unit, category=CAT_ANOMALY, verdict=None, reason=reason, elapsed_sec=0.0)
+
+
 def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResult | None, bool]:
     """Decide selection for one resolved unit: (probe_it, pre_result, forged).
 
@@ -423,8 +421,15 @@ def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResu
     An explicitly requested path that does not exist or is not a directory is `errored`, not
     `skipped` (finding #3): a typo'd/moved/truncated input must not masquerade as a clean estate by
     exiting 0.
+
+    ⚠️ The state string is compared CASE-INSENSITIVELY, and a non-BLOCKED state never silently wins
+    over the marker on disk. Blind review 2026-08-27: a caller-supplied `"blocked"` (lowercase) fell
+    through to the non-BLOCKED branch and returned `skipped` for a unit whose marker was present
+    RIGHT THEN, so the sweep reported exit 0 - "clean, nothing left blocked" - over a still-armed
+    gate. An untrusted input string must not outrank ground truth, which is this module's own stated
+    principle; a genuine disagreement is reported as an ANOMALY (non-zero) rather than skipped.
     """
-    state = (unit.state or "").strip()
+    state = (unit.state or "").strip().upper()
     if state == FORGED_STATE:
         return (
             False,
@@ -432,6 +437,16 @@ def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResu
             True,
         )
     if state and state != BLOCKED_STATE:
+        if resolved.is_dir() and unit_is_blocked(resolved):
+            return (
+                False,
+                _anomaly(
+                    resolved,
+                    f"state={state} (from list) but the gate marker is present NOW - refusing to skip a "
+                    "blocked unit on a caller-supplied state; re-list, or pass the path directly",
+                ),
+                False,
+            )
         return False, _skip(resolved, f"state={state} (from list); not re-probing"), False
     if not resolved.is_dir():
         return False, _errored(resolved, f"does not exist or is not a directory: {resolved}"), False

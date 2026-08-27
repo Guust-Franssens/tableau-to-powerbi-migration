@@ -168,10 +168,18 @@ def test_select_honours_a_blocked_state_but_reverifies_the_marker(tmp_path: Path
 
 
 def test_select_does_not_probe_non_blocked_states(tmp_path: Path) -> None:
+    """A non-BLOCKED state stops the probe - but when the marker is present it is LOUD, not silent.
+
+    This test previously asserted a silent `skipped` for exactly the disagreement it builds (marker
+    on disk, `list` claiming `cleared-earned`). Blind review 2026-08-27: that is the shape that
+    reports exit 0 - "clean, nothing left blocked" - over a still-armed gate, so the verdict is now
+    `anomaly`. The no-probe half of the original intent is unchanged and still asserted; the sibling
+    test below covers the benign case where the marker really is gone.
+    """
     unit = _blocked_unit(tmp_path)  # marker present, but list says already cleared
     to_probe, skipped, forged = rb.select([rb.UnitInput(path=unit, state="cleared-earned")])
     assert not to_probe
-    assert skipped[0].category == rb.CAT_SKIPPED
+    assert skipped[0].category == rb.CAT_ANOMALY
     assert forged is False
 
 
@@ -383,8 +391,15 @@ def test_probe_unit_isolates_a_runner_that_raises_and_the_sweep_continues(tmp_pa
 def test_default_probe_runner_builds_a_probe_command_and_never_a_clear_or_authorize(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pin 'never clears itself' at the command-construction level: only the probe is ever spawned."""
-    captured: dict[str, list[str]] = {}
+    """Pin 'never clears itself' at the command-construction level: only the probe is ever spawned.
+
+    ⚠️ Records EVERY spawned command, not just the last one. Blind review 2026-08-27 proved the
+    single-value form (`captured["cmd"] = cmd`) could not fail: injecting a `credential_gate.py
+    clear --earned` BEFORE the probe left this test green, because the probe's own command
+    overwrote the evidence. A guard on the ACL boundary that cannot fail is worse than no guard,
+    because it is credited as coverage.
+    """
+    captured: dict[str, list[list[str]]] = {"cmds": []}
 
     class _Proc:
         returncode = 1
@@ -392,17 +407,22 @@ def test_default_probe_runner_builds_a_probe_command_and_never_a_clear_or_author
         stderr = ""
 
     def fake_run(cmd, **_kwargs):
-        captured["cmd"] = cmd
+        captured["cmds"].append(list(cmd))
         return _Proc()
 
     monkeypatch.setattr(rb.subprocess, "run", fake_run)
     outcome = rb._default_probe_runner(
         Path("/x/unit"), rb.SweepOptions(apply=True, refresh_timeout_sec=None, per_unit_timeout_sec=0)
     )
-    cmd = " ".join(captured["cmd"])
+    assert len(captured["cmds"]) == 1, f"expected exactly one spawned command, got {captured['cmds']}"
+    cmd = " ".join(captured["cmds"][0])
     assert "probe_live_source.py" in cmd
     assert "--bundle" in cmd
-    assert "credential_gate.py" not in cmd
+    for spawned in captured["cmds"]:
+        joined = " ".join(spawned)
+        assert "credential_gate.py" not in joined, f"the sweep must never spawn the gate: {joined}"
+        assert "clear" not in spawned, f"the sweep must never clear: {joined}"
+        assert "authorize" not in spawned, f"the sweep must never authorize: {joined}"
     assert " clear" not in cmd and "authorize" not in cmd
     assert outcome.verdict == "NO_CREDENTIAL"
 
@@ -527,3 +547,58 @@ def test_negative_per_unit_timeout_is_rejected(tmp_path: Path) -> None:
 def test_zero_per_unit_timeout_is_accepted(tmp_path: Path) -> None:
     args = rb._parse_args(["--unit", str(tmp_path), "--per-unit-timeout-sec", "0"])
     assert args.per_unit_timeout_sec == 0
+
+
+def test_lowercase_blocked_state_is_normalised_and_still_probed(tmp_path: Path) -> None:
+    """A `list` state differing only in CASE must not fall through to the not-blocked branch."""
+    unit = _blocked_unit(tmp_path)
+    probe_it, pre, forged = rb._classify_selection(rb.UnitInput(path=unit, state="blocked"), unit)
+    assert probe_it is True, "a lowercase 'blocked' must normalise to BLOCKED and be probed"
+    assert pre is None
+    assert forged is False
+
+
+def test_non_blocked_state_never_silently_skips_a_unit_whose_marker_is_present(tmp_path: Path) -> None:
+    """Ground truth outranks a caller-supplied state; the disagreement is loud, not a skip."""
+    unit = _blocked_unit(tmp_path)
+    probe_it, pre, _ = rb._classify_selection(rb.UnitInput(path=unit, state="clean"), unit)
+    assert probe_it is False
+    assert pre is not None
+    assert pre.category == rb.CAT_ANOMALY, f"expected anomaly, got {pre.category}"
+    assert "marker is present NOW" in pre.reason
+
+
+def test_a_stale_non_blocked_state_still_skips_when_the_marker_is_gone(tmp_path: Path) -> None:
+    """The anomaly fires on DISAGREEMENT only - an ordinary cleared unit stays a cheap skip."""
+    unit = tmp_path / "cleared"
+    unit.mkdir()
+    probe_it, pre, _ = rb._classify_selection(rb.UnitInput(path=unit, state="clean"), unit)
+    assert probe_it is False
+    assert pre is not None and pre.category == rb.CAT_SKIPPED
+
+
+def test_forged_state_is_matched_case_insensitively(tmp_path: Path) -> None:
+    """The security signal must not be lost to casing either."""
+    unit = _blocked_unit(tmp_path)
+    _, pre, forged = rb._classify_selection(rb.UnitInput(path=unit, state="forged-override"), unit)
+    assert forged is True
+    assert pre is not None and pre.category == rb.CAT_SKIPPED
+
+
+def test_stdin_is_never_read_implicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No source + no --stdin is a usage error, NOT a blocking read on an open pipe."""
+
+    class _NeverRead:
+        @staticmethod
+        def isatty() -> bool:
+            return False
+
+        @staticmethod
+        def read() -> str:  # pragma: no cover - reaching this IS the failure
+            raise AssertionError("gather_units must not read stdin unless --stdin was passed")
+
+    monkeypatch.setattr(rb.sys, "stdin", _NeverRead())
+    args = rb._parse_args([])
+    units, provided = rb.gather_units(args)
+    assert units == []
+    assert provided is False
