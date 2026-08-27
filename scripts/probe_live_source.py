@@ -55,8 +55,9 @@ Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
 Module-size strategy (pylint `max-module-lines = 1200`): SPLIT, not waive. The verdict-line matchers
 live in `_verdict_lines.py` and the PBIP scaffold writers (`_tmdl_ident` / `_tmdl_filename_stem` /
 `_pbip_files`) in `_probe_pbip.py`; both are re-exported here because the seam tests reach them
-through this module. Both named seams are now taken, so the next growth spurt needs a NEW seam
-argued on its own merits - not a `# pylint: disable=too-many-lines`, which would only hide it.
+through this module. Gate-lifting (`lift_gate` / `marker_named_count`) is the third, in `_gate_lift.py`: reaching a
+source and deciding whether that earned a clear are different jobs. The next growth spurt needs
+a NEW seam argued on its own merits - not a `# pylint: disable=too-many-lines`, which would only hide it.
 """
 
 from __future__ import annotations
@@ -80,6 +81,10 @@ from _probe_pbip import (  # noqa: F401  # pylint: disable=unused-import
     _pbip_files,
     _tmdl_filename_stem,
     _tmdl_ident,
+)
+from _gate_lift import (  # noqa: F401  # pylint: disable=unused-import
+    lift_gate as _lift_gate,
+    marker_named_count as _marker_named_count,
 )
 from _verdict_lines import (
     _has_credential_stop_verdict,
@@ -753,62 +758,6 @@ def _record_attempt(migration: Path, verdict: str, what: str) -> None:
     _audit(migration, f"probe-{verdict.lower()}", what)
 
 
-def _lift_gate(migration: Path, what: str, proved_all: bool) -> bool:
-    """Ask the gate to record an EARNED clear for what this probe actually proved.
-
-    Returns whether a clear was requested, so the caller can avoid announcing DATA_OK over a gate
-    it deliberately left armed.
-
-    ⚠️ `what` is a human-readable COUNT ("2 live source(s)") and must never be passed as
-    `--sources`. It was, until 2026-08-27, and that silently broke the only earned route out of the
-    gate (#346): `clear_block` diffs `--sources` against the marker's real source names, a count
-    string matches none of them, so every source stayed in `remaining_sources` and the partial-clear
-    branch left the gate ARMED -- while still writing a `probe-cleared` audit entry and exiting 0.
-    A probe reporting DATA_OK over a still-armed gate is what pushed a real 44-unit estate onto
-    `authorize` for every unit, permanently marking builds UNVALIDATED.
-
-    So the source list is now derived from what was proven, not from prose:
-
-    * **proved every live source** -> pass NO `--sources`, and `clear_block` falls back to the
-      marker's own list, clearing it in full. This is the normal path.
-    * **proved a subset** (`--source-index`) -> a full clear would be a SAFETY regression: proving
-      one source would lift a gate covering sources nobody contacted, which is the exact hole the
-      plural guarantee in `run_probe` exists to close. We cannot yet name a single leg the way
-      `preflight_source_credentials._classify_legs` does, so we refuse to clear at all and say why.
-
-    ⚠️ `proved_all` is `source_index is None` and must stay that simple. Blind review 2026-08-27
-    caught the "cleverer" version, `set(live) >= set(all_live)`, being **fail-open**: a superset
-    test is vacuously true against an empty set, so a bundle with **0** live sources cleared the
-    gate on ZERO proof (`SKIPPED nothing to probe`, then marker deleted, ACL removed and an EARNED
-    `probe-cleared` written), and a **1**-live-source bundle cleared a marker naming two. Both were
-    a fail-OPEN regression against the very bug being fixed -- master left the gate armed in exactly
-    those cases. The predicate must key on *how the probe was invoked*, never on set arithmetic over
-    bundle indices, because the marker is keyed by source NAMES and the two sets are independent.
-    """
-    if not proved_all:
-        log.warning(
-            "PROBE: gate NOT lifted - a --source-index run proves only one source (%s), and a clear "
-            "would lift a gate covering sources never contacted. Re-run without --source-index to "
-            "earn a clear. See issues #346 and #347.",
-            what,
-        )
-        return False
-    subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).parent / "credential_gate.py"),
-            "clear",
-            str(migration),
-            "--reason",
-            f"probe-cleared: DATA_OK from {what}",
-            "--earned",
-        ],
-        capture_output=True,
-        check=False,
-    )
-    return True
-
-
 def _host_resolves(server: str) -> bool:
     """Cheap DNS check, run before any Desktop work.
 
@@ -906,16 +855,26 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
         return 0
 
     log.info("probing %d live source(s): %s", len(live), live)
+    contacted = 0
     for idx in live:
         rc, verdict = _probe_one(bundle.migration_dir, sources, idx, timeout_sec, keep)
         if rc != 0:
             log.error("PROBE: source index %d failed - not lifting the gate", idx)
             _print_verdict_directive(verdict)
             return rc
+        # SKIPPED means `_resolve_probe_target` found nothing to reach, so no endpoint was contacted
+        # and this source proves nothing. Counting it would re-open #353 for exactly the shape that
+        # exposed it: a `federated` outer connection carrying no server at all.
+        contacted += verdict != "SKIPPED"
 
     # `source_index is None` IS the predicate -- see `_lift_gate`. Anything derived from `live`
     # instead is fail-open: a superset test over bundle indices cleared on ZERO proof.
-    if not _lift_gate(bundle.migration_dir, f"{len(live)} live source(s)", proved_all=source_index is None):
+    if not _lift_gate(
+        bundle.migration_dir,
+        f"{len(live)} live source(s)",
+        proved_all=source_index is None,
+        contacted=contacted,
+    ):
         log.warning(
             "PROBE: %d source(s) reachable, but the gate is STILL ARMED and nothing was earned. "
             "Do not treat this as a green light.",
