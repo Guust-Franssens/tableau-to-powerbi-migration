@@ -24,8 +24,11 @@ readiness matrix. Session start is the **only safe moment** to change them.
 - Being **above** the recorded known-good matrix is not an error — it raises a WARN, because that is
   exactly when the version-specific Gotchas in `.github/agents/` need re-verification. Don't "fix" it
   by downgrading; re-verify the prose.
-- **Never upgrade mid-migration.** Swapping the validator underneath a half-built report is worse than
-  a slightly old CLI. Between migrations is fine.
+- **Mid-migration, don't upgrade the installed tooling.** The risk is not the calendar but *work
+  already validated by the current CLI* — swap the validator underneath it and earlier results are no
+  longer covered by the same check. Between migrations is fine. A version-*comparison* run into a
+  fresh output dir is not an upgrade and is always safe — see the engine timing rule in
+  [`/AGENTS.md`](../AGENTS.md).
 - It cannot update the **skill bundles** — `copilot plugin update` hits a file lock while any Copilot
   session is running. That lock only blocks renaming the plugin directory, not writing inside it, so a
   *content* refresh needs no restart: `python scripts/sync_installed_skills.py`.
@@ -41,7 +44,7 @@ readiness matrix. Session start is the **only safe moment** to change them.
 |---|---|---|
 | Session start (nothing in flight) | `preflight.ps1 -Update -CheckUpstream` | Safe; the CLI floor is a correctness floor, and this is the one moment upgrading is allowed |
 | Migration start (orchestrator step 0) | `preflight.ps1` (plain) | Confirm READY without changing tooling mid-flow |
-| Mid-migration | never | Swapping the validator under a half-built report is worse than a slightly old one |
+| Mid-migration | don't re-arm `-Update` | Swapping the validator mid-build leaves earlier-validated work uncovered by the same check; a comparison run into a fresh dir is a separate, always-safe operation (see [`/AGENTS.md`](../AGENTS.md)) |
 
 ## Everything else
 
