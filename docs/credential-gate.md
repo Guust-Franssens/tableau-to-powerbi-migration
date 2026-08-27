@@ -112,8 +112,39 @@ python scripts/credential_gate.py list      <estate-root>     # which units are 
 python scripts/credential_gate.py block     <migration-dir> --sources "a" "b"
 python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok
 python scripts/credential_gate.py authorize <migration-dir> --who "<name>"   # humans only
-python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation
+python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation — point at the bundle, NOT the ship copy (see below)
 ```
+
+### Where to run `verify` — the bundle, never the ship copy
+
+`verify` reads the audit log **at exactly the path you give it** —
+`<migration-dir>/.credential-gate-audit.log` — and nowhere else. It never searches upward or sideways
+for a related gate. So *which directory you point it at* is the whole decision, and there is exactly
+one correct target: **the directory where the gate was armed and probed** — the engine `<bundle>` you
+passed to `--bundle` during the reachability steps, or the migration/spec dir on the parser path. That
+directory holds the `block` entry (and the `probe-cleared` / `authorize` that earned the lift), so
+`verify` there sees the real history and fails closed (exit 1) on a violation.
+
+⚠️ **Do NOT run `verify` at the ship destination `migrations/{workbooks,datasources}/<slug>/fabric/`.**
+At sign-off the built artifacts are **copied** there, but the audit log is **not** — it lives at the
+bundle root, outside the copied tree. `verify` at the destination therefore finds no `block` entry,
+concludes *"no gate was ever applied to this migration"*, and exits **0** — the same false green
+whether the gate was honestly cleared or the model was built behind a live-source stop that was never
+resolved. Identical bytes, opposite verdict (reproduced 2026-08-27 on the same copied `.tmdl`):
+
+| you run | `.credential-gate-audit.log` present? | verdict |
+|---|---|---|
+| `verify <bundle>` | yes | `VIOLATION — artifact(s) exist while the gate is applied … Do not ship them.` **exit 1** |
+| `verify migrations/…/<slug>/fabric/` (or its parent) | no | `OK — no gate was ever applied to this migration` **exit 0** |
+
+**A `verify` whose path has no `.credential-gate-audit.log` proves nothing.** Treat an `OK` there as
+*unverified*, not *clean* — from the outside it is indistinguishable from the genuine "extract-only,
+never gated" pass this same message is designed to report.
+
+> **This is a stopgap, not the final design.** `verify` cannot yet recover the originating bundle from
+> a ship copy. The hook exists — both locations carry the same `engine-output-receipt.json` sha256,
+> which a future `verify` could follow back to the bundle, or a `--also-check <bundle>` flag could
+> name — but until that lands the rule is simply *point `verify` at the bundle*. Tracked in issue #354.
 
 ### Across MANY units: enumerate, then re-probe. Do not mass-authorize.
 
