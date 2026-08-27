@@ -177,9 +177,19 @@ distinct violations:
 ### `clear` earns nothing; only the probe does
 
 ⚠️ **`--source-index` cannot earn a clear at all (#347).** A probe narrowed to one source leaves the
-gate armed and records **no** `probe-cleared`, by design: clearing on a partial proof would lift a
-gate covering sources nobody contacted, which is the exact hole `run_probe`'s plural guarantee
-exists to close. Re-run without `--source-index` to earn a clear.
+gate armed, records **no** `probe-cleared`, and exits **3** — by design: clearing on a partial proof
+would lift a gate covering sources nobody contacted, which is the exact hole `run_probe`'s plural
+guarantee exists to close. Re-run without `--source-index` to earn a clear.
+
+The predicate is exactly `source_index is None`, and it must stay that simple. Blind review found
+the first attempt — `set(live) >= set(all_live)` — was **fail-open**: a superset test is vacuously
+true against an empty set, so a bundle with **0** live sources cleared the gate on ZERO proof
+(`SKIPPED nothing to probe`, then marker deleted, ACL removed, an EARNED `probe-cleared` written),
+and a **1**-source bundle cleared a marker naming two. Both were worse than the bug being fixed,
+because master left the gate armed in exactly those cases. Set arithmetic can never be right here:
+`live` holds bundle *indices* while the marker is keyed by source *names*, and the clear runs
+against the marker — the two sets are independent, so a superset relation over one says nothing
+about the other.
 
 That refusal is the conservative half of the #346 fix. Until 2026-08-27 the probe passed a
 human-readable count (`"2 live source(s)"`) as `--sources`; `clear_block` diffs that against the

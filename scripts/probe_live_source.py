@@ -753,8 +753,11 @@ def _record_attempt(migration: Path, verdict: str, what: str) -> None:
     _audit(migration, f"probe-{verdict.lower()}", what)
 
 
-def _lift_gate(migration: Path, what: str, proved_all: bool) -> None:
+def _lift_gate(migration: Path, what: str, proved_all: bool) -> bool:
     """Ask the gate to record an EARNED clear for what this probe actually proved.
+
+    Returns whether a clear was requested, so the caller can avoid announcing DATA_OK over a gate
+    it deliberately left armed.
 
     ⚠️ `what` is a human-readable COUNT ("2 live source(s)") and must never be passed as
     `--sources`. It was, until 2026-08-27, and that silently broke the only earned route out of the
@@ -772,15 +775,24 @@ def _lift_gate(migration: Path, what: str, proved_all: bool) -> None:
       one source would lift a gate covering sources nobody contacted, which is the exact hole the
       plural guarantee in `run_probe` exists to close. We cannot yet name a single leg the way
       `preflight_source_credentials._classify_legs` does, so we refuse to clear at all and say why.
+
+    ⚠️ `proved_all` is `source_index is None` and must stay that simple. Blind review 2026-08-27
+    caught the "cleverer" version, `set(live) >= set(all_live)`, being **fail-open**: a superset
+    test is vacuously true against an empty set, so a bundle with **0** live sources cleared the
+    gate on ZERO proof (`SKIPPED nothing to probe`, then marker deleted, ACL removed and an EARNED
+    `probe-cleared` written), and a **1**-live-source bundle cleared a marker naming two. Both were
+    a fail-OPEN regression against the very bug being fixed -- master left the gate armed in exactly
+    those cases. The predicate must key on *how the probe was invoked*, never on set arithmetic over
+    bundle indices, because the marker is keyed by source NAMES and the two sets are independent.
     """
     if not proved_all:
         log.warning(
-            "PROBE: gate NOT lifted - only a subset of live sources was proved (%s). Clearing on a "
-            "partial proof would lift a gate covering sources never contacted. Re-run without "
-            "--source-index to earn a clear. See issue #346.",
+            "PROBE: gate NOT lifted - a --source-index run proves only one source (%s), and a clear "
+            "would lift a gate covering sources never contacted. Re-run without --source-index to "
+            "earn a clear. See issues #346 and #347.",
             what,
         )
-        return
+        return False
     subprocess.run(
         [
             sys.executable,
@@ -794,6 +806,7 @@ def _lift_gate(migration: Path, what: str, proved_all: bool) -> None:
         capture_output=True,
         check=False,
     )
+    return True
 
 
 def _host_resolves(server: str) -> bool:
@@ -886,7 +899,6 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
         for i, s in enumerate(sources)
         if ((s.get("connection", {}) or {}).get("powerbi_target") or "") == "live_source"
     ]
-    all_live = list(live)
     if source_index is not None:
         live = [source_index]
     if not live:
@@ -901,7 +913,15 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
             _print_verdict_directive(verdict)
             return rc
 
-    _lift_gate(bundle.migration_dir, f"{len(live)} live source(s)", proved_all=set(live) >= set(all_live))
+    # `source_index is None` IS the predicate -- see `_lift_gate`. Anything derived from `live`
+    # instead is fail-open: a superset test over bundle indices cleared on ZERO proof.
+    if not _lift_gate(bundle.migration_dir, f"{len(live)} live source(s)", proved_all=source_index is None):
+        log.warning(
+            "PROBE: %d source(s) reachable, but the gate is STILL ARMED and nothing was earned. "
+            "Do not treat this as a green light.",
+            len(live),
+        )
+        return 3
     log.info("PROBE: DATA_OK all %d live source(s) reachable", len(live))
     return 0
 
