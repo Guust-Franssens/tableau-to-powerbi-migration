@@ -93,6 +93,18 @@ def test_parse_verdict_returns_none_without_a_recognised_verdict() -> None:
     assert rb._parse_verdict("") is None
 
 
+def test_parse_verdict_survives_a_bare_probe_line() -> None:
+    """Finding #1: a line that strips to exactly `PROBE:` must NOT raise (it once IndexError'd and
+    aborted the whole sweep). The real verdict before it still wins."""
+    assert rb._parse_verdict("PROBE: NO_CREDENTIAL x\nPROBE:\n") == "NO_CREDENTIAL"
+    assert rb._parse_verdict("PROBE:\n") is None
+
+
+def test_verdict_line_survives_a_bare_probe_line() -> None:
+    assert rb._verdict_line("PROBE:\nPROBE: DATA_OK all reachable\n") == "PROBE: DATA_OK all reachable"
+    assert rb._verdict_line("PROBE:\n") == ""
+
+
 # --------------------------------------------------------------------------------------------------
 # read_units_source
 # --------------------------------------------------------------------------------------------------
@@ -119,6 +131,20 @@ def test_read_units_source_parses_a_bare_json_array_of_paths() -> None:
 def test_read_units_source_parses_newline_paths_and_skips_comments() -> None:
     units = rb.read_units_source("/a/one\n# a comment\n\n/a/two\n")
     assert [u.path for u in units] == [Path("/a/one"), Path("/a/two")]
+
+
+def test_read_units_source_raises_on_truncated_json_rather_than_guessing_paths() -> None:
+    """Finding #3: input that clearly meant to be JSON (begins { or [) but is malformed must NOT be
+    silently reinterpreted as newline paths, which would mask a truncated pipe as a clean estate."""
+    with pytest.raises(rb.InputError):
+        rb.read_units_source('{"root":"r","units":[{"unit":"/a/one",')
+    with pytest.raises(rb.InputError):
+        rb.read_units_source('[{"unit":"/a/one"')
+
+
+def test_read_units_source_empty_is_empty_not_an_error() -> None:
+    assert rb.read_units_source("") == []
+    assert rb.read_units_source("   \n  ") == []
 
 
 # --------------------------------------------------------------------------------------------------
@@ -161,6 +187,22 @@ def test_select_deduplicates_by_resolved_path(tmp_path: Path) -> None:
     blocked = _blocked_unit(tmp_path)
     to_probe, _, _ = rb.select([rb.UnitInput(path=blocked), rb.UnitInput(path=blocked)])
     assert len(to_probe) == 1
+
+
+def test_select_errors_on_a_nonexistent_explicit_unit(tmp_path: Path) -> None:
+    """Finding #3: a typo'd/moved/missing explicit path must be `errored` (exit 5), not `skipped`,
+    so a broken input cannot masquerade as a clean estate by exiting 0."""
+    missing = tmp_path / "typo-does-not-exist"
+    to_probe, pre_results, _ = rb.select([rb.UnitInput(path=missing)])
+    assert not to_probe
+    assert pre_results[0].category == rb.CAT_ERRORED
+
+
+def test_select_errors_on_a_unit_that_is_a_file_not_a_directory(tmp_path: Path) -> None:
+    afile = tmp_path / "a-file.txt"
+    afile.write_text("x", encoding="utf-8")
+    _, pre_results, _ = rb.select([rb.UnitInput(path=afile)])
+    assert pre_results[0].category == rb.CAT_ERRORED
 
 
 # --------------------------------------------------------------------------------------------------
@@ -293,17 +335,49 @@ def test_sweep_skips_a_unit_cleared_between_listing_and_probe_time(tmp_path: Pat
 # --------------------------------------------------------------------------------------------------
 # the ONE hard rule: the sweep never lifts a gate itself
 # --------------------------------------------------------------------------------------------------
-def test_sweep_writes_no_gate_files_of_its_own(tmp_path: Path) -> None:
-    """A no-op runner leaves the marker; the sweep must add no override and no audit line itself."""
+@pytest.mark.parametrize(
+    "verdict,clears,returncode",
+    [
+        ("NO_CREDENTIAL", False, 1),  # still-blocked path
+        ("DATA_OK", True, 0),  # newly-earned path (marker vanishes via the runner, NOT the sweep)
+        ("DATA_OK", False, 0),  # anomaly / stuck-gate path
+    ],
+)
+def test_sweep_writes_no_gate_files_of_its_own(tmp_path: Path, verdict: str, clears: bool, returncode: int) -> None:
+    """The sweep must never write an override or audit line - on ANY verdict.
+
+    Finding #5: the original test only covered NO_CREDENTIAL, so a mutant that forged
+    `.credential-gate-AUTHORIZED` only on DATA_OK survived. Parametrising over both DATA_OK paths
+    (earned and stuck) closes that hole - the DATA_OK cases are exactly where injecting an unearned
+    override would do the most damage.
+    """
     unit = _blocked_unit(tmp_path)
     rb.sweep(
         [rb.UnitInput(path=unit)],
         _options(apply=True),
-        runner=_runner_that("NO_CREDENTIAL", clears=False, returncode=1),
+        runner=_runner_that(verdict, clears=clears, returncode=returncode),
     )
-    assert (unit / MARKER).exists(), "the sweep must not remove the marker itself"
-    assert not (unit / OVERRIDE).exists(), "the sweep must never write an authorization override"
-    assert not (unit / AUDIT).exists(), "the sweep must never write an audit entry itself"
+    assert not (unit / OVERRIDE).exists(), f"sweep must never write an override ({verdict})"
+    assert not (unit / AUDIT).exists(), f"sweep must never write an audit entry itself ({verdict})"
+    if not clears:
+        assert (unit / MARKER).exists(), "the sweep must not remove the marker itself"
+
+
+def test_probe_unit_isolates_a_runner_that_raises_and_the_sweep_continues(tmp_path: Path) -> None:
+    """Finding #1 (defense-in-depth): one unit whose probe RAISES must become `errored` without
+    discarding the other units' results."""
+    boom = _blocked_unit(tmp_path, "boom")
+    ok = _blocked_unit(tmp_path, "ok")
+
+    def runner(unit: Path, _options: rb.SweepOptions) -> rb.ProbeOutcome:
+        if unit == boom.resolve():
+            raise ValueError("kaboom from the probe")
+        return rb.ProbeOutcome(1, "NO_CREDENTIAL", False, "x")
+
+    report = rb.sweep([rb.UnitInput(path=boom), rb.UnitInput(path=ok)], _options(apply=True), runner=runner)
+    by_unit = {r.unit: r.category for r in report.results}
+    assert by_unit[boom.resolve()] == rb.CAT_ERRORED
+    assert by_unit[ok.resolve()] == rb.CAT_STILL_BLOCKED
 
 
 def test_default_probe_runner_builds_a_probe_command_and_never_a_clear_or_authorize(
@@ -418,3 +492,38 @@ def test_main_apply_surfaces_anomaly_exit_five(tmp_path: Path, capsys: pytest.Ca
     unit = _blocked_unit(tmp_path)
     code = rb.main(["--unit", str(unit), "--apply"], runner=_runner_that("DATA_OK", clears=False))
     assert code == rb.EXIT_ANOMALY
+
+
+def test_main_nonexistent_unit_exits_five_not_zero(tmp_path: Path) -> None:
+    """Finding #3: a typo'd --unit must NOT silently exit 0 as if the estate were clean."""
+    code = rb.main(["--unit", str(tmp_path / "typo")])
+    assert code == rb.EXIT_ANOMALY
+
+
+def test_main_empty_but_provided_source_is_clean_exit_zero(tmp_path: Path) -> None:
+    """Finding #3: `list --json` of a fully un-gated estate is `{"units":[]}` - a CLEAN result (exit
+    0), which must not collapse into the no-source usage error (exit 2)."""
+    empty = tmp_path / "empty.json"
+    empty.write_text('{"root":"r","units":[]}', encoding="utf-8")
+    assert rb.main(["--units-from", str(empty)]) == rb.EXIT_CLEAN
+
+
+def test_main_truncated_json_source_exits_five_not_zero(tmp_path: Path) -> None:
+    truncated = tmp_path / "truncated.json"
+    truncated.write_text('{"root":"r","units":[{"unit":"/a/one",', encoding="utf-8")
+    assert rb.main(["--units-from", str(truncated)]) == rb.EXIT_ANOMALY
+
+
+def test_main_missing_units_from_file_exits_five_not_crash(tmp_path: Path) -> None:
+    assert rb.main(["--units-from", str(tmp_path / "no-such-file.txt")]) == rb.EXIT_ANOMALY
+
+
+def test_negative_per_unit_timeout_is_rejected(tmp_path: Path) -> None:
+    """Finding #4: a fat-fingered negative must be rejected, not silently disable the backstop."""
+    with pytest.raises(SystemExit):
+        rb.main(["--unit", str(_blocked_unit(tmp_path)), "--per-unit-timeout-sec", "-5"])
+
+
+def test_zero_per_unit_timeout_is_accepted(tmp_path: Path) -> None:
+    args = rb._parse_args(["--unit", str(tmp_path), "--per-unit-timeout-sec", "0"])
+    assert args.per_unit_timeout_sec == 0

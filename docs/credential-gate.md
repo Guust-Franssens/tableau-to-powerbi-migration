@@ -147,13 +147,14 @@ every unit UNVALIDATED**, including the ones whose credentials now work.
 still **BLOCKED**, letting each gate **earn** its own `probe-cleared` where the probe now passes:
 
 ```powershell
-# DRY RUN by default — prints what WOULD be probed, runs nothing
+# DRY RUN by default — prints what WOULD be probed, runs nothing. --unit/--units-from work standalone.
 python scripts/reprobe_blocked.py --unit _runs\001-ia\bundle --unit _runs\ia-policy\bundle
 
 # actually probe (opens Power BI Desktop per unit, sequentially)
 python scripts/reprobe_blocked.py --units-from blocked.txt --apply
 
-# compose with the read-only `list` query
+# compose with the read-only `list` query — REQUIRES `credential_gate.py list` from PR #348 (not yet
+# on master); until it merges, use --unit/--units-from above
 python scripts/credential_gate.py list _runs --json | python scripts/reprobe_blocked.py --stdin --apply
 ```
 

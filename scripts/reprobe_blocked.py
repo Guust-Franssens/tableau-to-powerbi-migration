@@ -2,10 +2,11 @@
 purpose: after ONE machine-wide Power BI sign-in, re-run the reachability probe across MANY blocked
          credential-gate units and let each gate EARN its own clear where the probe now passes.
          This tool NEVER clears, authorizes, forces or mass-authorizes anything itself.
-usage:   python scripts/reprobe_blocked.py --unit <dir> [--unit <dir> ...]          # explicit
+usage:   python scripts/reprobe_blocked.py --unit <dir> [--unit <dir> ...]          # explicit, standalone
          python scripts/reprobe_blocked.py --units-from <file>                      # one path per line
+         # compose with the read-only `list` query (REQUIRES `credential_gate.py list` from PR #348):
          python scripts/credential_gate.py list <root> --json | \
-             python scripts/reprobe_blocked.py --stdin --apply                      # compose with `list`
+             python scripts/reprobe_blocked.py --stdin --apply
          (DRY RUN by default - prints what WOULD be probed; pass --apply to actually run the probe)
 
 The problem this solves (issue #344)
@@ -74,21 +75,32 @@ Each unit lands in exactly one category:
                   from ACCESS_DENIED / BAD_TABLE / OPERATOR_REQUIRED, which have different fixes.
     anomaly       DATA_OK but the gate stayed up (the defect above), or SKIPPED-no-live on an armed
                   unit: a tooling/spec problem, not a source verdict. Do NOT authorize past it.
-    errored       the probe could not run, timed out at the backstop, or produced no verdict line -
-                  the measurement did not happen, so nothing was learned about the source.
+    errored       the probe could not run, timed out at the backstop, produced no verdict line, OR an
+                  explicitly requested path does not exist / is not a directory (finding #3) - the
+                  measurement did not happen, so nothing was learned about the source.
     skipped       not blocked (nothing to do), or a non-BLOCKED `list` state, or no longer blocked
                   at probe time.
     would-probe   DRY-RUN only: this unit is blocked and WOULD be probed under --apply.
 
 Exit code (precedence: forged > anomaly/errored > blocked > clean; magnitude is an id, not a rank):
 
-    0  clean          nothing left blocked (or nothing was blocked to begin with)
+    0  clean          nothing left blocked (incl. a source that was provided but is legitimately empty,
+                      e.g. `list --json` of a fully un-gated estate)
     1  blocked         >=1 unit still BLOCKED for a source reason (or, in dry run, >=1 would-probe)
-    2  usage           bad/absent arguments (argparse convention)
+    2  usage           NO input source was given at all (argparse convention). An empty-but-provided
+                      source is exit 0, not 2 - the two must not collapse (finding #3).
     3  forged-override a FORGED-OVERRIDE state was present in the input (from `list --json`); security
-    5  anomaly         >=1 unit errored or returned DATA_OK-but-gate-stuck (measurement/tooling problem)
+    5  anomaly/errored >=1 unit errored, returned DATA_OK-but-gate-stuck, or the input itself was
+                      structurally broken (truncated JSON, a missing --units-from file, a non-dir unit)
     (4 is intentionally unused: it is the probe's OPERATOR_REQUIRED exit; this sweep folds
      operator-required into exit 1 and never emits 4.)
+
+    Cross-tool note (finding #6, OPEN): the sibling `credential_gate.py list` (PR #348) uses 2 =
+    forged-override and 3 = bad-root, which swaps two security-relevant codes against this tool's 2 =
+    usage / 3 = forged-override. This tool keeps 2 = usage because argparse hard-codes exit 2 for CLI
+    errors (so `list`'s 2 = forged already collides with its OWN argparse usage exit). Recommended
+    convergence: 2 = usage everywhere, 3 = forged-override everywhere, `list`'s bad-root -> 4. Not
+    renumbered unilaterally - the alignment change belongs on #348.
 
 What is NOT unit-tested here
 ----------------------------
@@ -245,16 +257,30 @@ class SweepReport:
     applied: bool
 
 
+def _probe_verdict_token(line: str) -> str | None:
+    """Return the recognised verdict token on a `PROBE: <VERDICT> ...` line, else None.
+
+    Tolerant by construction: a bare `PROBE:` with no token, or a `PROBE:` line whose first word is a
+    non-verdict summary (e.g. `PROBE: source index 0 failed`), both yield None rather than raising.
+    That tolerance is the point - the docstring promises the parser survives arbitrary
+    `PROBE:`-prefixed lines, and one malformed line must never abort a 44-unit sweep (finding #1).
+    """
+    stripped = line.strip()
+    if "PROBE:" not in stripped:
+        return None
+    tail = stripped.partition("PROBE:")[2].strip()
+    if not tail:
+        return None
+    token = tail.split(None, 1)[0]
+    return token if token in KNOWN_VERDICTS else None
+
+
 def _parse_verdict(text: str) -> str | None:
     """Return the LAST recognised `PROBE: <VERDICT>` token in `text`, or None if there is none."""
     verdict: str | None = None
     for line in text.splitlines():
-        stripped = line.strip()
-        marker = "PROBE:"
-        if marker not in stripped:
-            continue
-        token = stripped.split(marker, 1)[1].strip().split(None, 1)[0] if stripped else ""
-        if token in KNOWN_VERDICTS:
+        token = _probe_verdict_token(line)
+        if token is not None:
             verdict = token
     return verdict
 
@@ -262,12 +288,8 @@ def _parse_verdict(text: str) -> str | None:
 def _verdict_line(text: str) -> str:
     """The first recognised `PROBE: <VERDICT> ...` line, trimmed, for use as a human detail string."""
     for line in text.splitlines():
-        stripped = line.strip()
-        if "PROBE:" not in stripped:
-            continue
-        token = stripped.split("PROBE:", 1)[1].strip().split(None, 1)[0]
-        if token in KNOWN_VERDICTS:
-            return stripped[:300]
+        if _probe_verdict_token(line) is not None:
+            return line.strip()[:300]
     return ""
 
 
@@ -310,14 +332,26 @@ def _units_from_json(payload: object) -> list[UnitInput]:
     return units
 
 
+class InputError(ValueError):
+    """The unit input was provided but is structurally broken (e.g. truncated JSON) - refuse to guess."""
+
+
 def read_units_source(text: str) -> list[UnitInput]:
-    """Turn a text blob (JSON in the `list` shape, a JSON array, or newline paths) into UnitInputs."""
+    """Turn a text blob (JSON in the `list` shape, a JSON array, or newline paths) into UnitInputs.
+
+    Raises `InputError` when the text clearly looked like JSON (begins with ``{`` or ``[``) but failed
+    to parse: silently reinterpreting a truncated pipe as newline paths is exactly how a broken
+    upstream masquerades as a clean estate (finding #3). Genuine newline path lists (which never begin
+    with ``{``/``[``) still parse normally.
+    """
     stripped = text.strip()
     if not stripped:
         return []
     try:
         payload = json.loads(stripped)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        if stripped[:1] in ("{", "["):
+            raise InputError(f"input begins with '{stripped[:1]}' but is not valid JSON: {exc}") from exc
         return [
             UnitInput(path=Path(line.strip()))
             for line in stripped.splitlines()
@@ -342,19 +376,29 @@ def _maybe_read_stdin() -> str | None:
         return None
 
 
-def gather_units(args: argparse.Namespace) -> list[UnitInput]:
-    """Collect units from --unit, --units-from (file or -), --stdin, or an auto-detected pipe."""
+def gather_units(args: argparse.Namespace) -> tuple[list[UnitInput], bool]:
+    """Collect units and report whether ANY input source was provided.
+
+    The boolean lets `main` tell "no source given at all" (a usage error) apart from "a source was
+    given but was legitimately empty" (a clean estate - `list --json` of nothing gated is `{"units":
+    []}`), which must NOT both collapse to the same exit code (finding #3). Raises `InputError` /
+    `OSError` upward for structurally broken input (truncated JSON, an unreadable `--units-from`).
+    """
     units = [UnitInput(path=Path(raw)) for raw in (args.unit or [])]
+    provided = bool(args.unit)
     text: str | None = None
     if args.stdin or args.units_from == "-":
         text = _read_stdin()
+        provided = True
     elif args.units_from:
         text = Path(args.units_from).read_text(encoding="utf-8")
+        provided = True
     elif not units:
         text = _maybe_read_stdin()
-    if text:
+        provided = provided or text is not None
+    if text is not None:
         units.extend(read_units_source(text))
-    return units
+    return units, provided
 
 
 def _skip(unit: Path, reason: str) -> UnitResult:
@@ -362,13 +406,22 @@ def _skip(unit: Path, reason: str) -> UnitResult:
     return UnitResult(unit=unit, category=CAT_SKIPPED, verdict=None, reason=reason, elapsed_sec=0.0)
 
 
+def _errored(unit: Path, reason: str) -> UnitResult:
+    """A unit the sweep could not act on because the input itself was bad (drives a non-zero exit)."""
+    return UnitResult(unit=unit, category=CAT_ERRORED, verdict=None, reason=reason, elapsed_sec=0.0)
+
+
 def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResult | None, bool]:
-    """Decide selection for one resolved unit: (probe_it, skip_result, forged).
+    """Decide selection for one resolved unit: (probe_it, pre_result, forged).
 
     `list --json` state is authoritative for classification, so FORGED-OVERRIDE flags the sweep
     (highest-severity exit) even when this process cannot see the directory. A BLOCKED state (or a
     bare path) additionally re-verifies the marker is present RIGHT NOW - a unit cleared by a
     concurrent probe since it was listed must not be re-probed (verify before repeating).
+
+    An explicitly requested path that does not exist or is not a directory is `errored`, not
+    `skipped` (finding #3): a typo'd/moved/truncated input must not masquerade as a clean estate by
+    exiting 0.
     """
     state = (unit.state or "").strip()
     if state == FORGED_STATE:
@@ -380,7 +433,7 @@ def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResu
     if state and state != BLOCKED_STATE:
         return False, _skip(resolved, f"state={state} (from list); not re-probing"), False
     if not resolved.is_dir():
-        return False, _skip(resolved, f"not a directory: {resolved}"), False
+        return False, _errored(resolved, f"does not exist or is not a directory: {resolved}"), False
     if not unit_is_blocked(resolved):
         reason = (
             "listed BLOCKED but the marker is gone now (cleared since listing)"
@@ -392,14 +445,16 @@ def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResu
 
 
 def select(units: list[UnitInput]) -> tuple[list[UnitInput], list[UnitResult], bool]:
-    """Split inputs into (to_probe, pre_skipped, forged_seen), de-duplicating by resolved path.
+    """Split inputs into (to_probe, pre_results, forged_seen), de-duplicating by resolved path.
 
-    A unit carrying a `list --json` state is probed iff that state is BLOCKED and its marker is still
-    present; FORGED-OVERRIDE is skipped AND flags the sweep; every other state is skipped with its
-    state as the reason. A bare path (no state) is probed iff its BLOCKED marker is present right now.
+    `pre_results` are the units that will not be probed: skipped (not blocked, already cleared, a
+    non-BLOCKED state) OR errored (an explicitly requested path that is not a directory). A unit
+    carrying a `list --json` state is probed iff that state is BLOCKED and its marker is still present;
+    FORGED-OVERRIDE is skipped AND flags the sweep. A bare path is probed iff its BLOCKED marker is
+    present right now.
     """
     to_probe: list[UnitInput] = []
-    skipped: list[UnitResult] = []
+    pre_results: list[UnitResult] = []
     forged = False
     seen: set[Path] = set()
     for unit in units:
@@ -407,13 +462,13 @@ def select(units: list[UnitInput]) -> tuple[list[UnitInput], list[UnitResult], b
         if resolved in seen:
             continue
         seen.add(resolved)
-        probe_it, skip_result, unit_forged = _classify_selection(unit, resolved)
+        probe_it, pre_result, unit_forged = _classify_selection(unit, resolved)
         forged = forged or unit_forged
         if probe_it:
             to_probe.append(UnitInput(path=resolved, state=BLOCKED_STATE, relative=unit.relative))
-        elif skip_result is not None:
-            skipped.append(skip_result)
-    return to_probe, skipped, forged
+        elif pre_result is not None:
+            pre_results.append(pre_result)
+    return to_probe, pre_results, forged
 
 
 def _default_probe_runner(unit: Path, options: SweepOptions) -> ProbeOutcome:
@@ -490,12 +545,16 @@ def probe_unit(unit: UnitInput, runner, options: SweepOptions) -> UnitResult:
     start = time.monotonic()
     try:
         outcome = runner(path, options)
-    except OSError as exc:
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Per-unit isolation is the whole design: ONE unit's failure - a probe that raised, a parse
+        # surprise, a runner bug - must never discard the other N-1 results. Any unexpected error
+        # becomes `errored` for THIS unit and the sweep continues. (Reinforces finding #1: even if a
+        # future parser edge slips through, it cannot abort a 44-unit run.)
         return UnitResult(
             unit=path,
             category=CAT_ERRORED,
             verdict=None,
-            reason=f"probe could not be launched: {exc}",
+            reason=f"probe raised {type(exc).__name__}: {exc}",
             elapsed_sec=time.monotonic() - start,
         )
     elapsed = time.monotonic() - start
@@ -507,7 +566,7 @@ def probe_unit(unit: UnitInput, runner, options: SweepOptions) -> UnitResult:
 
 def sweep(units: list[UnitInput], options: SweepOptions, runner=_default_probe_runner) -> SweepReport:
     """Select the blocked units and, when `options.apply`, probe each ONCE, sequentially."""
-    to_probe, skipped, forged = select(units)
+    to_probe, pre_results, forged = select(units)
     if not options.apply:
         would = [
             UnitResult(
@@ -519,9 +578,9 @@ def sweep(units: list[UnitInput], options: SweepOptions, runner=_default_probe_r
             )
             for unit in to_probe
         ]
-        return SweepReport(results=would + skipped, forged=forged, applied=False)
+        return SweepReport(results=would + pre_results, forged=forged, applied=False)
     results = [probe_unit(unit, runner, options) for unit in to_probe]
-    return SweepReport(results=results + skipped, forged=forged, applied=True)
+    return SweepReport(results=results + pre_results, forged=forged, applied=True)
 
 
 def exit_code(report: SweepReport) -> int:
@@ -588,6 +647,15 @@ def render_json(report: SweepReport) -> str:
     return json.dumps(payload, indent=2)
 
 
+def _non_negative_int(raw: str) -> int:
+    """An argparse type that rejects a negative timeout - a fat-fingered `-5` must not silently
+    disable the supervisory backstop the way the documented `0` does (finding #4)."""
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (0 disables the backstop), got {value}")
+    return value
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     """Define and parse the CLI."""
     parser = argparse.ArgumentParser(
@@ -604,13 +672,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--apply", action="store_true", help="actually run the probe (default: dry-run preview)")
     parser.add_argument(
         "--refresh-timeout-sec",
-        type=int,
+        type=_non_negative_int,
         default=None,
         help="passed through to the probe's refresh timer (default: the probe's own default)",
     )
     parser.add_argument(
         "--per-unit-timeout-sec",
-        type=int,
+        type=_non_negative_int,
         default=DEFAULT_PER_UNIT_TIMEOUT_SEC,
         help=f"supervisory wall-clock backstop per unit (default {DEFAULT_PER_UNIT_TIMEOUT_SEC}; 0 disables)",
     )
@@ -621,17 +689,24 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None, runner=None) -> int:
     """CLI entry point. `runner` is an injection seam for tests; production uses the real probe."""
     args = _parse_args(argv)
-    units = gather_units(args)
-    if not units:
+    try:
+        units, provided = gather_units(args)
+    except InputError as exc:
+        log.error("%s - refusing to guess it as newline paths (truncated pipe?). Re-run with complete input.", exc)
+        return EXIT_ANOMALY
+    except OSError as exc:
+        log.error("could not read the requested input: %s", exc)
+        return EXIT_ANOMALY
+    if not provided:
         log.error(
-            "no units given. Pass --unit <dir> (repeatable), --units-from <file|->, or pipe "
-            "`credential_gate.py list <root> --json` and add --stdin."
+            "no input source given. Pass --unit <dir> (repeatable), --units-from <file|->, or pipe "
+            "`credential_gate.py list <root> --json` (from PR #348) and add --stdin."
         )
         return EXIT_USAGE
     options = SweepOptions(
         apply=args.apply, refresh_timeout_sec=args.refresh_timeout_sec, per_unit_timeout_sec=args.per_unit_timeout_sec
     )
-    if options.apply:
+    if options.apply and units:
         log.info("APPLYING: opening Power BI Desktop and probing each blocked unit sequentially. This tool is the")
         log.info("supervising timer - do not wrap it in an external 2-minute cap; the probe self-bounds each refresh.")
     report = sweep(units, options, runner=runner or _default_probe_runner)
