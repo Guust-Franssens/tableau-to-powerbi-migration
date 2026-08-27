@@ -6,7 +6,8 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 
 1. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status and final gate; direct `check_*.py` gates only isolate one finding.
 2. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
-3. Load the layer gotchas skill before editing: `powerbi-semantic-model-gotchas` for TMDL/DAX, `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, `powerbi-ai-readiness` for Copilot/Q&A metadata.
+3. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
+4. Load the layer gotchas skill before editing: `powerbi-semantic-model-gotchas` for TMDL/DAX, `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, `powerbi-ai-readiness` for Copilot/Q&A metadata.
 
 Toolkit-maintenance scripts live in `scripts/README.md`, outside the per-unit route.
 

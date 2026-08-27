@@ -108,11 +108,62 @@ python scripts/probe_live_source.py --spec <migration-dir>/migration-spec.json
 
 # the gate itself
 python scripts/credential_gate.py status    <migration-dir>   # is it gated?
+python scripts/credential_gate.py list      <estate-root>     # which units are gated? (--json)
 python scripts/credential_gate.py block     <migration-dir> --sources "a" "b"
 python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok
 python scripts/credential_gate.py authorize <migration-dir> --who "<name>"   # humans only
 python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation
 ```
+
+### Across MANY units: enumerate, then re-probe. Do not mass-authorize.
+
+Every other subcommand takes exactly **one** migration, which is the right scope for a decision and
+the wrong scope for a question. Field report 2026-08-26, an SES engineer on a ~44-unit estate:
+
+> **"I am always asked to run these for all the dashboards manually"**
+
+— with a terminal of hand-typed `authorize` calls, one per unit, at 00:48.
+
+```powershell
+python scripts/credential_gate.py list <estate-root>          # add --json for an agent
+```
+
+Exit `1` = something is still blocked (**the resume signal**), `3` = a forged override exists
+anywhere — deliberately outranking the workflow signal, so a bypass attempt cannot hide behind
+ordinary state — `4` = a bad `<estate-root>`, `0` = nothing gated. States are derived from
+artifacts, never prose: `BLOCKED`, `cleared-earned`, `authorized-unearned`, `FORGED-OVERRIDE`,
+`clean`.
+
+⚠️ **Do not alarm on exit `2` alone.** `3` keeps a mistyped root off the security code, but
+argparse's own usage errors (missing argument, unknown flag) still exit `2` and are not ours to
+renumber. Confirm a forgery through the `--json` `state` field, which is unambiguous; a `2` with no
+parseable JSON on stdout is a usage error. (Blind review 2026-08-27 measured a nonexistent root,
+a non-directory, a missing argument and an unknown flag *all* returning `2` — the most alarming
+state in the vocabulary, raised by a typo.)
+
+⚠️ **`list` reads the marker/override/audit FILES, not the ACL.** A unit whose marker was removed
+while the kernel write-deny survives reports as `clean` here. That direction is safe — it
+under-reports "blocked" and cannot help produce an unvalidated artifact — but it is why `list` is a
+**resume signal, never a ship gate**. `verify` stays the authoritative pre-ship check.
+
+**The two exits are NOT equivalent, and the lossy one is the one people reach for:**
+
+| exit | audit action | what the artifact means |
+|---|---|---|
+| re-probe after a sign-in | `probe-cleared` | **earned** — the source was actually reached |
+| `authorize --who` | `authorize` | **unearned** — a human accepted an *unvalidated* build |
+
+⚠️ **A credential caches machine-wide (DPAPI), so ONE sign-in can earn MANY units.** That is why
+mass-`authorize` is the wrong reflex: re-probing converts *unearned → earned* by measurement, while
+authorizing stamps every unit UNVALIDATED **permanently**, including ones whose credentials now
+work — after which `check_unit` can no longer tell "we proved this" from "a tired human clicked past
+it at 00:48". **Re-probe first; authorize only what genuinely cannot be reached.**
+
+Bulk `authorize` is deliberately **not** implemented (issue #344): making it one keystroke to mark 44
+units unvalidated would make the lossy path the easy path. Note the friction argument cuts the same
+way as the security one — retyping one decision 44 times adds fatigue, not deliberation, and the
+natural response to fatigue is a loop script, which is precisely the artifact an agent could later
+invoke. Remove the counting and the retyping; never remove the human decision.
 
 `verify` is the one to run before shipping anything — and before believing any agent's summary of
 its own run. It reads the **ACL and the audit log**, not files an agent can write. It reports four
@@ -125,6 +176,26 @@ distinct violations:
 
 ### `clear` earns nothing; only the probe does
 
+⚠️ **`--source-index` cannot earn a clear at all (#347).** A probe narrowed to one source leaves the
+gate armed, records **no** `probe-cleared`, and exits **3** — by design: clearing on a partial proof
+would lift a gate covering sources nobody contacted, which is the exact hole `run_probe`'s plural
+guarantee exists to close. Re-run without `--source-index` to earn a clear.
+
+The predicate is exactly `source_index is None`, and it must stay that simple. Blind review found
+the first attempt — `set(live) >= set(all_live)` — was **fail-open**: a superset test is vacuously
+true against an empty set, so a bundle with **0** live sources cleared the gate on ZERO proof
+(`SKIPPED nothing to probe`, then marker deleted, ACL removed, an EARNED `probe-cleared` written),
+and a **1**-source bundle cleared a marker naming two. Both were worse than the bug being fixed,
+because master left the gate armed in exactly those cases. Set arithmetic can never be right here:
+`live` holds bundle *indices* while the marker is keyed by source *names*, and the clear runs
+against the marker — the two sets are independent, so a superset relation over one says nothing
+about the other.
+
+That refusal is the conservative half of the #346 fix. Until 2026-08-27 the probe passed a
+human-readable count (`"2 live source(s)"`) as `--sources`; `clear_block` diffs that against the
+marker's real source names, nothing matched, and the partial-clear branch left **every** named-source
+gate armed while still writing `probe-cleared` and exiting 0. The earned route was therefore broken
+on every real estate, which is why `authorize` looked like the only thing that worked.
 `clear` exists for teardown and must keep existing, so it cannot self-defend by refusing. It lifts
 the ACL and records `manual-clear`; the probe's own `--earned` clear records `probe-cleared`. Only
 the latter is evidence. `verify` treats artifacts built after a `manual-clear` as **UNVALIDATED**.
