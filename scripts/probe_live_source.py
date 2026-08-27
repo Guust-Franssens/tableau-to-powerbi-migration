@@ -753,7 +753,34 @@ def _record_attempt(migration: Path, verdict: str, what: str) -> None:
     _audit(migration, f"probe-{verdict.lower()}", what)
 
 
-def _lift_gate(migration: Path, what: str) -> None:
+def _lift_gate(migration: Path, what: str, proved_all: bool) -> None:
+    """Ask the gate to record an EARNED clear for what this probe actually proved.
+
+    ⚠️ `what` is a human-readable COUNT ("2 live source(s)") and must never be passed as
+    `--sources`. It was, until 2026-08-27, and that silently broke the only earned route out of the
+    gate (#346): `clear_block` diffs `--sources` against the marker's real source names, a count
+    string matches none of them, so every source stayed in `remaining_sources` and the partial-clear
+    branch left the gate ARMED -- while still writing a `probe-cleared` audit entry and exiting 0.
+    A probe reporting DATA_OK over a still-armed gate is what pushed a real 44-unit estate onto
+    `authorize` for every unit, permanently marking builds UNVALIDATED.
+
+    So the source list is now derived from what was proven, not from prose:
+
+    * **proved every live source** -> pass NO `--sources`, and `clear_block` falls back to the
+      marker's own list, clearing it in full. This is the normal path.
+    * **proved a subset** (`--source-index`) -> a full clear would be a SAFETY regression: proving
+      one source would lift a gate covering sources nobody contacted, which is the exact hole the
+      plural guarantee in `run_probe` exists to close. We cannot yet name a single leg the way
+      `preflight_source_credentials._classify_legs` does, so we refuse to clear at all and say why.
+    """
+    if not proved_all:
+        log.warning(
+            "PROBE: gate NOT lifted - only a subset of live sources was proved (%s). Clearing on a "
+            "partial proof would lift a gate covering sources never contacted. Re-run without "
+            "--source-index to earn a clear. See issue #346.",
+            what,
+        )
+        return
     subprocess.run(
         [
             sys.executable,
@@ -763,8 +790,6 @@ def _lift_gate(migration: Path, what: str) -> None:
             "--reason",
             f"probe-cleared: DATA_OK from {what}",
             "--earned",
-            "--sources",
-            what,
         ],
         capture_output=True,
         check=False,
@@ -861,6 +886,7 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
         for i, s in enumerate(sources)
         if ((s.get("connection", {}) or {}).get("powerbi_target") or "") == "live_source"
     ]
+    all_live = list(live)
     if source_index is not None:
         live = [source_index]
     if not live:
@@ -875,7 +901,7 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
             _print_verdict_directive(verdict)
             return rc
 
-    _lift_gate(bundle.migration_dir, f"{len(live)} live source(s)")
+    _lift_gate(bundle.migration_dir, f"{len(live)} live source(s)", proved_all=set(live) >= set(all_live))
     log.info("PROBE: DATA_OK all %d live source(s) reachable", len(live))
     return 0
 

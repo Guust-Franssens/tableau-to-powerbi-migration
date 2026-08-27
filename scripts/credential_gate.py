@@ -2,6 +2,7 @@
 purpose: enforce the live-source credential gate at the FILESYSTEM level, so an unvalidated semantic
          model physically cannot be written, and record every gate decision for audit.
 usage:   python scripts/credential_gate.py status  <migration-dir>
+         python scripts/credential_gate.py list    <estate-root> [--json]
          python scripts/credential_gate.py block   <migration-dir> --sources "a" "b"
          python scripts/credential_gate.py clear    <migration-dir> --reason probe-data-ok
          python scripts/credential_gate.py verify   <migration-dir>
@@ -764,6 +765,90 @@ def status(migration: Path) -> int:
     return 1 if blocked and not override else 0
 
 
+def _unit_state(unit: Path) -> str:
+    """Classify one unit's gate state from artifacts on disk, never from prose.
+
+    Ordered most-alarming-first, because a forged override coexisting with a marker is a bypass
+    attempt and must not be reported as the benign state that happens to also be true.
+    """
+    marker = (unit / MARKER).exists()
+    override = (unit / OVERRIDE).exists()
+    if override and not _override_is_authentic(unit):
+        return "FORGED-OVERRIDE"
+    if override:
+        return "authorized-unearned"
+    if marker:
+        return "BLOCKED"
+    try:
+        actions = {json.loads(line).get("action") for line in (unit / AUDIT).read_text(encoding="utf-8").splitlines()}
+    except (OSError, ValueError):
+        return "clean"
+    if "probe-cleared" in actions:
+        return "cleared-earned"
+    return "clean"
+
+
+def list_units(root: Path, as_json: bool = False) -> int:
+    """Report gate state for EVERY unit beneath `root`. Read-only.
+
+    Exists because every other subcommand takes exactly one migration, so "what is still gated?"
+    across an estate cost one invocation per unit. Field report 2026-08-26, a ~44-unit estate:
+    *"I am always asked to run these for all the dashboards manually"*.
+
+    The agent needs this as much as the human. After a human signs in, a credential caches
+    machine-wide (DPAPI), so units sharing that source may now be probeable -- but with no way to
+    enumerate what is gated, an agent cannot discover what became retryable and cannot resume.
+
+    Exit codes are for scripting, and deliberately rank the security signal above the workflow one:
+    2 = a forged override exists anywhere, 1 = something is still blocked, 0 = nothing gated.
+
+    ⚠️ **`2` is not self-certifying, so do not alarm on it alone.** A bad `<root>` exits `3`, but
+    argparse's own usage errors (missing argument, unknown flag) also exit `2` and that is not ours
+    to renumber. Measured: before `3` existed, a mistyped estate root raised the *most alarming*
+    state in the vocabulary. A scripted consumer must confirm a forgery through the `--json`
+    `state` field, which is unambiguous, and treat a `2` with no parseable JSON as a usage error.
+
+    ⚠️ **This reads the marker/override/audit FILES, not the ACL.** `_has_deny_ace` is the real
+    enforcement state, so a unit whose marker was removed while the write-deny ACE survives reports
+    here as `clean`. That direction is safe -- it under-reports "blocked" and cannot help produce an
+    unvalidated artifact -- but it is why `list` is a *resume signal*, never a ship gate. `verify`
+    remains the authoritative pre-ship check.
+    """
+    units = sorted({p.parent for name in (MARKER, OVERRIDE, AUDIT) for p in root.rglob(name)})
+    rows = [
+        {"unit": str(u), "relative": str(u.relative_to(root)) if u != root else ".", "state": _unit_state(u)}
+        for u in units
+    ]
+
+    if as_json:
+        print(json.dumps({"root": str(root), "units": rows}, indent=2))
+    elif not rows:
+        log.info("no gated units found under %s", root)
+    else:
+        width = max(len(r["relative"]) for r in rows)
+        for r in rows:
+            log.info("  %-*s  %s", width, r["relative"], r["state"])
+        tally: dict[str, int] = {}
+        for r in rows:
+            tally[r["state"]] = tally.get(r["state"], 0) + 1
+        log.info("")
+        log.info("  %d unit(s): %s", len(rows), ", ".join(f"{n} {s}" for s, n in sorted(tally.items())))
+        blocked = tally.get("BLOCKED", 0)
+        if blocked:
+            log.info("")
+            log.info("  %d still BLOCKED. Two ways out, and they are NOT equivalent:", blocked)
+            log.info("    EARNED   - sign in, then re-probe. The clear is recorded as 'probe-cleared'")
+            log.info("               and the model counts as validated. Prefer this.")
+            log.info('    UNEARNED - credential_gate.py authorize <unit> --who "<name>"')
+            log.info("               marks the build UNVALIDATED, permanently, in the audit log.")
+            log.info("    A credential caches machine-wide, so ONE sign-in may earn several of these.")
+
+    states = {r["state"] for r in rows}
+    if "FORGED-OVERRIDE" in states:
+        return 2
+    return 1 if "BLOCKED" in states else 0
+
+
 def _has_deny_ace(migration: Path) -> bool:
     """Is the kernel-level write-deny still applied? This is the real gate state.
 
@@ -894,6 +979,9 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
+    lst = sub.add_parser("list", help="report gate state for every unit beneath a root (read-only)")
+    lst.add_argument("root", type=Path)
+    lst.add_argument("--json", dest="as_json", action="store_true", help="machine-readable output")
     for name in ("status", "block", "clear", "verify", "authorize"):
         p = sub.add_parser(name)
         p.add_argument("migration", type=Path)
@@ -915,20 +1003,22 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--who", required=True, help="who is authorizing this unvalidated build")
     args = parser.parse_args(argv)
 
-    migration = args.migration.resolve()
-    if not migration.is_dir():
-        log.error("not a directory: %s", migration)
-        return 2
+    target = (args.root if args.cmd == "list" else args.migration).resolve()
+    if not target.is_dir():
+        log.error("not a directory: %s", target)
+        # `list` gets its own code: its 2 is a documented SECURITY signal (forged override), and a
+        # mistyped estate root must not raise it. Every other subcommand keeps 2, unchanged.
+        return 3 if args.cmd == "list" else 2
 
-    if args.cmd == "block":
-        return apply_block(migration, args.sources, force_scope=args.force_scope)
-    if args.cmd == "clear":
-        return clear_block(migration, args.reason, earned=args.earned, sources=args.sources)
-    if args.cmd == "authorize":
-        return authorize(migration, args.who)
-    if args.cmd == "verify":
-        return verify(migration)
-    return status(migration)
+    handlers = {
+        "list": lambda: list_units(target, as_json=args.as_json),
+        "block": lambda: apply_block(target, args.sources, force_scope=args.force_scope),
+        "clear": lambda: clear_block(target, args.reason, earned=args.earned, sources=args.sources),
+        "authorize": lambda: authorize(target, args.who),
+        "verify": lambda: verify(target),
+        "status": lambda: status(target),
+    }
+    return handlers[args.cmd]()
 
 
 if __name__ == "__main__":

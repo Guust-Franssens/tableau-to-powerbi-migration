@@ -1484,3 +1484,178 @@ def test_an_earned_clear_still_verifies_clean_for_a_live_source(tmp_path: Path) 
 
     assert proc.returncode == 0, out
     assert "no gate was ever applied" not in out, "this migration WAS gated - it passed by earning the lift"
+
+
+# --- `list`: the multi-unit query (#344) ------------------------------------------------------
+#
+# Added after a field report from a ~44-unit estate: "I am always asked to run these for all the
+# dashboards manually". Every other subcommand takes exactly one migration, so answering "what is
+# still gated?" cost one invocation per unit -- and an agent had no way at all to discover what
+# became retryable after a human signed in.
+
+
+def _unit(root: Path, name: str, *, marker: bool = False, override: bool = False, audit: tuple[str, ...] = ()) -> Path:
+    """Build one unit on disk in a given gate state. Artifacts only -- never prose."""
+    d = root / name
+    d.mkdir(parents=True)
+    if marker:
+        (d / ".credential-gate-BLOCKED.json").write_text("{}", encoding="utf-8")
+    if override:
+        (d / ".credential-gate-AUTHORIZED").write_text("x", encoding="utf-8")
+    if audit:
+        (d / ".credential-gate-audit.log").write_text(
+            "\n".join(json.dumps({"action": a}) for a in audit) + "\n", encoding="utf-8"
+        )
+    return d
+
+
+def _list(root: Path) -> tuple[int, dict[str, str]]:
+    """Run `list --json` and return (exit code, {relative unit -> state})."""
+    r = subprocess.run(
+        [sys.executable, str(GATE), "list", str(root), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    units = json.loads(r.stdout)["units"]
+    return r.returncode, {u["relative"]: u["state"] for u in units}
+
+
+def test_list_classifies_every_gate_state(tmp_path: Path) -> None:
+    """Each state is derived from artifacts on disk, not from what anything claims."""
+    _unit(tmp_path, "blocked", marker=True, audit=("block",))
+    _unit(tmp_path, "earned", audit=("block", "probe-cleared"))
+    _unit(tmp_path, "unearned", override=True, audit=("block", "authorize"))
+    _unit(tmp_path, "clean", audit=("block",))
+
+    _, states = _list(tmp_path)
+    assert states["blocked"] == "BLOCKED"
+    assert states["earned"] == "cleared-earned"
+    assert states["unearned"] == "authorized-unearned"
+    assert states["clean"] == "clean"
+
+
+def test_list_reports_an_override_with_no_authorize_entry_as_forged(tmp_path: Path) -> None:
+    """The file alone authorizes nothing -- agents demonstrably create it themselves.
+
+    Without the audit entry this must NOT read as `authorized-unearned`, which is the benign state
+    it would otherwise be indistinguishable from.
+    """
+    _unit(tmp_path, "forged", override=True, audit=("block",))
+    code, states = _list(tmp_path)
+    assert states["forged"] == "FORGED-OVERRIDE"
+    assert code == 2
+
+
+def test_list_ranks_the_security_signal_above_the_workflow_signal(tmp_path: Path) -> None:
+    """A forged override anywhere outranks "something is still blocked".
+
+    Both conditions are true here. Reporting 1 would let a bypass attempt hide behind ordinary
+    workflow state, which is exactly the case a sweep exists to surface.
+    """
+    _unit(tmp_path, "blocked", marker=True, audit=("block",))
+    _unit(tmp_path, "forged", override=True, audit=("block",))
+    assert _list(tmp_path)[0] == 2
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [
+        ({"marker": True, "audit": ("block",)}, 1),
+        ({"audit": ("block", "probe-cleared")}, 0),
+        ({"override": True, "audit": ("block", "authorize")}, 0),
+    ],
+)
+def test_list_exit_code_is_scriptable(tmp_path: Path, kwargs: dict, expected: int) -> None:
+    """1 only while something is genuinely blocked -- this is an agent's retry signal."""
+    _unit(tmp_path, "u", **kwargs)
+    assert _list(tmp_path)[0] == expected
+
+
+def test_list_on_an_estate_with_nothing_gated_is_clean_and_zero(tmp_path: Path) -> None:
+    """An extract-only estate was never gated; that must not look like a problem."""
+    (tmp_path / "u").mkdir()
+    code, states = _list(tmp_path)
+    assert code == 0
+    assert states == {}
+
+
+def test_list_steers_the_human_toward_the_EARNED_route(tmp_path: Path) -> None:
+    """The field report's root cause: `authorize` was reached for units a probe could have earned.
+
+    Both routes must be named, and the earned one must come first -- a credential caches
+    machine-wide, so one sign-in can legitimately clear several units.
+    """
+    _unit(tmp_path, "blocked", marker=True, audit=("block",))
+    r = subprocess.run(
+        [sys.executable, str(GATE), "list", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    out = r.stderr
+    assert "EARNED" in out and "UNEARNED" in out
+    assert out.index("EARNED   -") < out.index("UNEARNED -")
+    assert "UNVALIDATED" in out
+
+
+def test_list_does_not_raise_the_forgery_code_for_a_bad_root(tmp_path: Path) -> None:
+    """A mistyped estate root must NOT exit 2 -- that code is the forged-override alarm.
+
+    Blind review 2026-08-27 measured all four of these returning 2, identical to a real bypass
+    attempt, while the docs sold 2 as meaning forgery and only forgery. No `list` test had ever
+    passed an invalid root, which is exactly why it survived.
+    """
+    missing = tmp_path / "nope"
+    not_a_dir = tmp_path / "f.txt"
+    not_a_dir.write_text("x", encoding="utf-8")
+
+    for bad in (missing, not_a_dir):
+        r = subprocess.run(
+            [sys.executable, str(GATE), "list", str(bad)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert r.returncode == 3, f"{bad} returned {r.returncode}, not the usage code 3"
+
+
+def test_bad_target_still_exits_2_for_every_OTHER_subcommand(tmp_path: Path) -> None:
+    """Only `list` was renumbered. Renumbering the rest would be an unrelated breaking change."""
+    missing = str(tmp_path / "nope")
+    for cmd in (["status", missing], ["verify", missing]):
+        r = subprocess.run([sys.executable, str(GATE), *cmd], capture_output=True, text=True, check=False)
+        assert r.returncode == 2, f"{cmd[0]} returned {r.returncode}, expected unchanged 2"
+
+
+def test_a_forged_override_is_confirmable_from_json_not_the_exit_code(tmp_path: Path) -> None:
+    """argparse usage errors also exit 2 and are not ours to renumber.
+
+    So the exit code cannot self-certify a forgery; the `--json` state field is what a scripted
+    consumer must key on. This pins that the machine-readable channel says it unambiguously.
+
+    ⚠️ Half of this test guards an EXTERNAL invariant. The forgery half is source-falsifiable
+    (mutating `_unit_state`'s `FORGED-OVERRIDE` breaks it), but the usage-error half pins
+    **argparse's** contract, which no mutation inside this repo can break. It is a valid regression
+    guard for the documented "exit 2 with no JSON on stdout = usage error" discriminator -- just do
+    not read its passing as evidence that our own code is covered.
+    """
+    _unit(tmp_path, "forged", override=True, audit=("block",))
+    usage = subprocess.run(
+        [sys.executable, str(GATE), "list", str(tmp_path), "--bogus"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert usage.returncode == 2, "argparse usage error still exits 2 (documented, not fixable here)"
+    assert not usage.stdout.strip(), "a usage error must emit no JSON, so consumers can tell them apart"
+
+    real = subprocess.run(
+        [sys.executable, str(GATE), "list", str(tmp_path), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert real.returncode == 2
+    states = {u["state"] for u in json.loads(real.stdout)["units"]}
+    assert "FORGED-OVERRIDE" in states
