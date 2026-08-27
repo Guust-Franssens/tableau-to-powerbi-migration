@@ -203,7 +203,13 @@ boolean artifact showed the defect. Reproduce on the artifact that actually carr
 
 Grep your own output before believing it is absent — and classify by **container**, since the two rows
 above are the same regex but different severities:
-`"Value":\s*"'(true|false)'"` (measured: 4 hits across 2,074 `visual.json`, all in the colour slot).
+`"Value":\s*"'(true|false)'"`.
+
+⚠️ **Classify the hits; do not expect a fixed count.** An earlier draft cited "4 hits across 2,074
+`visual.json`" as if it were a stable control. It is not reproducible: the hits live in *untracked*
+engine bundles, so the denominator moves with whatever scratch is on the machine — a re-run measured
+**8 across 3,122**, with **0 in tracked files**. What holds, and what is worth acting on, is the
+**container classification**: every hit found so far sits in the data-colour slot, none in a filter.
 
 ## 2. Data colours and conditional formatting
 
