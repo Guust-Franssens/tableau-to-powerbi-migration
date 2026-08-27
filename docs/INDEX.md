@@ -9,6 +9,8 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 3. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
 4. Load the layer gotchas skill before editing: `powerbi-semantic-model-gotchas` for TMDL/DAX, `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, `powerbi-ai-readiness` for Copilot/Q&A metadata.
 
+After a machine-wide Power BI sign-in, resume every still-blocked unit at once with `python scripts/reprobe_blocked.py` (dry-run by default; `--apply` to run). It re-probes each BLOCKED credential-gate unit and lets the gate earn its own `probe-cleared` where the probe now passes — it **never authorizes**, so it is the agent-safe counterpart to the human-only `credential_gate.py authorize`.
+
 Toolkit-maintenance scripts live in `scripts/README.md`, outside the per-unit route.
 
 ## Inclusion rule
