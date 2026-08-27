@@ -800,13 +800,17 @@ def list_units(root: Path, as_json: bool = False) -> int:
     enumerate what is gated, an agent cannot discover what became retryable and cannot resume.
 
     Exit codes are for scripting, and deliberately rank the security signal above the workflow one:
-    2 = a forged override exists anywhere, 1 = something is still blocked, 0 = nothing gated.
+    **3 = a forged override exists anywhere**, 1 = something is still blocked, 0 = nothing gated,
+    4 = a bad `<root>`. **2 is reserved for argparse's usage errors** and is never returned here.
 
-    ⚠️ **`2` is not self-certifying, so do not alarm on it alone.** A bad `<root>` exits `3`, but
-    argparse's own usage errors (missing argument, unknown flag) also exit `2` and that is not ours
-    to renumber. Measured: before `3` existed, a mistyped estate root raised the *most alarming*
-    state in the vocabulary. A scripted consumer must confirm a forgery through the `--json`
-    `state` field, which is unambiguous, and treat a `2` with no parseable JSON as a usage error.
+    That numbering is the *second* correction to this contract, and the reason is worth keeping.
+    Blind review 2026-08-27 found `2` meant three unrelated things -- forged override, bad root, and
+    argparse usage error -- while the docs sold it as forgery alone, so a mistyped estate root raised
+    the most alarming state in the vocabulary. The first fix moved only *bad root* off `2` and
+    documented the argparse overlap, which left the collision intact: `list <root> --badflag` still
+    exited `2`. argparse hard-codes that and it is not ours to move, so the **security signal** moved
+    instead. Two independent reviewers landed on this, and `3 = forged` now also matches
+    `reprobe_blocked.py` -- its sibling in the documented pipeline -- which had the two codes swapped.
 
     ⚠️ **This reads the marker/override/audit FILES, not the ACL.** `_has_deny_ace` is the real
     enforcement state, so a unit whose marker was removed while the write-deny ACE survives reports
@@ -845,7 +849,7 @@ def list_units(root: Path, as_json: bool = False) -> int:
 
     states = {r["state"] for r in rows}
     if "FORGED-OVERRIDE" in states:
-        return 2
+        return 3
     return 1 if "BLOCKED" in states else 0
 
 
@@ -1006,9 +1010,9 @@ def main(argv: list[str] | None = None) -> int:
     target = (args.root if args.cmd == "list" else args.migration).resolve()
     if not target.is_dir():
         log.error("not a directory: %s", target)
-        # `list` gets its own code: its 2 is a documented SECURITY signal (forged override), and a
-        # mistyped estate root must not raise it. Every other subcommand keeps 2, unchanged.
-        return 3 if args.cmd == "list" else 2
+        # `list` gets its own code: its security signal is 3 (forged override), and a mistyped
+        # estate root must not raise it. 2 belongs to argparse. Every other subcommand keeps 2.
+        return 4 if args.cmd == "list" else 2
 
     handlers = {
         "list": lambda: list_units(target, as_json=args.as_json),

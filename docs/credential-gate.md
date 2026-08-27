@@ -128,9 +128,9 @@ the wrong scope for a question. Field report 2026-08-26, an SES engineer on a ~4
 python scripts/credential_gate.py list <estate-root>          # add --json for an agent
 ```
 
-Exit `1` = something is still blocked (**the resume signal**), `2` = a forged override exists
+Exit `1` = something is still blocked (**the resume signal**), `3` = a forged override exists
 anywhere — deliberately outranking the workflow signal, so a bypass attempt cannot hide behind
-ordinary state — `3` = a bad `<estate-root>`, `0` = nothing gated. States are derived from
+ordinary state — `4` = a bad `<estate-root>`, `0` = nothing gated. States are derived from
 artifacts, never prose: `BLOCKED`, `cleared-earned`, `authorized-unearned`, `FORGED-OVERRIDE`,
 `clean`.
 

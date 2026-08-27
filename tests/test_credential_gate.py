@@ -1544,7 +1544,7 @@ def test_list_reports_an_override_with_no_authorize_entry_as_forged(tmp_path: Pa
     _unit(tmp_path, "forged", override=True, audit=("block",))
     code, states = _list(tmp_path)
     assert states["forged"] == "FORGED-OVERRIDE"
-    assert code == 2
+    assert code == 3
 
 
 def test_list_ranks_the_security_signal_above_the_workflow_signal(tmp_path: Path) -> None:
@@ -1555,7 +1555,7 @@ def test_list_ranks_the_security_signal_above_the_workflow_signal(tmp_path: Path
     """
     _unit(tmp_path, "blocked", marker=True, audit=("block",))
     _unit(tmp_path, "forged", override=True, audit=("block",))
-    assert _list(tmp_path)[0] == 2
+    assert _list(tmp_path)[0] == 3
 
 
 @pytest.mark.parametrize(
@@ -1617,7 +1617,7 @@ def test_list_does_not_raise_the_forgery_code_for_a_bad_root(tmp_path: Path) -> 
             text=True,
             check=False,
         )
-        assert r.returncode == 3, f"{bad} returned {r.returncode}, not the usage code 3"
+        assert r.returncode == 4, f"{bad} returned {r.returncode}, not the bad-root code 4"
 
 
 def test_bad_target_still_exits_2_for_every_OTHER_subcommand(tmp_path: Path) -> None:
@@ -1647,7 +1647,7 @@ def test_a_forged_override_is_confirmable_from_json_not_the_exit_code(tmp_path: 
         text=True,
         check=False,
     )
-    assert usage.returncode == 2, "argparse usage error still exits 2 (documented, not fixable here)"
+    assert usage.returncode == 2, "argparse owns 2; the security signal moved to 3 so they cannot collide"
     assert not usage.stdout.strip(), "a usage error must emit no JSON, so consumers can tell them apart"
 
     real = subprocess.run(
@@ -1656,6 +1656,6 @@ def test_a_forged_override_is_confirmable_from_json_not_the_exit_code(tmp_path: 
         text=True,
         check=False,
     )
-    assert real.returncode == 2
+    assert real.returncode == 3
     states = {u["state"] for u in json.loads(real.stdout)["units"]}
     assert "FORGED-OVERRIDE" in states
