@@ -379,12 +379,28 @@ replace the blunt "never mid-migration" it used to read:
 | Doing this | Verdict | Check, right now |
 |---|---|---|
 | **Comparing** two versions — run the second via `--allow-noncanonical-engine` into a fresh `--output` dir, keep the old bundle, diff | ✅ always safe — not an upgrade; the installed canonical engine is untouched | is the installed plugin left as-is and `--output` a new dir? |
-| Re-running a unit on a newer engine with **~no hand-authoring since it ran** | ✅ re-run into a fresh dir; nothing hand-made is lost | the `<bundle>/reports/` vs `<bundle>/pbip/` diff (shared conventions) is ~empty |
-| Re-running a unit with **substantial hand-authored TMDL/PBIR** on top | ⛔ finish or checkpoint that unit first | that same diff is large |
+| Re-running a unit on a newer engine with **~no hand-authoring since it ran** | ✅ re-run into a fresh dir; nothing hand-made is lost | **both** baseline diffs are ~empty (see below) |
+| Re-running a unit with **substantial hand-authored TMDL/PBIR** on top | ⛔ finish or checkpoint that unit first | **either** diff is large |
 | **Partial** re-run into an **existing** bundle (some workbooks, not all) | ⛔ **never** | `write_engine_receipt` stamps one `engine.version` over the whole bundle, so it would claim a single version for artifacts two builds produced — the #107 shape, and `check_engine_receipts.py` cannot see an intra-bundle mix |
 
-So the escape hatch above is usable between migrations, and mid-migration when the diff shows little at
-risk; the one move that is *always* wrong is the last row — a partial re-run into a live bundle.
+⚠️ **There are TWO baselines, and checking only one gives a false "safe".** The engine writes a
+pristine copy of *both* layers, in *different* trees, and `reports/` is the **report** baseline only:
+
+```
+git diff --no-index --stat <bundle>/reports/<WB>.Report            <bundle>/pbip/<WB>/<WB>.Report
+git diff --no-index --stat <bundle>/semantic_models/<WB>.SemanticModel  <bundle>/pbip/<WB>/<WB>.SemanticModel
+```
+
+Measured on a real bundle: `reports/` contains **0** `.tmdl` files, while `semantic_models/` holds
+119 and `pbip/` 481. So a `reports/`-vs-`pbip/` diff is **structurally blind to hand-authored TMDL** —
+and an agent that authored DAX, relationships, RLS or AI metadata but left the report alone would see
+an ~empty diff, read row 2's "nothing hand-made is lost", re-run, and lose all of it. That is exactly
+what `pbi-semantic-builder` produces, so it is a first-class case, not an edge one. A check that is
+*evaluable but incomplete* is worse than a blunt prohibition, because it grants false confidence.
+
+So the escape hatch above is usable between migrations, and mid-migration when **both** diffs show
+little at risk; the one move that is *always* wrong is the last row — a partial re-run into a live
+bundle.
 
 Historic cost of not having this: **three** retracted or nearly-retracted defect reports. The engine
 went 2.60.0 → 2.72.0 unnoticed; then 2.113.0 → 2.126.0 (13 releases) *mid-dry-run*; then 2.113.0 →
