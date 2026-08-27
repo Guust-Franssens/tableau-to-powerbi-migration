@@ -288,9 +288,13 @@ PBIR files yourself.
       deleted to make room, and what you deliberately did NOT record because it was a one-off.
       "Nothing worth recording" is a legitimate outcome — say it plainly rather than inventing one.
 15. **Final gate — prove nothing was built behind the credential stop.** For any migration with a live
-    source, run `python scripts/credential_gate.py verify migrations/workbooks/<name>` and paste the
-    verdict. Exit 1 = artifacts exist while the gate was applied, or the override was forged: that run
-    is **unvalidated and must not ship**.
+    source, run `python scripts/credential_gate.py verify <bundle>` — the **`<bundle>`** you passed to
+    `--bundle` in steps 6/6b, where the audit history lives (parser path: migration/spec dir) — and
+    paste the verdict. Exit 1 = artifacts exist while the gate was applied, or the override was forged:
+    **unvalidated, must not ship**. ⚠️ **Never run `verify` at the ship destination
+    `migrations/{workbooks,datasources}/<slug>/fabric/`**: that copy has no `.credential-gate-audit.log`,
+    so `verify` finds no `block` entry and falsely reports "no gate was ever applied" (exit 0) on the
+    artifacts flagged unshippable (#354; `docs/credential-gate.md`).
 16. **(Phase 2 / on request)** Delegate to `pbi-deployer` to publish to Fabric and run validation.
     Not in the default flow until that agent exists.
 
