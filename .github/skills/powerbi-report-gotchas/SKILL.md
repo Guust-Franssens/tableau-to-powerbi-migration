@@ -170,6 +170,47 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   undetectable by screenshot** — a wrong measure reference and an environmental blank look identical.
   Fall back to executing the encoded path against the live model.
 
+### A literal must carry the COLUMN's type — and the same mistake fails two opposite ways
+
+🟢 render-verified (Desktop 2.157.828.0). PBIR encodes a literal's type in the string itself:
+`'x'` = string · `10L` = Int64 · `100D` = Double · bare `true` = boolean. Comparing a **boolean**
+column against the **string** `"'true'"` is a type mismatch that `validate` cannot see —
+`result: succeeded, errorCount: 0, warningCount: 0` — and whose symptom depends entirely on **which
+slot** the literal sits in:
+
+| slot | outcome | how you find it |
+|---|---|---|
+| `objects.dataPoint[].selector.data[].scopeId.Comparison.Right` (**data colour**) | the **entire colour encoding is silently dropped**; every series takes the default colour | ❌ only by eye, against the source |
+| `filterConfig` → `Where[].Condition.Comparison.Right` (**filter**) | the visual is **replaced by an error card** — *"Something's wrong with one or more filters"* + a **Fix this** button | ✅ immediately obvious |
+
+**The silent one is the dangerous one.** A `stackedAreaChart` split by a boolean rendered entirely in
+one colour: correct data, correct axes, correct shape — and a chart that no longer says what the
+source said. Changing only the literal to bare `true` made the second series appear.
+
+**Blast radius of the loud one is ONE visual, not the page.** In the same frame as the error card, the
+azureMap, both area charts and both slicers rendered normally. So N bad filters cost you N visuals —
+useful for triage, and it means "the page is blank" is *not* this bug.
+
+**How to test a suspected literal bug — and the trap that wasted a cycle.** Use a **3-state** run on
+the **real artifact**: `baseline` (no encoding) · `broken` · `correct`, changing *only* the literal.
+The `correct` state is not optional — it is what proves your hand-written JSON is otherwise valid and
+that the reload took effect; without it "broken looks wrong" is unfalsifiable. Measured control, a
+`multiRowCard` filtered to profitable orders: Sales $2,326,534 → $1,841,231, Profit $292,297 →
+$432,805, Ratio 12.6% → 23.5% — Sales down, Profit *up*, exactly as the semantics demand.
+⚠️ **Do not invent your own analogue.** A fabricated *numeric* case (`"1.0D"` → `"'1.0'"`) rendered
+**pixel-identical to baseline** and would have been written up as "benign"; only the engine's real
+boolean artifact showed the defect. Reproduce on the artifact that actually carries the bug.
+
+Grep your own output before believing it is absent — and classify by **container**, since the two rows
+above are the same regex but different severities:
+`"Value":\s*"'(true|false)'"`.
+
+⚠️ **Classify the hits; do not expect a fixed count.** An earlier draft cited "4 hits across 2,074
+`visual.json`" as if it were a stable control. It is not reproducible: the hits live in *untracked*
+engine bundles, so the denominator moves with whatever scratch is on the machine — a re-run measured
+**8 across 3,122**, with **0 in tracked files**. What holds, and what is worth acting on, is the
+**container classification**: every hit found so far sits in the data-colour slot, none in a filter.
+
 ## 2. Data colours and conditional formatting
 
 See the `powerbi-report-authoring` skill → `references/conditional-formatting.md`; for table-specific

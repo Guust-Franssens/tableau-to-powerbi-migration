@@ -605,6 +605,63 @@ exists to prevent.
 **Trust `powerbi-desktop status` + `currentFilePath`, never the pid `open` hands back.** Match the
 instance to your own `.pbip` path before you touch it.
 
+### A PEM/key parse error on ONE table is a data-source IDENTITY mismatch, not a bad key
+
+Field report 2026-08-25 (estate built on engine 2.146.0). One table refused to refresh with
+`ADBC: [snowflake] Failed to parse PEM block containing the private key`, while its siblings in the
+**same model**, on the same server with the same key-pair, refreshed fine. A bad key cannot do that —
+it would fail every connection identically. **That asymmetry is the whole diagnosis**; treat it as the
+first thing to check, because the error names a subsystem that is not the cause.
+
+Power BI keys credential identity on the **argument tuple** of the connection call, not on the server.
+✅ The engine models the same thing: `storage_mode.py:99` registers snowflake as
+`("Snowflake.Databases", "server_warehouse", "database_schema_table")`.
+
+| | connection call |
+|---|---|
+| siblings (worked) | `Snowflake.Databases(#"Server_snowflake", #"Warehouse_snowflake", [Role="UDP_TABLEAU_APP"])` |
+| the one that failed | `Snowflake.Databases("<host>", "UDP_DB", [Implementation="2.0"])` |
+
+Same host, different tuple → a **distinct data source** with no stored credential. The connector
+surfaces that as a PEM parse failure instead of a sign-in prompt, which sends you to the wrong
+subsystem entirely. Two compounding authoring errors, both worth recognising:
+
+- **`UDP_DB` is a database, not a warehouse.** ✅ `storage_mode.py:113` documents the verified shape —
+  `Snowflake.Databases(#"Server", #"Warehouse"){[Name="UDP_DB", Kind="Database"]}[Data]` — where the
+  database belongs in the **navigation step**. It had been hoisted into the warehouse positional arg.
+- **Hardcoded literals replaced the M parameters**, which guarantees a different tuple even when the
+  values look right.
+
+⚠️ **This was ours, not the engine's — do not file it upstream.** `Implementation="2.0"` appears
+**nowhere** in the engine (checked at 2.260.0; the estate was 2.146.0, which we could not inspect), and
+the reporter's own account attributes it to an earlier hand fix-pass. Filing it would have been a
+retraction.
+
+**The rule:** when hand-rewiring a connection, copy a working sibling's signature **byte-for-byte**.
+Never re-enter a credential to "fix" a PEM error before diffing the tuple against a table that works.
+
+### Class-suffixed M parameters mean FEDERATED — and `_sqlproxy` + `localhost` is a phantom
+
+Same investigation, worth separating because it is a reusable read of the artifact. The model carried
+orphaned `Server_sqlproxy = "localhost"` and `Database_sqlproxy = "DS_Aircraft_Health"` expressions.
+Those are **engine-emitted, not hand-written leftovers**: `connection_to_m.py:2869` suffixes M
+parameters **by connector class** (`Server_snowflake`, `Warehouse_snowflake`) and does so **only for a
+federated datasource** — `if len(conns) <= 1: return {}` keeps the bare `Server`/`Database` names.
+
+So the naming itself is diagnostic:
+
+- **bare `Server` / `Database`** → single-connection datasource.
+- **class-suffixed `Server_<class>`** → federated; each table binds its own upstream.
+- **`Server_sqlproxy = "localhost"` + `Database_sqlproxy = "<name>"`** → a **phantom published
+  datasource**: a secondary published dependency whose proxy never rebound. The table opens empty.
+  ⚠️ `localhost` alone is an ordinary local SQL Server/Postgres, and a `_sqlproxy` parameter pointing
+  at a **real** host is a successful rebind — only the **combination** is a phantom.
+
+This is upstream `Yarbrdab000/tableau-fabric-skills#174` (fixed at engine 2.274.0, which adds a
+`phantom_published_proxy_tables` finding). Before that build the phantom ships silently, and the
+orphans are exactly what mislead a later fix-pass into hand-wiring a bad connection — the PEM entry
+above is what that looks like when it goes wrong.
+
 ## 6. File-based extracts: a legacy `.xls` + a custom OS locale silently corrupts DATA
 
 Measured 2026-08-08 (`book_8-1-Dashboards`, Tableau Superstore extract landed as a legacy BIFF8
@@ -951,6 +1008,32 @@ Unknown. Three workbooks (ACMU `_Measures.tmdl:87` `'Selected Measure'`, Airline
 Phase `'Measure - All Phases'`) each shipped a bare `BLANK()` dispatcher while every branch measure
 it referenced was translated correctly. That pattern is real and reported from the field. The cause
 is not established. Do not fill the gap with a plausible story.
+
+**2026-08-25 — two causes RULED OUT, and a contradiction of the paragraph above.** A field report
+(SES estate, engine 2.146.0) compared two workbooks in one estate whose `'Selected Measure'` calcs
+have **byte-identical `TableauFormula` annotation text**, both 15 branches, all branches returning
+numeric measures:
+
+| workbook | outcome |
+|---|---|
+| ACMU | ✅ translated to a working `SWITCH(...)` |
+| `IA_Airborne_Services_Dashboard` | ❌ stubbed to `BLANK()` |
+
+Same formula, same engine, same run, opposite results. That **rules out formula content and branch
+type** as the cause, and points at something order- or run-state-dependent instead. It also
+independently rules out branch *count*: the engine author probed 15 identical branches directly at
+2.260.0 and they translate (`Yarbrdab000/tableau-fabric-skills#168`).
+
+⚠️ **But it contradicts this section's own record**, which lists ACMU's `'Selected Measure'` among the
+three that *shipped a stub*. Both cannot be true of the same artifact. Unresolved as of writing —
+plausibly a version difference (the field bundle is 2.146.0; the entry above predates it and names
+`_Measures.tmdl:87`), plausibly one observation is of a re-run rather than the original. **Do not
+cite either outcome for ACMU as settled** until a single build is measured end to end.
+
+⚠️ Also note the reporter's supporting evidence included a matching `lineageTag` GUID across the two
+measures. That corroborates nothing: `stabilize_lineage_tags` re-derives every GUID from the object's
+**identity path**, so any two models with a same-named measure in a same-named table collide by
+construction. The byte-identical annotation text is the real evidence and stands without it.
 
 ### The idiom itself: a parameter-driven measure dispatcher
 
