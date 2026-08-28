@@ -68,6 +68,9 @@ _NO_CREDENTIAL_MARKERS = ("no embedded credential", "no credential")
 # Keyed on `show_path` output, so the separator here must match it.
 KEEP_EMPTY = frozenset({"ZZ Migration Torture > Empty On Purpose"})
 
+# Marks a workbook this script published, so "genuinely empty" can be told from "only holds a seed".
+SEED_PREFIX = "Seed - "
+
 
 @dataclass
 class ProjectRecord:
@@ -231,6 +234,14 @@ def _download_asset(endpoint: Any, item: Any, assets: Path, taken: set[str], inc
     `X.twbx.twbx`), and a workbook with no packaged data comes back as `.twb`, not `.twbx`. Guessing
     either produced a manifest whose filenames did not exist on disk - `apply` then reported every
     one of them as a missing asset.
+
+    ⚠️ **Sanitising the filename breaks downstream name-based matching, and the manifest is the fix.**
+    Measured: feeding this directory straight into `run_estate.py`, only 6 of 10 workbooks carried a
+    project into `source-provenance.json`. The 4 that did not were exactly those whose name contains a
+    character stripped here - `R&D`, `R+D`, `R/D`, `Trailing dot.` all sanitise to some `R_D`/`_`
+    form, so the engine could no longer match filename back to workbook name, and they landed at the
+    Fabric workspace ROOT instead of in a mirrored folder. The real name survives in the manifest's
+    `name` field; a consumer that needs the project must join on THAT, not on the filename.
     """
     written = Path(endpoint.download(item.id, filepath=str(assets), include_extract=include_extract))
     final = assets / _unique(_safe_filename(item.name, written.suffix), taken)
@@ -357,29 +368,44 @@ def apply_manifest(  # pylint: disable=too-many-branches,too-many-locals,too-man
     return 1 if problems else 0
 
 
-def empty_leaf_projects(server: Any) -> list[tuple[tuple[str, ...], str, str]]:
-    """Return `(segments, project_id, name)` for every leaf project holding no content.
+def empty_leaf_projects(server: Any, *, include_seeded: bool = False) -> list[tuple[tuple[str, ...], str, str]]:
+    """Return `(segments, project_id, name)` for every leaf project that needs a seed.
 
     A leaf with nothing in it is an inert fixture: the migration never walks that path, so whatever
     the folder was built to stress - 11 levels of nesting, a slash in the name - is never exercised.
     The project's own `name` is returned rather than derived from the path, because deriving it is
     what broke on `R/D`.
+
+    `include_seeded` additionally returns leaves whose ONLY content is a previously published seed.
+    That is what makes a seed-template fix reachable: when the template gained the
+    `<metadata-records>` the engine needs to type a model, every already-seeded project was
+    non-empty, so a plain `seed` run correctly skipped it - leaving a site full of fixtures that
+    still could not migrate.
     """
     projects = list(tsc.Pager(server.projects))
     by_id = {p.id: p for p in projects}
     paths = {p.id: project_path_of(p, by_id) for p in projects}
     parents = {paths[p.parent_id] for p in projects if p.parent_id and p.parent_id in paths}
 
-    counts = {pid: 0 for pid in paths}
+    total = {pid: 0 for pid in paths}
+    non_seed = {pid: 0 for pid in paths}
     for endpoint in (server.datasources, server.workbooks):
         for item in tsc.Pager(endpoint):
-            if item.project_id in counts:
-                counts[item.project_id] += 1
+            if item.project_id in total:
+                total[item.project_id] += 1
+                if not item.name.startswith(SEED_PREFIX):
+                    non_seed[item.project_id] += 1
+
+    def needs_seed(pid: str) -> bool:
+        return total[pid] == 0 or (include_seeded and non_seed[pid] == 0)
 
     return sorted(
         (paths[pid], pid, by_id[pid].name)
-        for pid, n in counts.items()
-        if n == 0 and paths[pid] not in parents and not _managed(paths[pid]) and show_path(paths[pid]) not in KEEP_EMPTY
+        for pid in total
+        if needs_seed(pid)
+        and paths[pid] not in parents
+        and not _managed(paths[pid])
+        and show_path(paths[pid]) not in KEEP_EMPTY
     )
 
 
@@ -388,7 +414,7 @@ def _publish_seed(server: Any, target: tuple[tuple[str, ...], str, str], work_di
     from make_seed_workbook import build_twbx  # pylint: disable=import-outside-toplevel
 
     segments, project_id, leaf = target
-    name = f"Seed - {leaf}"
+    name = f"{SEED_PREFIX}{leaf}"
     item = tsc.WorkbookItem(project_id)
     item.name = name
     try:
@@ -398,17 +424,18 @@ def _publish_seed(server: Any, target: tuple[tuple[str, ...], str, str], work_di
     return None
 
 
-def seed_empty_projects(env: dict[str, str], work_dir: Path, *, dry_run: bool) -> int:
+def seed_empty_projects(env: dict[str, str], work_dir: Path, *, dry_run: bool, include_seeded: bool = False) -> int:
     """Publish one tiny workbook into every empty leaf project, so each becomes migratable."""
     server, auth = _sign_in(env)
     problems: list[str] = []
     with server.auth.sign_in(auth):
-        targets = empty_leaf_projects(server)
+        targets = empty_leaf_projects(server, include_seeded=include_seeded)
         if not targets:
-            print("  (no empty leaf projects - nothing to seed)")
+            print("  (no leaf projects need seeding)")
             return 0
         for target in targets:
-            print(f"  + seed {'PLAN' if dry_run else 'PUBLISH'}  {show_path(target[0])} > Seed - {target[2]}")
+            action = "PLAN" if dry_run else "PUBLISH"
+            print(f"  + seed {action}  {show_path(target[0])} > {SEED_PREFIX}{target[2]}")
             if dry_run:
                 continue
             if (err := _publish_seed(server, target, work_dir)) is not None:
@@ -439,6 +466,11 @@ def main() -> int:
     sd = sub.add_parser("seed", help="give every empty leaf project something migratable")
     sd.add_argument("--dry-run", action="store_true")
     sd.add_argument("--work-dir", type=Path, default=REPO_ROOT / "_runs" / "tableau-estate" / "seeds")
+    sd.add_argument(
+        "--refresh-seeded",
+        action="store_true",
+        help="also republish leaves whose only content is an existing seed (use after changing the template)",
+    )
 
     args = parser.parse_args()
     env = resolve_env(REPO_ROOT / ".env")
@@ -461,7 +493,7 @@ def main() -> int:
 
     if args.command == "seed":
         args.work_dir.mkdir(parents=True, exist_ok=True)
-        return seed_empty_projects(env, args.work_dir, dry_run=args.dry_run)
+        return seed_empty_projects(env, args.work_dir, dry_run=args.dry_run, include_seeded=args.refresh_seeded)
 
     manifest = json.loads(args.manifest.read_text(encoding="utf8"))
     return apply_manifest(

@@ -44,6 +44,30 @@ TWB_TEMPLATE = """<?xml version='1.0' encoding='utf-8' ?>
             <column datatype='integer' name='amount' ordinal='1' />
           </columns>
         </relation>
+        <metadata-records>
+          <metadata-record class='column'>
+            <remote-name>region</remote-name>
+            <remote-type>129</remote-type>
+            <local-name>[region]</local-name>
+            <parent-name>[{csv_name}]</parent-name>
+            <remote-alias>region</remote-alias>
+            <ordinal>0</ordinal>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>amount</remote-name>
+            <remote-type>20</remote-type>
+            <local-name>[amount]</local-name>
+            <parent-name>[{csv_name}]</parent-name>
+            <remote-alias>amount</remote-alias>
+            <ordinal>1</ordinal>
+            <local-type>integer</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+        </metadata-records>
       </connection>
       <column caption='Region' datatype='string' name='[region]' role='dimension' type='nominal' />
       <column caption='Amount' datatype='integer' name='[amount]' role='measure' type='quantitative' />
