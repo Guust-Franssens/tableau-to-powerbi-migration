@@ -63,14 +63,28 @@ A unit reaches Power BI by one of two paths, and only one of them has a spec:
     fourteen units in a real 2026-08-28 field run were therefore reported SKIPPED "no spec with
     data_sources" - the gate built for a WORKBOOK incident silently covering no workbook at all.
 
-The engine bundle is not evidence-free, so this gate now reads it instead of refusing. Its
-`embedded_datasources` telemetry (engine `migrate_estate._embedded_datasource_telemetry`) carries
-`connection_class` per datasource AND per federated leg, plus `pbip_folder` - the exact model that
-workbook built. What it does NOT carry, at engine 2.339.0, is TABLE NAMES: only a `table_count`. So
-per-table attribution is impossible there, and pretending otherwise would be a fabricated pass.
+The engine bundle is not evidence-free, so this gate reads it instead of refusing. But it is NOT one
+tier: measured against a real canonical 2.339.0 bundle on 2026-08-29, the engine's two unit kinds
+carry DIFFERENT evidence, and conflating them would have cost the stronger half.
 
-Engine units are therefore judged at MODEL scope (`SCOPE_MODEL`), against the one consolidated model
-named by `pbip_folder`. That is weaker than table scope, and the verdict rules say so out loud:
+  * a DATASOURCE unit (`report.json` -> `datasources[]`) carries `connector` (the Tableau class),
+    `pbip_folder`, and - the load-bearing part - **`tables`, the real emitted table names**
+    (measured: `["FACT_ORDERS", "DIM_CUSTOMER", "DIM_DATE", "Date"]`, matching the emitted TMDL
+    filenames exactly). That is the parser contract in all but name, so it is judged at `SCOPE_TABLE`,
+    at full strength.
+  * a WORKBOOK unit (`report.json` -> `workbooks[]`, or a `handover/*.json` slice) carries
+    `embedded_datasources` telemetry (`migrate_estate._embedded_datasource_telemetry`) with
+    `connection_class` per datasource and per federated leg, plus `pbip_folder` - but only a
+    `table_count`, **never table names**. So per-table attribution is impossible there, and
+    pretending otherwise would be a fabricated pass.
+
+CAUTION: An earlier draft of this module said flatly "the engine bundle carries no table names". That was
+inferred from the workbook emitter alone and is FALSE of the datasource emitter, which had the names
+all along. The cost of believing it would have been judging a Snowflake DirectQuery datasource at
+model scope when table scope was available for free.
+
+Workbook units are therefore judged at MODEL scope (`SCOPE_MODEL`), against the one consolidated
+model named by `pbip_folder`. That is weaker than table scope, and the verdict rules say so out loud:
 
   | model-scope evidence                          | verdict                                       |
   |-----------------------------------------------|-----------------------------------------------|
@@ -81,6 +95,15 @@ named by `pbip_folder`. That is weaker than table scope, and the verdict rules s
 
 The asymmetry is the same one the rest of this module runs on: a FINDING may rest on partial
 evidence, a PASS may not.
+
+A published-datasource workbook is not a hole, it is a POINTER
+--------------------------------------------------------------
+Measured on the same bundle: a workbook binding a published datasource reports
+`connection_class: "sqlproxy"` - Tableau's PROXY, not the upstream system. The real connection
+(Snowflake, here) is not in the workbook at all; it lives in the published datasource's own unit. So
+`sqlproxy` is reported NOT_CHECKED **with the datasource named**, rather than as an unmapped class.
+CAUTION: Do NOT "fix" this by adding `sqlproxy` to `CLASS_TO_CONNECTOR`: there is no such Power Query
+connector, and mapping it would make the gate judge a proxy as though it were the upstream.
 
 Absent is not empty
 -------------------
@@ -97,8 +120,9 @@ What this gate does NOT tell you
 * A PARTIAL downgrade inside a source that still has one live partition, or an exotic connection
   class this module cannot map to an M connector: both are reported as NOT_CHECKED for that source,
   never as PASS. Anything this module cannot prove is a downgrade is not called one.
-* On the ENGINE path, whether ONE table of a live source was materialised while its siblings stayed
-  connected. The bundle does not name tables, so that shape reports NOT_CHECKED, never PASS.
+* On the engine WORKBOOK path, whether ONE table of a live source was materialised while its
+  siblings stayed connected. That payload does not name tables, so the shape reports NOT_CHECKED,
+  never PASS. The engine DATASOURCE path does name them and does not have this limitation.
 """
 
 from __future__ import annotations
@@ -206,6 +230,13 @@ CLASS_TO_CONNECTOR: dict[str, str] = {
 }
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+# Tableau connection classes that are a PROXY to another migration unit rather than an upstream
+# system. Measured on a real 2.339.0 bundle: a workbook binding a published datasource reports
+# `sqlproxy`, and its real connection (Snowflake) is not in the workbook payload at all. These are
+# NOT_CHECKED-with-a-pointer, never an unmapped class - and never a `CLASS_TO_CONNECTOR` entry, since
+# no Power Query connector corresponds to them.
+PROXY_CLASSES = frozenset({"sqlproxy"})
 
 
 @dataclass(frozen=True)
@@ -752,6 +783,23 @@ def _judge_source(  # pylint: disable=too-many-return-statements
     """
     source_id = str(data_source.get("id") or "<unnamed>")
     caption = str(data_source.get("caption") or data_source.get("internal_name") or source_id)
+    if _norm_class(connection_class) in PROXY_CLASSES:
+        target_unit = str(data_source.get("published_datasource_name") or "").strip()
+        where = f"the migrated unit for published datasource '{target_unit}'" if target_unit else "that unit"
+        return SourceVerdict(
+            source_id,
+            caption,
+            connection_class,
+            mode,
+            target,
+            SOURCE_NOT_CHECKED,
+            f"'{connection_class}' is Tableau's PROXY to a published datasource, not an upstream "
+            f"system - this workbook's payload does not carry the real connection at all. Check "
+            f"{where}; `check_sqlproxy_connections.py` owns the binding question. This is a POINTER, "
+            "not an unmapped class: do not add it to CLASS_TO_CONNECTOR, no Power Query connector "
+            "corresponds to it",
+            [],
+        )
     token = CLASS_TO_CONNECTOR.get(_norm_class(connection_class))
     if token is None:
         # An unmapped live class: we cannot name the connector it SHOULD emit, and check_empty_model
@@ -921,8 +969,7 @@ def _finalize_unit(
         status = STATUS_SKIPPED
         detail = (
             f"{declared_live} data source(s) that could carry a live connection were declared, but "
-            "NONE could be examined (unresolved or unmappable connection class, or nothing "
-            "attributable in the emitted model)"
+            "NONE could be examined. " + _unchecked_reasons(unchecked)
         )
         reason = REASON_NOT_EVALUATED
     elif unchecked:
@@ -937,6 +984,23 @@ def _finalize_unit(
         detail = None
         reason = None
     return _unit_result(spec_path, status, verdicts, detail=detail, reason=reason, unit_name=unit_name)
+
+
+def _unchecked_reasons(unchecked: list[SourceVerdict], limit: int = 3) -> str:
+    """The per-source reasons behind a wholly-unexamined unit, surfaced where an operator reads them.
+
+    Measured against the real cold-run bundle: the workbook unit's ONLY actionable sentence - that
+    `sqlproxy` is a pointer to the published datasource's own unit - lived on `sources[0].detail` and
+    never reached the rendered line, which said the generic "unresolved or unmappable connection
+    class". An operator was told to go looking for an unmapped class when the answer was "check the
+    other unit". A reason nobody sees is not a reason.
+    """
+    if not unchecked:
+        return "No source-level reason was recorded."
+    shown = unchecked[:limit]
+    parts = [f"{verdict.source_id}: {verdict.detail}" for verdict in shown]
+    more = f" (+{len(unchecked) - len(shown)} more source(s))" if len(unchecked) > len(shown) else ""
+    return " || ".join(parts) + more
 
 
 def _unit_result(  # pylint: disable=too-many-arguments
@@ -972,12 +1036,92 @@ def _unit_result(  # pylint: disable=too-many-arguments
 
 @dataclass(frozen=True)
 class EngineUnit:
-    """One workbook of an ENGINE bundle: its telemetry payload, and where the bundle lives."""
+    """One unit of an ENGINE bundle: its telemetry payload, where the bundle lives, and its scope.
+
+    `scope` is carried per unit, not per bundle, because the engine's two unit kinds genuinely carry
+    different evidence. A datasource detail names its tables; a workbook detail does not. Deciding
+    that once, at discovery, is what keeps the datasource half at full strength.
+    """
 
     name: str
     source: Path
     bundle: Path
     workbook: dict[str, Any]
+    scope: str = SCOPE_MODEL
+
+
+def engine_datasource_sources(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    """An engine DATASOURCE detail as this gate's data-source records - TABLE NAMES INCLUDED.
+
+    `report.json` -> `datasources[]` is the parser contract in all but name. Measured on a real
+    canonical 2.339.0 bundle, one migrated Snowflake datasource carried::
+
+        connector      = "snowflake"                # the Tableau connection class
+        m_connector    = "Snowflake.Databases"      # the emitted Power Query connector
+        storage_mode   = "DirectQuery"
+        tables         = ["FACT_ORDERS", "DIM_CUSTOMER", "DIM_DATE", "Date"]
+        pbip_folder    = "pbip/<name>/<name>.pbip"
+
+    and those four table names matched the emitted TMDL filenames exactly. So this half of the engine
+    path needs no weakening at all: it is judged at `SCOPE_TABLE`, with a real CONNECTED pass and a
+    real DOWNGRADED finding, exactly like a spec unit.
+
+    `storage_mode` is recorded as `mode` for the operator-facing line only. It is NOT the
+    discriminator - see this module's header on why `mode` never is.
+    """
+    name = str(detail.get("name") or "<unnamed datasource>")
+    connection_class = str(detail.get("connector") or detail.get("connection_class") or "")
+    target, _reason = powerbi_target(connection_class or UNKNOWN, "unknown")
+    tables = [str(t) for t in (detail.get("tables") or []) if isinstance(t, str)]
+    return [
+        {
+            "id": name,
+            "caption": name,
+            "connection": {
+                "class": connection_class,
+                "mode": str(detail.get("storage_mode") or "unknown"),
+                "powerbi_target": target,
+            },
+            "tables": tables,
+        }
+    ]
+
+
+def engine_datasource_units(bundle: Path) -> list[EngineUnit]:
+    """Every DATASOURCE unit recorded in a bundle's `report.json`.
+
+    Read directly rather than through `read_handover`, which resolves WORKBOOKS only - and, when a
+    `handover/` folder exists, never opens `report.json` at all, so the datasource half would be
+    invisible. Measured: on the real cold-run bundle that is exactly what happened - one handover
+    slice, one workbook unit found, and the only genuinely live Snowflake source in the estate
+    (the datasource) never examined.
+
+    Guarded by CONTENT, not by filename: every PBIR report definition in this repo is also called
+    `report.json`, and one carries no `datasources` list.
+    """
+    report = bundle / "report.json"
+    if not report.is_file():
+        return []
+    try:
+        payload = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict) or not isinstance(payload.get("datasources"), list):
+        return []
+    units = []
+    for detail in payload["datasources"]:
+        if not isinstance(detail, dict):
+            continue
+        units.append(
+            EngineUnit(
+                name=str(detail.get("name") or report.stem),
+                source=report,
+                bundle=bundle,
+                workbook=detail,
+                scope=SCOPE_TABLE,
+            )
+        )
+    return units
 
 
 def engine_datasource_telemetry(workbook: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -999,7 +1143,7 @@ def engine_datasource_telemetry(workbook: dict[str, Any]) -> tuple[str, list[dic
     return TELEMETRY_PRESENT, rows
 
 
-def engine_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def engine_sources(rows: list[dict[str, Any]], published_name: str = "") -> list[dict[str, Any]]:
     """Engine `embedded_datasources` telemetry as this gate's data-source records.
 
     ONE RECORD PER DISTINCT CONNECTION CLASS, not per datasource. A Tableau datasource can federate
@@ -1009,9 +1153,13 @@ def engine_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     as `migration_bundle._engine_embedded_source` does for its own purpose, maps to no connector at
     all and would report every federated source NOT_CHECKED.
 
-    `tables` is deliberately left empty rather than invented: the engine records a `table_count` and
-    no names (verified against canonical engine 2.339.0). `mode` is `unknown` for the same reason -
-    the telemetry does not record extract-vs-live, and `powerbi_target` does not need it.
+    `published_name` rides along from the workbook's `binding_signal` so a `sqlproxy` record can name
+    the unit that actually holds its connection instead of reporting an unmapped class.
+
+    `tables` is deliberately left empty rather than invented: the WORKBOOK emitter records a
+    `table_count` and no names (measured against canonical engine 2.339.0). The DATASOURCE emitter
+    does name them - see `engine_datasource_sources`. `mode` is `unknown` because this payload does
+    not record extract-vs-live, and `powerbi_target` does not need it.
     """
     sources: list[dict[str, Any]] = []
     for row in rows:
@@ -1037,42 +1185,77 @@ def engine_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "powerbi_target": target,
                     },
                     "tables": [],
+                    "published_datasource_name": published_name,
                 }
             )
     return sources
 
 
 def engine_model_dirs(bundle: Path, workbook: dict[str, Any]) -> tuple[list[Path], str | None]:
-    """`(model dirs, why-not)` for the model ONE workbook built, from the engine's own pointer.
+    """`(model dirs, why-not)` for the model ONE unit built, from the engine's own pointer.
 
-    `pbip_folder` is a run-relative `pbip/<Name>/<Name>.pbip` recorded by the engine itself, so the
-    model scope is read, never guessed. Guessing it - matching a workbook name to a folder name - is
-    how a workbook would silently borrow a sibling's model and, with it, a sibling's verdict.
+    Three pointers are tried IN ORDER, and every one of them is a value the engine recorded - nothing
+    here matches on name. Guessing the model by name is how a unit would silently borrow a sibling's
+    model and, with it, a sibling's verdict.
+
+      1. `pbip_folder` - run-relative `pbip/<Name>/<Name>.pbip`; the working copy agents edit.
+      2. `bound_model` - the model a workbook bound, when no project path was recorded.
+      3. `output_folder` - `semantic_models/<Name>.SemanticModel`, the engine's PRISTINE baseline.
+         LAST on purpose: judging the baseline answers what the engine emitted, not what ships.
+
+    Falling through rather than giving up on the first miss is deliberate: a unit whose project path
+    is stale but whose `bound_model` still resolves is checkable, and refusing it would be an
+    unnecessary NOT_EVALUATED. Every failed pointer is still reported, so an operator sees which.
+
+    ⚠️ The model inside a workbook's project is NOT named after the workbook. Measured on the real
+    cold-run bundle: `pbip/Meridian Revenue by Region/Meridian Sales (Live Snowflake).SemanticModel`
+    - the project is the workbook, the model is the DATASOURCE it bound. So the project directory is
+    scanned for whatever `.SemanticModel` it holds.
     """
+    reasons: list[str] = []
+
     folder = workbook.get("pbip_folder")
     if isinstance(folder, str) and folder.strip():
         project = (bundle / Path(folder.strip())).parent
-        if project.is_dir():
-            models = shipping_models(project, include_standalone=True)
-            if models:
-                return models, None
-            return [], f"the engine recorded pbip_folder '{folder}' but no .SemanticModel ships under {project}"
-        return [], f"the engine recorded pbip_folder '{folder}' but {project} does not exist"
+        models = shipping_models(project, include_standalone=True) if project.is_dir() else []
+        if models:
+            return models, None
+        missing = "does not exist" if not project.is_dir() else "holds no .SemanticModel"
+        reasons.append(f"pbip_folder '{folder}' points at {project}, which {missing}")
+
     bound = workbook.get("bound_model")
     if isinstance(bound, str) and bound.strip():
         wanted = bound.strip().casefold()
         models = [m for m in shipping_models(bundle, include_standalone=True) if m.stem.casefold() == wanted]
         if models:
             return models, None
-        return [], f"the engine recorded bound_model '{bound}' but no matching .SemanticModel ships in {bundle}"
-    return [], (
-        "the engine recorded neither pbip_folder nor bound_model for this workbook, so no emitted "
-        "model can be attributed to it (the workbook produced no bound project)"
-    )
+        reasons.append(f"bound_model '{bound}' matches no .SemanticModel shipping in {bundle}")
+
+    output = workbook.get("output_folder")
+    if isinstance(output, str) and output.strip():
+        baseline = bundle / Path(output.strip())
+        models = shipping_models(baseline, include_standalone=True) if baseline.is_dir() else []
+        if models:
+            return models, None
+        missing = "does not exist" if not baseline.is_dir() else "holds no .SemanticModel"
+        reasons.append(f"output_folder '{output}' points at {baseline}, which {missing}")
+
+    if not reasons:
+        return [], (
+            "the engine recorded no pbip_folder, bound_model or output_folder for this unit, so no "
+            "emitted model can be attributed to it (it produced no bound project)"
+        )
+    return [], "no emitted model could be attributed to this unit: " + "; ".join(reasons)
 
 
 def scan_engine_unit(unit: EngineUnit) -> dict[str, Any]:
-    """Judge one ENGINE-path workbook unit at model scope. Never silently passes."""
+    """Judge one ENGINE-path unit. Never silently passes.
+
+    Dispatches on the unit's own scope: a DATASOURCE unit names its tables and gets the full-strength
+    table-scoped rules; a WORKBOOK unit does not and gets the weaker model-scoped ones.
+    """
+    if unit.scope == SCOPE_TABLE:
+        return _scan_engine_datasource(unit)
     status, rows = engine_datasource_telemetry(unit.workbook)
     if status == TELEMETRY_MISSING:
         return _engine_skip(
@@ -1088,12 +1271,12 @@ def scan_engine_unit(unit: EngineUnit) -> dict[str, Any]:
             "inspect the raw handover; nothing can be concluded from it",
             REASON_NOT_EVALUATED,
         )
+    binding = unit.workbook.get("binding_signal")
+    published = binding.get("published_ds_name") if isinstance(binding, dict) else None
     if status == TELEMETRY_NONE:
-        binding = unit.workbook.get("binding_signal")
-        published = isinstance(binding, dict) and binding.get("kind") == "published"
         note = (
-            " - it binds a PUBLISHED datasource, whose connection is checked in that datasource's own "
-            "unit, so co-migrate it and check that unit"
+            f" - it binds PUBLISHED datasource '{published}', whose connection is checked in that "
+            "datasource's own unit, so co-migrate it and check that unit"
             if published
             else ""
         )
@@ -1107,13 +1290,38 @@ def scan_engine_unit(unit: EngineUnit) -> dict[str, Any]:
     if not model_dirs:
         return _engine_skip(unit, str(why_not), REASON_NOT_EVALUATED)
 
-    sources = engine_sources(rows)
+    sources = engine_sources(rows, str(published or ""))
+    return _judge_engine_models(unit, sources, model_dirs, SCOPE_MODEL)
+
+
+def _scan_engine_datasource(unit: EngineUnit) -> dict[str, Any]:
+    """Judge one engine DATASOURCE unit at TABLE scope - it names its tables, so nothing is weakened."""
+    detail = unit.workbook
+    if not (detail.get("connector") or detail.get("connection_class")):
+        return _engine_skip(
+            unit,
+            "this datasource detail records no `connector`, so what it connected to is UNRECORDED - "
+            f"not absent (status: {detail.get('status') or 'unknown'})",
+            REASON_NOT_EVALUATED,
+        )
+    model_dirs, why_not = engine_model_dirs(unit.bundle, detail)
+    if not model_dirs:
+        return _engine_skip(unit, str(why_not), REASON_NOT_EVALUATED)
+    return _judge_engine_models(unit, engine_datasource_sources(detail), model_dirs, SCOPE_TABLE)
+
+
+def _judge_engine_models(
+    unit: EngineUnit, sources: list[dict[str, Any]], model_dirs: list[Path], scope: str
+) -> dict[str, Any]:
+    """Load the unit's models and fold its source verdicts, at whichever scope its payload supports.
+
+    An engine bundle has no `limitations_encountered` - that field is a parser-spec artifact. The
+    sanctioned escape hatch on this path is therefore the generated-edit declaration, which is our
+    own tier's artifact and works on either path.
+    """
     models = [load_model(model_dir) for model_dir in model_dirs]
-    # An engine bundle has no `limitations_encountered` - that field is a parser-spec artifact. The
-    # sanctioned escape hatch on this path is therefore the generated-edit declaration, which is our
-    # own tier's artifact and works on either path.
     declarations = load_generated_edit_declarations(unit.bundle)
-    verdicts = _live_verdicts(sources, models, [], declarations, SCOPE_MODEL)
+    verdicts = _live_verdicts(sources, models, [], declarations, scope)
     return _finalize_unit(unit.source, verdicts, unit_name=unit.name, live_declared=_count_judgeable(sources))
 
 
@@ -1155,11 +1363,14 @@ def _engine_bundle_roots(root: Path) -> list[Path]:
 
 
 def _find_engine_units(root: Path) -> list[EngineUnit]:
-    """Every engine-bundle workbook unit under a target.
+    """Every engine-bundle unit under a target - workbooks AND datasources.
+
+    Both halves are needed. Measured on the real cold-run bundle: `handover/` held one workbook slice
+    and `report.json` held the only genuinely live Snowflake source in the estate, as a DATASOURCE.
+    Discovering workbooks alone found 1 of 2 units and skipped the checkable one.
 
     Skipped entirely when the target IS a parser unit (a root-level `migration-spec.json`): that
-    contract governs the unit, carries table names, and gives the stronger table-scoped verdict, so
-    scanning the same models twice under a weaker scope would only add noise.
+    contract governs the unit and gives the same table-scoped verdict, so scanning twice adds noise.
     """
     if root.is_file():
         if root.name == "migration-spec.json":
@@ -1177,9 +1388,10 @@ def _find_engine_units(root: Path) -> list[EngineUnit]:
         try:
             found = read_handover.load_workbooks(bundle)
         except read_handover.HandoverError:
-            continue
+            found = []
         for name, workbook, source in found:
             units.append(EngineUnit(name=name, source=source, bundle=bundle, workbook=workbook))
+        units.extend(engine_datasource_units(bundle))
     return units
 
 
