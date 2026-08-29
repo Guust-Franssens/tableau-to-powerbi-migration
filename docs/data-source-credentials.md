@@ -98,10 +98,12 @@ watches for the connector modal:
 - No modal within the timeout -> `VERDICT: CREDENTIAL_PRESENT` (exit 0), **but** re-confirm with the
   data probe before trusting it (see the serverless false-positive above).
 - A dialog is up that is *not* a credential prompt -> one of `REFRESH_IN_PROGRESS` (another refresh
-  already owns this instance — wait for it or cancel the stale one), `DIALOG_UNRECOGNIZED` (we read its
-  text and it matched no credential signature) or `DIALOG_UNREADABLE` (its **content** could not be
-  read — no text at all, or only a caption), each **exit 3**. All three mean *"could not probe"*, never
-  *"a human must sign in"*.
+  already owns this instance — wait for it or cancel the stale one), `DIALOG_NEEDS_HUMAN` (a **known**
+  human-blocking prompt that is not a credential prompt — the native-database-query approval modal;
+  approve it, no sign-in implied), `DIALOG_UNRECOGNIZED` (no signature matched, or progress text
+  alongside prose that is not progress status) or `DIALOG_UNREADABLE` (its **content** could not be
+  shown to be harmless), each **exit 3**. All four mean *"could not probe"*, never *"a human must sign
+  in"*.
 
 ⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall.** Until issue #367 the probe
 returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
@@ -127,6 +129,12 @@ harvest in a **killable child process** (a hung provider held a 1 s probe for 15
 at all), and — the load-bearing part — **suppresses a dialog only when it positively reads benign
 CONTENT**, never because a caption looked reassuring. If you extend this probe, or write another dialog
 detector: **a caption is not content, and "we read something" is not "we read the thing that matters".**
+A third round found the same shape twice more: the **first** benign element used to classify the whole
+window (so `Evaluating` beside *"Permission is required to run this native database query"* cleared it),
+and a **missing JSON property** in the harvest child's payload computed to "complete" because
+`-not $null` is `$true`. The probe now scans all content, recognises known human-blocking prompts by
+name (`DIALOG_NEEDS_HUMAN`, exit 3), and validates the child's schema and exit code. The one-line
+lesson across all three rounds: **missing evidence must never read as good evidence.**
 
 **The robust positive check: query one row from the Desktop model (verified 2026-07).** Modal-absence is
 a *negative* signal; the *positive* proof that data actually flows is to query the loaded model. Power BI

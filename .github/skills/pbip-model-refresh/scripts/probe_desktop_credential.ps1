@@ -64,12 +64,19 @@
     exit 3  UNKNOWN              no window for the pid, a minimized owner, or no Refresh control was
                                  ever invoked (with nothing invoked, "no modal appeared" proves
                                  nothing - reporting PRESENT would be a fail-open arbiter).
-    exit 3  REFRESH_IN_PROGRESS  a dialog whose CONTENT positively reads as refresh progress was
-                                 already up at t=0. Desktop is busy, so the credential state cannot be
-                                 probed; wait for it, or cancel the stale refresh.
-    exit 3  DIALOG_UNRECOGNIZED  a dialog is up whose text matched NEITHER signature. We read it and
-                                 it is not a credential prompt - so it is not a credential wall - but
-                                 we cannot say what it is. A human should look at the screen.
+    exit 3  REFRESH_IN_PROGRESS  a dialog whose CONTENT positively reads as refresh progress - all of
+                                 it, not just its first element - was already up at t=0. Desktop is
+                                 busy, so the credential state cannot be probed; wait for it, or
+                                 cancel the stale refresh.
+    exit 3  DIALOG_NEEDS_HUMAN   a KNOWN human-blocking prompt that is not a credential prompt - the
+                                 native database query approval modal above all. Not exit 1, because
+                                 the remedy is an approval, not a sign-in. Never suppressed, and it
+                                 outranks any progress text in the same window.
+    exit 3  DIALOG_UNRECOGNIZED  a dialog is up whose text matched NO signature, or which shows
+                                 progress text ALONGSIDE prose that is not progress status. We read it
+                                 and it is not a credential prompt - so it is not a credential wall -
+                                 but we cannot account for all of it. A human should look at the
+                                 screen.
     exit 3  DIALOG_UNREADABLE    a dialog is up that could not be shown to be harmless: no text at
                                  all, or only a reassuring CAPTION, or benign-looking content read
                                  from an INCOMPLETE harvest. "We could not establish it" is a weaker
@@ -135,6 +142,20 @@ $sig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'credential_modal_sign
 # see SKILL.md. Keep the alternatives narrow and anchored: this is the only file that can cause a
 # dialog to be ignored, so a broad pattern here is the one way to hide a genuine blocker.
 $benignSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_dialog_signature.regex') -Raw).Trim()
+
+# Prompts that are KNOWN to need a human but are NOT credential prompts - the native-database-query
+# approval modal above all. Migrated custom-SQL sources emit exactly the shape that triggers it, and
+# SKILL.md's standing instruction is to check for it before concluding anything about credentials; a
+# probe that suppressed it would make this bundle contradict its own documentation. Matched BEFORE
+# benign, so one progress element in the same window cannot erase it (review round 3).
+$blockingSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'blocking_prompt_signature.regex') -Raw).Trim()
+
+# A content element with at least this many words is PROSE - something written to be read by a human.
+# If it is not itself a recognised progress status, it is unaccounted for, and a window with
+# unaccounted prose is not provably a progress dialog however much progress text sits beside it.
+# This is the backstop for prompts that are in NEITHER signature; the cost of it firing wrongly is one
+# more exit 3, which is loud and recoverable.
+$MinPromptWords = 5
 
 function Get-NormalizedText {
   <# Whitespace-normalised, de-duplicated, order-preserving text. #>
@@ -221,19 +242,29 @@ function Get-DialogClassification {
 
   Kinds, in the order they are tested:
     credential        the credential signature matched a text element or the prose join -> hard stop.
-    benign            the benign signature matched CONTENT (not the caption) AND the harvest completed
-                      -> Power BI is working. The one suppressible kind.
-    benign-unverified the benign signature matched content, but the harvest was truncated, timed out,
-                      or hit a pattern it could not read. Benign-LOOKING is not benign.
+    needs-human       a KNOWN human-blocking prompt that is not a credential prompt - the native
+                      database query approval modal. Exit 3, not 1: a human must act, but the remedy
+                      is an approval, not a sign-in.
+    mixed-content     progress text AND unaccounted prose in the same window. Round 3's defect: the
+                      FIRST content element matching the benign regex used to classify the whole
+                      window, so `Evaluating` beside
+                      `Permission is required to run this native database query` cleared it at exit 0.
+                      The entire content is now scanned before benign can be concluded.
+    benign            every content element is either recognised progress status or too short to be a
+                      human-directed prompt, at least one IS progress status, AND the harvest
+                      completed -> Power BI is working. The one suppressible kind.
+    benign-unverified as `benign`, but the harvest was truncated, timed out, or hit a pattern it could
+                      not read. Benign-LOOKING is not benign.
     non-blocking      the owner window is ENABLED. Modality is a ONE-WAY test: a modal dialog disables
                       its owner, so an enabled owner PROVES this window blocks nothing. The converse
                       does not hold - Power BI's refresh dialog also disables the owner - so a disabled
-                      owner never convicts. `$null` (no owner) proves nothing either way.
+                      owner never convicts. `$null` (no owner) proves nothing either way. It is tested
+                      AFTER `needs-human` on purpose: a known blocking prompt outranks the exoneration.
     benign-title-only the CAPTION matched the benign signature and no content did. A caption is not
                       content.
     unreadable        no readable text at all.
-    unrecognized      readable text that matched neither signature: we looked, and it is not a
-                      credential prompt. Distinct from `unreadable` on purpose - absent is not empty.
+    unrecognized      readable text that matched no signature: we looked, and it is not a credential
+                      prompt. Distinct from `unreadable` on purpose - absent is not empty.
 
   Everything except `credential` and `benign` lands in the exit-3 band, so the failure mode of every
   uncertainty here is a LOUD stop-and-look, never a silent clear.
@@ -244,13 +275,29 @@ function Get-DialogClassification {
   foreach ($t in $sets.Search) {
     if ($t -match $sig) { return [pscustomobject]@{ Kind = 'credential'; Evidence = $t } }
   }
+  foreach ($t in $sets.Search) {
+    if ($t -match $blockingSig) { return [pscustomobject]@{ Kind = 'needs-human'; Evidence = $t } }
+  }
+
+  # Scan ALL of the content. A first-match-wins loop let one benign element erase everything after it.
+  $benignHit = $null
+  $unaccounted = $null
   foreach ($t in $sets.Content) {
     if ($t -match $benignSig) {
-      if (Test-HarvestComplete -Value $Window.HarvestComplete) {
-        return [pscustomobject]@{ Kind = 'benign'; Evidence = $t }
-      }
-      return [pscustomobject]@{ Kind = 'benign-unverified'; Evidence = $t }
+      if ($null -eq $benignHit) { $benignHit = $t }
+      continue
     }
+    if ($null -eq $unaccounted) {
+      $words = @($t -split '\s+' | Where-Object { $_ })
+      if ($words.Count -ge $MinPromptWords) { $unaccounted = $t }
+    }
+  }
+  if ($benignHit) {
+    if ($unaccounted) { return [pscustomobject]@{ Kind = 'mixed-content'; Evidence = $unaccounted } }
+    if (Test-HarvestComplete -Value $Window.HarvestComplete) {
+      return [pscustomobject]@{ Kind = 'benign'; Evidence = $benignHit }
+    }
+    return [pscustomobject]@{ Kind = 'benign-unverified'; Evidence = $benignHit }
   }
   if ($Window.OwnerEnabled -eq $true) {
     return [pscustomobject]@{ Kind = 'non-blocking'; Evidence = 'owner window is enabled' }
@@ -262,6 +309,36 @@ function Get-DialogClassification {
     return [pscustomobject]@{ Kind = 'unreadable'; Evidence = '' }
   }
   return [pscustomobject]@{ Kind = 'unrecognized'; Evidence = $sets.All[0] }
+}
+
+function ConvertTo-HarvestResult {
+  <# Validate a harvest child's payload before any of it is believed.
+
+  Round 3's MEDIUM, and the third instance on this branch of MISSING EVIDENCE READ AS GOOD EVIDENCE:
+  the parent checked only that the payload was valid JSON, then computed
+  `(-not $p.Truncated) -and (-not $p.PatternsIncomplete)`. A missing property is `$null`, and
+  `-not $null` is `$true`, so a well-formed-but-schema-incomplete payload became
+  `HarvestComplete = $true` - a real Boolean, which then sailed through the strict
+  `Test-HarvestComplete` guard because the coercion had already happened upstream of it.
+
+  Both flags must EXIST and be actual Booleans, and the child must have exited 0. Items are still
+  merged when they are present and the flags are not - unread text lowers credential recall, so
+  keeping it costs nothing and can only help - but `Complete` stays `$false`, so a malformed payload
+  can never authorise suppression.
+  #>
+  param([object]$Payload, [int]$ExitCode)
+
+  if ($ExitCode -ne 0 -or $null -eq $Payload) { return $null }
+  $properties = $Payload.PSObject.Properties
+  $hasTruncated = $null -ne $properties['Truncated']
+  $hasPatterns = $null -ne $properties['PatternsIncomplete']
+  $truncated = if ($hasTruncated) { $Payload.Truncated } else { $null }
+  $patterns = if ($hasPatterns) { $Payload.PatternsIncomplete } else { $null }
+  $schemaOk = $hasTruncated -and $hasPatterns -and ($truncated -is [bool]) -and ($patterns -is [bool])
+  $items = @()
+  if ($null -ne $properties['Items'] -and $null -ne $Payload.Items) { $items = @($Payload.Items) }
+  $complete = $schemaOk -and (-not $truncated) -and (-not $patterns)
+  return [pscustomobject]@{ Items = $items; Complete = [bool]$complete }
 }
 
 function Format-DialogEvidence {
@@ -292,6 +369,7 @@ function Get-DialogVerdict {
   #>
   param([object[]]$Windows, [switch]$RefreshInFlight)
 
+  $needsHuman = $null
   $unreadable = $null
   $unrecognized = $null
   $benign = $null
@@ -304,14 +382,17 @@ function Get-DialogVerdict {
         $found.ExitCode = 1
         return $found
       }
+      'needs-human' { if ($null -eq $needsHuman) { $found.Verdict = 'DIALOG_NEEDS_HUMAN'; $needsHuman = $found } }
       'unreadable' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
       'benign-unverified' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
       'benign-title-only' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
+      'mixed-content' { if ($null -eq $unrecognized) { $found.Verdict = 'DIALOG_UNRECOGNIZED'; $unrecognized = $found } }
       'unrecognized' { if ($null -eq $unrecognized) { $found.Verdict = 'DIALOG_UNRECOGNIZED'; $unrecognized = $found } }
       'benign' { if ($null -eq $benign) { $found.Verdict = 'REFRESH_IN_PROGRESS'; $benign = $found } }
       default { }
     }
   }
+  if ($null -ne $needsHuman) { return $needsHuman }
   if ($null -ne $unreadable) { return $unreadable }
   if ($null -ne $unrecognized) { return $unrecognized }
   if ($null -ne $benign -and -not $RefreshInFlight) { return $benign }
@@ -517,7 +598,10 @@ function Get-BoundedAutomationHarvest {
     if (-not $raw) { return $null }
     $line = @($raw -split "`r?`n" | Where-Object { $_ -like 'HARVEST:*' })
     if ($line.Count -eq 0) { return $null }
-    return ConvertFrom-Json $line[0].Substring(8)
+    $payload = $null
+    try { $payload = ConvertFrom-Json $line[0].Substring(8) } catch { return $null }
+    # Valid JSON is not a valid payload. Schema and exit code are checked before anything is believed.
+    return ConvertTo-HarvestResult -Payload $payload -ExitCode $child.ExitCode
   } catch {
     return $null
   } finally {
@@ -543,7 +627,7 @@ function ConvertTo-ProbeWindow {
         $texts += [string]$item.Text
         if ($item.Interactive) { $interactive += [string]$item.Text }
       }
-      $complete = (-not $harvested.Truncated) -and (-not $harvested.PatternsIncomplete)
+      $complete = [bool]$harvested.Complete
     }
   }
   return [pscustomobject]@{
@@ -597,6 +681,8 @@ if ($blocker) {
   }
   switch ($blocker.Kind) {
     'benign' { Write-Output "  a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack a second refresh on it" }
+    'needs-human' { Write-Output "  this is a known human-blocking prompt (e.g. native database query approval), NOT a credential prompt - approve it at the Desktop screen; no sign-in is implied" }
+    'mixed-content' { Write-Output "  it shows refresh progress AND prose that is not progress status - a progress dialog does not explain the rest of this window; look at the Desktop screen" }
     'benign-unverified' { Write-Output "  its content LOOKS like refresh progress, but the read was truncated or incomplete - benign-looking is not benign; look at the Desktop screen" }
     'benign-title-only' { Write-Output "  its CAPTION looks like a progress dialog, but no content confirmed it - a caption is not content; look at the Desktop screen" }
     'unreadable' { Write-Output "  this window exposes no readable text, so it could not be classified at all - look at the Desktop screen" }

@@ -1019,15 +1019,31 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
 PROBE_PS1 = Path(__file__).resolve().parents[1] / "scripts" / "probe_desktop_credential.ps1"
 CREDENTIAL_SIGNATURE = PROBE_PS1.parent / "credential_modal_signature.regex"
 BENIGN_SIGNATURE = PROBE_PS1.parent / "benign_dialog_signature.regex"
+BLOCKING_SIGNATURE = PROBE_PS1.parent / "blocking_prompt_signature.regex"
 
 _HARNESS = r"""
 param(
   [Parameter(Mandatory = $true)][string]$Probe,
-  [Parameter(Mandatory = $true)][string]$WindowsJson,
+  [string]$WindowsJson,
+  [string]$PayloadJson,
+  [int]$PayloadExit = 0,
   [switch]$RefreshInFlight
 )
 $ErrorActionPreference = 'Stop'
 . $Probe -LoadDetectorsOnly
+if ($PayloadJson) {
+  $payload = $null
+  try { $payload = ConvertFrom-Json (Get-Content -LiteralPath $PayloadJson -Raw) } catch { $payload = $null }
+  $result = ConvertTo-HarvestResult -Payload $payload -ExitCode $PayloadExit
+  $accepted = ($null -ne $result)
+  $shaped = [ordered]@{
+    accepted = $accepted
+    complete = $(if ($accepted) { [bool]$result.Complete } else { $false })
+    items    = $(if ($accepted) { @($result.Items).Count } else { 0 })
+  }
+  Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $shaped -Compress -Depth 4))
+  return
+}
 $parsed = ConvertFrom-Json (Get-Content -LiteralPath $WindowsJson -Raw)
 $windows = @($parsed)
 $verdict = Get-DialogVerdict -Windows $windows -RefreshInFlight:$RefreshInFlight
@@ -1095,6 +1111,22 @@ def classify(tmp_path: Path, windows: list[dict], *, refresh_in_flight: bool = F
     argv += ["-WindowsJson", str(payload)]
     if refresh_in_flight:
         argv.append("-RefreshInFlight")
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
+    marker = "<<<PROBE-JSON>>>"
+    assert marker in done.stdout, f"harness produced no result payload:\n{done.stdout}\n{done.stderr}"
+    return json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
+
+
+def harvest_result(tmp_path: Path, payload, *, exit_code: int = 0) -> dict:
+    """Run the SHIPPED payload validator over a raw child payload and return what it accepted."""
+    exe = _powershell()
+    harness = tmp_path / "classify.ps1"
+    harness.write_text(_HARNESS, encoding="utf-8")
+    blob = tmp_path / "payload.json"
+    blob.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(PROBE_PS1)]
+    argv += ["-PayloadJson", str(blob), "-PayloadExit", str(exit_code)]
     done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
     assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
     marker = "<<<PROBE-JSON>>>"
@@ -1689,6 +1721,10 @@ def test_the_probe_harvests_window_text_through_ui_automation() -> None:
     assert "function Get-BoundedAutomationHarvest" in body and "WaitForExit" in body and "Kill()" in body, (
         "the harvest must run in a killable child process: a hung UIA provider cannot be cancelled in-process"
     )
+    assert "ConvertTo-HarvestResult -Payload" in body and "-ExitCode $child.ExitCode" in body, (
+        "the collector must route the child payload through the validator, carrying the child's exit code - "
+        "the validator is behaviourally tested on its own, but nothing else pins that it is actually WIRED IN"
+    )
 
 
 def test_the_harvest_child_process_is_this_same_script() -> None:
@@ -1841,7 +1877,17 @@ $script:timer.Add_Tick({
 
 
 def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: list[str] | None = None):
-    """Launch the fake-Desktop app with ``modal_body``, run the probe, return the completed process."""
+    """Launch the fake-Desktop app with ``modal_body``, run the probe, return the completed process.
+
+    ⚠️ **These live tests are CONTENTION-SENSITIVE, and that is not flakiness.** They drive a real GUI
+    process and a real cross-process UI Automation harvest, so running them alongside the whole skills
+    suite can slow the fixture enough that it never exposes an invokable `Refresh` (skip below), or slow
+    the harvest enough that it hits its own timeout and the verdict degrades to `DIALOG_UNREADABLE`.
+    Both are the fail-safe working: every degraded path lands in the exit-3 band, never a clear.
+    Measured 2026-08-29: a clean run is 100 passed; the same suite under a concurrent full-suite run
+    skipped one live test. Prefer asserting on the BAND (never exit 0, never suppressed) and reserve
+    exact-verdict assertions for the cases that are stable.
+    """
     exe = _powershell()
     app_script = tmp_path / "fake_desktop.ps1"
     app_script.write_text(_WPF_APP_PREAMBLE + modal_body + _WPF_APP_EPILOGUE, encoding="utf-8")
@@ -1937,3 +1983,244 @@ def test_a_wedged_uia_provider_still_produces_a_verdict(tmp_path: Path) -> None:
     assert done.elapsed < 25, (
         f"the probe inherited the provider's wedge instead of bounding it (took {done.elapsed:.1f}s)"
     )
+
+
+# --------------------------------------------------------------------------------------------------
+# Round 3: one benign element must not erase the rest of the window, and a payload must be validated
+# --------------------------------------------------------------------------------------------------
+#
+# Both findings are the SAME root cause, for the third time on this branch: missing evidence read as
+# good evidence. Round 1 let a caption stand in for content; round 2 let "we read something" stand in
+# for "we read the thing that matters"; round 3 let the FIRST benign element stand in for the whole
+# window, and a MISSING JSON property stand in for a completed harvest.
+
+NATIVE_QUERY_PROMPT = "Permission is required to run this native database query"
+
+
+def test_a_native_query_approval_beside_progress_text_is_not_suppressed(tmp_path: Path) -> None:
+    """The finding this branch must not ship without: one `Evaluating` erased a known blocking prompt.
+
+    `Permission is required to run this native database query` is Power BI Desktop's native-database-
+    query approval modal. It is not hypothetical - `SKILL.md` documents it at length, notes that
+    migrated custom-SQL sources emit exactly the shape that triggers it, and instructs the reader to
+    check for it *before* concluding anything about credentials. A probe that suppressed it would make
+    this bundle contradict its own documentation.
+
+    Exit 3, not 1: a human must act, but the remedy is an approval, not a sign-in - so it must not be
+    reported in the band whose documented meaning is "sign in once".
+    """
+    window = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Evaluating", NATIVE_QUERY_PROMPT],
+        OwnerEnabled=False,
+    )
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["kind"] == "needs-human"
+    assert result["verdict"] == "DIALOG_NEEDS_HUMAN"
+    assert result["exit_code"] == 3
+    assert NATIVE_QUERY_PROMPT in (result["evidence"] or ""), "the verdict must carry the prompt it found"
+
+
+def test_a_native_query_approval_outranks_an_enabled_owner(tmp_path: Path) -> None:
+    """Modality exonerates a window we know nothing about, not one we have identified as blocking."""
+    window = _window(Title="Refresh", Texts=["Refresh", NATIVE_QUERY_PROMPT], OwnerEnabled=True)
+
+    assert classify(tmp_path, [window], refresh_in_flight=True)["kind"] == "needs-human"
+
+
+def test_authentication_required_alongside_loading_data_is_not_suppressed(tmp_path: Path) -> None:
+    """The second round-3 case: `\\bLoading data\\b` matched as a substring of a real prompt.
+
+    Two independent guards now stop it: the benign expressions are WHOLE-ELEMENT status patterns, so
+    `Loading data requires authentication` is not progress text at all; and `Authentication required`
+    is itself a known human-blocking prompt.
+    """
+    window = _window(
+        Title="Authentication required",
+        Texts=["Authentication required", "Loading data requires authentication"],
+        OwnerEnabled=False,
+    )
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["exit_code"] == 3
+    assert result["verdict"] != "REFRESH_IN_PROGRESS"
+
+
+def test_unaccounted_prose_beside_progress_text_is_not_suppressed(tmp_path: Path) -> None:
+    """The backstop for a blocking prompt in NEITHER signature.
+
+    A window is a progress dialog only when its content is ACCOUNTED FOR: recognised status text, or
+    short enough that it cannot be a human-directed prompt. A sentence nobody can explain sitting
+    beside `Evaluating` means the progress dialog does not explain this window.
+    """
+    window = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Evaluating", "Something entirely unknown is blocking this refresh now"],
+        OwnerEnabled=False,
+    )
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["kind"] == "mixed-content"
+    assert result["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert result["exit_code"] == 3
+
+
+def test_short_data_labels_beside_progress_text_do_not_block_suppression(tmp_path: Path) -> None:
+    """Positive control. Without this, "scan everything" could degenerate into "never suppress".
+
+    A real refresh dialog lists table names and row counts next to its status text. Those are short
+    data labels, not prose, and they must not veto - otherwise the benign path is unreachable and the
+    probe can never return CREDENTIAL_PRESENT while Desktop shows its own refresh dialog.
+    """
+    window = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Orders", "Customers", "1,204 rows loaded", "Evaluating", "Cancel"],
+        InteractiveTexts=["Cancel"],
+        OwnerEnabled=False,
+    )
+
+    assert classify(tmp_path, [window], refresh_in_flight=True)["verdict"] is None
+    assert classify(tmp_path, [window])["verdict"] == "REFRESH_IN_PROGRESS"
+
+
+def test_the_benign_signature_matches_whole_elements_not_substrings() -> None:
+    """Platform-independent gate on the resource itself: no broad substring alternatives.
+
+    `\\bLoading data\\b` matched inside `Loading data requires authentication`. Every alternative is now
+    anchored, so a status word buried in a sentence is not a status.
+    """
+    benign = re.compile(BENIGN_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+
+    for status in ["Refresh", "Evaluating", "Evaluating...", "Loading data", "1,204 rows loaded"]:
+        assert benign.search(status), f"a whole-element status must still match: {status!r}"
+    for sentence in [
+        "Loading data requires authentication",
+        "Refresh failed",
+        "Evaluating whether you have permission to sign in",
+        "Waiting for other queries and then a sign-in prompt",
+    ]:
+        assert not benign.search(sentence), f"a status word inside a sentence is not a status: {sentence!r}"
+
+
+def test_the_blocking_prompt_signature_covers_the_documented_native_query_modal() -> None:
+    """The prompt `SKILL.md` documents must actually be in the resource that recognises it."""
+    blocking = re.compile(BLOCKING_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+
+    for phrase in [
+        NATIVE_QUERY_PROMPT,
+        "This native database query requires your approval",
+        "Authentication required",
+        "Authentication is required",
+    ]:
+        assert blocking.search(phrase), f"blocking signature must recognise: {phrase!r}"
+    for benign_status in ["Refresh", "Evaluating", "1,204 rows loaded", "Orders"]:
+        assert not blocking.search(benign_status), f"progress text must not be a blocking prompt: {benign_status!r}"
+
+
+@pytest.mark.parametrize(
+    "payload,exit_code,why",
+    [
+        pytest.param({"Items": []}, 0, "both flags missing", id="no-flags"),
+        pytest.param({"Items": [], "Truncated": False}, 0, "PatternsIncomplete missing", id="one-flag"),
+        pytest.param({"Items": [], "PatternsIncomplete": False}, 0, "Truncated missing", id="other-flag"),
+        pytest.param({"Items": [], "Truncated": None, "PatternsIncomplete": None}, 0, "null flags", id="null-flags"),
+        pytest.param({"Items": [], "Truncated": 0, "PatternsIncomplete": 0}, 0, "integer flags", id="int-flags"),
+        pytest.param(
+            {"Items": [], "Truncated": "false", "PatternsIncomplete": "false"}, 0, "string flags", id="str-flags"
+        ),
+        pytest.param(
+            {"Items": [], "Truncated": False, "PatternsIncomplete": False}, 4, "child failed", id="nonzero-exit"
+        ),
+    ],
+)
+def test_a_structurally_incomplete_child_payload_is_never_complete(tmp_path: Path, payload, exit_code, why) -> None:
+    """A missing property is `$null`, and `-not $null` is `$true` - so absence computed to "complete".
+
+    That coercion happened UPSTREAM of the strict `Test-HarvestComplete` guard, which is why the guard
+    did not save it: by the time it ran, the malformed value was already a real Boolean `$true`.
+    """
+    result = harvest_result(tmp_path, payload, exit_code=exit_code)
+
+    assert result["complete"] is False, f"payload must not be complete ({why})"
+
+
+def test_a_well_formed_child_payload_is_accepted_as_complete(tmp_path: Path) -> None:
+    """Positive control for the validator - otherwise it could pass by rejecting everything."""
+    payload = {
+        "Items": [{"Text": "Evaluating", "Interactive": False}],
+        "Truncated": False,
+        "PatternsIncomplete": False,
+    }
+
+    result = harvest_result(tmp_path, payload)
+
+    assert result["accepted"] is True
+    assert result["complete"] is True
+    assert result["items"] == 1
+
+
+def test_a_malformed_payloads_items_are_still_read_but_never_authorise_suppression(tmp_path: Path) -> None:
+    """Keeping the text costs nothing and can only raise credential recall; `Complete` still stays false."""
+    payload = {"Items": [{"Text": "Enter your credentials", "Interactive": False}], "Truncated": False}
+
+    result = harvest_result(tmp_path, payload)
+
+    assert result["items"] == 1, "unread text lowers credential recall, so salvage what parsed"
+    assert result["complete"] is False, "but a schema-incomplete payload can never authorise benign"
+
+
+def test_invalid_json_and_flagged_incompleteness_are_rejected(tmp_path: Path) -> None:
+    """The two shapes that were already safe, pinned so they stay that way."""
+    assert harvest_result(tmp_path, "{not json", exit_code=0)["accepted"] is False
+    truncated = {"Items": [], "Truncated": True, "PatternsIncomplete": False}
+    assert harvest_result(tmp_path, truncated)["complete"] is False
+    patterns = {"Items": [], "Truncated": False, "PatternsIncomplete": True}
+    assert harvest_result(tmp_path, patterns)["complete"] is False
+
+
+# `Evaluating` and the native-query approval prompt in ONE fully-harvested modal - the round-3 High,
+# reproduced end to end rather than only at the classifier.
+_MODAL_PROGRESS_PLUS_NATIVE_QUERY = r"""
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = 'Refresh'
+    $modal.Width = 560
+    $modal.Height = 320
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $status = New-Object System.Windows.Controls.TextBlock
+    $status.Text = 'Evaluating'
+    $null = $panel.Children.Add($status)
+    $prompt = New-Object System.Windows.Controls.TextBlock
+    $prompt.Text = 'Permission is required to run this native database query'
+    $null = $panel.Children.Add($prompt)
+    $ok = New-Object System.Windows.Controls.Button
+    $ok.Content = 'Cancel'
+    $null = $panel.Children.Add($ok)
+    $modal.Content = $panel
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $null = $modal.ShowDialog()
+  })
+"""
+
+
+def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: Path) -> None:
+    """Round 3's High, end to end: a fully-harvested mixed window must not clear.
+
+    ⚠️ The live tests in this module drive a real GUI process and a real UI Automation harvest, so they
+    are CONTENTION-SENSITIVE: running them alongside the whole skills suite can slow the harvest enough
+    that it times out and the verdict degrades to `DIALOG_UNREADABLE`. That is the fail-safe working as
+    designed, not flakiness - every degraded path still lands in the exit-3 band. Assertions here are
+    therefore written against the BAND (never exit 0, never suppressed), with the exact verdict checked
+    only where it is stable.
+    """
+    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PROGRESS_PLUS_NATIVE_QUERY)
+
+    assert done.returncode == 3, f"a native-query approval must never clear or be a credential stop:\n{done.stdout}"
+    assert "CREDENTIAL_PRESENT" not in done.stdout
+    assert "REFRESH_IN_PROGRESS" not in done.stdout, "one progress element must not suppress the whole window"

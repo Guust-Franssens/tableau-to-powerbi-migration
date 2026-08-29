@@ -154,8 +154,9 @@ stay byte-identical.
 > |---|---|---|
 > | `CREDENTIAL_MISSING` | 1 | text matched `credential_modal_signature.regex`. The hard stop. |
 > | `CREDENTIAL_PRESENT` | 0 | a refresh was invoked and ran to the deadline with nothing unclassifiable up. Still not the gate of record for a serverless source — confirm with the one-row data probe. |
-> | `REFRESH_IN_PROGRESS` | 3 | a progress dialog was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
-> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched neither signature. We read it, and it is **not** a credential prompt — but we cannot say what it is. |
+> | `REFRESH_IN_PROGRESS` | 3 | a dialog whose **whole content** positively reads as refresh progress was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
+> | `DIALOG_NEEDS_HUMAN` | 3 | a **known** human-blocking prompt that is not a credential prompt — the **native-database-query approval modal** above all. Not exit 1, because the remedy is an approval, not a sign-in. Never suppressed, and it outranks any progress text in the same window. |
+> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched **no** signature, **or** which shows progress text *alongside* prose that is not progress status. We read it, and it is **not** a credential prompt — but we cannot account for all of it. |
 > | `DIALOG_UNREADABLE` | 3 | a dialog is up that could not be **shown to be harmless**: no text at all, or only a reassuring **caption**, or benign-looking content read from an **incomplete** harvest (truncated, timed out, or a pattern that threw). Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not establish it" is a weaker state of knowledge than "we read it and it did not match". |
 > | `UNKNOWN` | 3 | no window for the pid, a minimized owner, or no Refresh control was ever invoked. |
 >
@@ -233,9 +234,46 @@ stay byte-identical.
 > looking at the screen; on the benign path it would be a **silent** false clear.
 >
 > **The net effect is deliberately conservative.** Every uncertainty — unread content, a truncated
-> harvest, a wedged provider, an unknown field type — lands in the exit-3 band, which is loud and
-> recoverable. A mostly-conservative arbiter with a narrow proven-benign path is a better artifact than
-> a clever one with a residual silent clear.
+> harvest, a wedged provider, an unknown field type, prose nobody can explain — lands in the exit-3
+> band, which is loud and recoverable. A mostly-conservative arbiter with a narrow proven-benign path is
+> a better artifact than a clever one with a residual silent clear.
+
+> ⚠️ **One benign element must not account for a whole window — and the native-query modal is why.**
+> Round 3 of review found that the **first** content element matching the progress signature classified
+> the entire window, so `Evaluating` sitting beside
+> *"Permission is required to run this native database query"* was suppressed → **exit 0**. That prompt
+> is documented as a live hazard three sections below, and
+> `tests/test_credential_modal_detection.py` already treated it as blocking — the bundle would have
+> contradicted itself. Three changes, in order of how much they carry:
+>
+> 1. **`scripts/blocking_prompt_signature.regex`** — known human-blocking prompts that are *not*
+>    credential prompts (native-query approval, `Authentication required`). Matched **before** benign
+>    and **before** the enabled-owner exoneration, and reported as **`DIALOG_NEEDS_HUMAN`, exit 3** —
+>    a human must act, but the remedy is an approval, not a sign-in, so it must not enter the band
+>    whose documented meaning is *"sign in once"*.
+> 2. **The whole content is scanned before benign is concluded.** Progress text plus prose that is not
+>    progress status is `mixed-content` → `DIALOG_UNRECOGNIZED`. The backstop for prompts in *neither*
+>    signature is a word count: a content element of **5+ words** that is not itself recognised status
+>    is prose written for a human, and it vetoes suppression. Short data labels (`Orders`,
+>    `1,204 rows loaded`, `Cancel`) do not — otherwise the benign path is unreachable and the probe
+>    could never return `CREDENTIAL_PRESENT` while Desktop shows its own refresh dialog.
+> 3. **The benign expressions are whole-element status patterns**, not substrings. `\bLoading data\b`
+>    matched inside *"Loading data requires authentication"*. Every alternative is now anchored, so a
+>    status word buried in a sentence is not a status.
+>
+> ⚠️ **And validate the harvest child's payload, not just its JSON.** The parent computed
+> `(-not $p.Truncated) -and (-not $p.PatternsIncomplete)`. A missing property is `$null`, and
+> `-not $null` is `$true`, so a well-formed-but-schema-incomplete payload became `HarvestComplete`
+> **`$true`** — a *real Boolean*, which then sailed straight through the strict
+> `Test-HarvestComplete` guard because the coercion had already happened upstream of it. The child must
+> now exit 0, and both flags must **exist** and be actual Booleans. Items are still merged when they
+> parse (unread text only lowers credential recall), but `Complete` stays false.
+>
+> **Notice the shape all three review rounds share: MISSING EVIDENCE READ AS GOOD EVIDENCE.** A caption
+> standing in for content; "we read something" standing in for "we read the thing that matters"; the
+> first benign element standing in for the whole window; a missing JSON property standing in for a
+> completed harvest. If you extend this probe — or write any other detector whose output can stop a
+> pipeline — that is the failure to look for first.
 >
 > The **Python** fast check (`_credential_modal.blocking_dialog_candidates`, used by
 > `refresh_pbip_model.py` and `probe_desktop_query.py`) still promotes any >= 100x100 non-main window
@@ -308,6 +346,13 @@ stay byte-identical.
 > anything about credentials.** `blocking_dialog_candidates()` will report it as
 > `BLOCKED_BY_DIALOG` rather than a false `NO_CREDENTIAL`, which is honest but not yet specific —
 > capture the modal's exact title when you first hit one so it can be classified by name.
+>
+> ✅ **`probe_desktop_credential.ps1` now classifies it by name.**
+> `scripts/blocking_prompt_signature.regex` recognises `native database quer(y|ies)` /
+> `requires your approval`, and the arbiter reports **`VERDICT: DIALOG_NEEDS_HUMAN`, exit 3** — checked
+> *before* the progress signature and *before* the enabled-owner exoneration, so a refresh dialog in the
+> same window cannot suppress it. Round 3 of review found exactly that suppression and it exited 0;
+> see the verdict table above.
 
 Read-only preflight (proves credentials + source reachability without changing anything):
 
