@@ -108,14 +108,75 @@ def test_a_name_outside_the_convention_is_still_reported_unignored(repo: Path) -
     assert not _is_ignored(repo / "sweep-without-underscore", repo)
 
 
+def _rule_comment_block(text: str, rule: str) -> str:
+    """The contiguous comment block immediately above the LINE that IS `rule` in `.gitignore`.
+
+    Located by matching a whole line, never by splitting on the rule text. `text.split(rule)[0]`
+    lands on the FIRST occurrence anywhere in the file, so a comment quoting a rule verbatim earlier
+    on hijacks it and this test fails on prose that is entirely correct - hit for real on PR #382,
+    whose author reworded their comment rather than edit a file outside their group.
+
+    The hazard is already live: `.gitignore:109-110` quotes both `/_harvest*/` and `/_sweep*/` inside
+    the general-rule commentary, and this test survives only because those lines sit BELOW the rules
+    they quote. Moving that block up, or adding any similar note above line 83, breaks a test that
+    has nothing to do with the change.
+
+    An ambiguous file is refused rather than guessed at: if a rule is listed twice, no single comment
+    block governs it, and picking the first silently answers a question the file does not settle.
+    """
+    lines = text.splitlines()
+    matches = [i for i, line in enumerate(lines) if line.strip() == rule]
+    assert len(matches) == 1, f"`.gitignore` has {len(matches)} lines equal to `{rule}`, expected exactly 1"
+    index = matches[0]
+    start = index
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    return "\n".join(lines[start:index])
+
+
 def test_the_two_harvesters_do_not_share_one_documented_folder() -> None:
     """`.gitignore` must say WHICH tool writes where; one folder for two tools is the collision."""
     text = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
-    harvest_block = text.split("/_harvest*/")[0].rsplit("\n\n", 1)[-1]
-    sweep_block = text.split("/_sweep*/")[0].rsplit("\n\n", 1)[-1]
+    harvest_block = _rule_comment_block(text, "/_harvest*/")
+    sweep_block = _rule_comment_block(text, "/_sweep*/")
     assert "harvest_tableau_public.py" in harvest_block, "_harvest* rule does not name its owning tool"
     assert "harvest_estate_assets.py" in sweep_block, "_sweep* rule does not name its owning tool"
     assert "harvest_estate_assets.py" not in harvest_block, "both harvesters documented into _harvest*"
+
+
+def test_the_rule_locator_is_not_hijacked_by_a_comment_quoting_the_rule() -> None:
+    """The regression PR #382 hit: correct prose, unrelated file, red test.
+
+    Asserts twice on purpose - first that the OLD split-based locator really is hijacked by this
+    fixture, so a fixture that does not reproduce the defect cannot pass quietly.
+    """
+    text = (
+        "# THE GENERAL RULE, added after the specific ones below.\n"
+        "# `/_harvest*/` and `/_sweep*/` both cite issue #125.\n"
+        "/_*\n"
+        "\n"
+        "# `harvest_tableau_public.py` output (`--out-dir`, default `_harvest`).\n"
+        "/_harvest*/\n"
+        "candidates.json\n"
+        "\n"
+        "# `harvest_estate_assets.py` output (`--out`): downloaded .twbx/.tdsx from a REAL site.\n"
+        "/_sweep*/\n"
+    )
+    for rule, owner in (("/_harvest*/", "harvest_tableau_public.py"), ("/_sweep*/", "harvest_estate_assets.py")):
+        hijacked = text.split(rule)[0].rsplit("\n\n", 1)[-1]
+        assert owner not in hijacked, f"fixture proves nothing: the old locator was not hijacked for {rule}"
+        assert owner in _rule_comment_block(text, rule), f"the locator missed the real {rule} block"
+
+
+def test_the_rule_locator_refuses_a_file_it_cannot_answer_for() -> None:
+    """A missing or duplicated rule must fail loudly, never return an empty block that asserts True.
+
+    An empty string satisfies `"x" not in block`, so a silent miss would turn the collision check
+    above into a rubber stamp - the same fail-open shape the output guard is built to avoid.
+    """
+    for text in ("# nothing here\n/_assessment*/\n", "/_sweep*/\n\n# a second, contradictory home\n/_sweep*/\n"):
+        with pytest.raises(AssertionError):
+            _rule_comment_block(text, "/_sweep*/")
 
 
 # --------------------------------------------------------------------------- the script's guard
