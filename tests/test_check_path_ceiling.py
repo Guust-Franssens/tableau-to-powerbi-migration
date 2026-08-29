@@ -156,6 +156,126 @@ def test_both_ceilings_are_reported_separately_and_unambiguously(tmp_path):
     assert "refuses 260" in text and "refuses 248" in text
 
 
+# --------------------------------------------------------------------------------------------
+# The SECOND opt-in. One being set while the other was not is how #235 stayed invisible, so both
+# are reported - and neither may reach the verdict.
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("git_value", [True, False, None])
+def test_git_long_paths_is_reported_and_never_changes_the_verdict(tmp_path, monkeypatch, git_value):
+    target = _tree(tmp_path)
+    monkeypatch.setattr(cpc, "read_git_long_paths", lambda _root=None: git_value)
+    report = cpc.scan(tmp_path, cpc.Limits(file_ceiling=len(str(target)) - 1, dir_ceiling=10_000))
+    assert report["host_git_long_paths"] is git_value
+    assert report["status"] == cpc.STATUS_OVER_CEILING
+    assert report["counted"]["over_ceiling"] == 1
+    assert "core.longpaths" in cpc.render(report)
+
+
+@pytest.mark.parametrize("git_value", [True, False, None])
+def test_git_long_paths_cannot_rescue_an_unknown_path_either(tmp_path, monkeypatch, git_value):
+    """The `unknown` branch needs its own proof, and mutation testing is why.
+
+    A mutant that made the unknown branch depend on `read_git_long_paths` SURVIVED the first pass:
+    on this machine `core.longpaths` is unset, so the extra condition was inert and the covering
+    test only exercised the over-ceiling branch. It is a live defect on any machine that HAS set
+    `core.longpaths=true` - exactly the "it works here" trap #235 is about.
+    """
+    _tree(tmp_path)
+    monkeypatch.setattr(cpc, "read_git_long_paths", lambda _root=None: git_value)
+    real_walk = cpc.os.walk
+
+    def exploding_walk(top, onerror=None, **kwargs):
+        if onerror is not None:
+            onerror(PermissionError(13, "Permission denied"))
+        yield from real_walk(top, onerror=onerror, **kwargs)
+
+    monkeypatch.setattr(cpc.os, "walk", exploding_walk)
+    report = cpc.scan(tmp_path)
+    assert report["status"] == cpc.STATUS_UNKNOWN_PATHS
+    assert report["counted"]["unknown"] == 1
+
+
+def test_git_default_is_reported_as_the_silent_data_loss_risk(tmp_path, monkeypatch):
+    """Measured: an overlong DIRECTORY makes `git add` skip its contents and still exit 0."""
+    _tree(tmp_path)
+    monkeypatch.setattr(cpc, "read_git_long_paths", lambda _root=None: False)
+    text = cpc.render(cpc.scan(tmp_path))
+    assert "git default" in text
+    assert "silently drops" in text
+
+
+def test_unknown_git_config_is_not_read_as_enabled(tmp_path, monkeypatch):
+    _tree(tmp_path)
+    monkeypatch.setattr(cpc, "read_git_long_paths", lambda _root=None: None)
+    text = cpc.render(cpc.scan(tmp_path))
+    assert "do not read as enabled" in text
+
+
+def test_git_reader_treats_unset_as_false_not_unknown(tmp_path, monkeypatch):
+    """`git config --get` exits 1 when unset; that is git's documented default, not an unknown."""
+
+    class _Proc:  # pylint: disable=too-few-public-methods
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(cpc.subprocess, "run", lambda *a, **k: _Proc())
+    assert cpc.read_git_long_paths(tmp_path) is False
+
+
+def test_git_reader_returns_none_when_git_is_unavailable(tmp_path, monkeypatch):
+    def _boom(*_a, **_k):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(cpc.subprocess, "run", _boom)
+    assert cpc.read_git_long_paths(tmp_path) is None
+
+
+# --------------------------------------------------------------------------------------------
+# The shipping question: a short root can hide an unshippable tail.
+#
+# Note the arithmetic, because it decides how these tests must be written: root_budget is
+# `ceiling - tail`, and a tree is clean only when `ceiling >= root_len + tail`. So a CLEAN tree
+# always has `root_budget >= root_len`. The advisory can therefore only fire for a bundle built at
+# a SHORT root - a CI runner, `C:\b\`, a container - which is precisely the blind spot: such a
+# bundle passes the absolute check and is still unshippable. `tmp_path` is ~80 characters, far above
+# the 40-char advisory, so the threshold is moved rather than the fixture.
+# --------------------------------------------------------------------------------------------
+
+
+def test_tight_root_budget_is_flagged_even_when_every_absolute_path_is_clean(tmp_path, monkeypatch):
+    _tree(tmp_path)
+    clean = cpc.scan(tmp_path)
+    assert clean["counted"]["over_ceiling"] == 0
+    monkeypatch.setattr(cpc, "SHIPPING_ROOT_BUDGET_ADVISORY", clean["root_budget"] + 1)
+    report = cpc.scan(tmp_path)
+    assert report["counted"]["over_ceiling"] == 0, "the absolute check must still be clean"
+    assert report["root_budget_is_tight"] is True
+    assert "TIGHT ROOT BUDGET" in cpc.render(report)
+
+
+def test_tight_root_budget_is_advisory_not_a_finding(tmp_path, monkeypatch):
+    _tree(tmp_path)
+    monkeypatch.setattr(cpc, "SHIPPING_ROOT_BUDGET_ADVISORY", cpc.FILE_CEILING)
+    report = cpc.scan(tmp_path)
+    assert report["root_budget_is_tight"] is True
+    assert report["status"] == cpc.STATUS_OK, "advisory only - --min-root-budget is the gate"
+
+
+def test_a_roomy_bundle_is_not_flagged_as_tight(tmp_path):
+    _tree(tmp_path)
+    report = cpc.scan(tmp_path)
+    assert report["root_budget"] >= cpc.SHIPPING_ROOT_BUDGET_ADVISORY
+    assert report["root_budget_is_tight"] is False
+    assert "TIGHT ROOT BUDGET" not in cpc.render(report)
+
+
+def test_shipping_advisory_is_documented_and_below_the_ceiling():
+    assert 0 < cpc.SHIPPING_ROOT_BUDGET_ADVISORY < cpc.FILE_CEILING
+    assert cpc.SHIPPING_ROOT_BUDGET_ADVISORY == 40, r"derived from C:\Users\<name>\Documents\ + one folder"
+
+
 def test_over_ceiling_is_reported_for_files_this_host_can_open_perfectly_well(tmp_path):
     # The files below are short and readable right now. The check still calls them over ceiling,
     # which proves it measures the string rather than asking the OS.

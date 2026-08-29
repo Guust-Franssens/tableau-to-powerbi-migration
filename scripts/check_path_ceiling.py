@@ -90,14 +90,53 @@ and deepest file we emit - which is also the shape that actually fails in the wi
 The directory rule only becomes the stricter of the two for shorter names (`page.json`, `.platform`),
 which is precisely the case a file-only check would miss.
 
+Three consumers, three different answers, one machine — which is why "it works here" was never
+evidence
+--------------------------------------------------------------------------------------------------
+Measured 2026-08-29/30 on this machine, `LongPathsEnabled = 1` and `core.longpaths` unset throughout:
+
+| consumer                    | tolerates a 287-char path? | evidence                                    |
+|-----------------------------|----------------------------|---------------------------------------------|
+| Python 3.6+ (our generator) | **yes**                    | writes the whole estate bundle in silence    |
+| Power BI Desktop            | **NO, and no setting helps**| `EnsureNotLong`; refused at file 260/dir 248 |
+| git (`core.longpaths` unset)| **NO, but a setting fixes**| 0 of 179 files staged, exit 128              |
+
+The git half is not theoretical, and it is the reason `core.longpaths` is reported next to the
+registry value. A faithful copy of the three offending estate units at the same 90-character root:
+
+    core.longpaths unset (default)   git add -A -> 74 warnings + fatal, exit 128, 0/179 staged
+    core.longpaths=true              git add -A -> 0 warnings,          exit   0, 179/179 staged
+
+⚠️ **And git's failure is not always loud.** The two failure modes differ by WHICH path is overlong:
+
+    file  over the limit, parent directory readable -> `error: unable to index file` -> FATAL, exit 128
+    DIRECTORY over the limit                        -> `warning: could not open directory` -> SKIPPED
+
+In the second case git never sees the files inside, so it reports nothing missing. Measured on a
+synthetic tree with one 265-char directory: `git add -A` exited **0**, `git commit` exited **0**,
+`git status --porcelain` printed **nothing**, and **1 of 2 files was committed**. A green, silent,
+content-missing commit whose only trace is a `warning:` on stderr that any script redirecting stderr
+throws away. That is the strongest independent argument for gating on the DIRECTORY ceiling and not
+only on file paths.
+
 Why this cannot silently inherit LongPathsEnabled=1
 ---------------------------------------------------
 The verdict is computed ARITHMETICALLY from path strings. This module never asks the operating
 system whether a path can be opened, so there is no code path by which the host's registry setting,
-or the host's OS, can soften the answer. The registry value IS read and printed - because issue #235
-exists entirely because nobody printed it - but it is reported as context, is never an input to the
-verdict, and is labelled in the output as not affecting Desktop at all. Running on Linux CI produces
-the same numbers for the same tree.
+its git configuration, or the host's OS can soften the answer. Both settings ARE read and printed -
+because issue #235 exists entirely because nobody printed them, and because one being set while the
+other was not is exactly how the defect stayed invisible - but neither is ever an input to the
+verdict. Running on Linux CI produces the same numbers for the same tree.
+
+Two questions, and the check answers both
+-----------------------------------------
+* *"Can this bundle be used WHERE IT IS?"* - the absolute ceiling. This is the blocking gate, because
+  it is not hypothetical: at its current location the estate bundle breaks git today and Desktop
+  refuses it.
+* *"Can this bundle be SHIPPED?"* - the longest TAIL and the `259 - tail` root budget, which survive
+  relocation. A bundle sitting at a short root can pass the absolute check and still be unshippable,
+  so a tight root budget is called out on every run (`TIGHT ROOT BUDGET`) and `--min-root-budget N`
+  turns it into a gate.
 
 The portable number, and why it matters more than the absolute one
 ------------------------------------------------------------------
@@ -141,6 +180,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -155,6 +195,13 @@ DIR_CEILING = 247
 # Advisory only. Suggested on issue #235 by a customer whose bundle measured 258 of 260 on a stock
 # machine: the margin is consumed by where the bundle lands, which the generator cannot see.
 DEFAULT_WARN_AT = 240
+
+# Advisory only, and deliberately derived rather than invented: `C:\\Users\\<name>\\Documents\\` is
+# already ~28 characters before a customer creates a single folder, so a bundle that cannot tolerate
+# a 40-character install root is a shipping hazard even when every absolute path measures clean where
+# it was built. For contrast, the root this repo's own estate run occupies is 90 characters
+# (`...\\tableau-to-pbi-migration\\_runs\\estate-2.339.0-20260829`) - measured, not assumed.
+SHIPPING_ROOT_BUDGET_ADVISORY = 40
 
 REPORT_VERSION = 1
 
@@ -190,6 +237,35 @@ class Limits(NamedTuple):
 
 
 DEFAULT_LIMITS = Limits()
+
+
+def read_git_long_paths(cwd: Path | None = None) -> bool | None:
+    """Return the effective `git config core.longpaths`, or None when it cannot be determined.
+
+    Reported for context alongside the registry value, and for the same reason: issue #235 stayed
+    invisible because one opt-in was set and the other was not, so "it works here" was never
+    evidence. Measured 2026-08-29 on this machine, with `core.longpaths` unset (its default):
+    `git add -A` on a real 3-unit slice of the estate bundle staged **0 of 179** files and exited
+    128 (`fatal: adding files failed`); with `core.longpaths=true` the same tree staged 179 of 179.
+
+    Like the registry value, this NEVER feeds the verdict - git and Power BI Desktop disagree about
+    long paths, and Desktop's answer is the one a shipped bundle has to survive.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "core.longpaths"],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = proc.stdout.strip().lower()
+    if proc.returncode != 0 or not value:
+        return False  # unset is git's documented default: long paths NOT enabled
+    return value in {"true", "yes", "on", "1"}
 
 
 def read_long_paths_enabled() -> int | None:
@@ -297,6 +373,7 @@ def scan(root: Path, limits: Limits = DEFAULT_LIMITS) -> dict:
         "root_length": len(str(root)),
         "status": status,
         "host_long_paths_enabled": read_long_paths_enabled(),
+        "host_git_long_paths": read_git_long_paths(root),
         "host_platform": sys.platform,
         "file_ceiling": limits.file_ceiling,
         "dir_ceiling": limits.dir_ceiling,
@@ -313,6 +390,8 @@ def scan(root: Path, limits: Limits = DEFAULT_LIMITS) -> dict:
         "longest": None if longest is None else {k: longest[k] for k in ("path", "kind", "length", "tail")},
         "longest_tail": longest_tail if measured else None,
         "root_budget": root_budget,
+        "shipping_root_budget_advisory": SHIPPING_ROOT_BUDGET_ADVISORY,
+        "root_budget_is_tight": root_budget is not None and root_budget < SHIPPING_ROOT_BUDGET_ADVISORY,
         "worst_offenders": [{k: r[k] for k in ("path", "kind", "length", "ceiling")} for r in over[:WORST_N]],
         "near_ceiling_paths": [
             {k: r[k] for k in ("path", "kind", "length")} for r in sorted(near, key=lambda r: -r["length"])[:WORST_N]
@@ -331,12 +410,27 @@ def _registry_line(report: dict) -> str:
     return f"  host LongPathsEnabled : {value} ({note}) - {suffix}"
 
 
+def _git_line(report: dict) -> str:
+    """The second opt-in. Reported because ONE being set and the other not is how #235 hid."""
+    value = report["host_git_long_paths"]
+    if value is None:
+        return "  host git core.longpaths: could not be determined - unknown, do not read as enabled"
+    if value:
+        return "  host git core.longpaths: true - git tolerates these paths; Power BI Desktop still will not"
+    return (
+        "  host git core.longpaths: false (git default) - `git add` on an over-ceiling tree either"
+        " aborts (exit 128) or, when the OVERLONG path is a DIRECTORY, silently drops its contents"
+        " and exits 0"
+    )
+
+
 def render(report: dict) -> str:
     """Human-readable report for one target."""
     counted = report["counted"]
     lines = [
         f"{report['status'].upper()}: {report['root']}",
         _registry_line(report),
+        _git_line(report),
         f"  ceilings              : file <= {report['file_ceiling']} (Desktop refuses"
         f" {report['file_ceiling'] + 1}), directory <= {report['dir_ceiling']} (refuses"
         f" {report['dir_ceiling'] + 1}) - measured, see module docstring",
@@ -351,6 +445,12 @@ def render(report: dict) -> str:
             f"  longest tail          : {report['longest_tail']} chars"
             f"  ->  root budget {report['root_budget']} chars"
             " (longest install root this bundle tolerates)"
+        )
+    if report["root_budget_is_tight"]:
+        lines.append(
+            f"  TIGHT ROOT BUDGET     : {report['root_budget']} <"
+            f" {report['shipping_root_budget_advisory']} - this bundle is a shipping hazard wherever"
+            " it currently sits; advisory, use --min-root-budget to gate on it"
         )
     if counted["over_ceiling"]:
         lines.append(f"  OVER CEILING          : {counted['over_ceiling']} path(s)")
