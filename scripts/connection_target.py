@@ -26,6 +26,9 @@ FLAT_FILE_CLASSES = frozenset(
         "csv",
         "json",
         "jsonfile",
+        # Tableau's OGR/GDAL spatial-file connectors (e.g. packaged ESRI shapefiles inside a .twbx).
+        "ogr",
+        "ogrdirect",
         "parquet",
         "spatial",
         "statfile",

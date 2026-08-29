@@ -843,16 +843,11 @@ def test_hand_authored_work_in_the_bundle_refuses_the_landing_rerun(tmp_path: Pa
     assert ORDERS_TMDL in capsys.readouterr().out, "a refusal must name what would be destroyed"
 
 
-def test_a_hand_edited_report_file_is_work_the_receipt_alone_cannot_see(tmp_path: Path, monkeypatch) -> None:
-    """PBIR JSON is outside `ARTIFACT_SUFFIXES`, so the receipt does not record it at all.
-
-    That is why the guard reads the generated-artifact baseline too. The second assertion pins the
-    reason: if the receipt ever did cover these files, this test would be passing for a different
-    reason than it was written for.
-    """
+def test_a_hand_edited_report_file_is_work_the_receipt_catches(tmp_path: Path, monkeypatch) -> None:
+    """PBIR JSON is now receipt-backed engine output; changing it is downstream work."""
     engine, src, out = _first_run(tmp_path, monkeypatch)
     receipt = json.loads((out / run_estate.ENGINE_RECEIPT).read_text(encoding="utf-8"))
-    assert REPORT_JSON not in {record["path"] for record in receipt["artifacts"]}
+    assert REPORT_JSON in {record["path"] for record in receipt["artifacts"]}
 
     (out / REPORT_JSON).write_text('{"pages": [{"name": "p1"}]}', encoding="utf-8")
     calls = _relanding(monkeypatch)

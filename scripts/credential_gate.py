@@ -64,7 +64,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from migration_bundle import ENGINE_OUTPUT_DIRS, ENGINE_RECEIPT, sha256_file
+from migration_bundle import ENGINE_OUTPUT_DIRS, ENGINE_RECEIPT, is_engine_artifact, sha256_file
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("credential_gate")
@@ -129,16 +129,60 @@ def _scope_refusal(migration: Path) -> str | None:
     )
 
 
-def _audit(migration: Path, action: str, detail: str) -> None:
+def _duplicate_sources(sources: list[str]) -> list[str]:
+    """Source keys that appear more than once, preserving first duplicate order."""
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for source in sources:
+        if source in seen and source not in duplicates:
+            duplicates.append(source)
+        seen.add(source)
+    return duplicates
+
+
+def _sources_detail(sources: list[str]) -> str:
+    """Human-readable detail with a machine-readable JSON source array."""
+    return f"sources_json={json.dumps(sources, ensure_ascii=False)}"
+
+
+def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> int | None:
+    """Return a refusal code for invalid block inputs, or None when arming may proceed."""
+    duplicates = _duplicate_sources(sources)
+    if duplicates:
+        log.error("REFUSING to arm the gate: duplicate source key(s) are not unique identities: %s", duplicates)
+        _audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
+        return 2
+
+    refusal = _scope_refusal(migration)
+    if not refusal:
+        return None
+    if not force_scope:
+        log.error(
+            "REFUSING to arm the gate: %s.\n"
+            "A marker governs its ENTIRE subtree (the hook walks upward and stops at the first "
+            "one), so arming here would block every migration beneath it - including any that "
+            "already earned a clearance. This is usually a wrong working directory: pass the "
+            "migration or bundle directory explicitly. Use --force-scope only if you really do "
+            "mean to gate everything below this path.",
+            refusal,
+        )
+        return 2
+    log.warning("--force-scope: arming the gate on a target that failed the scope check (%s).", refusal)
+    _audit(migration, "block-forced-scope", refusal)
+    return None
+
+
+def _audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
     """Append a tamper-evident-ish record of every gate transition."""
-    line = json.dumps(
-        {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "action": action,
-            "detail": detail,
-            "user": os.environ.get("USERNAME") or os.environ.get("USER") or "?",
-        }
-    )
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "action": action,
+        "detail": detail,
+        "user": os.environ.get("USERNAME") or os.environ.get("USER") or "?",
+    }
+    if sources is not None:
+        entry["sources"] = sources
+    line = json.dumps(entry)
     try:
         with (migration / AUDIT).open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
@@ -148,6 +192,14 @@ def _audit(migration: Path, action: str, detail: str) -> None:
 
 def _parse_sources_detail(detail: str) -> list[str] | None:
     """Parse a ``sources=[...]`` audit detail, returning None when absent or malformed."""
+    json_marker = "sources_json="
+    if detail.startswith(json_marker):
+        decoder = json.JSONDecoder()
+        try:
+            parsed, _idx = decoder.raw_decode(detail[len(json_marker) :].lstrip())
+        except ValueError:
+            return None
+        return [str(source) for source in parsed] if isinstance(parsed, list) else None
     marker = "sources="
     if not detail.startswith(marker):
         return None
@@ -157,6 +209,14 @@ def _parse_sources_detail(detail: str) -> list[str] | None:
     except (ValueError, SyntaxError):
         return None
     return [str(source) for source in parsed] if isinstance(parsed, list) else None
+
+
+def _entry_sources(entry: dict) -> list[str] | None:
+    """Structured audit sources, falling back to legacy detail parsing."""
+    sources = entry.get("sources")
+    if isinstance(sources, list):
+        return [str(source) for source in sources]
+    return _parse_sources_detail(str(entry.get("detail") or ""))
 
 
 def _parse_legacy_probe_source(detail: str) -> list[str] | None:
@@ -182,14 +242,14 @@ def _earned_sources(migration: Path) -> tuple[dict[str, str | None], bool]:
             ts = str(entry.get("ts") or "")
             detail = str(entry.get("detail") or "")
             if action in BLOCK_ACTIONS:
-                sources = _parse_sources_detail(detail)
+                sources = _entry_sources(entry)
                 last_block_sources = sources or []
                 for source in last_block_sources:
                     states[source] = (None, ts)
             elif action == "authorize":
                 authorized = True
             elif action == "probe-cleared":
-                sources = _parse_sources_detail(detail) or _parse_legacy_probe_source(detail) or last_block_sources
+                sources = _entry_sources(entry) or _parse_legacy_probe_source(detail) or last_block_sources
                 for source in sources:
                     _earned, blocked_at = states.get(source, (None, ""))
                     if ts >= blocked_at:
@@ -318,8 +378,8 @@ def audited_paths(migration: Path) -> list[Path]:
     Scans the WHOLE migration rather than one directory. The gate's guarantee is "no model, and no
     extracted rows, for a source that was never reached" - so where the artifact landed is
     irrelevant to whether the harm occurred. A build that writes outside `fabric/` (the deterministic
-    tier writes to `pbip/`, `semantic_models/` and `data/`) is exactly the case a `fabric/`-only scan
-    misses.
+    tier writes to `pbip/`, `reports/`, `semantic_models/` and `data/`) is exactly the case a
+    `fabric/`-only scan misses.
     """
     if not migration.exists():
         return []
@@ -334,7 +394,7 @@ def audited_paths(migration: Path) -> list[Path]:
         if AUDIT_EXCLUDED_DIRS.intersection(relative.parts):
             continue
         suffix = path.suffix.lower()
-        if suffix in DEFINITION_SUFFIXES or suffix in MATERIALIZED_DATA_SUFFIXES:
+        if suffix in DEFINITION_SUFFIXES or suffix in MATERIALIZED_DATA_SUFFIXES or is_engine_artifact(relative):
             found.append(path)
     return found
 
@@ -436,9 +496,9 @@ def _split_pre_gate_engine_artifacts(migration: Path, artifacts: list[Path]) -> 
 def _last_block_sources(migration: Path) -> list[str] | None:
     """The source list recorded by the most recent `block`, or None if unreadable/absent.
 
-    `_audit` stores it as the repr of a Python list (`sources=['source[0]']`), so it is parsed with
-    `literal_eval` rather than `json.loads`. Any parse failure returns None, which callers must
-    treat as "cannot prove these are the same sources" and therefore re-arm - failing closed.
+    Current audit entries carry structured JSON `sources`; the `literal_eval` fallback exists only
+    for legacy `sources=[...]` detail text. Any parse failure returns None, which callers must treat
+    as "cannot prove these are the same sources" and therefore re-arm - failing closed.
     """
     found: list[str] | None = None
     try:
@@ -446,8 +506,12 @@ def _last_block_sources(migration: Path) -> list[str] | None:
             entry = json.loads(line)
             if entry.get("action") not in BLOCK_ACTIONS:
                 continue
+            sources = _entry_sources(entry)
+            if sources is not None:
+                found = sources
+                continue
             detail = entry.get("detail", "")
-            if not detail.startswith("sources="):
+            if not str(detail).startswith("sources="):
                 found = None
                 continue
             try:
@@ -504,21 +568,9 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
     same conflation was fixed in the classifier's console output first; the file kept the old claim,
     so the two disagreed and the file won.
     """
-    refusal = _scope_refusal(migration)
-    if refusal:
-        if not force_scope:
-            log.error(
-                "REFUSING to arm the gate: %s.\n"
-                "A marker governs its ENTIRE subtree (the hook walks upward and stops at the first "
-                "one), so arming here would block every migration beneath it - including any that "
-                "already earned a clearance. This is usually a wrong working directory: pass the "
-                "migration or bundle directory explicitly. Use --force-scope only if you really do "
-                "mean to gate everything below this path.",
-                refusal,
-            )
-            return 2
-        log.warning("--force-scope: arming the gate on a target that failed the scope check (%s).", refusal)
-        _audit(migration, "block-forced-scope", refusal)
+    refusal_code = _block_refusal(migration, sources, force_scope)
+    if refusal_code is not None:
+        return refusal_code
 
     if (migration / OVERRIDE).exists():
         if _override_is_authentic(migration):
@@ -586,7 +638,7 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
         # Same `sources=` detail as the enforced path. Without it `_last_block_sources` cannot read
         # this entry, so the redundant-re-arm check fails closed forever on non-Windows.
-        _audit(migration, "block-marker-only", f"sources={pending_sources}")
+        _audit(migration, "block-marker-only", _sources_detail(pending_sources), sources=pending_sources)
         return 0
 
     failed = 0
@@ -599,7 +651,7 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
             log.info("ENFORCED: write denied on %s", d)
 
     log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
-    _audit(migration, "block", f"sources={pending_sources}")
+    _audit(migration, "block", _sources_detail(pending_sources), sources=pending_sources)
     return 1 if failed else 0
 
 
@@ -611,6 +663,13 @@ def _marker_sources(migration: Path) -> list[str]:
         return []
     marker_sources = payload.get("sources") if isinstance(payload, dict) else None
     return [str(source) for source in marker_sources] if isinstance(marker_sources, list) else []
+
+
+def _unmatched_earned_sources(migration: Path, marker_sources: list[str], earned_sources: list[str]) -> list[str]:
+    """Earned sources that neither remain in the marker nor have prior source-level evidence."""
+    states, _authorized = _earned_sources(migration)
+    marker_set = set(marker_sources)
+    return [source for source in earned_sources if source not in marker_set and not states.get(source)]
 
 
 def clear_block(migration: Path, reason: str, earned: bool = False, sources: list[str] | None = None) -> int:
@@ -625,14 +684,28 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
     detail = reason
     earned_sources = sources if sources is not None else _last_block_sources(migration)
     if earned and earned_sources:
-        detail = f"sources={earned_sources}; reason={reason}"
-        remaining_sources = [source for source in _marker_sources(migration) if source not in set(earned_sources)]
+        duplicates = _duplicate_sources(earned_sources)
+        if duplicates:
+            log.error("credential gate NOT cleared (%s): duplicate earned source key(s): %s", reason, duplicates)
+            _audit(migration, "violation", f"duplicate source keys at clear: {duplicates}", sources=earned_sources)
+            return 1
+        marker_sources = _marker_sources(migration)
+        unknown_sources = _unmatched_earned_sources(migration, marker_sources, earned_sources)
+        if marker.exists() and unknown_sources:
+            log.error(
+                "credential gate NOT cleared (%s): earned source(s) not named by the marker: %s",
+                reason,
+                unknown_sources,
+            )
+            return 1
+        detail = f"{_sources_detail(earned_sources)}; reason={reason}"
+        remaining_sources = [source for source in marker_sources if source not in set(earned_sources)]
         if remaining_sources:
             payload = json.loads(marker.read_text(encoding="utf-8"))
             payload["sources"] = remaining_sources
             marker.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             log.info("credential gate PARTIALLY CLEARED (%s); still blocked: %s", reason, remaining_sources)
-            _audit(migration, "probe-cleared", detail)
+            _audit(migration, "probe-cleared", detail, sources=earned_sources)
             return 0
 
     if platform.system() == "Windows":
@@ -645,7 +718,7 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
     if marker.exists():
         marker.unlink()
     log.info("credential gate CLEARED (%s)", reason)
-    _audit(migration, "probe-cleared" if earned else "manual-clear", detail)
+    _audit(migration, "probe-cleared" if earned else "manual-clear", detail, sources=earned_sources if earned else None)
     return 0
 
 
@@ -899,7 +972,7 @@ def _gate_was_ever_applied(migration: Path) -> bool:
     return False
 
 
-def verify(migration: Path) -> int:
+def _verify_one(migration: Path) -> int:
     """Authoritative post-hoc check: did anything get built while the gate was up?
 
     This is the compensating control for everything enforcement cannot guarantee, and it is
@@ -977,6 +1050,11 @@ def verify(migration: Path) -> int:
     else:
         log.info("GATE VERIFY: OK - gate not applied.")
     return 0
+
+
+def verify(migration: Path) -> int:
+    """Verify one audit-bearing migration/bundle target."""
+    return _verify_one(migration)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -161,8 +161,8 @@ def test_verify_flags_materialized_source_data(migration: Path) -> None:
 def test_verify_scans_outside_fabric(migration: Path) -> None:
     """A build that lands anywhere in the migration counts, not only under `fabric/`.
 
-    The deterministic tier writes to `pbip/`, `semantic_models/` and `data/`. A `fabric/`-only scan
-    reported "no artifacts exist" beside a complete, unvalidated PBIP.
+    The deterministic tier writes to `pbip/`, `reports/`, `semantic_models/` and `data/`. A
+    `fabric/`-only scan reported "no artifacts exist" beside a complete, unvalidated PBIP.
     """
     run_gate("block", str(migration), "--sources", "warehouse")
     run_gate("clear", str(migration), "--reason", "simulate-evasion")
@@ -194,6 +194,43 @@ def test_verify_allows_provenance_backed_engine_artifacts_that_predate_the_gate(
 
     assert result.returncode == 0
     assert "PRE-GATE TIER OUTPUT" in (result.stdout + result.stderr)
+
+
+def test_verify_allows_receipted_reports_engine_artifacts(migration: Path) -> None:
+    """`reports/` is pristine engine output too; a matching receipt must exempt it (#172)."""
+    (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
+    (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    report = migration / "reports" / "Orders.Report"
+    visual = report / "definition" / "pages" / "Page1" / "visuals" / "Visual1" / "visual.json"
+    visual.parent.mkdir(parents=True)
+    pbir = report / "definition.pbir"
+    pbir.write_text('{"version":"4.0"}', encoding="utf-8")
+    visual.write_text('{"visualType":"barChart"}', encoding="utf-8")
+    _write_engine_receipt(migration, [pbir, visual])
+
+    run_gate("block", str(migration), "--sources", "warehouse")
+    result = run_gate("verify", str(migration))
+
+    assert result.returncode == 0
+    assert "PRE-GATE TIER OUTPUT" in (result.stdout + result.stderr)
+
+
+def test_verify_rejects_changed_reports_engine_artifacts(migration: Path) -> None:
+    """The reports exemption is receipt-backed, not a blanket allow-list."""
+    (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
+    (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    report = migration / "reports" / "Orders.Report"
+    visual = report / "definition" / "pages" / "Page1" / "visuals" / "Visual1" / "visual.json"
+    visual.parent.mkdir(parents=True)
+    visual.write_text('{"visualType":"barChart"}', encoding="utf-8")
+    _write_engine_receipt(migration, [visual])
+    visual.write_text('{"visualType":"lineChart"}', encoding="utf-8")
+
+    run_gate("block", str(migration), "--sources", "warehouse")
+    result = run_gate("verify", str(migration))
+
+    assert result.returncode == 1
+    assert "visual.json" in (result.stdout + result.stderr)
 
 
 def test_verify_still_flags_agent_artifacts_in_engine_roots_when_not_receipted(migration: Path) -> None:

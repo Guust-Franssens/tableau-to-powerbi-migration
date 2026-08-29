@@ -1165,8 +1165,16 @@ def test_the_terse_citation_is_bounded_in_BYTES_not_characters(tmp_path, glyph, 
     character count and byte count coincide.
 
     Mutation killed: clip the citation with a character-counting helper.
+
+    The glyph count is derived from the byte width rather than fixed, because this test writes a
+    REAL file and Linux caps a filename component at 255 BYTES: 90 emoji is 360 and raised
+    `OSError [Errno 36]` on CI while passing on Windows, where the cap counts UTF-16 units. The
+    original 90 was itself a character count applied to a byte limit - the exact confusion this
+    test exists to catch. 240 bytes still overruns `TERSE_DRIFT_LINE_MAX_BYTES` (72) by 3.3x and
+    is far past the ~24-character clip window, so the property is unchanged.
     """
-    name = (glyph * 90) + ".json"
+    glyphs = 240 // width
+    name = (glyph * glyphs) + ".json"
     root = bundle(tmp_path, real_workbook(), ORACLE_DRIFTED, oracle_name=name)
     proc = run_cli(str(root), "--max-bytes", str(rh.MIN_MAX_BYTES))
     assert proc.returncode == rh.EXIT_OK
@@ -1183,7 +1191,7 @@ def test_the_terse_citation_is_bounded_in_BYTES_not_characters(tmp_path, glyph, 
     # provenance. A bound honoured by deleting the signal is the failure this file is about.
     assert terse[0].endswith("]"), "the citation must SURVIVE the clip, not be dropped to satisfy it"
     assert ".json]" in terse[0], "and it must still identify the report"
-    assert glyph * 90 not in terse[0]
+    assert glyph * glyphs not in terse[0]
     # ...and the clip must not have produced mojibake by splitting a code point.
     assert terse[0] == terse[0].encode("utf-8").decode("utf-8")
     assert "\ufffd" not in terse[0]
