@@ -126,6 +126,11 @@ candidates.json
 # to an unignored path (`refuse_unignored_output`), not rely on someone choosing a lucky name.
 /_*
 
+# `connections_manifest.py` default output: customer infrastructure metadata (server/database names)
+# meant for the platform team, not for this public repo. The script refuses unignored in-repo output;
+# this explicit convention documents the safe default even though the root `/_*` backstop also covers it.
+/_connections_manifest*/
+
 # Power BI Desktop local cache/settings - machine-specific, regenerated automatically on open
 **/.pbi/cache.abf
 **/.pbi/localSettings.json
