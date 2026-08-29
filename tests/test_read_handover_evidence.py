@@ -48,8 +48,22 @@ REAL_SLICE = FIXTURES / "handover-2.339.0-evidence.json"
 ORACLE_DRIFTED = FIXTURES / "oracle-2.339.0-drifted.json"
 ORACLE_EXACT = FIXTURES / "oracle-2.339.0-pixel-exact.json"
 ORACLE_AXIS_BLIND = FIXTURES / "oracle-pre-2.332.0-axis-blind.json"
+ORACLE_EDGE_DRIFT = FIXTURES / "oracle-2.339.0-edge-size-drift.json"
 
 WB_NAME = "Meridian Revenue by Region"
+
+# A minimal axis record that IS assessable, used as the baseline the malformed cases mutate one
+# field of. Taken from the shape the engine's `_axis_rollup` actually returns.
+_AXIS_OK = {
+    "evaluated": 2,
+    "exact": 2,
+    "median_abs_px": 0.0,
+    "mean_abs_px": 0.0,
+    "worst_abs_px": 0.0,
+    "mean_signed_px": 0.0,
+    "positive": 0,
+    "negative": 0,
+}
 
 
 def real_workbook() -> dict:
@@ -101,6 +115,11 @@ def cites_oracle(stdout: str) -> bool:
 def run_cli(*args: str) -> subprocess.CompletedProcess:
     cmd = [sys.executable, str(SCRIPTS / "read_handover.py"), *args]
     return subprocess.run(cmd, capture_output=True, check=False, text=True, encoding="utf-8")
+
+
+def _blen(text: str) -> int:
+    """Byte length, the unit `--max-bytes` is actually enforced in."""
+    return len(text.encode("utf-8"))
 
 
 # =============================================================================================
@@ -424,7 +443,7 @@ def test_a_malformed_by_axis_is_invalid_not_measured(by_axis):
     oracle = {"kind": rh.ORACLE_KIND, "summary": {"placement": {"by_axis": by_axis}}}
     status, _ = rh.layout_drift_status({}, oracle)
     assert status == rh.LAYOUT_DRIFT_INVALID
-    assert "INVALID SHAPE" in rh._layout_drift_summary_line({}, oracle)
+    assert "NOT ASSESSABLE" in rh._layout_drift_summary_line({}, oracle)
 
 
 def test_the_oracle_is_found_by_kind_not_by_filename(tmp_path):
@@ -555,13 +574,81 @@ def test_both_citation_forms_name_the_report_and_stay_bounded():
     assert len(full) == 2 and "measured from:" in full[1]
     assert full[1].rstrip().endswith(".json")  # clipped from the LEFT, filename intact
     assert len(terse) == 1 and terse[0].endswith("]")
-    assert sum(len(x) for x in terse) < sum(len(x) for x in full)
+    assert sum(_blen(x) for x in terse) < sum(_blen(x) for x in full)
     # Bounded whatever the path: a fallback that can itself overrun the cap is not a fallback.
-    assert len(terse[0]) <= 100
+    # Measured in BYTES, because that is the unit `--max-bytes` is enforced in.
+    assert _blen(terse[0]) <= rh.TERSE_DRIFT_LINE_MAX_BYTES
+    assert _blen(full[1]) <= 88 + len("           measured from: ")
     assert "z" * 90 not in terse[0]
 
 
-def test_an_inlined_placement_block_would_be_preferred_over_the_oracle():
+def test_the_terse_line_is_bounded_even_when_the_VERDICT_alone_overflows():
+    """The bound must hold for ANY input, not just well-behaved data.
+
+    The citation-side clip cannot help here: an extra axis with a long name (a future engine could
+    add one) or an extreme pixel value pushes the VERDICT itself past the ceiling before any
+    provenance is appended. A bound enforced only on the citation is a bound that holds for the
+    inputs you thought of.
+
+    Mutation killed: remove the final `_clip_head` clamp from `_layout_drift_lines`.
+    """
+    long_axis = "diagonal_" + ("v" * 40)
+    axes = {
+        "x": _AXIS_OK,
+        "y": _AXIS_OK,
+        long_axis: {**_AXIS_OK, "exact": 0, "worst_abs_px": 12345678901234.5, "mean_signed_px": -98765432109876.5},
+    }
+    oracle = {"kind": rh.ORACLE_KIND, "summary": {"placement": {"verdict": "drifted", "by_axis": axes}}}
+    verdict = rh._layout_drift_summary_line({}, oracle, terse=True)
+    assert _blen(verdict) > rh.TERSE_DRIFT_LINE_MAX_BYTES, "fixture too tame to exercise the clamp"
+
+    for path in (None, Path("report.json")):
+        line = rh._layout_drift_lines({}, rh.OracleSource(oracle, path), terse=True)
+        assert len(line) == 1
+        assert _blen(line[0]) <= rh.TERSE_DRIFT_LINE_MAX_BYTES, path
+        assert "drift" in line[0], "the verdict's meaning lives at the FRONT and must survive"
+        assert "\ufffd" not in line[0]
+
+
+def test_the_terse_citation_is_dropped_only_when_there_is_no_room_for_one():
+    """Ordering of sacrifice, stated as a test: the VERDICT is the signal and the citation is its
+    provenance, so when the ceiling cannot hold both, the citation goes - never the verdict.
+
+    ⚠️ The fixture is TUNED to land in the guard's observable window (0 <= room < 4) and ASSERTS
+    that it did. The first version used a fixture with plenty of room, so the branch it names never
+    ran and the mutation escaped: a conditional assertion inside an untaken branch is a test that
+    cannot fail, which is the thing this whole review pass is about.
+
+    Mutation killed: append a citation regardless of whether there is room for a meaningful one.
+    Without the guard a 3-byte allowance yields `[eport.json]` - a citation that looks like a
+    filename and names a file which does not exist. A wrong citation is worse than none.
+    """
+    axis = "y" + "Q" * 30  # tuned so the terse verdict is 66 bytes -> room == 3
+    axes = {
+        "x": _AXIS_OK,
+        "y": _AXIS_OK,
+        axis: {**_AXIS_OK, "exact": 0, "worst_abs_px": 1.0, "mean_signed_px": -1.0},
+    }
+    oracle = {"kind": rh.ORACLE_KIND, "summary": {"placement": {"verdict": "drifted", "by_axis": axes}}}
+    verdict = rh._layout_drift_summary_line({}, oracle, terse=True)
+    room = rh.TERSE_DRIFT_LINE_MAX_BYTES - _blen(verdict) - len(" []")
+    assert 0 <= room < 4, f"fixture must land in the guard's window; room={room}"
+
+    line = rh._layout_drift_lines({}, rh.OracleSource(oracle, Path("report.json")), terse=True)[0]
+    assert line == verdict, "with no room for a real citation, the verdict must survive UNTOUCHED"
+    assert _blen(line) <= rh.TERSE_DRIFT_LINE_MAX_BYTES
+    assert "[" not in line, "a truncated citation naming a nonexistent file is worse than none"
+
+
+def test_a_citation_is_still_emitted_whenever_there_IS_room():
+    """The other side of the same guard, so "drop it" cannot quietly become the default.
+
+    Mutation killed: raise the room threshold until the citation is never emitted at all.
+    """
+    oracle = rh.OracleSource(json.loads(ORACLE_DRIFTED.read_text(encoding="utf-8")), Path("report.json"))
+    line = rh._layout_drift_lines({}, oracle, terse=True)[0]
+    assert line.endswith("]") and ".json]" in line
+
     """Forward compatibility, asserted rather than merely commented: if `migrate_estate.py` ever
     absorbs the rollup, the handover wins and the separate report stops being needed."""
     wb = real_workbook()
@@ -572,8 +659,230 @@ def test_an_inlined_placement_block_would_be_preferred_over_the_oracle():
 
 
 # =============================================================================================
-# Budget - the two new lines must not break the cap this module treats as a defect
+# Review pass: malformed or unassessable input must never collapse into the CLEAN bucket
+#
+# One root cause wearing five faces. It is the same failure #371 exists to prevent - "an unexamined
+# visual is indistinguishable from a verified one" - reappearing at the level of this module's own
+# parsing. Wherever the reader cannot assess something, that is its own state, never a pass.
 # =============================================================================================
+
+
+def test_an_unreadable_row_stays_in_the_denominator():
+    """HIGH 1. Filtering non-object rows out before counting made the denominator describe the rows
+    the parser could read, not the visuals the engine emitted.
+
+    Measured on the first version: ``[{"evidence": "emitted+linted"}, 42]`` reported
+    *"1 of 1 visual(s) emitted+linted - structural coverage complete"* and exited **0**. Two
+    visuals in, one out, and the one nobody could read vanished into a clean bill of health.
+
+    Mutation killed: drop non-dict rows before counting, or bucket them as ``emitted+linted``.
+    """
+    wb = {"viz_fidelity": [{"evidence": "emitted+linted"}, 42]}
+    status, counts = rh.fidelity_evidence_status(wb)
+    assert status == rh.FIDELITY_EVIDENCE_PRESENT
+    assert sum(counts.values()) == 2, "the denominator must be every ROW, not every readable row"
+    assert counts[rh.EVIDENCE_UNREADABLE] == 1
+    code, verdict = rh.evidence_gate(wb)
+    assert code == rh.EXIT_NOT_VERIFIED
+    assert "1 of 2" in verdict
+    assert "1 of 1" not in verdict, "a 2-row input can never report a 1-row denominator"
+
+
+@pytest.mark.parametrize("junk", [42, "rebuilt", None, [], ["nested"]])
+def test_no_shape_of_unreadable_row_can_produce_a_pass(junk):
+    """The same hole probed across every JSON type a row could arrive as.
+
+    Mutation killed: special-case one type (e.g. skip ``None``) and let it fall out of the count.
+    """
+    wb = {"viz_fidelity": [{"evidence": "emitted+linted"}, junk]}
+    _, counts = rh.fidelity_evidence_status(wb)
+    assert sum(counts.values()) == 2
+    assert rh.evidence_gate(wb)[0] == rh.EXIT_NOT_VERIFIED
+
+
+def test_an_all_unreadable_workbook_is_not_a_pass():
+    wb = {"viz_fidelity": [1, 2, 3]}
+    status, counts = rh.fidelity_evidence_status(wb)
+    assert status == rh.FIDELITY_EVIDENCE_PRESENT
+    assert counts == {rh.EVIDENCE_UNREADABLE: 3}
+    assert rh.evidence_gate(wb)[0] == rh.EXIT_NOT_VERIFIED
+
+
+def test_a_mixed_estate_never_claims_coverage_it_did_not_assess(tmp_path):
+    """HIGH 1, estate half. A workbook with no ``viz_fidelity`` (or an unreadable one) contributes
+    nothing to the totals, so it was skipped silently - while still appearing in the ordinary
+    workbook list below. The estate then read "1/1 examined": complete coverage, next to two
+    workbooks nobody assessed at all.
+
+    Mutation killed: `continue` past NONE/INVALID workbooks without naming them.
+    """
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    payloads = {
+        "Clean": {"viz_fidelity": [{"evidence": "emitted+linted", "worksheet": "w"}]},
+        "Unreadable": {"viz_fidelity": {}},
+        "NoRows": {},
+    }
+    for name, extra in payloads.items():
+        wb = {"name": name, **extra}
+        (root / "handover" / f"{name}.json").write_text(json.dumps({"estate": {}, "workbook": wb}), encoding="utf-8")
+    proc = run_cli(str(root), "--list")
+    assert proc.returncode == rh.EXIT_OK
+    assert "NOT ASSESSABLE" in proc.stdout
+    assert "2 workbook(s) NOT ASSESSABLE" in proc.stdout
+    for name in ("Unreadable", "NoRows"):
+        assert f"?? {name}" in proc.stdout, f"{name} must be NAMED, not merely counted"
+    assert "NOT in the total above" in proc.stdout, "the total must disclaim what it excludes"
+
+
+def test_the_engine_verdict_overrules_a_by_axis_that_looks_exact():
+    """HIGH 2. ``by_axis`` measures ``left``/``top`` ONLY; the rollup around it also weighs the far
+    edges and SIZE. A visual whose origin is perfect but whose size is wrong is therefore invisible
+    to the axis records - and that is the exact customer shape in #372 (visuals compressed to
+    ~34-48% of intended height, origins in the right place).
+
+    The fixture is the ENGINE's own ``_placement_rollup`` output: both axes report ``2/2 exact`` at
+    ``0.0px``, while the enclosing verdict is ``drifted`` with ``worst_max_edge_px: 240.0``. Reading
+    only ``by_axis`` reported ``pixel_exact`` with ``measured: true``.
+
+    Mutation killed: decide exactness from the axis records alone.
+    """
+    oracle = json.loads(ORACLE_EDGE_DRIFT.read_text(encoding="utf-8"))
+    placement = oracle["summary"]["placement"]
+    # Pin the trap in the fixture itself, so a regenerated fixture that lost it fails loudly.
+    assert placement["verdict"] == "drifted"
+    assert all(a["exact"] == a["evaluated"] for a in placement["by_axis"].values())
+    assert all(a["worst_abs_px"] == 0.0 for a in placement["by_axis"].values())
+
+    status, _ = rh.layout_drift_status({}, oracle)
+    assert status == rh.LAYOUT_DRIFT_EDGE_ONLY
+    assert status != rh.LAYOUT_DRIFT_EXACT
+    line = rh._layout_drift_summary_line({}, oracle)
+    assert "EDGE or SIZE drift" in line
+    assert "240.0px" in line
+    assert "!!" in line, "a size defect the axes cannot see must be loud, not quiet"
+
+
+def test_the_edge_only_state_is_distinct_in_json():
+    """A machine consumer must be able to tell the three measured states apart without prose."""
+    edge = rh._layout_drift_json({}, rh.OracleSource(json.loads(ORACLE_EDGE_DRIFT.read_text(encoding="utf-8"))))
+    exact = rh._layout_drift_json({}, rh.OracleSource(json.loads(ORACLE_EXACT.read_text(encoding="utf-8"))))
+    assert edge["status"] != exact["status"]
+    assert edge["measured"] is True and exact["measured"] is True
+    assert edge["origins_pixel_exact"] is False, "origins are exact but the VISUAL is not"
+    assert exact["origins_pixel_exact"] is True
+    assert edge["edge_or_size_drift"] is True and exact["edge_or_size_drift"] is False
+    assert edge["enclosing_verdict"] == "drifted"
+
+
+@pytest.mark.parametrize(
+    "by_axis, why",
+    [
+        ({"x": {}, "y": {}}, "empty records: _num(missing) == _num(missing) is None == None -> True"),
+        ({"x": _AXIS_OK, "y": "bad"}, "one axis unreadable; reading only the other says 'fine'"),
+        ({"x": _AXIS_OK}, "a single axis is a malformed rollup - the engine emits both or neither"),
+        ({"y": _AXIS_OK}, "same, mirrored"),
+        ({"x": _AXIS_OK, "y": {**_AXIS_OK, "evaluated": float("nan")}}, "non-finite count"),
+        ({"x": _AXIS_OK, "y": {**_AXIS_OK, "evaluated": float("inf")}}, "infinite count"),
+        ({"x": _AXIS_OK, "y": {**_AXIS_OK, "exact": 5}}, "exact exceeds evaluated"),
+        ({"x": _AXIS_OK, "y": {**_AXIS_OK, "evaluated": -1, "exact": -1}}, "negative counts"),
+        ({"x": _AXIS_OK, "y": {**_AXIS_OK, "worst_abs_px": -3.0}}, "negative magnitude"),
+        ({"x": _AXIS_OK, "y": {**_AXIS_OK, "exact": True, "evaluated": True}}, "bools posing as counts"),
+        ({"x": _AXIS_OK, "y": {**_AXIS_OK, "mean_signed_px": "0"}}, "a string posing as a number"),
+    ],
+)
+def test_an_unassessable_axis_record_is_never_exact(by_axis, why):
+    """HIGH 2, second half. ``None == None`` is ``True``, so a MISSING count satisfied
+    ``exact == evaluated`` and reported ``pixel_exact`` with ``measured: true``.
+
+    Mutation killed: compare counts without validating them first; or accept one axis.
+    """
+    oracle = {"kind": rh.ORACLE_KIND, "summary": {"placement": {"verdict": "pixel-exact", "by_axis": by_axis}}}
+    status, _ = rh.layout_drift_status({}, oracle)
+    assert status == rh.LAYOUT_DRIFT_INVALID, why
+    assert status != rh.LAYOUT_DRIFT_EXACT
+    assert rh._layout_drift_json({}, rh.OracleSource(oracle))["measured"] is False
+    assert "NOT ASSESSABLE" in rh._layout_drift_summary_line({}, oracle)
+
+
+def test_valid_axes_with_no_enclosing_verdict_are_not_called_exact():
+    """Origins exact, but nothing corroborates the edges or the size: that is unassessable, not a
+    pass. A rollup without a verdict is not one the engine wrote.
+
+    Mutation killed: default a missing enclosing verdict to pixel-exact.
+    """
+    oracle = {"kind": rh.ORACLE_KIND, "summary": {"placement": {"by_axis": {"x": _AXIS_OK, "y": _AXIS_OK}}}}
+    assert rh.layout_drift_status({}, oracle)[0] == rh.LAYOUT_DRIFT_INVALID
+
+
+def test_a_lone_oracle_is_not_attributed_across_a_multi_workbook_bundle(tmp_path):
+    """HIGH 3. The singleton fallback accepted an arbitrarily-named report unconditionally, so in a
+    bundle where the oracle ran for A only, B was handed A's measurements - and a pixel-exact A made
+    an entirely unmeasured B read as verified.
+
+    Mutation killed: accept a lone unmatched candidate regardless of how many workbooks exist.
+    """
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    for name in ("Workbook A", "Workbook B"):
+        (root / "handover" / f"{name}.json").write_text(
+            json.dumps({"estate": {}, "workbook": {"name": name, "viz_fidelity": []}}), encoding="utf-8"
+        )
+    (root / "measured-run.json").write_text(ORACLE_EXACT.read_text(encoding="utf-8"), encoding="utf-8")
+
+    proc = run_cli(str(root), "--workbook", "Workbook B")
+    assert proc.returncode == rh.EXIT_OK
+    assert "NOT MEASURED" in proc.stdout
+    assert "pixel-exact" not in proc.stdout, "another workbook's measurement must not land here"
+    assert not cites_oracle(proc.stdout)
+
+
+def test_a_single_workbook_target_still_accepts_an_arbitrarily_named_report(tmp_path):
+    """The narrowing must not become a refusal to work: with one workbook there is nothing to
+    confuse it with, which is the case the singleton fallback legitimately serves.
+
+    Mutation killed: refuse the singleton unconditionally.
+    """
+    root = bundle(tmp_path, real_workbook(), ORACLE_DRIFTED, oracle_name="measured-run.json")
+    proc = run_cli(str(root))
+    assert "worst Y" in proc.stdout
+    assert cites_oracle(proc.stdout)
+
+
+def test_a_name_matched_report_still_wins_in_a_multi_workbook_bundle(tmp_path):
+    """...and the workbook that WAS measured must still get its numbers."""
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    for name in ("Workbook A", "Workbook B"):
+        (root / "handover" / f"{name}.json").write_text(
+            json.dumps({"estate": {}, "workbook": {"name": name, "viz_fidelity": []}}), encoding="utf-8"
+        )
+    (root / "Workbook A.json").write_text(ORACLE_DRIFTED.read_text(encoding="utf-8"), encoding="utf-8")
+    assert "worst Y" in run_cli(str(root), "--workbook", "Workbook A").stdout
+    assert "NOT MEASURED" in run_cli(str(root), "--workbook", "Workbook B").stdout
+
+
+def test_the_estate_evidence_section_is_budgeted(tmp_path):
+    """MEDIUM 4. One unconditional line per workbook is unbounded in the estate's width. At
+    ``MIN_MAX_BYTES`` a 30-workbook estate fired ``HARD CAP``, cut 18 of the 30 signals with no
+    omitted-count line, and exited 0 - a dropped signal under budget pressure is a silent
+    false-clean, which is the failure this section exists to prevent.
+
+    Mutation killed: remove the budget/reserve and emit every workbook line unconditionally.
+    """
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    for i in range(30):
+        wb = {"name": f"Workbook-{i:02d}", "viz_fidelity": [{"evidence": "emitted", "worksheet": "w"}]}
+        (root / "handover" / f"{wb['name']}.json").write_text(
+            json.dumps({"estate": {}, "workbook": wb}), encoding="utf-8"
+        )
+    proc = run_cli(str(root), "--list", "--max-bytes", str(rh.MIN_MAX_BYTES))
+    assert proc.returncode == rh.EXIT_OK
+    assert "HARD CAP" not in proc.stdout
+    assert len(proc.stdout.encode("utf-8")) <= rh.MIN_MAX_BYTES
+    assert "Visual evidence: 0/30" in proc.stdout, "the estate total must survive any cap"
+    assert "not named here" in proc.stdout, "everything cut must be COUNTED"
 
 
 def test_the_new_lines_do_not_fire_the_hard_cap_at_the_minimum(tmp_path):
@@ -611,6 +920,10 @@ def test_the_terse_form_compresses_but_never_drops_either_signal(tmp_path):
 def test_the_terse_form_stays_bounded_however_long_the_oracle_path_is(tmp_path):
     """Mutation killed: interpolate the raw filename into the terse line. A long report name would
     then push the compressed fallback back over the cap - a fallback that can overrun is not one.
+
+    ⚠️ ASCII ONLY here, on purpose, and it is NOT sufficient by itself: where one character is one
+    byte, a character-counting clip looks byte-bounded. The multibyte case below is the one that
+    can actually fail, and it did.
     """
     root = bundle(tmp_path, real_workbook(), ORACLE_DRIFTED, oracle_name=("z" * 90) + ".json")
     proc = run_cli(str(root), "--max-bytes", str(rh.MIN_MAX_BYTES))
@@ -618,3 +931,41 @@ def test_the_terse_form_stays_bounded_however_long_the_oracle_path_is(tmp_path):
     assert "HARD CAP" not in proc.stdout
     assert len(proc.stdout.encode("utf-8")) <= rh.MIN_MAX_BYTES
     assert "z" * 90 not in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "glyph, width",
+    [("\u732b", 3), ("\U0001f4c8", 4)],  # CJK ideograph (3 bytes), emoji (4 bytes)
+)
+def test_the_terse_citation_is_bounded_in_BYTES_not_characters(tmp_path, glyph, width):
+    """`--max-bytes` counts BYTES; the first version of the terse citation clipped CHARACTERS.
+
+    Measured on the shipped code before this fix: a 90-glyph CJK filename produced a 69-character
+    terse line that was 101 BYTES - a 46% overrun of a bound the code believed it was enforcing -
+    and pushed the whole render past the cap. The ASCII test above could not see it because there
+    character count and byte count coincide.
+
+    Mutation killed: clip the citation with a character-counting helper.
+    """
+    name = (glyph * 90) + ".json"
+    root = bundle(tmp_path, real_workbook(), ORACLE_DRIFTED, oracle_name=name)
+    proc = run_cli(str(root), "--max-bytes", str(rh.MIN_MAX_BYTES))
+    assert proc.returncode == rh.EXIT_OK
+    assert "HARD CAP" not in proc.stdout
+    assert len(proc.stdout.encode("utf-8")) <= rh.MIN_MAX_BYTES
+    # The unit the bound is expressed in, asserted directly rather than via the render.
+    oracle = rh.OracleSource(json.loads(ORACLE_DRIFTED.read_text(encoding="utf-8")), Path(name))
+    terse = rh._layout_drift_lines({}, oracle, terse=True)
+    assert len(terse) == 1
+    assert _blen(terse[0]) <= rh.TERSE_DRIFT_LINE_MAX_BYTES
+    # BOTH halves are required, and asserting only the first is what let a mutation escape: a
+    # character-counting clip produces an over-long candidate, the byte guard then discards the
+    # whole citation, and the line is comfortably "bounded" - by having silently dropped the
+    # provenance. A bound honoured by deleting the signal is the failure this file is about.
+    assert terse[0].endswith("]"), "the citation must SURVIVE the clip, not be dropped to satisfy it"
+    assert ".json]" in terse[0], "and it must still identify the report"
+    assert glyph * 90 not in terse[0]
+    # ...and the clip must not have produced mojibake by splitting a code point.
+    assert terse[0] == terse[0].encode("utf-8").decode("utf-8")
+    assert "\ufffd" not in terse[0]
+    assert width in (3, 4)  # pins that this case really is multibyte

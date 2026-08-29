@@ -1,0 +1,57 @@
+{
+  "kind": "tableau-fabric-structural-fidelity",
+  "version": 2,
+  "advisory": true,
+  "summary": {
+    "aggregate_score": 0.88,
+    "aggregate_band": "faithful",
+    "mean_visual_score": 0.88,
+    "worst_visual_score": 0.8,
+    "coverage": 1.0,
+    "source_worksheets": 2,
+    "matched_visuals": 2,
+    "unmatched_worksheets": [],
+    "extra_visuals": 0,
+    "slicers": 0,
+    "remodel_rename_suspected": 0,
+    "fields_alias_resolved": 0,
+    "placement": {
+      "evaluated": 2,
+      "pixel_exact": 0,
+      "within_tolerance": 0,
+      "drifted": 2,
+      "worst_max_edge_px": 240.0,
+      "mean_max_edge_px": 170.0,
+      "worst_worksheet": "Revenue Trend",
+      "verdict": "drifted",
+      "by_axis": {
+        "x": {
+          "evaluated": 2,
+          "exact": 2,
+          "median_abs_px": 0.0,
+          "mean_abs_px": 0.0,
+          "worst_abs_px": 0.0,
+          "mean_signed_px": 0.0,
+          "positive": 0,
+          "negative": 0
+        },
+        "y": {
+          "evaluated": 2,
+          "exact": 2,
+          "median_abs_px": 0.0,
+          "mean_abs_px": 0.0,
+          "worst_abs_px": 0.0,
+          "mean_signed_px": 0.0,
+          "positive": 0,
+          "negative": 0
+        }
+      }
+    },
+    "dashboard_objects": 0
+  },
+  "visuals": [],
+  "slicers": [],
+  "extra_visuals_detail": [],
+  "dashboard_objects_detail": [],
+  "notes": []
+}

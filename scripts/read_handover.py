@@ -122,6 +122,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -251,13 +252,17 @@ EVIDENCE_LINT_FAILED = "lint_failed"
 # bundle). It is deliberately NOT folded into `emitted` - "the emitter ran and nothing looked" and
 # "we cannot tell what happened" are different claims, and only one of them is the engine's.
 EVIDENCE_UNKNOWN = "unknown"
+# Also not an engine value: a `viz_fidelity[]` entry that is not an object at all. It stays in the
+# DENOMINATOR - dropping it made a 2-row list report "1 of 1 complete" and exit 0.
+EVIDENCE_UNREADABLE = "unreadable_row"
 
 # Loudest first: anything that is not `emitted+linted` outranks it, because the whole point is that
 # an unexamined visual must never sort or read like a verified one.
-EVIDENCE_ORDER = [EVIDENCE_LINT_FAILED, EVIDENCE_EMITTED, EVIDENCE_UNKNOWN, EVIDENCE_LINTED]
+EVIDENCE_ORDER = [EVIDENCE_LINT_FAILED, EVIDENCE_UNREADABLE, EVIDENCE_EMITTED, EVIDENCE_UNKNOWN, EVIDENCE_LINTED]
 
 EVIDENCE_LABEL = {
     EVIDENCE_LINT_FAILED: "LINT FAILED - a PBIR lint finding names this visual",
+    EVIDENCE_UNREADABLE: "UNREADABLE - the row is not an object; it cannot be assessed at all",
     EVIDENCE_EMITTED: "NEVER EXAMINED - emitter ran clean; nothing inspected the shipped bytes",
     EVIDENCE_UNKNOWN: "NOT RECORDED - no evidence key (bundle predates engine 2.335.0)",
     EVIDENCE_LINTED: "linted - shipped bytes were linted and no finding names it",
@@ -283,8 +288,20 @@ ORACLE_SNIFF_BYTES = 4096
 LAYOUT_DRIFT_NOT_MEASURED = "not_measured"
 LAYOUT_DRIFT_AXIS_BLIND = "axis_blind"
 LAYOUT_DRIFT_EXACT = "pixel_exact"
+LAYOUT_DRIFT_EDGE_ONLY = "edge_or_size_drift"
 LAYOUT_DRIFT_PRESENT = "present"
 LAYOUT_DRIFT_INVALID = "invalid"
+
+# The states in which a per-axis number was genuinely produced. `EDGE_ONLY` belongs here: the axes
+# WERE measured; it is the far edges the axis rollup cannot see.
+LAYOUT_DRIFT_MEASURED = (LAYOUT_DRIFT_EXACT, LAYOUT_DRIFT_EDGE_ONLY, LAYOUT_DRIFT_PRESENT)
+
+# Byte ceiling for the compressed drift line. Bytes, not characters: `--max-bytes` is a byte cap,
+# and a 24-CHARACTER clip of a CJK filename measured 101 bytes against a bound believed to be ~70.
+# The value is the previous EFFECTIVE width, now enforced in the right unit rather than assumed -
+# raising it is not free, because `render_default`'s terse pass is what keeps the floor cap
+# honourable and this line is part of its fixed tail.
+TERSE_DRIFT_LINE_MAX_BYTES = 72
 
 # The engine's own vocabulary for the signed direction counts, kept verbatim so a reader can move
 # between our line and the oracle's markdown without re-learning which sign means which way.
@@ -410,7 +427,9 @@ def _oracle_candidates(directory: Path) -> list[tuple[Path, dict]]:
     return out
 
 
-def find_oracle_report(target: Path, source: Path, wb_name: str, explicit: Path | None = None) -> OracleSource:
+def find_oracle_report(
+    target: Path, source: Path, wb_name: str, explicit: Path | None = None, workbook_count: int = 1
+) -> OracleSource:
     """Locate the fidelity-oracle report carrying ``summary.placement.by_axis`` for one workbook.
 
     Returns an :class:`OracleSource`, empty when there is none - which is the answer for every
@@ -418,9 +437,15 @@ def find_oracle_report(target: Path, source: Path, wb_name: str, explicit: Path 
     An explicit ``--oracle`` wins; otherwise the bundle root, a ``fidelity/`` subfolder and the
     directory the slice itself came from are scanned, in that order.
 
-    When several reports are found, one whose filename names the workbook wins; a single unnamed
-    candidate is accepted; an ambiguous set is REFUSED (empty) rather than guessed, because
-    attributing another workbook's drift numbers to this one is worse than reporting nothing.
+    ⚠️ ``workbook_count`` is load-bearing, not decoration. A report whose filename names the
+    workbook always wins. An arbitrarily-named SINGLE candidate is accepted **only when the target
+    holds one workbook**: in a multi-workbook bundle where the oracle was run for A alone, the old
+    unconditional singleton fallback handed A's numbers to B - and a pixel-exact A made an entirely
+    unmeasured B read as verified. Ambiguity is refused rather than guessed, because attributing
+    another workbook's measurements to this one is worse than reporting nothing.
+
+    The real fix belongs upstream: the oracle report should carry the workbook identity it measured,
+    so this is an identity check rather than a filename inference. Filed as the successor to #182.
     """
     directories: list[Path] = []
     if explicit is not None:
@@ -452,7 +477,7 @@ def find_oracle_report(target: Path, source: Path, wb_name: str, explicit: Path 
         named = [(p, d) for p, d in found if wb_name.lower() in p.stem.lower()]
     if len(named) == 1:
         return OracleSource(named[0][1], named[0][0])
-    if not named and len(found) == 1:
+    if not named and len(found) == 1 and workbook_count == 1:
         return OracleSource(found[0][1], found[0][0])
     return OracleSource()
 
@@ -1231,17 +1256,26 @@ def fidelity_evidence_status(wb: dict) -> tuple[str, dict[str, int]]:
     An unrecognised value (a future engine adds one) is counted under its own name and is therefore
     NOT verified - only the literal `emitted+linted` is. Failing that way round is the point: a new
     value must not inherit a pass from a consumer that has never heard of it.
+
+    ⚠️ EVERY ROW COUNTS, including one that is not an object. Filtering unreadable rows out before
+    counting made the denominator describe the rows this function could parse rather than the
+    visuals the engine emitted: ``[{"evidence": "emitted+linted"}, 42]`` reported *"1 of 1 visual(s)
+    emitted+linted - structural coverage complete"* and exited 0, with two visuals in and one out.
+    That is the same collapse this whole module exists to prevent, one level down - a row nothing
+    could assess is not a row that passed - so an unreadable row gets its own bucket instead.
     """
     if "viz_fidelity" not in wb:
         return FIDELITY_EVIDENCE_NONE, {}
     raw_rows = wb.get("viz_fidelity")
     if not isinstance(raw_rows, list):
         return FIDELITY_EVIDENCE_INVALID, {}
-    rows = [r for r in raw_rows if isinstance(r, dict)]
-    if not rows:
+    if not raw_rows:
         return FIDELITY_EVIDENCE_NONE, {}
     counts: dict[str, int] = {}
-    for row in rows:
+    for row in raw_rows:
+        if not isinstance(row, dict):
+            counts[EVIDENCE_UNREADABLE] = counts.get(EVIDENCE_UNREADABLE, 0) + 1
+            continue
         raw = row.get("evidence")
         value = raw.strip() if isinstance(raw, str) and raw.strip() else EVIDENCE_UNKNOWN
         counts[value] = counts.get(value, 0) + 1
@@ -1357,44 +1391,118 @@ def placement_block_of(wb: dict, oracle: dict | None) -> dict | None:
     return None
 
 
+def _num(value: Any) -> float | None:
+    """Numeric coercion that refuses bools and non-finite values.
+
+    Refusing bools stops a stray ``true`` posing as a pixel count; refusing ``nan``/``inf`` stops a
+    corrupt number surviving a comparison it should fail. ``nan != nan`` would have made an axis
+    look drifted; ``None == None`` made a MISSING one look exact, which is worse.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+# The engine derives both axes from the same `delta_px` dicts, so `_placement_rollup` emits them
+# together or not at all - its own test asserts exactly that. One axis alone is therefore a
+# malformed rollup, and reading it as "the other is fine" is the failure `by_axis` was built to fix.
+EXPECTED_AXES = ("x", "y")
+
+# Every axis record must carry these, finite and non-negative, before any comparison is made.
+AXIS_MAGNITUDE_KEYS = ("median_abs_px", "mean_abs_px", "worst_abs_px")
+
+
+def _valid_axis(stats: Any) -> bool:
+    """Whether an axis record can be compared at all. Anything unassessable is NOT exact.
+
+    Guards the trap directly: ``_num(missing) == _num(missing)`` is ``None == None`` -> True, so an
+    EMPTY axis record used to satisfy "exact == evaluated" and report ``pixel_exact``. Measured:
+    ``{"x": {}, "y": {}}`` returned ``pixel_exact`` with ``measured: true``.
+    """
+    if not isinstance(stats, dict):
+        return False
+    evaluated, exact = _num(stats.get("evaluated")), _num(stats.get("exact"))
+    if evaluated is None or exact is None or evaluated < 0 or not 0 <= exact <= evaluated:
+        return False
+    if _num(stats.get("mean_signed_px")) is None:
+        return False
+    return all((_num(stats.get(k)) or 0.0) >= 0 and _num(stats.get(k)) is not None for k in AXIS_MAGNITUDE_KEYS)
+
+
+def _placement_pixel_exact(placement: dict) -> bool | None:
+    """Whether the ENCLOSING rollup calls itself pixel-exact. ``None`` when it does not say.
+
+    ``by_axis`` measures ``left``/``top`` only, while the rollup around it also weighs the right and
+    bottom edges and size drift. Measured against engine 2.339.0: a visual whose origin is perfect
+    but whose far edges are 100 px out yields ``verdict: "drifted"``, ``worst_max_edge_px: 100.0`` -
+    and reading only ``by_axis`` reported ``pixel_exact`` with ``measured: true``. The engine's own
+    verdict is authoritative here; ours is a per-axis refinement of it, never a replacement.
+    """
+    verdict = placement.get("verdict")
+    if isinstance(verdict, str):
+        return verdict == "pixel-exact"
+    evaluated, exact = _num(placement.get("evaluated")), _num(placement.get("pixel_exact"))
+    if evaluated is None or exact is None:
+        return None
+    return exact == evaluated
+
+
+def _by_axis_status(placement: dict) -> str | None:
+    """Whether ``by_axis`` is usable at all. Returns a terminal status, or ``None`` to continue.
+
+    Split out of `layout_drift_status` so the shape rules read as one list, and so the caller stays
+    under pylint's return-statement ceiling.
+    """
+    by_axis = placement.get("by_axis")
+    if by_axis is None or (isinstance(by_axis, dict) and not by_axis):
+        return LAYOUT_DRIFT_AXIS_BLIND
+    if not isinstance(by_axis, dict):
+        return LAYOUT_DRIFT_INVALID
+    if any(axis not in by_axis for axis in EXPECTED_AXES):
+        return LAYOUT_DRIFT_INVALID
+    if not all(_valid_axis(stats) for stats in by_axis.values()):
+        return LAYOUT_DRIFT_INVALID
+    return None
+
+
 def layout_drift_status(wb: dict, oracle: dict | None = None) -> tuple[str, dict]:
     """Per-axis layout drift, distinguishing "measured, no drift" from "never measured".
 
-    Five states, because collapsing any two of them recreates the axis-blind failure this block was
+    Six states, because collapsing any two of them recreates the axis-blind failure this block was
     built to fix:
 
     * ``LAYOUT_DRIFT_NOT_MEASURED`` - no placement rollup anywhere. Absence of the block is NOT
       absence of drift, and today this is the answer for every deterministic-pipeline bundle.
-    * ``LAYOUT_DRIFT_AXIS_BLIND``   - a placement rollup with no usable ``by_axis`` (a pre-2.332.0
-      oracle report, or one with no zone->visual deltas). Per-axis drift is UNKNOWN.
-    * ``LAYOUT_DRIFT_INVALID``      - ``by_axis`` present but not an object of axis records.
-    * ``LAYOUT_DRIFT_EXACT``        - measured, every evaluated pair exact on every axis.
-    * ``LAYOUT_DRIFT_PRESENT``      - measured, with drift. ``payload["axes"]`` carries both axes and
-      ``payload["worst"]`` the ``(name, stats)`` pair to lead with.
+    * ``LAYOUT_DRIFT_AXIS_BLIND``   - a placement rollup with no ``by_axis`` (a pre-2.332.0 oracle
+      report, or one with no zone->visual deltas). Per-axis drift is UNKNOWN.
+    * ``LAYOUT_DRIFT_INVALID``      - ``by_axis`` is not an object of two comparable axis records:
+      a missing axis, a non-object record, a non-finite or out-of-range count, or an enclosing
+      rollup that never states its own verdict. Unassessable, therefore not a pass.
+    * ``LAYOUT_DRIFT_EXACT``        - origins exact on every axis AND the enclosing rollup agrees it
+      is pixel-exact.
+    * ``LAYOUT_DRIFT_EDGE_ONLY``    - origins exact on every axis but the enclosing rollup is not
+      pixel-exact: the far edges or the SIZE drifted. ``by_axis`` structurally cannot see this, so
+      it is reported rather than absorbed into either neighbour.
+    * ``LAYOUT_DRIFT_PRESENT``      - measured, with origin drift. ``payload["axes"]`` carries both
+      axes and ``payload["worst"]`` the ``(name, stats)`` pair to lead with.
     """
     placement = placement_block_of(wb, oracle)
     if placement is None:
         return LAYOUT_DRIFT_NOT_MEASURED, {}
-    by_axis = placement.get("by_axis")
-    if by_axis is None:
-        return LAYOUT_DRIFT_AXIS_BLIND, {"placement": placement}
-    if not isinstance(by_axis, dict):
-        return LAYOUT_DRIFT_INVALID, {"placement": placement}
-    axes = {name: stats for name, stats in by_axis.items() if isinstance(stats, dict)}
-    if not axes:
-        status = LAYOUT_DRIFT_AXIS_BLIND if not by_axis else LAYOUT_DRIFT_INVALID
-        return status, {"placement": placement}
+    shape = _by_axis_status(placement)
+    if shape is not None:
+        return shape, {"placement": placement}
+    axes = dict(placement["by_axis"])
     payload = {"placement": placement, "axes": axes, "worst": _worst_axis(axes)}
-    if all(_num(s.get("exact")) == _num(s.get("evaluated")) for s in axes.values()):
-        return LAYOUT_DRIFT_EXACT, payload
-    return LAYOUT_DRIFT_PRESENT, payload
-
-
-def _num(value: Any) -> float | None:
-    """Numeric coercion that refuses bools, so a stray `true` cannot pose as a pixel count."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
+    if not all(_num(s.get("exact")) == _num(s.get("evaluated")) for s in axes.values()):
+        return LAYOUT_DRIFT_PRESENT, payload
+    enclosing = _placement_pixel_exact(placement)
+    if enclosing is None:
+        # Origins are exact but nothing corroborates the edges or the size. "Cannot assess" is its
+        # own answer; claiming pixel-exact on it is the collapse this function guards against.
+        return LAYOUT_DRIFT_INVALID, {"placement": placement}
+    return (LAYOUT_DRIFT_EXACT if enclosing else LAYOUT_DRIFT_EDGE_ONLY), payload
 
 
 def _worst_axis(axes: dict[str, dict]) -> tuple[str, dict] | None:
@@ -1431,6 +1539,8 @@ def _terse_drift_line(status: str, payload: dict) -> str:
         return "        ?? drift: PER-AXIS UNKNOWN"
     if status == LAYOUT_DRIFT_EXACT:
         return "        drift: MEASURED, pixel-exact"
+    if status == LAYOUT_DRIFT_EDGE_ONLY:
+        return "        !! drift: origins exact, EDGE/SIZE drift"
     worst = payload.get("worst")
     if not worst:
         return "        !! drift: MEASURED, worst axis unknown"
@@ -1439,18 +1549,28 @@ def _terse_drift_line(status: str, payload: dict) -> str:
     return f"        !! drift: worst {worst[0].upper()} {worst[1].get('worst_abs_px', '?')}px {signed_txt}px"
 
 
-def _layout_drift_summary_line(wb: dict, oracle: dict | None = None, terse: bool = False) -> str:
-    """One line per workbook - the triage #372 asks for, ahead of anyone opening the report.
+def _edge_only_line(placement: dict, axes: dict[str, dict]) -> str:
+    """Origins land pixel-perfect, yet the enclosing rollup does not call itself pixel-exact.
 
-    BOTH axes always appear together in the full form. The engine's own rollup test pins that rule
-    ("a consumer comparing axes must never get one of them; that reads as 'the other is fine'"), and
-    it applies just as hard one layer up.
+    Named rather than absorbed, because `by_axis` measures ``left``/``top`` only: it structurally
+    cannot see a far-edge or SIZE mismatch, which is precisely the customer-reported shape in #372
+    (visuals compressed to ~34-48% of intended height with their origins in the right place).
     """
-    status, payload = layout_drift_status(wb, oracle)
+    detail = " | ".join(f"{n.upper()} {s.get('exact', '?')}/{s.get('evaluated', '?')}" for n, s in sorted(axes.items()))
+    return (
+        f"        !! layout drift: origins pixel-exact ({detail}) but the rollup reports "
+        f"{placement.get('verdict', '?')!s} - EDGE or SIZE drift that by_axis cannot see; "
+        f"worst edge {placement.get('worst_max_edge_px', '?')}px"
+    )
+
+
+def _unmeasured_drift_line(status: str, payload: dict) -> str | None:
+    """The full-form lines for the states that carry no per-axis numbers. ``None`` to continue."""
     if status == LAYOUT_DRIFT_INVALID:
-        return "        layout drift: INVALID SHAPE (by_axis is not an object of axis records)"
-    if terse:
-        return _terse_drift_line(status, payload)
+        return (
+            "        ?? layout drift: NOT ASSESSABLE - by_axis is not two comparable axis records, "
+            "or the rollup states no verdict; treated as unknown, never as no drift"
+        )
     if status == LAYOUT_DRIFT_NOT_MEASURED:
         return (
             "        ?? layout drift: NOT MEASURED - no oracle placement rollup here "
@@ -1462,8 +1582,26 @@ def _layout_drift_summary_line(wb: dict, oracle: dict | None = None, terse: bool
             "        ?? layout drift: PER-AXIS UNKNOWN - placement measured but carries no by_axis "
             f"(pre-2.332.0); axis-blind worst edge {placement.get('worst_max_edge_px', '?')}px"
         )
+    return None
+
+
+def _layout_drift_summary_line(wb: dict, oracle: dict | None = None, terse: bool = False) -> str:
+    """One line per workbook - the triage #372 asks for, ahead of anyone opening the report.
+
+    BOTH axes always appear together in the full form. The engine's own rollup test pins that rule
+    ("a consumer comparing axes must never get one of them; that reads as 'the other is fine'"), and
+    it applies just as hard one layer up.
+    """
+    status, payload = layout_drift_status(wb, oracle)
+    if terse and status != LAYOUT_DRIFT_INVALID:
+        return _terse_drift_line(status, payload)
+    unmeasured = _unmeasured_drift_line(status, payload)
+    if unmeasured is not None:
+        return unmeasured
     axes = payload["axes"]
     worst = payload["worst"]
+    if status == LAYOUT_DRIFT_EDGE_ONLY:
+        return _edge_only_line(payload["placement"], axes)
     if status == LAYOUT_DRIFT_EXACT:
         detail = " | ".join(
             f"{n.upper()} {s.get('exact', '?')}/{s.get('evaluated', '?')}" for n, s in sorted(axes.items())
@@ -1480,9 +1618,27 @@ def _layout_drift_summary_line(wb: dict, oracle: dict | None = None, terse: bool
 
 
 def _clip_tail(text: str, limit: int = 88) -> str:
-    """Clip from the LEFT, keeping the tail. A path clipped from the right loses its filename -
-    which is the only part that identifies which report the numbers came from."""
-    return text if len(text) <= limit else "..." + text[-(limit - 3) :]
+    """Clip from the LEFT by BYTES, keeping the tail.
+
+    Two things, both load-bearing. Clipping from the RIGHT loses the filename, which is the only
+    part identifying which report the numbers came from. And the limit is a BYTE limit because
+    ``--max-bytes`` is a byte cap: a 24-CHARACTER clip of a CJK filename measured 101 bytes against
+    a bound the code believed was ~70, and pushed the whole render past the cap. ``errors="ignore"``
+    drops a code point the cut landed inside, so the result is never mojibake.
+    """
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return "..." + raw[-(limit - 3) :].decode("utf-8", errors="ignore")
+
+
+def _clip_head(text: str, limit: int) -> str:
+    """Clip from the RIGHT by BYTES, keeping the head. The mirror of `_clip_tail`, for text whose
+    MEANING is at the front (a verdict) rather than at the end (a path)."""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[: limit - 3].decode("utf-8", errors="ignore") + "..."
 
 
 def _layout_drift_lines(wb: dict, oracle: OracleSource, terse: bool = False) -> list[str]:
@@ -1492,15 +1648,24 @@ def _layout_drift_lines(wb: dict, oracle: OracleSource, terse: bool = False) -> 
     strict cap on everything a run prints: a line printed outside the budgeted body made the cap a
     suggestion (measured - 1632 bytes emitted under a 1500-byte cap, with no truncation banner).
 
-    Under ``terse`` the citation collapses onto the verdict line and the filename is clipped, so the
-    pair stays inside a fixed byte ceiling however long the oracle's path happens to be.
+    Under ``terse`` the citation collapses onto the verdict line and is byte-clipped to fit, and the
+    whole line is then clamped to ``TERSE_DRIFT_LINE_MAX_BYTES``. The clamp is NOT redundant: the
+    verdict alone can exceed the ceiling on extreme input (a long axis name, a huge pixel value), so
+    a bound enforced only on the citation is a bound that holds for well-behaved data and no other.
     """
     verdict = _layout_drift_summary_line(wb, oracle.payload, terse)
-    if oracle.path is None:
-        return [verdict]
-    if terse:
-        return [f"{verdict} [{_clip_tail(oracle.path.name, 24)}]"]
-    return [verdict, f"           measured from: {_clip_tail(str(oracle.path))}"]
+    if not terse:
+        if oracle.path is None:
+            return [verdict]
+        return [verdict, f"           measured from: {_clip_tail(str(oracle.path))}"]
+    line = verdict
+    if oracle.path is not None:
+        # Below ~4 bytes a citation is "...", which identifies nothing; the VERDICT is the signal
+        # and the citation is its provenance, so this is the one place dropping it is right.
+        room = TERSE_DRIFT_LINE_MAX_BYTES - _blen(verdict) - len(" []")
+        if room >= 4:
+            line = f"{verdict} [{_clip_tail(oracle.path.name, room)}]"
+    return [_clip_head(line, TERSE_DRIFT_LINE_MAX_BYTES)]
 
 
 def _fidelity_counts(wb: dict) -> list[str]:
@@ -1844,34 +2009,75 @@ def _partition_review_estate_lines(found: list[tuple[str, dict, Path]]) -> list[
     return out + [""]
 
 
-def _evidence_estate_lines(found: list[tuple[str, dict, Path]]) -> list[str]:
-    """Estate totals for `--list`: how much of the estate's visual surface was actually examined.
+def _evidence_estate_tally(found: list[tuple[str, dict, Path]]) -> tuple[dict[str, int], list[str], list[str]]:
+    """Roll the per-workbook evidence up, keeping the unassessable workbooks VISIBLE.
 
-    Named per workbook, not just totalled: "38 of 40 examined" estate-wide hides that all 2 gaps sit
-    in one report. Workbooks with nothing examined are listed first for the same reason.
+    Returns ``(counts, gap_labels, unassessable_names)``. A workbook with no ``viz_fidelity`` or an
+    unreadable one contributes nothing to ``counts``, so it must be NAMED instead: skipping it
+    silently is how a mixed estate claimed full coverage while a workbook in the very same list was
+    never assessed at all.
     """
     counts: dict[str, int] = {}
-    unexamined: list[tuple[str, int, int]] = []
+    gaps: list[tuple[str, int, int]] = []
+    unassessable: list[str] = []
     for name, wb, _ in found:
         status, wb_counts = fidelity_evidence_status(wb)
         if status in (FIDELITY_EVIDENCE_NONE, FIDELITY_EVIDENCE_INVALID):
+            unassessable.append(name)
             continue
         for value, n in wb_counts.items():
             counts[value] = counts.get(value, 0) + n
         total = sum(wb_counts.values())
         verified = wb_counts.get(EVIDENCE_VERIFIED, 0)
         if verified != total:
-            unexamined.append((name, verified, total))
-    if not counts:
-        return ["Visual evidence: NOT RECORDED anywhere in this estate (no viz_fidelity rows).", ""]
-    total = sum(counts.values())
-    out = [
-        f"Visual evidence: {counts.get(EVIDENCE_VERIFIED, 0)}/{total} visual(s) examined "
-        f"({' | '.join(f'{v} {counts[v]}' for v in _evidence_order(counts))})",
+            gaps.append((name, verified, total))
+    labels = [
+        f"    !! {_clip(n, 52):<52} {v}/{t} examined"
+        for n, v, t in sorted(gaps, key=lambda g: (g[1] - g[2], g[0].lower()))
     ]
-    for name, verified, wb_total in sorted(unexamined, key=lambda t: (t[1] - t[2], t[0].lower())):
-        out.append(f"    !! {_clip(name, 52):<52} {verified}/{wb_total} examined")
-    return out + [""]
+    return counts, labels, sorted(unassessable)
+
+
+def _evidence_estate_lines(found: list[tuple[str, dict, Path]], budget: int) -> list[str]:
+    """Estate totals for `--list`: how much of the estate's visual surface was actually examined.
+
+    Named per workbook, not just totalled: "38 of 40 examined" estate-wide hides that all 2 gaps sit
+    in one report. Workbooks with nothing examined are listed first for the same reason.
+
+    BUDGETED, like every other section in this module. It was not, and one unconditional line per
+    workbook is unbounded in the estate's width: at `MIN_MAX_BYTES` a 30-workbook estate fired
+    `HARD CAP` and cut 18 of the 30 signals with no omission line and exit 0. A dropped signal under
+    budget pressure is a silent false-clean - the exact failure this section exists to prevent - so
+    the omission line is reserved BEFORE any workbook is named, and the estate totals always
+    survive.
+    """
+    counts, labels, unassessable = _evidence_estate_tally(found)
+    head: list[str] = []
+    if counts:
+        total = sum(counts.values())
+        head.append(
+            f"Visual evidence: {counts.get(EVIDENCE_VERIFIED, 0)}/{total} visual(s) examined "
+            f"({' | '.join(f'{v} {counts[v]}' for v in _evidence_order(counts))})"
+        )
+        # Named ONLY when the estate is MIXED. When nothing was assessable the headline below
+        # already says so and naming every workbook is noise; when SOME were, silence about the
+        # rest is what let a "1/1 examined" total sit above two workbooks nobody assessed.
+        if unassessable:
+            head.append(
+                f"    ?? {len(unassessable)} workbook(s) NOT ASSESSABLE (no viz_fidelity, or an "
+                "unreadable one) - they are NOT in the total above"
+            )
+            labels = [f"    ?? {_clip(n, 52):<52} not assessable" for n in unassessable] + labels
+    else:
+        head.append(
+            f"Visual evidence: NOT RECORDED anywhere in this estate - none of {len(found)} "
+            "workbook(s) carries viz_fidelity rows; coverage is unknown, not zero"
+        )
+    if not labels:
+        return head + [""]
+    more = "    ... and {n} more workbook(s) not named here; raise --max-bytes or use --json"
+    remaining = budget - sum(_blen(x) + 1 for x in head) - 1
+    return head + _fit_lines(labels, remaining, more) + [""]
 
 
 def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
@@ -1891,7 +2097,10 @@ def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     ]
     out += _pbip_warning_estate_lines(found)
     out += _partition_review_estate_lines(found)
-    out += _evidence_estate_lines(found)
+    # Half the remaining budget, so a wide estate cannot spend the whole cap naming unexamined
+    # workbooks and leave the ranked queue below with nothing. Both sections then omit-and-count.
+    spent = sum(_blen(x) + 1 for x in out)
+    out += _evidence_estate_lines(found, max(0, (max_bytes - spent) // 2))
     # Partition scaffolds rank FIRST: unlike a stub calc or a dropped visual binding, an unresolved
     # M partition means the table has ZERO rows -- and it carries a named manual completion step
     # the engine already wrote down (issue #326).
@@ -1908,7 +2117,10 @@ def _layout_drift_json(wb: dict, oracle: OracleSource) -> dict:
     worst = payload.get("worst")
     return {
         "status": status,
-        "measured": status in (LAYOUT_DRIFT_EXACT, LAYOUT_DRIFT_PRESENT),
+        "measured": status in LAYOUT_DRIFT_MEASURED,
+        "origins_pixel_exact": status == LAYOUT_DRIFT_EXACT,
+        "edge_or_size_drift": status == LAYOUT_DRIFT_EDGE_ONLY,
+        "enclosing_verdict": (payload.get("placement") or {}).get("verdict"),
         "by_axis": payload.get("axes"),
         "worst_axis": worst[0] if worst else None,
         "worst_axis_stats": worst[1] if worst else None,
@@ -2080,7 +2292,7 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_OK
         selected = select_workbook(found, args.workbook)
         wb_name, wb, source = selected
-        oracle = find_oracle_report(args.target, source, wb_name, args.oracle)
+        oracle = find_oracle_report(args.target, source, wb_name, args.oracle, len(found))
     except HandoverError as exc:
         print(f"read_handover: {exc}", file=sys.stderr)
         return EXIT_USAGE

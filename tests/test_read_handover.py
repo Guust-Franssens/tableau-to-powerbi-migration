@@ -363,10 +363,18 @@ def test_a_pathological_workbook_name_cannot_spend_the_whole_cap_on_a_heading(tm
 
 
 def test_list_view_honours_the_cap(tmp_path, capsys):
-    """Kills: `--list` rows emitted unbudgeted - a wide estate is the one that overflows."""
+    """Kills: `--list` rows emitted unbudgeted - a wide estate is the one that overflows.
+
+    ⚠️ The fixtures carry `viz_fidelity` DELIBERATELY. Without it this test was vacuous for the
+    estate evidence section (#371): that section only emits per-workbook lines for workbooks whose
+    visuals were not all examined, so a fixture with no `viz_fidelity` never reached it and the
+    section was unbudgeted for weeks under a test that claimed to cover this view. A test whose
+    fixture cannot reach the code it names is worse than no test.
+    """
     (tmp_path / "handover").mkdir()
     for i in range(300):
         wb = make_workbook([make_request("A")], name=f"Workbook_{i:03d}_{'L' * 40}")
+        wb["viz_fidelity"] = [{"evidence": "emitted", "status": "rebuilt", "worksheet": f"Sheet {i}"}]
         write_slice(tmp_path / "handover", wb, f"W{i:03d}.json")
 
     _, out = run([str(tmp_path), "--list", "--max-bytes", "4000"], capsys)
@@ -374,6 +382,30 @@ def test_list_view_honours_the_cap(tmp_path, capsys):
     assert_within_cap(out, 4000)
     assert "300 workbook(s)" in out, "the total must survive even when most rows do not"
     assert "more workbook(s) not listed here" in out
+
+
+def test_list_view_honours_the_floor_cap_with_an_unexamined_estate(tmp_path, capsys):
+    """Kills: the estate evidence section emitting one unconditional line per workbook.
+
+    The narrow case the 300-workbook test above cannot reach, because at 4,000 bytes there is slack.
+    At `MIN_MAX_BYTES` a 30-workbook estate where every workbook has unexamined visuals fired
+    `HARD CAP` and silently cut 18 of the 30 signals with no omitted-count line and exit 0 - a
+    dropped signal under budget pressure is a silent false-clean, which is the exact failure the
+    evidence section exists to prevent.
+    """
+    (tmp_path / "handover").mkdir()
+    for i in range(30):
+        wb = make_workbook([], name=f"Workbook-{i:02d}")
+        wb["viz_fidelity"] = [{"evidence": "emitted", "status": "rebuilt", "worksheet": "Sheet"}]
+        write_slice(tmp_path / "handover", wb, f"W{i:02d}.json")
+
+    _, out = run([str(tmp_path), "--list", "--max-bytes", str(rh.MIN_MAX_BYTES)], capsys)
+
+    assert_within_cap(out, rh.MIN_MAX_BYTES)
+    assert "Visual evidence:" in out, "the estate coverage total must survive any cap"
+    named = out.count("examined\n")
+    assert named < 30, "fixture too small to force an omission; raise the workbook count"
+    assert "not named here" in out, "every workbook cut from the evidence section must be COUNTED"
 
 
 def test_default_max_bytes_is_the_size_an_agent_read_tool_accepts(tmp_path, capsys):
