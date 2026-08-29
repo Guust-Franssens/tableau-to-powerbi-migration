@@ -41,6 +41,7 @@ import os
 import re
 import warnings
 from pathlib import Path
+from xml.etree import ElementTree
 
 # The secret half of the PAT credential. TABLEAU_PAT_SECRET is canonical; the engine's historical
 # TABLEAU_PAT_VALUE spelling stays accepted so existing environments keep working.
@@ -73,6 +74,93 @@ DATASOURCE_CREDENTIAL_KEYS = frozenset({"TABLEAU_SF_USER", "TABLEAU_SF_PASSWORD"
 ACCEPTED_ENV_KEYS = frozenset(CANONICAL_ENV_KEYS) | {"TABLEAU_SERVER", "TABLEAU_PAT_VALUE"} | DATASOURCE_CREDENTIAL_KEYS
 
 _TABLEAU_AUTH_HEADER_RE = re.compile(r"(?i)([\"']?x-tableau-auth[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;<>]+)")
+
+# Markers tried in order. A marker that CONTAINS a supplied secret would re-emit the credential it
+# is meant to hide -- `redact("credential=[REDACTED]", "[REDACTED]")` used to return its input
+# unchanged, and a two-character secret like "ED" survived inside every marker. The ladder shrinks
+# the alphabet at each step and ends in the empty string, which cannot contain anything, so a marker
+# is always available and deletion is the guaranteed-safe terminal case.
+_MARKERS = ("[REDACTED]", "[HIDDEN]", "[###]", "")
+
+# The length below which a secret starts to collide with ordinary words. It is a NOISE threshold and
+# nothing else: `redact` warns here, it never skips. It used to be a skip, which meant a human-chosen
+# warehouse password shorter than this was silently published verbatim (#381).
+NOISY_SECRET_LEN = 8
+
+
+def _wire_forms(secret: str) -> list[str]:
+    """The shapes a secret takes on the wire, as the SUPPORTED transport serializer writes it.
+
+    ``provision_tableau_estate.py`` hands warehouse credentials to ``tableauserverclient``, which
+    builds its request with :mod:`xml.etree.ElementTree`. ``ElementTree.tostring`` defaults to
+    ``us-ascii``, so a configured value holding a non-ASCII character (U+00E4, say) reaches the wire
+    as a numeric character reference -- ``SYNTH-&#228;-PASS`` -- and searching for the literal finds
+    nothing. XML metacharacters (``& < > "``) escape the same way. A reversible encoding of a
+    credential in a persisted diagnostic is a leak, so both the attribute and text-node forms are
+    redacted alongside the literal.
+
+    **Deliberately NOT covered**, so the promise matches the code: case-changed, Unicode-normalised
+    (NFD), percent-encoded, base64 and newline-split forms. Each survives redaction, and no call
+    site in this repository emits one -- every caller feeds ``redact`` either an HTTP response body
+    or an exception message from this XML client. Adding a speculative encoding ladder would be
+    guesswork; adding one because a new transport appears would not.
+    """
+    forms = [secret]
+    try:
+        attribute = ElementTree.tostring(ElementTree.Element("s", {"v": secret})).decode("ascii")
+        node = ElementTree.Element("s")
+        node.text = secret
+        text_node = ElementTree.tostring(node).decode("ascii")
+    except (ValueError, TypeError):
+        # A control character ElementTree refuses to serialise cannot reach a Tableau request body
+        # either, so the literal is the whole of the exposure.
+        return forms
+    opening = attribute.index('v="') + 3
+    forms.append(attribute[opening : attribute.index('"', opening)])
+    forms.append(text_node[text_node.index(">") + 1 : text_node.rindex("<")])
+    return forms
+
+
+def _choose_marker(needles: list[str]) -> str:
+    """The first marker that cannot re-emit any of the values being redacted."""
+    for marker in _MARKERS:
+        if not any(needle in marker for needle in needles):
+            return marker
+    return ""
+
+
+def _blank_spans(text: str, needles: list[str]) -> list[tuple[int, int]]:
+    """Every span to remove, measured against the ORIGINAL text.
+
+    Both halves must be measured before anything is rewritten. Replacing literals first and then
+    running the header rule let a secret inside the header NAME break the rule that protects the
+    session token: redacting the ``Tableau`` in ``X-Tableau-Auth:`` stopped the header regex from
+    matching, and the token -- which the call site does not separately know -- survived.
+    """
+    spans: list[tuple[int, int]] = [m.span(2) for m in _TABLEAU_AUTH_HEADER_RE.finditer(text)]
+    for needle in needles:
+        start = 0
+        while (hit := text.find(needle, start)) >= 0:
+            spans.append((hit, hit + len(needle)))
+            start = hit + 1  # +1, not +len: "aa" must still be found twice inside "aaa"
+    return spans
+
+
+def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Collapse overlapping and touching spans into one.
+
+    Ordering the alternatives longest-first is not enough, because a regex prefers an earlier match
+    to a longer one: with ``"=S"`` and a long secret, ``password=SYNTHETIC-...`` lost its first
+    character and kept the rest. Merging intervals is what makes overlap safe, and it is what lets
+    the header rule and the literal rule coexist.
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -226,12 +314,70 @@ def redact(text: str, *secrets: str) -> str:
 
     Scrub at the point of capture rather than trusting another tool's logging discipline: the secret
     is ours, the file is ours, and the engine's error text is not something we control.
+
+    **There is no minimum length.** There was one -- 8 characters -- and it was sound while the only
+    thing in scope was a machine-generated PAT. ``provision_tableau_estate.py`` then put a
+    human-chosen warehouse password in scope, and a 7-character ``TABLEAU_SF_PASSWORD`` went straight
+    through into ``manifest.json`` on a PUBLIC repository (#381). Measured before removing it, on
+    reflected errors of the shape these callers actually persist:
+
+    ============  =====  ==========  =================  ==================
+    secret        chars  redactions  collateral (chars) diagnostic tokens
+    ============  =====  ==========  =================  ==================
+    25-character      25           1                 25  all kept
+    ``Tr0ub4d``        7           1                  7  all kept
+    ``ci``             2           3                  6  all kept
+    ``e``              1          30                 30  HTTP status kept
+    ============  =====  ==========  =================  ==================
+
+    So the feared damage does not appear until 1-2 characters, and even there the output is merely
+    noisy -- a false redaction is recoverable, a published credential is not. The 8 survives only as
+    ``NOISY_SECRET_LEN``, a warning: nothing is silently unprotected any more.
+
+    Two alternatives were measured and rejected. Redacting the whole word around a short match cost
+    4-5x more text (24 chars vs 6 for ``ci``) while leaving a known-plaintext oracle almost as intact
+    (5/7 vs 7/7 secrets uniquely recovered from a fixed error template), and its natural spelling,
+    ``\\w*(?:secret)\\w*``, backtracks quadratically -- 826 ms on 16 KB, still running after 180 s on
+    500 KB. Withholding the whole text instead destroys the diagnostic in every case, including the
+    common one where the collateral is zero.
+
+    Only ``""`` is skipped -- an optional credential that is simply not set, which every caller
+    passes as ``... or ""``. A whitespace-only value **is** redacted: it was skipped here on the
+    stated grounds that it "would match everywhere", which is false. Only an EMPTY pattern matches
+    between every character; a non-empty whitespace value matches whitespace, and ``resolve_env``
+    genuinely preserves a single-space password that the provisioner then treats as truthy.
+
+    Everything is measured against the ORIGINAL text and replaced in ONE pass, because two of the
+    three rules here can otherwise disable each other. See ``_blank_spans`` (a secret inside the
+    ``X-Tableau-Auth`` header NAME used to stop the header rule protecting the session token),
+    ``_merge`` (an overlapping short secret left all but one character of a long one visible) and
+    ``_choose_marker`` (a marker that contains the secret re-emits it).
     """
-    for secret in secrets:
-        # A short or empty value would redact unrelated text; a real PAT secret is far longer.
-        if secret and len(secret) >= 8:
-            text = text.replace(secret, "[REDACTED]")
-    return _TABLEAU_AUTH_HEADER_RE.sub(r"\1[REDACTED]", text)
+    live = [secret for secret in secrets if secret]
+    if not live:
+        return _TABLEAU_AUTH_HEADER_RE.sub(r"\1" + _MARKERS[0], text)
+    if min(len(secret) for secret in live) < NOISY_SECRET_LEN:
+        warnings.warn(
+            f"A configured secret is shorter than {NOISY_SECRET_LEN} characters. It IS redacted, "
+            "but a short value also matches unrelated text, so persisted diagnostics may be "
+            "noisy. Prefer a longer secret.",
+            stacklevel=2,
+        )
+    needles: list[str] = []
+    for secret in live:
+        needles.extend(form for form in _wire_forms(secret) if form and form not in needles)
+    spans = _merge(_blank_spans(text, needles))
+    if not spans:
+        return text
+    marker = _choose_marker(needles)
+    out: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        out.append(text[cursor:start])
+        out.append(marker)
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out)
 
 
 def engine_child_env(env: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:
