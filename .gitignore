@@ -11,9 +11,23 @@ build/
 # PUBLIC, and such notes are not toolkit content - they belong in the session workspace, never here.
 # (Learned the hard way: a workshop plan and a prerequisites email were committed and pushed before
 # anyone noticed the repo was public.)
-/migrations/workshop-*/
-/migrations/engagement-*/
-/migrations/customer-*/
+#
+# `**/` not `/migrations/`: these three were root-anchored at DEPTH 1 (`/migrations/customer-*/`),
+# but the user trees are two levels deep (`migrations/workbooks/<slug>/`,
+# `migrations/datasources/<slug>/`), so prefixing a slug - the documented opt-out for a migration
+# that must stay local - matched NOTHING and tracked the whole unit, `fabric/**` (TMDL partitions
+# with server/database names, M queries, PBIR) and `migration-spec.json` included. Measured before
+# the fix: `migrations/customer-foo/...` IGNORED, `migrations/workbooks/customer-foo/...` NOT
+# IGNORED (issue #378). The identical trap is written up four lines below for `migration-brief.md`;
+# it was fixed there and not generalised to its own neighbours. `**/` matches at every depth, so it
+# subsumes the old depth-1 rules rather than sitting beside them.
+#
+# The trailing `/` is load-bearing: these ignore DIRECTORIES only. Dropping it would also swallow
+# tracked files whose NAME starts with a prefix - `docs/customer-text-exposure.md` is exactly that.
+# Pinned by tests/test_gitignore_privacy_prefixes.py.
+**/workshop-*/
+**/engagement-*/
+**/customer-*/
 # `**/` not `/migrations/*/`: the depth-1 rule did NOT cover the path AGENTS.md actually instructs -
 # `migrations/workbooks/<slug>/migration-brief.md` is two levels deep, and `git check-ignore` on that
 # exact documented path returned NOT IGNORED. A brief names the customer, their scope, their people
