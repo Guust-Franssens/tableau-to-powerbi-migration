@@ -329,6 +329,33 @@ class OracleSource(NamedTuple):
     path: Path | None = None
 
 
+class WorkbookCensus(NamedTuple):
+    """What the target DECLARED, kept beside what could actually be parsed.
+
+    ⚠️ These are two different numbers and conflating them re-opened a fixed defect. The oracle's
+    unmatched-singleton fallback is only safe when the target provably holds ONE workbook, and it
+    was gated on ``len(parsed)`` - so a two-slice bundle with one CORRUPT slice reported a count of
+    1 and handed the readable workbook the other one's measurements. A parse failure must never
+    shrink a denominator into a permissive path; that is the same shape as unreadable
+    ``viz_fidelity`` rows vanishing from the evidence denominator, one level up.
+
+    ``declared`` counts workbook-like inputs the target announced; ``unreadable`` counts how many of
+    those could not be turned into a workbook. A stray non-workbook JSON beside the slices is
+    neither - it was never a workbook and skipping it is correct.
+    """
+
+    workbooks: list[tuple[str, dict, Path]]
+    declared: int = 0
+    unreadable: int = 0
+    unreadable_sources: tuple[Path, ...] = ()
+
+    @property
+    def provably_single(self) -> bool:
+        """One workbook declared, one parsed, nothing unaccounted for. The ONLY state in which an
+        arbitrarily-named oracle report can be attributed without a name match."""
+        return self.declared == 1 and self.unreadable == 0 and len(self.workbooks) == 1
+
+
 # --------------------------------------------------------------------------------------------
 # Loading
 # --------------------------------------------------------------------------------------------
@@ -341,53 +368,116 @@ def _read_json(path: Path) -> Any:
         raise HandoverError(f"{path} is not valid JSON: {exc}") from exc
 
 
+def _census_from_payload(payload: Any, source: Path) -> tuple[list[tuple[str, dict, Path]], int, int]:
+    """``(workbooks, declared, unreadable)`` for ONE payload.
+
+    The three outcomes are deliberately distinct:
+
+    * a slice or report that yields workbooks - declared and parsed;
+    * a payload that DECLARES ``workbook``/``workbooks`` but cannot honour it (a non-object entry
+      inside ``workbooks[]``, or ``{"workbook": 42}``) - declared and **unreadable**;
+    * a stray JSON that is not workbook-like at all - **neither**, because it was never a workbook
+      and counting it would refuse the oracle fallback on every bundle that has a `report.json`
+      or an oracle report sitting beside the slices.
+    """
+    if isinstance(payload, dict) and isinstance(payload.get("workbooks"), list):
+        rows = payload["workbooks"]
+        out = [(wb.get("name") or f"workbook[{i}]", wb, source) for i, wb in enumerate(rows) if isinstance(wb, dict)]
+        return out, len(rows), len(rows) - len(out)
+    if isinstance(payload, dict) and isinstance(payload.get("workbook"), dict):
+        wb = payload["workbook"]
+        return [(wb.get("name") or source.stem, wb, source)], 1, 0
+    if isinstance(payload, dict) and ("workbook" in payload or "workbooks" in payload):
+        return [], 1, 1
+    return [], 0, 0
+
+
 def _workbooks_from_payload(payload: Any, source: Path) -> list[tuple[str, dict, Path]]:
     """Accept either a handover slice (``{estate, workbook}``) or an estate ``report.json``."""
     if not isinstance(payload, dict):
         raise HandoverError(f"{source}: expected a JSON object at the top level")
-
-    if isinstance(payload.get("workbook"), dict):
-        wb = payload["workbook"]
-        return [(wb.get("name") or source.stem, wb, source)]
-
-    if isinstance(payload.get("workbooks"), list):
-        out = []
-        for i, wb in enumerate(payload["workbooks"]):
-            if isinstance(wb, dict):
-                out.append((wb.get("name") or f"workbook[{i}]", wb, source))
-        return out
-
-    raise HandoverError(f"{source}: no 'workbook' or 'workbooks' key - is this a handover slice or a report.json?")
+    workbooks, declared, _ = _census_from_payload(payload, source)
+    if not declared:
+        raise HandoverError(f"{source}: no 'workbook' or 'workbooks' key - is this a handover slice or a report.json?")
+    return workbooks
 
 
-def load_workbooks(target: Path) -> list[tuple[str, dict, Path]]:
-    """Resolve a file or bundle directory to ``(name, workbook_payload, source_path)`` triples."""
+def _census_from_slices(slices: list[Path]) -> WorkbookCensus:
+    """Census a ``handover/`` directory. Unparseable bytes count as UNREADABLE, never as absent.
+
+    Fail-closed on purpose: a file that will not parse cannot be classified, so it *might* be a
+    workbook. Assuming otherwise is exactly the undercount that unlocked wrong-oracle attribution.
+    """
+    workbooks: list[tuple[str, dict, Path]] = []
+    declared = unreadable = 0
+    bad: list[Path] = []
+    for path in slices:
+        try:
+            payload = _read_json(path)
+        except HandoverError:
+            declared += 1
+            unreadable += 1
+            bad.append(path)
+            continue
+        found, n_declared, n_unreadable = _census_from_payload(payload, path)
+        workbooks += found
+        declared += n_declared
+        unreadable += n_unreadable
+        if n_unreadable:
+            bad.append(path)
+    return WorkbookCensus(workbooks, declared, unreadable, tuple(bad))
+
+
+def load_workbook_census(target: Path) -> WorkbookCensus:
+    """Resolve a file or bundle directory to workbooks PLUS the census they came from.
+
+    `load_workbooks` is the thin list-only wrapper over this; anything that makes a decision from
+    "how many workbooks are there" must use the census, because the list alone cannot distinguish
+    "one workbook" from "one workbook and one that failed to parse".
+    """
     if not target.exists():
         raise HandoverError(f"{target} does not exist")
 
     if target.is_file():
-        return _workbooks_from_payload(_read_json(target), target)
+        return WorkbookCensus(*_as_census(_read_json(target), target))
 
     handover_dir = target / "handover" if (target / "handover").is_dir() else target
     slices = sorted(p for p in handover_dir.glob("*.json"))
-    if slices:
-        found: list[tuple[str, dict, Path]] = []
-        for path in slices:
-            try:
-                found.extend(_workbooks_from_payload(_read_json(path), path))
-            except HandoverError:
-                continue  # a stray JSON file in the folder is not an error
-        if found:
-            return found
+    pending = _census_from_slices(slices) if slices else WorkbookCensus([])
+    if pending.workbooks:
+        return pending
 
     report = target / "report.json"
     if report.is_file():
-        return _workbooks_from_payload(_read_json(report), report)
+        workbooks, declared, unreadable, bad = _as_census(_read_json(report), report)
+        # Slice failures are CARRIED, not discarded: falling through to `report.json` because no
+        # slice parsed must not erase the fact that slices existed and could not be read.
+        return WorkbookCensus(
+            workbooks,
+            declared + pending.declared,
+            unreadable + pending.unreadable,
+            tuple(bad) + pending.unreadable_sources,
+        )
 
     raise HandoverError(
         f"{target}: found no handover/*.json slices and no report.json. "
         "Point at a bundle directory, a handover slice, or an estate report.json."
     )
+
+
+def _as_census(payload: Any, source: Path) -> tuple[list[tuple[str, dict, Path]], int, int, tuple[Path, ...]]:
+    """Census one explicitly-named file, raising the usual error when it is not workbook-like."""
+    if not isinstance(payload, dict):
+        raise HandoverError(f"{source}: expected a JSON object at the top level")
+    workbooks, declared, unreadable = _census_from_payload(payload, source)
+    if not declared:
+        raise HandoverError(f"{source}: no 'workbook' or 'workbooks' key - is this a handover slice or a report.json?")
+    return workbooks, declared, unreadable, ((source,) if unreadable else ())
+
+
+def load_workbooks(target: Path) -> list[tuple[str, dict, Path]]:
+    """Resolve a file or bundle directory to ``(name, workbook_payload, source_path)`` triples."""
+    return load_workbook_census(target).workbooks
 
 
 def _sniff_oracle(path: Path) -> bool:
@@ -428,7 +518,7 @@ def _oracle_candidates(directory: Path) -> list[tuple[Path, dict]]:
 
 
 def find_oracle_report(
-    target: Path, source: Path, wb_name: str, explicit: Path | None = None, workbook_count: int = 1
+    target: Path, source: Path, wb_name: str, explicit: Path | None = None, census: WorkbookCensus | None = None
 ) -> OracleSource:
     """Locate the fidelity-oracle report carrying ``summary.placement.by_axis`` for one workbook.
 
@@ -437,12 +527,19 @@ def find_oracle_report(
     An explicit ``--oracle`` wins; otherwise the bundle root, a ``fidelity/`` subfolder and the
     directory the slice itself came from are scanned, in that order.
 
-    ⚠️ ``workbook_count`` is load-bearing, not decoration. A report whose filename names the
-    workbook always wins. An arbitrarily-named SINGLE candidate is accepted **only when the target
-    holds one workbook**: in a multi-workbook bundle where the oracle was run for A alone, the old
-    unconditional singleton fallback handed A's numbers to B - and a pixel-exact A made an entirely
-    unmeasured B read as verified. Ambiguity is refused rather than guessed, because attributing
-    another workbook's measurements to this one is worse than reporting nothing.
+    ⚠️ ``census`` is load-bearing, not decoration. A report whose filename names the workbook always
+    wins. An arbitrarily-named SINGLE candidate is accepted **only when the target is PROVABLY a
+    single-workbook input** - one declared, one parsed, nothing unreadable. Two defects live here:
+
+    * the original fallback was unconditional, so in a multi-workbook bundle where the oracle ran
+      for A alone, B got A's numbers and a pixel-exact A made an unmeasured B read as verified;
+    * gating it on the number of PARSED workbooks re-opened the same hole, because a corrupt slice
+      is silently skipped - a two-slice bundle with one unreadable slice counted 1 and satisfied
+      the guard. Hence the census rather than ``len(found)``.
+
+    ``census=None`` means "provenance unknown", and is treated conservatively: no unmatched
+    singleton. Ambiguity is refused rather than guessed, because attributing another workbook's
+    measurements to this one is worse than reporting nothing.
 
     The real fix belongs upstream: the oracle report should carry the workbook identity it measured,
     so this is an identity check rather than a filename inference. Filed as the successor to #182.
@@ -477,7 +574,7 @@ def find_oracle_report(
         named = [(p, d) for p, d in found if wb_name.lower() in p.stem.lower()]
     if len(named) == 1:
         return OracleSource(named[0][1], named[0][0])
-    if not named and len(found) == 1 and workbook_count == 1:
+    if not named and len(found) == 1 and census is not None and census.provably_single:
         return OracleSource(found[0][1], found[0][0])
     return OracleSource()
 
@@ -2261,6 +2358,26 @@ def _render(
     return render_default(wb_name, wb, source, budget, oracle)
 
 
+def _warn_unreadable(census: WorkbookCensus) -> None:
+    """Say out loud that part of the input could not be read.
+
+    On stderr, so it is outside the `--max-bytes` budget that governs the rendered body and cannot
+    be truncated away. Silently skipping a corrupt slice is the same failure as silently skipping an
+    unreadable `viz_fidelity` row: the reader looks complete because the thing it could not read
+    left no trace.
+    """
+    if not census.unreadable:
+        return
+    names = ", ".join(str(p) for p in census.unreadable_sources[:5])
+    more = f" (+{len(census.unreadable_sources) - 5} more)" if len(census.unreadable_sources) > 5 else ""
+    print(
+        f"read_handover: WARNING - {census.unreadable} of {census.declared} declared workbook "
+        f"input(s) could not be read: {names}{more}. They are missing from every count below, and "
+        "an unmatched fidelity-oracle report will NOT be attributed while any input is unreadable.",
+        file=sys.stderr,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Exit 0 on a rendered queue, 2 on an unresolvable target or a cap too small to honour.
 
@@ -2286,13 +2403,15 @@ def main(argv: list[str] | None = None) -> int:
     budget = args.max_bytes - 1 - (_blen(json_notice) + 1 if json_notice else 0)
 
     try:
-        found = load_workbooks(args.target)
+        census = load_workbook_census(args.target)
+        found = census.workbooks
+        _warn_unreadable(census)
         if args.list:
             print(_capped(render_list(found, budget), budget))
             return EXIT_OK
         selected = select_workbook(found, args.workbook)
         wb_name, wb, source = selected
-        oracle = find_oracle_report(args.target, source, wb_name, args.oracle, len(found))
+        oracle = find_oracle_report(args.target, source, wb_name, args.oracle, census)
     except HandoverError as exc:
         print(f"read_handover: {exc}", file=sys.stderr)
         return EXIT_USAGE

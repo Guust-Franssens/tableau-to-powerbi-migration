@@ -862,6 +862,225 @@ def test_a_name_matched_report_still_wins_in_a_multi_workbook_bundle(tmp_path):
     assert "NOT MEASURED" in run_cli(str(root), "--workbook", "Workbook B").stdout
 
 
+def test_a_corrupt_slice_does_not_shrink_the_census_into_the_singleton_path(tmp_path):
+    """HIGH (round 2). The singleton-oracle guard was gated on the number of PARSED workbooks, and
+    `load_workbooks` silently skips a slice it cannot read - so a two-slice bundle with ONE corrupt
+    slice counted 1, satisfied the guard, and handed the readable workbook the other one's
+    measurements.
+
+    Measured before the fix: ``HANDOVER_SLICES=2  LOADED=1`` ->
+    ``drift: MEASURED, pixel-exact [measured-run.json]``, exit 0.
+
+    This is the round-1 HIGH 1 defect recurring one level up: a parse failure silently shrinks a
+    denominator and unlocks a permissive path.
+
+    Mutation killed: gate on ``len(found)`` (or on ``census.workbooks``) instead of the census.
+    """
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    (root / "handover" / "Workbook A.json").write_text(
+        json.dumps({"estate": {}, "workbook": {"name": "Workbook A", "viz_fidelity": []}}), encoding="utf-8"
+    )
+    (root / "handover" / "Workbook B.json").write_text("{ this is not valid json", encoding="utf-8")
+    (root / "measured-run.json").write_text(ORACLE_EXACT.read_text(encoding="utf-8"), encoding="utf-8")
+
+    census = rh.load_workbook_census(root)
+    assert census.declared == 2, "the CORRUPT slice must still be declared"
+    assert len(census.workbooks) == 1
+    assert census.unreadable == 1
+    assert census.provably_single is False
+
+    proc = run_cli(str(root))
+    assert proc.returncode == rh.EXIT_OK
+    assert "NOT MEASURED" in proc.stdout
+    assert "pixel-exact" not in proc.stdout, "another workbook's measurement must not land here"
+    assert not cites_oracle(proc.stdout)
+
+
+def test_a_malformed_estate_entry_does_not_shrink_the_census(tmp_path):
+    """The same undercount through the other input shape: `report.json`'s `workbooks[]` with a
+    non-object entry. The DECLARED list is the census; parse results reconcile against it.
+
+    Mutation killed: count only the entries that survive the `isinstance(wb, dict)` filter.
+    """
+    root = tmp_path / "bundle"
+    root.mkdir(parents=True)
+    (root / "report.json").write_text(
+        json.dumps({"workbooks": [{"name": "Workbook A", "viz_fidelity": []}, 42]}), encoding="utf-8"
+    )
+    (root / "measured-run.json").write_text(ORACLE_EXACT.read_text(encoding="utf-8"), encoding="utf-8")
+
+    census = rh.load_workbook_census(root)
+    assert (census.declared, len(census.workbooks), census.unreadable) == (2, 1, 1)
+    assert census.provably_single is False
+
+    proc = run_cli(str(root))
+    assert "NOT MEASURED" in proc.stdout
+    assert "pixel-exact" not in proc.stdout
+
+
+def test_a_genuine_single_workbook_target_is_not_over_refused(tmp_path):
+    """The narrowing must not swallow the case the fallback legitimately serves.
+
+    Mutation killed: refuse the singleton whenever ANY json in the bundle fails to yield a workbook
+    - which would over-refuse on every bundle that has an oracle report or a report.json beside the
+    slices.
+    """
+    root = bundle(tmp_path, real_workbook(), ORACLE_DRIFTED, oracle_name="measured-run.json")
+    census = rh.load_workbook_census(root)
+    assert census.provably_single is True
+    proc = run_cli(str(root))
+    assert "worst Y" in proc.stdout
+    assert cites_oracle(proc.stdout)
+
+
+def test_a_stray_non_workbook_json_beside_the_slices_is_not_unreadable(tmp_path):
+    """A file that was never a workbook is neither declared nor unreadable.
+
+    The oracle report itself commonly sits next to the slices, and counting it as a failed workbook
+    would disable the fallback on exactly the bundles that have something to attribute.
+
+    Mutation killed: treat every non-workbook JSON as an unreadable workbook.
+    """
+    root = bundle(tmp_path, real_workbook())
+    (root / "handover" / "an-oracle-report.json").write_text(
+        ORACLE_DRIFTED.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    census = rh.load_workbook_census(root)
+    assert (census.declared, census.unreadable) == (1, 0)
+    assert census.provably_single is True
+    assert "worst Y" in run_cli(str(root)).stdout
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"workbook": {"name": "A"}}, (1, 1, 0)),
+        ({"workbooks": [{"name": "A"}, {"name": "B"}]}, (2, 2, 0)),
+        ({"workbooks": [{"name": "A"}, 42, None]}, (3, 1, 2)),
+        ({"workbooks": []}, (0, 0, 0)),
+        ({"workbook": 42}, (1, 0, 1)),
+        ({"workbooks": "nope"}, (1, 0, 1)),
+        ({"kind": "tableau-fabric-structural-fidelity"}, (0, 0, 0)),
+        ({}, (0, 0, 0)),
+        ([1, 2], (0, 0, 0)),
+    ],
+)
+def test_the_census_classifies_every_payload_shape(payload, expected):
+    """Declared / parsed / unreadable, enumerated. A payload that DECLARES a workbook key it cannot
+    honour is unreadable; one that never claimed to be a workbook is a stray.
+
+    Mutation killed: collapse "declared but unreadable" into "stray", which is precisely the
+    undercount.
+    """
+    workbooks, declared, unreadable = rh._census_from_payload(payload, Path("x.json"))
+    assert (declared, len(workbooks), unreadable) == expected
+
+
+def test_slice_failures_survive_the_fallthrough_to_report_json(tmp_path):
+    """When NO slice parses, the reader falls through to `report.json` - and must not forget that
+    slices existed and could not be read.
+
+    Mutation killed: build the report.json census fresh, discarding the pending slice failures.
+    """
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    (root / "handover" / "broken.json").write_text("{{{", encoding="utf-8")
+    (root / "report.json").write_text(
+        json.dumps({"workbooks": [{"name": "Only One", "viz_fidelity": []}]}), encoding="utf-8"
+    )
+    (root / "measured-run.json").write_text(ORACLE_EXACT.read_text(encoding="utf-8"), encoding="utf-8")
+
+    census = rh.load_workbook_census(root)
+    assert census.unreadable == 1, "the unreadable slice must survive the fallthrough"
+    assert census.provably_single is False
+    assert "NOT MEASURED" in run_cli(str(root)).stdout
+
+
+def test_an_unreadable_input_is_announced_on_stderr(tmp_path):
+    """Silently skipping a corrupt slice is the same failure as silently skipping an unreadable
+    row: the reader looks complete because what it could not read left no trace.
+
+    stderr, so the warning is outside the `--max-bytes` budget and cannot be truncated away.
+
+    Mutation killed: drop the warning, or emit it on stdout where the cap can cut it.
+    """
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    (root / "handover" / "Good.json").write_text(
+        json.dumps({"estate": {}, "workbook": {"name": "Good", "viz_fidelity": []}}), encoding="utf-8"
+    )
+    (root / "handover" / "Broken.json").write_text("nope", encoding="utf-8")
+    proc = run_cli(str(root), "--workbook", "Good", "--max-bytes", str(rh.MIN_MAX_BYTES))
+    assert proc.returncode == rh.EXIT_OK
+    assert "could not be read" in proc.stderr
+    assert "Broken.json" in proc.stderr
+    assert "1 of 2" in proc.stderr
+    assert len(proc.stdout.encode("utf-8")) <= rh.MIN_MAX_BYTES
+
+
+def test_load_workbooks_still_returns_only_the_list(tmp_path):
+    """Backwards compatibility: the census is additive, not a breaking change to the loader."""
+    root = bundle(tmp_path, real_workbook())
+    found = rh.load_workbooks(root)
+    assert isinstance(found, list) and len(found) == 1
+    assert found[0][0] == WB_NAME
+    assert found == rh.load_workbook_census(root).workbooks
+
+
+def test_find_oracle_report_refuses_an_unmatched_singleton_without_a_census(tmp_path):
+    """`census=None` means provenance unknown, and unknown is not permission.
+
+    Mutation killed: default the census to a permissive "single workbook" when the caller omits it.
+    """
+    root = bundle(tmp_path, real_workbook(), ORACLE_DRIFTED, oracle_name="measured-run.json")
+    source = root / "handover" / f"{WB_NAME}.json"
+    assert rh.find_oracle_report(root, source, WB_NAME).payload is None
+    assert rh.find_oracle_report(root, source, WB_NAME, None, rh.load_workbook_census(root)).payload is not None
+
+
+@pytest.mark.parametrize(
+    "declared, workbooks, unreadable, expected, why",
+    [
+        (1, 1, 0, True, "one declared, one parsed, nothing lost"),
+        (2, 1, 1, False, "the classic: a corrupt slice shrank the parsed count"),
+        (1, 1, 1, False, "unreadable is never compatible with a proof"),
+        (0, 1, 0, False, "a workbook nothing declared is not a provable census"),
+        (2, 2, 0, False, "two workbooks"),
+        (0, 0, 0, False, "nothing at all"),
+        # The clause that today looks redundant, pinned as an INDEPENDENT requirement. It is the
+        # only one that refuses a census where the declared list is larger than the parsed list
+        # WITHOUT anything being marked unreadable - the shape a future loader would produce the
+        # moment it deduplicates (two slices naming the same workbook -> declared 2, parsed 1,
+        # unreadable 0). `provably_single` must not become true by arithmetic coincidence.
+        (2, 1, 0, False, "declared > parsed with nothing flagged unreadable is NOT a proof"),
+    ],
+)
+def test_provably_single_requires_all_three_conditions(declared, workbooks, unreadable, expected, why):
+    """Mutation killed: drop any one of `declared == 1`, `unreadable == 0`, `len(workbooks) == 1`.
+
+    Each is asserted against a census that isolates it, so no clause survives on the strength of
+    another one happening to imply it on today's inputs.
+    """
+    census = rh.WorkbookCensus([(f"W{i}", {}, Path(f"w{i}.json")) for i in range(workbooks)], declared, unreadable, ())
+    assert census.provably_single is expected, why
+
+
+def test_the_loader_keeps_declared_equal_to_parsed_plus_unreadable(tmp_path):
+    """The invariant that makes `declared == 1` look redundant, asserted rather than assumed - so a
+    future loader path that breaks it is caught here instead of silently widening the guard."""
+    root = tmp_path / "bundle"
+    (root / "handover").mkdir(parents=True)
+    (root / "handover" / "Good.json").write_text(
+        json.dumps({"estate": {}, "workbook": {"name": "Good"}}), encoding="utf-8"
+    )
+    (root / "handover" / "Broken.json").write_text("{{{", encoding="utf-8")
+    (root / "handover" / "Stray.json").write_text(json.dumps({"kind": "something-else"}), encoding="utf-8")
+    census = rh.load_workbook_census(root)
+    assert census.declared == len(census.workbooks) + census.unreadable
+    assert (census.declared, len(census.workbooks), census.unreadable) == (2, 1, 1)
+
+
 def test_the_estate_evidence_section_is_budgeted(tmp_path):
     """MEDIUM 4. One unconditional line per workbook is unbounded in the estate's width. At
     ``MIN_MAX_BYTES`` a 30-workbook estate fired ``HARD CAP``, cut 18 of the 30 signals with no
