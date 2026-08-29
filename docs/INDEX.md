@@ -7,11 +7,37 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 1. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status and final gate; direct `check_*.py` gates only isolate one finding.
 2. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
 3. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
-4. Load the layer gotchas skill before editing: `powerbi-semantic-model-gotchas` for TMDL/DAX, `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, `powerbi-ai-readiness` for Copilot/Q&A metadata.
+4. Load the right skill before acting: `live-source-reachability` for live-source proof and
+   credential-gate routing, `powerbi-semantic-model-gotchas` for TMDL/DAX,
+   `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, and
+   `powerbi-ai-readiness` for Copilot/Q&A metadata.
 
 After a machine-wide Power BI sign-in, resume every still-blocked unit at once with `python scripts/reprobe_blocked.py` (dry-run by default; `--apply` to run). It re-probes each BLOCKED credential-gate unit and lets the gate earn its own `probe-cleared` where the probe now passes — it **never authorizes**, so it is the agent-safe counterpart to the human-only `credential_gate.py authorize`.
 
 Toolkit-maintenance scripts live in `scripts/README.md`, outside the per-unit route.
+
+## Retrospective targets
+
+At the end of a migration, route durable learnings to the smallest permanent home that will be read
+next time. Craft belongs in skills/docs/tests, not back in a persona unless the learning is
+orchestration-specific.
+
+| Learning about | Put it here |
+|---|---|
+| Every agent | `AGENTS.md` conventions block, then run `scripts/sync_agent_conventions.py` |
+| Live-source reachability / credential gates | `.github/skills/live-source-reachability/SKILL.md` or `docs/credential-gate.md` |
+| PBIR / visual / Desktop craft | `.github/skills/powerbi-report-gotchas/SKILL.md` |
+| TMDL / DAX / modeling craft | `.github/skills/powerbi-semantic-model-gotchas/SKILL.md` |
+| Refresh / cache or AI readiness | `.github/skills/pbip-model-refresh/SKILL.md` / `.github/skills/powerbi-ai-readiness/SKILL.md` |
+| Orchestration or cross-agent process | `.github/agents/tableau-migrator.agent.md` `## Gotchas` |
+| Tableau formula → DAX | `docs/tableau-dax-translation-guide.md` |
+| A visual encoding that renders | `.github/pbi.kb/visual-cookbook.md` + `.github/pbi.kb/visuals/` |
+| Parser/tooling behaviour | the script itself plus a regression test |
+| Upstream engine behaviour | fresh empty-output run first; then upstream issue + credential-free reproducer |
+
+If you edit a skill bundle that is also published, re-run `scripts/build_plugin.py` or preflight flags
+the drift. If a learning is one-off or already caught by a gate, say "nothing worth recording" rather
+than inventing durable knowledge.
 
 ## Inclusion rule
 
@@ -198,6 +224,7 @@ migrations/workbooks/README.md
 Reason: `AGENTS.md` indexes repo-local skills; the start-here block names when to invoke the per-layer skills.
 Base: ``
 ```text
+.github/skills/live-source-reachability/SKILL.md
 .github/skills/pbip-model-refresh/SKILL.md
 .github/skills/powerbi-ai-readiness/SKILL.md
 .github/skills/powerbi-report-gotchas/SKILL.md

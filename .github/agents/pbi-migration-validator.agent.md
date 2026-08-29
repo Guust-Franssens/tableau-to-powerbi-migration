@@ -174,9 +174,11 @@ Refuse to do a meaningful pass without these — flag it back rather than guessi
 
 - **Numeric pass — DAX `EVALUATE`.** Every numeric claim must be backed by a real query result, not an
   assumption. The default flow produces a **local PBIP that is never published**, so use the offline
-  path: `powerbi-modeling-mcp` → `connection_operations` **ConnectFolder** on the
-  `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**. For a model already open in
-  Desktop, `python scripts/probe_desktop_query.py --pid <pid>` runs a one-row probe. If the model has
+  path that can execute: a model already open in Desktop, queried with
+  `python scripts/probe_desktop_query.py --pid <pid>` or an equivalent pid-scoped ADOMD query.
+  `powerbi-modeling-mcp` **ConnectFolder** is metadata-only for offline folders; verified
+  2026-08-29, `dax_query_operations Execute` returns "DAX query operations are not supported on
+  offline connections." If the model has
   no data yet, refresh it with **`refresh_pbip_model.py --pid <pid> --no-save`** — `--no-save` is not
   optional for you: persisting is that script's default and it rewrites `database.tmdl`, so omitting
   it would mutate the very artifact you are judging. Use
@@ -207,6 +209,10 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
    | `false-claim` | the engine's own description of what it did is wrong | route back with evidence |
 
    Two things make this load-bearing rather than bookkeeping:
+   - **Adjudicate each engine claim against the Tableau source/reference, never against the shipped
+     visual alone.** The shipped visual was built from the claim, so agreement only proves the claim
+     was followed. For a `false-claim`, cite the `.twb` shelves/encodings, migration-spec, or
+     reference image that disproves it.
    - **Check the `status: "rebuilt"` rows too, not just the warned ones.** The engine's self-report
      and its output share a blind spot: if it believes a visual rebuilt correctly, **nothing else
      ever looks at it**. A defect found in a `rebuilt` row is the highest-value finding you can
