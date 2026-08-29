@@ -38,12 +38,22 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
   * duplicate scalar TMDL properties within one object
   * measure/column name collisions within one table file
   * empty measure expressions
+  * DAX/M expression blocks whose LINE LAYOUT the TMDL parser cannot read as intended - an
+    expression started on the `=` line and then continued onto the next, which makes Desktop
+    refuse to open the model, and an under-indented multi-line expression, which parses cleanly
+    while silently swallowing the object's own properties
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
   * legacy BIFF8 `.xls` partitions with a resolvable local source: their navigation key and type
     conversion culture, which otherwise fail or silently corrupt rows at refresh
 
 A clean result does NOT prove the model opens; it only excludes these structural classes.
 """
+
+# One coherent gate: every check below is a measured Desktop-open failure class, and each carries the
+# evidence that produced it, so the length is documented knowledge rather than sprawl. The real fix is
+# to split the M half from the TMDL half (they share only `Finding`-shaped output), deferred because
+# it would move code unrelated to the change that crossed the cap.
+# pylint: disable=too-many-lines
 
 from __future__ import annotations
 
@@ -790,6 +800,226 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
     return findings
 
 
+# --- TMDL expression continuation ------------------------------------------------------------
+#
+# Measured 2026-08-29 against TmdlSerializer.DeserializeDatabaseFromFolder (AMO 19.84.1), the same
+# parser Power BI Desktop uses. Multi-line DAX is LEGAL and blank lines inside it are LEGAL; what
+# is fatal is starting the expression on the `=` line and then continuing it onto the next line.
+# TMDL commits to single-line mode the moment it sees text after `=`, so every following line must
+# be a property or a child object - a DAX fragment there raises, at Desktop open time:
+#   TMDL Format Error: Unexpected line type: Other!    (or: <TOKEN> is not a supported property)
+# and the model does not open at all. See the skill bundle for the full evidence table.
+
+# Objects whose default property is an expression read verbatim. `partition` is deliberately
+# absent: its `= m` / `= calculated` names a source TYPE, not an expression, and the M it carries
+# lives in the nested `source =` handled here.
+_EXPRESSION_HEADER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?:(?:measure|column|calculationItem|expression)\s+(?:'[^']*'|[^=]+?)\s*=|source\s*=)"
+    r"(?P<tail>.*)$"
+)
+# A property set by the shortcut syntax, where the name alone implies `true` (e.g. `isHidden`).
+_BARE_BOOLEAN_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9_]*[ \t]*$")
+# Keyword-introduced entries that legally follow an expression. This is an ALLOWLIST on purpose:
+# `VAR x = 1` has the identical `<word> <word> = <value>` shape and is fatal
+# ("UnsupportedObjectType - VAR is not a supported property in the current context").
+_KEYED_ENTRY_RE = re.compile(r"^[ \t]*(annotation|extendedProperty|changedProperty|ref|variation|levels?)\b")
+# `<name> =` with nothing between the name and the equals: TMDL's other expression-valued entries
+# (`source =`, `defaultMember =`). Deliberately NOT `<word> <word> = <value>`, which is the shape of
+# `VAR x = 1` - measured fatal, so it must keep failing this test.
+_NAME_EQUALS_RE = re.compile(r"^[ \t]*[A-Za-z][A-Za-z0-9_]*[ \t]*=")
+# Only used to decide that an absorbed line really was a property, so a DAX line that happens to
+# contain a colon cannot manufacture a finding. Harvested from the committed example corpus.
+_KNOWN_PROPERTIES = frozenset(
+    {
+        "compatibilityLevel", "contentType", "crossFilteringBehavior", "culture", "dataCategory",
+        "dataType", "defaultPowerBIDataSourceVersion", "displayFolder", "formatString",
+        "fromCardinality", "fromColumn", "isActive", "isAvailableInMdx", "isHidden", "lineageTag",
+        "mode", "sortByColumn", "sourceColumn", "sourceQueryCulture", "summarizeBy",
+        "toCardinality", "toColumn",
+    }
+)  # fmt: skip
+_CONTINUATION_HELP = (
+    "Either collapse the expression onto the one line, or start it on the line AFTER '=' and indent "
+    "every line deeper than the object's properties. Multi-line DAX is legal; an inline start with a "
+    "continuation line is not."
+)
+
+
+def _indent_of(line: str) -> int:
+    """Visual indent width of a line, with tabs expanded so tabs and spaces compare correctly."""
+    stripped = line.lstrip(" \t")
+    return len(line[: len(line) - len(stripped)].expandtabs(4))
+
+
+def _is_body_line(line: str) -> bool:
+    """Whether a line is something TMDL accepts inside an object body (not an expression)."""
+    return bool(
+        _PROPERTY_RE.match(line)
+        or _BARE_BOOLEAN_RE.match(line)
+        or _KEYED_ENTRY_RE.match(line)
+        or _NAME_EQUALS_RE.match(line)
+        or _OBJECT_RE.match(line)
+    )
+
+
+def _skip_verbatim(path: Path, lines: list[str], start: int) -> tuple[list[TmdlFinding], int]:
+    """Step over a ``` -enclosed expression, which TMDL reads verbatim so nothing here applies."""
+    idx = start + 1
+    while idx < len(lines):
+        if lines[idx].strip() == "```":
+            return [], idx + 1
+        idx += 1
+    # Unterminated: the rest of the file is unassessable, so say so rather than reporting it clean.
+    return (
+        [
+            TmdlFinding(
+                "TMDL_UNTERMINATED_EXPRESSION",
+                "a ``` -enclosed expression is never closed, so the rest of this file could not be "
+                "checked. TMDL requires the closing ``` on a line of its own.",
+                path,
+                start + 1,
+            )
+        ],
+        idx,
+    )
+
+
+def _check_inline_expression(
+    path: Path, lines: list[str], start: int, head_indent: int
+) -> tuple[list[TmdlFinding], int]:
+    """After an expression written on the `=` line, every following body line must be a property."""
+    idx = start + 1
+    while idx < len(lines):
+        raw = lines[idx]
+        if not raw.strip():
+            idx += 1
+            continue
+        if _indent_of(raw) <= head_indent:
+            break
+        if raw.lstrip().startswith("///"):
+            finding = TmdlFinding(
+                "TMDL_MISPLACED_DESCRIPTION",
+                f"a '///' description sits inside the body of the object opened at line {start + 1}. "
+                f"TMDL only accepts a description immediately BEFORE the object it documents, at that "
+                f"object's own indent; here Desktop raises 'Unexpected line type: Other!' at open.",
+                path,
+                idx + 1,
+            )
+            return [finding], idx + 1
+        if not _is_body_line(raw):
+            finding = TmdlFinding(
+                "TMDL_EXPRESSION_CONTINUATION",
+                f"the expression opened at line {start + 1} is written on the '=' line, so TMDL reads "
+                f"it as single-line and this continuation is not a property or child object. Power BI "
+                f"Desktop refuses to open the model: 'TMDL Format Error: Unexpected line type: Other!'. "
+                f"{_CONTINUATION_HELP}",
+                path,
+                idx + 1,
+            )
+            return [finding], idx + 1
+        idx += 1
+    return [], idx
+
+
+def _check_multiline_expression(
+    path: Path, lines: list[str], start: int, head_indent: int
+) -> tuple[list[TmdlFinding], int]:
+    """A multi-line expression must be indented past the object's properties, or it eats them."""
+    idx = start + 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return [], idx
+    baseline = _indent_of(lines[idx])
+    if baseline <= head_indent:
+        return (
+            [
+                TmdlFinding(
+                    "TMDL_EXPRESSION_UNINDENTED",
+                    f"the expression opened at line {start + 1} continues at an indent that is not "
+                    f"deeper than its own declaration, so TMDL reads this as a sibling and raises "
+                    f"'Invalid indentation was detected!' at open. {_CONTINUATION_HELP}",
+                    path,
+                    idx + 1,
+                )
+            ],
+            idx + 1,
+        )
+    body_start = idx
+    while idx < len(lines) and not (lines[idx].strip() and _indent_of(lines[idx]) < baseline):
+        idx += 1
+    findings = _absorbed_properties(path, lines, body_start, idx, start)
+    findings.extend(_bad_terminator(path, lines, idx, start))
+    return findings, idx
+
+
+def _absorbed_properties(path: Path, lines: list[str], body_start: int, body_end: int, start: int) -> list[TmdlFinding]:
+    """Sibling properties that landed INSIDE a multi-line expression because it is under-indented."""
+    findings: list[TmdlFinding] = []
+    baseline = _indent_of(lines[body_start])
+    for number in range(body_start, body_end):
+        raw = lines[number]
+        prop = _PROPERTY_RE.match(raw)
+        if prop and _indent_of(raw) == baseline and prop.group("name") in _KNOWN_PROPERTIES:
+            findings.append(
+                TmdlFinding(
+                    "TMDL_EXPRESSION_ABSORBS_PROPERTY",
+                    f"'{prop.group('name')}' sits at the same indent as the expression opened at line "
+                    f"{start + 1}, so TMDL reads it as part of the DAX/M instead of as a property. This "
+                    f"parses CLEANLY and corrupts the model silently. Indent the expression one level "
+                    f"deeper than the object's properties.",
+                    path,
+                    number + 1,
+                )
+            )
+    return findings
+
+
+def _bad_terminator(path: Path, lines: list[str], idx: int, start: int) -> list[TmdlFinding]:
+    """The line that ENDS a multi-line expression must itself be legal TMDL, or the parser errors.
+
+    This is what catches a fragment that dedents out of the expression mid-way - including a blank
+    line inside a string literal, whose next line lands back at column 0.
+    """
+    while idx < len(lines) and (not lines[idx].strip() or lines[idx].lstrip().startswith("///")):
+        idx += 1
+    if idx >= len(lines) or _is_body_line(lines[idx]):
+        return []
+    return [
+        TmdlFinding(
+            "TMDL_EXPRESSION_UNINDENTED",
+            f"this line ends the expression opened at line {start + 1} by dedenting out of it, but it "
+            f"is not a property or a child object, so Power BI Desktop raises 'Invalid indentation was "
+            f"detected!' and the model does not open. {_CONTINUATION_HELP}",
+            path,
+            idx + 1,
+        )
+    ]
+
+
+def check_tmdl_expressions(path: Path, text: str) -> list[TmdlFinding]:
+    """Report TMDL expression blocks whose line layout the parser cannot read as intended."""
+    findings: list[TmdlFinding] = []
+    lines = text.splitlines()
+    idx = 0
+    while idx < len(lines):
+        raw = lines[idx]
+        match = None if raw.lstrip().startswith("///") else _EXPRESSION_HEADER_RE.match(raw)
+        if not match:
+            idx += 1
+            continue
+        head_indent = _indent_of(raw)
+        tail = match.group("tail").strip()
+        if tail.startswith("```"):
+            found, idx = _skip_verbatim(path, lines, idx)
+        elif tail:
+            found, idx = _check_inline_expression(path, lines, idx, head_indent)
+        else:
+            found, idx = _check_multiline_expression(path, lines, idx, head_indent)
+        findings.extend(found)
+    return findings
+
+
 def _model_dirs(target: Path) -> list[Path]:
     if target.name.endswith(".SemanticModel"):
         return [target]
@@ -1000,8 +1230,23 @@ def check_tmdl_model(model_dir: Path) -> tuple[list[TmdlFinding], int]:
     definition = model_dir / "definition"
     files = sorted(definition.rglob("*.tmdl")) if definition.exists() else []
     for tmdl in files:
-        text = tmdl.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
+        try:
+            # Strict, NOT errors="replace": substituting U+FFFD for undecodable bytes turns a file
+            # this checker cannot actually read into a reassuring "clean" result.
+            text = tmdl.read_bytes().decode("utf-8").lstrip("\ufeff")
+        except (OSError, UnicodeDecodeError) as exc:
+            findings.append(
+                TmdlFinding(
+                    "TMDL_UNREADABLE",
+                    f"could not be read as UTF-8 ({exc.__class__.__name__}), so it was NOT checked. "
+                    f"Power BI requires TMDL as UTF-8 without a BOM.",
+                    tmdl,
+                    1,
+                )
+            )
+            continue
         findings.extend(check_tmdl_text(tmdl, text))
+        findings.extend(check_tmdl_expressions(tmdl, text))
     return findings, len(files)
 
 

@@ -59,10 +59,59 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 - **`database.tmdl` must be exactly**: `database` (no name after it) on its own line, then a
   tab-indented `compatibilityLevel: <n>` on the next line. A name after `database` or an unindented
   `compatibilityLevel` causes a TMDL indentation parse error.
-- **Prefer single-line DAX over multi-line expressions for `column`/`measure`.** Multi-line
-  expression continuation has a subtle, easy-to-get-wrong indentation contract; single-line
-  `column X = <full DAX expression>` (DAX has no newline requirement) followed by properties at
-  declaration+1 tab is the proven-safe pattern.
+- ⚠️ **The fatal TMDL expression mistake is NOT a newline, and NOT a blank line — it is starting the
+  expression on the `=` line and then CONTINUING it onto the next line.** A customer field report
+  (issue #254) had an agent write a measure with blank lines between fragments; Desktop answered
+  `TMDL Format Error: Unexpected line type: Other!` and **refused to open the model at all**. The
+  obvious lesson ("never use newlines in DAX") is the wrong one, and it is a costly wrong one,
+  because it forces every long measure onto one unreviewable line.
+
+  ✅ **Measured 2026-08-29** against `TmdlSerializer.DeserializeDatabaseFromFolder` (AMO 19.84.1 —
+  the same parser Desktop uses), 34 synthetic variants injected into a real committed model:
+
+  | layout | verdict |
+  |---|---|
+  | `measure 'M' = IF(1=1,"a","b")` — single line | ✅ opens |
+  | expression starts on the line **after** `=`, indented deeper than the properties | ✅ opens; newlines preserved in the expression |
+  | …**with empty lines between fragments** | ✅ opens — blank lines are part of the expression |
+  | …with whitespace-only lines, or a blank line right after `=`, or a blank line before the properties | ✅ opens |
+  | ` ``` `-enclosed block, blank lines and all | ✅ opens (verbatim) |
+  | **`measure 'M' = IF(` then a continuation line** | ❌ `Unexpected line type: Other!` — model does not open |
+  | same, with blank lines between the fragments (the reported crash) | ❌ identical failure; the blank line is **not** the trigger |
+  | inline start whose continuation is `VAR x = 1` / `RETURN x` | ❌ `UnsupportedObjectType — VAR is not a supported property in the current context` |
+  | multi-line whose continuation **dedents to the object's own indent** | ❌ `Invalid indentation was detected!` |
+  | multi-line indented to the **same level as the properties** | ⚠️ **opens, silently corrupt** — `formatString: 0.0%` is swallowed *into the DAX* |
+
+  **The rule, stated positively:** an expression is either **entirely on the `=` line**, or it
+  **starts on the line after `=`** and every one of its lines is indented **strictly deeper than the
+  object's properties** (properties at declaration+1 tab ⇒ expression at declaration+2). Inside that
+  block, blank lines are legal and preserved. Mixing the two — text after `=` *and* continuation
+  lines — is what kills the model, because TMDL commits to single-line mode the moment it sees text
+  after `=`, and then every following line must be a property or a child object.
+
+  Microsoft documents exactly this: *"If multi-line, they must be located in the line immediately
+  following the property or object declaration… Multi-line expressions must be indented one level
+  deeper to the parent object properties… Vertical whitespaces (blank lines without whitespaces) are
+  allowed and are considered part of the expression."*
+  ([TMDL overview → Expressions](https://learn.microsoft.com/en-us/analysis-services/tmdl/tmdl-overview))
+
+  **Which to write.** Both are safe, so choose on reviewability: single-line for anything that fits,
+  multi-line (starting *after* the `=`) for a `VAR`/`RETURN` measure that is genuinely unreadable on
+  one line. The committed corpus in this repo is 100 % single-line (167 TMDL documents, zero
+  multi-line expressions, zero backtick blocks) — so single-line remains the **house default**, but
+  it is a style choice now, not a format constraint.
+
+  **The under-indented case deserves its own fear.** It is the only one that *passes* the parser: the
+  expression eats the object's own properties, so `formatString`/`displayFolder`/`dataType` silently
+  vanish from the model and nothing reports it. That is worse than the crash, which at least tells
+  you.
+
+  ✅ **Gated offline:** `python scripts/check_datamodel.py <model>` now reports
+  `TMDL_EXPRESSION_CONTINUATION`, `TMDL_EXPRESSION_UNINDENTED`, `TMDL_EXPRESSION_ABSORBS_PROPERTY`,
+  `TMDL_MISPLACED_DESCRIPTION`, `TMDL_UNTERMINATED_EXPRESSION` and `TMDL_UNREADABLE`, exiting **1**
+  on any finding. It agreed with the real parser on all 34 variants and fires on none of the 16
+  committed example models. Run it **before** the first Desktop open — that is the whole point, since
+  after the crash Desktop names no file and no line.
 - **A measure's suffix-qualified name must never collide with any column name in the same table**
   (e.g. `measure 'X'` next to `column 'X'`, even if one is hidden). Tabular's naming rule shares one
   namespace between columns and measures per table — a bare-named "value" measure over a same-named
