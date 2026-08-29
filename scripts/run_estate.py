@@ -87,28 +87,27 @@ needs no `--force`. Hence: all DAX lands in ONE run, and per-workbook work start
 That sentence used to end "this script owns that ordering so no agent has to remember it", which was
 false: it DOCUMENTED the ordering and checked nothing (issue #250). Every gate below runs in phase 2,
 reading the report the engine has already written - including the collision check, the one gate that
-is specifically about `--approved-dax`. A wrong landing was reported *after* it had landed, and a
-landing into a bundle full of hand-authored fix work was not reported at all.
+is specifically about `--approved-dax`. `assess_bundle_rewrite` now runs BEFORE the engine and
+refuses with `EXIT_BUNDLE_REWRITE` on either finding:
 
-`assess_bundle_rewrite` now runs BEFORE the engine and makes it true, refusing with
-`EXIT_BUNDLE_REWRITE` in two cases:
+* **downstream work would be destroyed** - the bundle is re-hashed against the baselines the
+  previous run wrote: `engine_output_tree` in `input_manifest.json` (every file in every folder a
+  re-run deletes, with NO format allowlist), plus the engine receipt and `generated_artifacts`.
+  `--accept-bundle-rewrite` proceeds, and the acknowledgement is recorded in the bundle.
+* **the bundle was built by a DIFFERENT engine version** - 2.113.0 emitted deprecated Bing
+  `shapeMap` visuals and dropped a density-map worksheet entirely where 2.126.0 emitted `azureMap`
+  with a heat layer, and nothing in the output said which ran (#107). Re-running in place silently
+  mixes both. `--accept-engine-version-change` proceeds.
 
-* **downstream work would be destroyed.** Re-hash the bundle against the two baselines the previous
-  run already wrote - `engine-output-receipt.json` (written by every run, read back by nothing until
-  now) and `input_manifest.json`'s `generated_artifacts` - and any file that no longer matches is
-  somebody's work. `--accept-bundle-rewrite` proceeds and the acknowledgement is recorded in the
-  bundle.
-* **the bundle was built by a DIFFERENT engine version.** Two engine versions are not equivalent:
-  2.113.0 emitted deprecated Bing `shapeMap` visuals and dropped a density-map worksheet entirely
-  where 2.126.0 emitted `azureMap` with a heat layer, and nothing in the output said which ran
-  (#107). Re-running into that bundle silently mixes both. `--accept-engine-version-change` proceeds.
+Two SEPARATE flags on purpose: one would mean accepting a known engine bump also silently waives the
+destruction guard for work you did not know was there.
 
-The two acknowledgements are deliberately SEPARATE flags. One flag would mean accepting a known
-engine bump also silently waives the destruction guard for work you did not know was there.
-
-A bundle with neither baseline (pre-receipt, or third-party) warns and proceeds - a missing receipt
-must not brick every older bundle - and `--slice-only` never runs the guard at all, because it never
-runs the engine and therefore destroys nothing.
+**The rule that governs the whole barrier: where it cannot assess, it BLOCKS.** A missing, empty,
+truncated or `--slice-only`-backfilled baseline, or an unreadable engine version, is an explicit
+indeterminate state - never a pass. The first cut of this file reported *clean* on all five of those
+routes and a reviewer destroyed a sentinel through each of them at exit 0. Legacy and third-party
+bundles stay usable through the acknowledgement flags, which is what they are for. `--slice-only`
+alone is genuinely exempt: it never invokes the engine, so it destroys nothing.
 
 (Line numbers are against engine HEAD `81e6164`. They drift on every upstream release - the four
 `rmtree`/guard sites moved ~30 lines between 2.72.0 and 2.78.0 with no behaviour change - so re-derive
@@ -116,6 +115,14 @@ them by symbol, not by number, if they do not match.)
 """
 
 from __future__ import annotations
+
+# The coordinator and its pre-engine barrier are one procedure: the barrier's whole job is to run
+# before `main`'s phase 1, and the docstring above is the measured knowledge that keeps it correct.
+# DEFERRED FIX: extract the barrier (`assess_bundle_rewrite` and its helpers, ~390 lines) into
+# `scripts/bundle_rewrite_guard.py`. Not done here because a new `scripts/*.py` must be classified in
+# `docs/agent-capability-wiring.md` or carry an `internal: true` marker that no script in this repo
+# uses yet - pioneering that mechanism belongs in its own change, not in a security fix.
+# pylint: disable=too-many-lines
 
 import argparse
 import json
@@ -141,7 +148,7 @@ from check_pbir_valid import REPORT_NAME as PBIR_VALID_REPORT
 from check_pbir_valid import render as render_pbir_valid
 from check_pbir_valid import scan as scan_pbir_validity
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
-from migration_bundle import ENGINE_RECEIPT, engine_artifact_records, sha256_file, write_engine_receipt
+from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
 
 log = logging.getLogger("run_estate")
 
@@ -161,6 +168,7 @@ EXIT_INVALID_PBIR = 7
 EXIT_BLANK_PLACEHOLDER = 8
 EXIT_BUNDLE_REWRITE = 9
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
+SLICE_ONLY_COVERAGE = "slice_only_backfill"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
@@ -285,7 +293,7 @@ def backfill_slice_only_baseline(bundle: Path, report: dict | None, phases: list
         if isinstance(existing, dict) and GENERATED_ARTIFACTS_KEY in existing:
             return None
     started = time.monotonic()
-    written = write_generated_artifact_manifest(bundle, report, earliest_mtime=None, coverage="slice_only_backfill")
+    written = write_generated_artifact_manifest(bundle, report, earliest_mtime=None, coverage=SLICE_ONLY_COVERAGE)
     phases.append({"phase": "slice_only_baseline_backfill", "elapsed_sec": round(time.monotonic() - started, 1)})
     log.info("GENERATED_ARTIFACTS: backfilled slice-only baseline -> %s", written)
     return written
@@ -469,26 +477,44 @@ def write_receipt_phase(out_dir: Path, phases: list[dict], engine: Path | None =
 
 
 def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict], engine: Path | None = None) -> None:
-    """Baseline the engine's output: generated-artifact hashes, then the receipt over them.
+    """Baseline the engine's output: artifact hashes, the full output tree, then the receipt.
 
     The order is load-bearing and lives HERE rather than in ``main`` so it cannot be separated by an
-    unrelated edit: the manifest UPSERTS into ``input_manifest.json`` and the receipt HASHES that
-    same file, so receipt-first leaves ``input_manifest_sha256`` stale and the credential gate then
-    rejects the bundle the engine just produced - while the run still reports success.
+    unrelated edit: both manifest writes UPSERT into ``input_manifest.json`` and the receipt HASHES
+    that same file, so receipt-first leaves ``input_manifest_sha256`` stale and the credential gate
+    then rejects the bundle the engine just produced - while the run still reports success.
     """
     log.info(
         "GENERATED_ARTIFACTS: hashes -> %s",
         write_generated_artifact_manifest(out_dir, report, phases[0]["started_wall"] - 1),
     )
+    log.info("ENGINE_OUTPUT_TREE: hashes -> %s", write_engine_output_tree(out_dir))
     write_receipt_phase(out_dir, phases, engine)
 
 
 # ---------------------------------------------------------------------------
 # The destructive-re-run barrier (issue #250) - the ONLY pre-engine gate
+#
+# ONE rule governs everything below: where the barrier CANNOT ASSESS something, it must say so and
+# BLOCK. Absence of evidence is not evidence of absence. A guard that reports clean when it cannot
+# see is worse than no guard, because the operator trusts it - and five separate routes into
+# "reported clean, destroyed real work at exit 0" were found in the first cut of this file.
 # ---------------------------------------------------------------------------
 
 BUNDLE_REWRITE_RECORD = "bundle-rewrite-acknowledgement.json"
+ENGINE_TREE_KEY = "engine_output_tree"
 REWRITE_LIST_LIMIT = 12
+
+# Every top-level folder a re-run may delete and rewrite. `migration_bundle.ENGINE_OUTPUT_DIRS` is
+# deliberately NOT reused: it omits `reports/`, and the receipt built from it filters by
+# `ARTIFACT_SUFFIXES`, which is exactly the allowlist that let a hand-authored PBIR file and a
+# `textscan` `.txt` extract go unbaselined and unprotected. The barrier allowlists LOCATIONS, never
+# formats.
+ENGINE_TREE_ROOTS = ("data", "pbip", "reports", "semantic_models")
+
+# What makes a `--output` folder "already an engine bundle" rather than a fresh target. An empty or
+# unrelated folder is NOT one, so a first run into a new folder is never touched by the barrier.
+BUNDLE_MARKERS = ("report.json", "summary.md", "input_manifest.json", BUNDLE_REWRITE_RECORD)
 
 
 class BundleDrift(NamedTuple):
@@ -504,30 +530,40 @@ class BundleDrift(NamedTuple):
         return len(self.modified) + len(self.added) + len(self.missing)
 
 
+class BundleCoverage(NamedTuple):
+    """How much of the bundle the barrier can actually vouch for.
+
+    ``complete`` means a full engine-output tree baseline exists, which is the ONLY thing that makes
+    an ADDED file decidable - without it, a file the engine never wrote is indistinguishable from
+    one it did. ``gaps`` is every reason the assessment is partial; a non-empty ``gaps`` is itself a
+    blocking finding, because "I could not look" must never render as "I looked and it was fine".
+    """
+
+    known: dict[str, str]
+    complete: bool
+    gaps: list[str]
+
+
 class BundleRewriteFindings(NamedTuple):
     """Everything the pre-engine barrier knows about the `--output` folder it is about to rewrite.
 
-    ``applicable`` is False when the question does not arise at all - ``--slice-only`` (no engine, so
-    nothing is destroyed), a `--output` that does not exist yet, or a bundle carrying neither
-    baseline. It is deliberately distinct from "checked and found nothing".
+    ``applicable`` is False only when the question does not arise: ``--slice-only`` (no engine, so
+    nothing is destroyed) or a `--output` that is not an engine bundle yet. It is never False merely
+    because evidence is missing - that case is applicable AND indeterminate, which blocks.
     """
 
     bundle: Path
     applicable: bool
     drift: BundleDrift
+    coverage: BundleCoverage
     recorded_version: str | None
     running_version: str | None
-    warnings: list[str]
     accepted_rewrite: bool
     accepted_version: bool
 
     @property
     def version_changed(self) -> bool:
-        """Whether this run's engine differs from the one that built the bundle.
-
-        Both versions have to be known: an unversioned engine tree or a pre-``engine`` receipt is an
-        absence of evidence, and blocking on it would fail every older bundle for no finding.
-        """
+        """A different engine built this bundle than the one about to rewrite it."""
         return bool(
             self.applicable
             and self.recorded_version
@@ -536,14 +572,23 @@ class BundleRewriteFindings(NamedTuple):
         )
 
     @property
+    def version_indeterminate(self) -> bool:
+        """Either version is unknown, so "did the engine change?" has no answer.
+
+        A truncated receipt used to make this return "no change" and wave the run through - one
+        broken byte disabling the guard. Unknown is now its own blocking state.
+        """
+        return bool(self.applicable and not (self.recorded_version and self.running_version))
+
+    @property
     def blocks_on_downstream(self) -> bool:
-        """Downstream work exists in the bundle and the caller has not accepted losing it."""
-        return bool(self.applicable and self.drift.total and not self.accepted_rewrite)
+        """Work would be destroyed, or the barrier cannot prove that it would not be."""
+        return bool(self.applicable and (self.drift.total or self.coverage.gaps) and not self.accepted_rewrite)
 
     @property
     def blocks_on_engine_version(self) -> bool:
-        """The bundle would be rewritten by a different engine than the one that built it."""
-        return bool(self.version_changed and not self.accepted_version)
+        """The engine differs, or cannot be shown not to differ."""
+        return bool((self.version_changed or self.version_indeterminate) and not self.accepted_version)
 
     @property
     def blocking(self) -> bool:
@@ -552,39 +597,11 @@ class BundleRewriteFindings(NamedTuple):
 
     @property
     def acknowledged(self) -> bool:
-        """Whether a real finding was waived by an explicit flag, and so must be recorded."""
+        """Whether a real finding or a coverage gap was waived by a flag, and so must be recorded."""
         return bool(
-            (self.applicable and self.drift.total and self.accepted_rewrite)
-            or (self.version_changed and self.accepted_version)
+            (self.applicable and (self.drift.total or self.coverage.gaps) and self.accepted_rewrite)
+            or ((self.version_changed or self.version_indeterminate) and self.accepted_version)
         )
-
-
-def _looks_like_bundle(bundle: Path) -> bool:
-    """Whether `--output` already holds engine output, rather than being a fresh folder."""
-    return (bundle / "report.json").is_file() or (bundle / "pbip").is_dir()
-
-
-def read_engine_receipt(bundle: Path) -> tuple[dict | None, str | None]:
-    """Read the receipt the bundle's last run wrote. Returns ``(receipt, warning)``.
-
-    ``write_receipt_phase`` writes this on EVERY run and, until this guard existed, nothing ever read
-    it back. It is the only record of which files the engine itself produced, which is what makes
-    "everything else in here is somebody's downstream work" a decidable question rather than a guess.
-
-    A malformed receipt degrades to ``(None, warning)`` instead of raising: the caller's job is to
-    protect a bundle, and aborting the run because the protection metadata is corrupt would turn a
-    safety feature into an outage.
-    """
-    path = bundle / ENGINE_RECEIPT
-    if not path.is_file():
-        return None, None
-    try:
-        receipt = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return None, f"{ENGINE_RECEIPT} is unreadable ({type(exc).__name__})"
-    if not isinstance(receipt, dict):
-        return None, f"{ENGINE_RECEIPT} is not a JSON object"
-    return receipt, None
 
 
 def _is_guarded_path(relative: Path) -> bool:
@@ -596,6 +613,78 @@ def _is_guarded_path(relative: Path) -> bool:
     """
     lower = [part.lower() for part in relative.parts]
     return not _is_scratch_path(relative) and not any(part in VOLATILE_GENERATED_DIRS for part in lower)
+
+
+def engine_output_tree_hashes(bundle: Path) -> dict[str, str]:
+    """Hash EVERY file under every folder a re-run may delete, with no format allowlist.
+
+    This is the barrier's authoritative baseline and the reason it can see an added PBIR file or a
+    `textscan` `.txt` extract under `<project>.Data` - neither of which carries a suffix the engine
+    receipt records, and both of which sit inside a directory the engine rmtree()s.
+    """
+    files: dict[str, str] = {}
+    for root_name in ENGINE_TREE_ROOTS:
+        root = bundle / root_name
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(bundle)
+            if _is_guarded_path(relative):
+                files[relative.as_posix()] = sha256_file(path)
+    return files
+
+
+def write_engine_output_tree(bundle: Path) -> Path:
+    """Record the complete engine-output tree into ``input_manifest.json``.
+
+    A SEPARATE key from ``generated_artifacts`` on purpose: that one is the tamper-audit baseline of
+    stable *deliverables* an agent may declare edits against, and `check_migration_progress.py`
+    depends on its shape and scope. This one answers a different question - "what was in the
+    directories the next run will delete?" - so it is deliberately wider (flat-file extracts,
+    `<project>.Data`, `reports/`, loose files) and must not be conflated with it.
+
+    Written only on a real engine run. ``--slice-only`` has no engine-run boundary, so it can only
+    hash a working copy that may already contain downstream edits; recording that here would launder
+    those edits into "engine output" and is exactly the hole this key exists to close.
+    """
+    manifest_path = bundle / "input_manifest.json"
+    manifest: dict = {}
+    if manifest_path.is_file():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            loaded = None
+        manifest = loaded if isinstance(loaded, dict) else {"engine_input_manifest": loaded}
+    manifest[ENGINE_TREE_KEY] = {
+        "version": 1,
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "roots": list(ENGINE_TREE_ROOTS),
+        "files": engine_output_tree_hashes(bundle),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def read_engine_receipt(bundle: Path) -> tuple[dict | None, str | None]:
+    """Read the receipt the bundle's last run wrote. Returns ``(receipt, gap)``.
+
+    ``write_receipt_phase`` writes this on EVERY run and, until this guard existed, nothing ever read
+    it back. A malformed receipt degrades to ``(None, gap)`` rather than raising - but the gap is a
+    BLOCKING finding, not a warning: a corrupt receipt tells you less than no receipt does, and
+    treating it as "no version change" is how one broken byte disabled the version guard entirely.
+    """
+    path = bundle / ENGINE_RECEIPT
+    if not path.is_file():
+        return None, None
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"{ENGINE_RECEIPT} is unreadable ({type(exc).__name__}) - it attests to nothing"
+    if not isinstance(receipt, dict):
+        return None, f"{ENGINE_RECEIPT} is not a JSON object - it attests to nothing"
+    return receipt, None
 
 
 def _receipt_artifact_hashes(receipt: dict | None) -> dict[str, str]:
@@ -610,23 +699,21 @@ def _receipt_artifact_hashes(receipt: dict | None) -> dict[str, str]:
     return hashes
 
 
-def _generated_baseline_hashes(bundle: Path) -> dict[str, str]:
-    """The WIDER baseline: every file under a `*.SemanticModel`/`*.Report` folder, PBIR JSON included.
-
-    The receipt only records `ARTIFACT_SUFFIXES`, so a hand-edited PBIR visual definition - the
-    report builder's entire output - is invisible to it. `write_generated_artifact_manifest` hashes
-    the whole generated tree, so the two baselines together cover both halves of what an agent
-    actually edits: model measures and report visuals.
-    """
-    manifest_path = bundle / "input_manifest.json"
-    if not manifest_path.is_file():
+def _read_manifest(bundle: Path) -> dict:
+    """``input_manifest.json`` as a dict, or empty when absent or unreadable."""
+    path = bundle / "input_manifest.json"
+    if not path.is_file():
         return {}
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    generated = manifest.get(GENERATED_ARTIFACTS_KEY) if isinstance(manifest, dict) else None
-    files = generated.get("files") if isinstance(generated, dict) else None
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _hash_map(block: object) -> dict[str, str]:
+    """A ``{"files": {path: sha256}}`` block as a clean map, dropping anything malformed."""
+    files = block.get("files") if isinstance(block, dict) else None
     if not isinstance(files, dict):
         return {}
     return {
@@ -636,40 +723,67 @@ def _generated_baseline_hashes(bundle: Path) -> dict[str, str]:
     }
 
 
-def detect_downstream_work(bundle: Path, receipt_hashes: dict[str, str], baseline: dict[str, str]) -> BundleDrift:
+def assess_coverage(bundle: Path, receipt: dict | None, receipt_gap: str | None) -> BundleCoverage:
+    """Work out what the barrier can vouch for, and name every hole in it.
+
+    Three baselines, in descending authority: the complete engine-output tree, the engine receipt,
+    and the generated-artifact manifest. Only the first makes an ADDED file decidable. A
+    ``--slice-only`` backfill is explicitly NOT trusted - it hashes the working copy, downstream
+    edits included, so treating it as engine output blesses exactly the work the barrier protects.
+    """
+    gaps: list[str] = []
+    known: dict[str, str] = {}
+    manifest = _read_manifest(bundle)
+
+    tree = _hash_map(manifest.get(ENGINE_TREE_KEY))
+    known.update(tree)
+    if not tree:
+        gaps.append(
+            f"no usable '{ENGINE_TREE_KEY}' baseline in input_manifest.json - a file the engine never "
+            "wrote cannot be told from one it did, so ADDED downstream work is undetectable here"
+        )
+
+    receipt_hashes = _receipt_artifact_hashes(receipt)
+    known.update(receipt_hashes)
+    if receipt is None:
+        gaps.append(receipt_gap or f"no {ENGINE_RECEIPT} - nothing attests to what the engine produced")
+    elif not receipt_hashes:
+        gaps.append(f"{ENGINE_RECEIPT} lists no usable artifacts - it attests to nothing")
+
+    generated = manifest.get(GENERATED_ARTIFACTS_KEY)
+    coverage = generated.get("coverage") if isinstance(generated, dict) else None
+    if coverage == SLICE_ONLY_COVERAGE:
+        gaps.append(
+            f"'{GENERATED_ARTIFACTS_KEY}' was backfilled by --slice-only from the working copy, so its "
+            "hashes are not proof of engine origin and are not trusted as a baseline here"
+        )
+    else:
+        known.update(_hash_map(generated))
+
+    return BundleCoverage(known, bool(tree), gaps)
+
+
+def detect_downstream_work(bundle: Path, coverage: BundleCoverage) -> BundleDrift:
     """Re-hash the bundle and name every file that is no longer what the engine produced.
 
-    ``added`` is decided from the RECEIPT alone, via ``engine_artifact_records`` - the very function
-    that wrote it - so a pristine bundle reconciles exactly and cannot raise a false alarm. The
-    generated-artifact baseline is mtime-filtered when written, so it is used only for files it
-    already knows about (modified/missing) and never to decide that a file is new.
+    ``added`` is reported ONLY when coverage is complete. With a partial baseline every unrecognised
+    file is ambiguous, so listing some of them would imply the rest had been cleared; the coverage
+    gap blocks instead, which is the honest answer.
     """
+    current = engine_output_tree_hashes(bundle)
     modified: list[str] = []
-    added: list[str] = []
     missing: list[str] = []
-
-    if receipt_hashes:
-        current = {
-            record["path"]: record["sha256"]
-            for record in engine_artifact_records(bundle)
-            if _is_guarded_path(Path(record["path"]))
-        }
-        for path, digest in receipt_hashes.items():
-            if path not in current:
+    for path, digest in coverage.known.items():
+        now = current.get(path)
+        if now is None:
+            candidate = bundle / path
+            if not candidate.is_file():
                 missing.append(path)
-            elif current[path] != digest:
+            elif sha256_file(candidate) != digest:
                 modified.append(path)
-        added = [path for path in current if path not in receipt_hashes]
-
-    for path, digest in baseline.items():
-        if path in receipt_hashes:
-            continue
-        candidate = bundle / path
-        if not candidate.is_file():
-            missing.append(path)
-        elif sha256_file(candidate) != digest:
+        elif now != digest:
             modified.append(path)
-
+    added = [path for path in current if path not in coverage.known] if coverage.complete else []
     return BundleDrift(sorted(set(modified)), sorted(set(added)), sorted(set(missing)))
 
 
@@ -681,6 +795,13 @@ def _engine_versions(receipt: dict | None, engine: Path | None) -> tuple[str | N
     return (recorded if isinstance(recorded, str) else None, running if isinstance(running, str) else None)
 
 
+def _looks_like_bundle(bundle: Path) -> bool:
+    """Whether `--output` already holds engine output, rather than being a fresh target."""
+    return any((bundle / name).is_file() for name in BUNDLE_MARKERS) or any(
+        (bundle / root).is_dir() for root in ENGINE_TREE_ROOTS
+    )
+
+
 def assess_bundle_rewrite(args: argparse.Namespace, engine: Path | None) -> BundleRewriteFindings:
     """Decide, BEFORE the engine runs, whether this run may rewrite `--output`.
 
@@ -689,38 +810,30 @@ def assess_bundle_rewrite(args: argparse.Namespace, engine: Path | None) -> Bund
     points at an existing bundle every single time.
     """
     bundle = Path(args.output)
-    nothing = BundleDrift([], [], [])
     accepted_rewrite = bool(args.accept_bundle_rewrite)
     accepted_version = bool(args.accept_engine_version_change)
-    if args.slice_only or not bundle.is_dir():
-        return BundleRewriteFindings(bundle, False, nothing, None, None, [], accepted_rewrite, accepted_version)
+    if args.slice_only or not bundle.is_dir() or not _looks_like_bundle(bundle):
+        return BundleRewriteFindings(
+            bundle,
+            False,
+            BundleDrift([], [], []),
+            BundleCoverage({}, True, []),
+            None,
+            None,
+            accepted_rewrite,
+            accepted_version,
+        )
 
-    receipt, warning = read_engine_receipt(bundle)
-    warnings = [warning] if warning else []
-    receipt_hashes = _receipt_artifact_hashes(receipt)
-    if receipt is not None and not receipt_hashes:
-        warnings.append(f"{ENGINE_RECEIPT} lists no artifacts - it cannot attest to what the engine produced")
-    baseline = _generated_baseline_hashes(bundle)
+    receipt, receipt_gap = read_engine_receipt(bundle)
+    coverage = assess_coverage(bundle, receipt, receipt_gap)
     recorded_version, running_version = _engine_versions(receipt, engine)
-    if not receipt_hashes and not baseline:
-        if _looks_like_bundle(bundle):
-            warnings.append(
-                f"no usable {ENGINE_RECEIPT} and no generated-artifact baseline in {bundle} - this run "
-                "cannot tell engine output from downstream work, so it is not trying to; anything an "
-                "agent wrote here will be destroyed without being named"
-            )
-        if not recorded_version:
-            return BundleRewriteFindings(
-                bundle, False, nothing, None, None, warnings, accepted_rewrite, accepted_version
-            )
-
     return BundleRewriteFindings(
         bundle,
         True,
-        detect_downstream_work(bundle, receipt_hashes, baseline),
+        detect_downstream_work(bundle, coverage),
+        coverage,
         recorded_version,
         running_version,
-        warnings,
         accepted_rewrite,
         accepted_version,
     )
@@ -735,15 +848,14 @@ def _sample(paths: list[str]) -> str:
     return "\n".join(lines)
 
 
-def print_bundle_rewrite(findings: BundleRewriteFindings) -> None:
-    """Name what a re-run into this `--output` would destroy, and how to proceed deliberately."""
-    for warning in findings.warnings:
-        print(f"BUNDLE_REWRITE: WARN - {warning}")
+def _print_drift(findings: BundleRewriteFindings) -> None:
+    """The downstream-work half of the verdict: what is here that the engine did not put here."""
+    if not findings.drift.total and not findings.coverage.gaps:
+        return
+    verdict = "ACCEPTED" if findings.accepted_rewrite else "REFUSED"
+    print(f"\nESTATE: BUNDLE_REWRITE {verdict} - {findings.bundle}")
     if findings.drift.total:
-        print(
-            f"\nESTATE: BUNDLE_REWRITE {'ACCEPTED' if findings.accepted_rewrite else 'REFUSED'} - "
-            f"{findings.drift.total} file(s) in {findings.bundle} no longer match what the engine produced"
-        )
+        print(f"  {findings.drift.total} file(s) no longer match what the engine produced:")
         for label, paths in (
             ("modified", findings.drift.modified),
             ("added", findings.drift.added),
@@ -752,36 +864,57 @@ def print_bundle_rewrite(findings: BundleRewriteFindings) -> None:
             if paths:
                 print(f"  {label} ({len(paths)}):")
                 print(_sample(paths))
-        print(
-            "  An engine re-run is DELETE-AND-RECREATE, not merge: it rmtree()s the .SemanticModel\n"
-            "  folder, the .pbip project dir and <name>.Report before rewriting them, and the\n"
-            "  engine's own stale-output guard EXEMPTS the --approved-dax landing path. Every file\n"
-            "  listed above would be gone, and no other gate here runs until after that has happened."
-        )
-        if not findings.accepted_rewrite:
-            print("  -> land into a FRESH --output, or pass --accept-bundle-rewrite to proceed knowingly.")
+    for gap in findings.coverage.gaps:
+        print(f"  CANNOT ASSESS: {gap}")
+    print(
+        "  An engine re-run is DELETE-AND-RECREATE, not merge: it rmtree()s the .SemanticModel\n"
+        "  folder, the .pbip project dir and <name>.Report before rewriting them, and the\n"
+        "  engine's own stale-output guard EXEMPTS the --approved-dax landing path. Anything in\n"
+        "  those folders would be gone, and no other gate here runs until after that has happened."
+    )
+    if not findings.accepted_rewrite:
+        print("  -> land into a FRESH --output, or pass --accept-bundle-rewrite to proceed knowingly.")
+
+
+def _print_version(findings: BundleRewriteFindings) -> None:
+    """The engine-identity half: a bundle two engine versions built is two bundles in a trench coat."""
+    if not (findings.version_changed or findings.version_indeterminate):
+        return
+    verdict = "ACCEPTED" if findings.accepted_version else "REFUSED"
     if findings.version_changed:
         print(
-            f"\nESTATE: BUNDLE_REWRITE {'ACCEPTED' if findings.accepted_version else 'REFUSED'} - this "
-            f"bundle was built by engine {findings.recorded_version}, this run would rewrite it with "
-            f"{findings.running_version}"
+            f"\nESTATE: BUNDLE_REWRITE {verdict} - this bundle was built by engine "
+            f"{findings.recorded_version}, this run would rewrite it with {findings.running_version}"
         )
+    else:
         print(
-            "  Two engine versions are not equivalent: 2.113.0 emitted deprecated Bing shapeMap\n"
-            "  visuals and dropped a density-map worksheet entirely where 2.126.0 emitted azureMap\n"
-            "  with a heat layer, and nothing in the output said which one ran (#107). Rewriting in\n"
-            "  place mixes both into one bundle."
+            f"\nESTATE: BUNDLE_REWRITE {verdict} - CANNOT ASSESS the engine version "
+            f"(bundle recorded: {findings.recorded_version or 'unknown'}; this run: "
+            f"{findings.running_version or 'unknown'})"
         )
-        if not findings.accepted_version:
-            print("  -> use a FRESH --output, or pass --accept-engine-version-change to proceed knowingly.")
+    print(
+        "  Two engine versions are not equivalent: 2.113.0 emitted deprecated Bing shapeMap\n"
+        "  visuals and dropped a density-map worksheet entirely where 2.126.0 emitted azureMap\n"
+        "  with a heat layer, and nothing in the output said which one ran (#107). Rewriting in\n"
+        "  place mixes both into one bundle."
+    )
+    if not findings.accepted_version:
+        print("  -> use a FRESH --output, or pass --accept-engine-version-change to proceed knowingly.")
+
+
+def print_bundle_rewrite(findings: BundleRewriteFindings) -> None:
+    """Name what a re-run into this `--output` would destroy, and how to proceed deliberately."""
+    _print_drift(findings)
+    _print_version(findings)
 
 
 def record_bundle_rewrite_acknowledgement(findings: BundleRewriteFindings) -> Path | None:
     """Append the acknowledgement to the bundle, so the ARTIFACT says the loss was deliberate.
 
     Written before the engine runs and at the bundle root, which the engine's `rmtree` sites do not
-    touch, so it survives the rewrite it is describing. Append rather than overwrite: a bundle that
-    has been knowingly rewritten twice should say so twice.
+    touch, so it survives the rewrite it is describing. The coverage gaps are recorded alongside the
+    file list: "these files were destroyed" and "and this much could not be assessed at all" are
+    different admissions, and collapsing them would overstate what the record proves.
     """
     if not findings.acknowledged:
         return None
@@ -801,6 +934,8 @@ def record_bundle_rewrite_acknowledgement(findings: BundleRewriteFindings) -> Pa
             "accepted_engine_version_change": findings.accepted_version,
             "engine_version_recorded": findings.recorded_version,
             "engine_version_running": findings.running_version,
+            "coverage_complete": findings.coverage.complete,
+            "coverage_gaps": findings.coverage.gaps,
             "destroyed": {
                 "modified": findings.drift.modified,
                 "added": findings.drift.added,

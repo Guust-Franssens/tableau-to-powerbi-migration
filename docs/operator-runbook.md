@@ -559,7 +559,7 @@ and 2/5 reproduced by running the command:
 | `6` | `EXIT_EMPTY_MODEL` | **live** — a model would open and load **zero rows** (an Import partition over a flat file that never landed) | read `<bundle>/empty-model-check.json`; see the block below |
 | `7` | `EXIT_INVALID_PBIR` | **live** ✅ reproduced — a shipped report FAILS the first-party `powerbi-report-author validate` (measured: `PBIR_ROLE_REQUIRED_MISSING` from a stubbed calc whose projection was dropped) | read `<bundle>/pbir-validity-check.json`; **bind the stub**, do not delete the visual |
 | `8` | `EXIT_BLANK_PLACEHOLDER` | **live** ✅ reproduced — a handover-backed `BLANK()` placeholder is consumed by a report filter or visual field binding | read `<bundle>/blank-placeholder-check.json`; translate the calc or remove the consuming report dependency knowingly |
-| `9` | `EXIT_BUNDLE_REWRITE` | **pre-engine refusal** (#250) — the `--output` bundle already holds work an engine re-run would delete, and/or a **different engine version** built it | land into a FRESH `--output`, or acknowledge with `--accept-bundle-rewrite` / `--accept-engine-version-change`; the acknowledgement is written to `<bundle>/bundle-rewrite-acknowledgement.json` |
+| `9` | `EXIT_BUNDLE_REWRITE` | **pre-engine refusal** (#250) — the `--output` bundle holds work an engine re-run would delete, a **different engine version** built it, **or the barrier cannot assess either question** (missing/empty/truncated baseline, `--slice-only`-backfilled baseline, unreadable engine version) | land into a FRESH `--output`, or acknowledge with `--accept-bundle-rewrite` / `--accept-engine-version-change`; the acknowledgement, the destroyed files **and the coverage gaps** are written to `<bundle>/bundle-rewrite-acknowledgement.json` |
 
 ❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
 §5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
@@ -595,14 +595,22 @@ Reference run ✅ verified from `_convert.log`: `bound=23/38 failed=15 warned=20
 > needs no `--force`. **All DAX approvals land in ONE run; per-workbook agent work starts only
 > afterwards.** ✅ verified from `run_estate.py`'s own docstring.
 >
-> ✅ **This is now ENFORCED, not just documented** (#250). `run_estate.py` re-hashes the target
-> bundle against `engine-output-receipt.json` and `input_manifest.json`'s `generated_artifacts`
-> **before** the engine runs, and **exits 9** naming every file the re-run would destroy. Proceeding
-> anyway needs `--accept-bundle-rewrite`, and the acknowledgement (including the file list) is
-> written to `<bundle>/bundle-rewrite-acknowledgement.json`. A bundle built by a **different engine
-> version** is refused the same way and acknowledged separately with
-> `--accept-engine-version-change` — deliberately two flags, so accepting a known engine bump does
-> not silently waive the destruction guard. `--slice-only` never runs the engine and is exempt.
+> ✅ **This is now ENFORCED, not just documented** (#250). Before the engine runs, `run_estate.py`
+> re-hashes **every file in every folder a re-run deletes** (`pbip/`, `semantic_models/`, `reports/`,
+> `data/`) against the `engine_output_tree` baseline in `input_manifest.json`, plus
+> `engine-output-receipt.json` and `generated_artifacts`. It **exits 9** naming what would be
+> destroyed. Proceeding needs `--accept-bundle-rewrite`; a bundle built by a **different engine
+> version** is refused separately and acknowledged with `--accept-engine-version-change` —
+> deliberately two flags, so accepting a known engine bump does not silently waive the destruction
+> guard.
+>
+> ⚠️ **"Cannot assess" blocks too, and that is the point.** A missing, empty, truncated or
+> `--slice-only`-backfilled baseline, or an engine version that cannot be read, is an explicit
+> indeterminate state — never a pass. The first cut reported *clean* through five such routes and a
+> reviewer destroyed a sentinel through each at exit 0. **Bundles built before this shipped have no
+> `engine_output_tree`, so their first destructive re-run will need both flags** — that is the
+> intended cost of not being able to prove what is in them. `--slice-only` never runs the engine and
+> is exempt.
 
 What a bundle contains ✅ verified against the reference bundle by listing it, 2026-08-13:
 
@@ -618,7 +626,8 @@ What a bundle contains ✅ verified against the reference bundle by listing it, 
 | `empty-model-check.json` | the exit-6 verdict: every model, its partitions, and why any of them would load zero rows. **Written on every run, pass or fail** | — |
 | `phase-timings.json` | per-phase elapsed seconds — see the note under §2's table for what it does *not* cover | — |
 | `engine-output-receipt.json` | hashes of the engine's output **and `engine` — what built this bundle** (§1.2). Read back by the pre-engine rewrite barrier (exit 9) to tell engine output from downstream work | — |
-| `bundle-rewrite-acknowledgement.json` | present only when someone knowingly re-ran the engine over downstream work or a different engine version — records when, which flag, and every file destroyed | — |
+| `input_manifest.json` → `engine_output_tree` | the barrier's authoritative baseline: **every** file in every folder a re-run deletes, with no format allowlist (so PBIR JSON and `textscan` extracts under `<project>.Data` are covered, which the receipt's suffix list does not reach). Absent ⇒ the next destructive run is indeterminate and blocks | — |
+| `bundle-rewrite-acknowledgement.json` | present only when someone knowingly re-ran the engine over downstream work, a different engine version, or a bundle that could not be assessed — records when, which flag, every file destroyed, and every coverage gap | — |
 | `.credential-gate-audit.log` | append-only audit trail; `credential_gate.py verify` reads it. **This is the non-narrative record** — trust it over any summary, including your own | — |
 | `input_manifest.json`, `source-provenance.json` | what went in, and where upstream it came from | — |
 | `deploy-journal.jsonl` | written by step 6, not step 5: intent-then-outcome per item (§6.1) | — |
