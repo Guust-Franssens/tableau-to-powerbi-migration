@@ -3,11 +3,13 @@
 **Answers the question**: "Are there AI tools that can help migrate dashboards from Tableau to
 Power BI, and what are their limitations?"
 
-This is a grounded, evidence-based answer, not a generic claim. Everything below comes from actual
+This is a grounded, evidence-based answer, not a generic claim. Most examples below come from actual
 end-to-end runs of this toolkit against **16 real, publicly available Tableau Public workbooks** (every
 folder under `examples/`), ranging from a 7-worksheet KPI dashboard to a 91-worksheet enterprise
-navigation app, plus IronViz infographics and custom-geometry charts. Where a specific behavior was
-observed on a specific workbook, that workbook's slug is cited so the claim is checkable.
+navigation app, plus IronViz infographics and custom-geometry charts. The known-limits section also
+cites later field evidence from a 44-unit customer estate where the hardest report-layer migrations
+exposed gaps the public examples did not. Where a specific behavior was observed on a specific
+workbook or unit, that source is cited so the claim is checkable.
 
 ## What the pipeline does automatically
 
@@ -130,9 +132,21 @@ a single pass does.
 - **Extract-based data sources with no live upstream** migrate structurally, but real row data requires
   the separate `.hyper` extraction step (or repointing to a true upstream if one exists behind the
   extract).
-- **Visual polish is a separate pass.** Chart-type and layout mapping is automated and directionally
-  correct, but exact spacing, colors, and fonts still deserve a design pass before a customer-facing
-  rollout.
+- **Report-layer fidelity is the biggest variable, not just "visual polish."** On the hardest field
+  units, the customer did not elect to rebuild the semantic models, but that does not mean the model
+  tier is risk-free: the same field record includes unresolved model defects such as stubbed
+  `BLANK()` measures and missing reference columns. The report layer is where manual rework was chosen
+  before customer rollout. In a later 44-unit SES estate, the two hardest units exposed this tail risk:
+  [**IA CAPS Dashboard**](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/342)
+  shipped provisional after retry validation found **3 FAIL / 8 PARTIAL of 11 pages**, including two
+  hard-crash pages, and the customer chose to have their team manually repair the visual layer;
+  [**IA IPTV Dashboard**](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/342)
+  was baseline **FAIL / NOT READY with 22 findings**. Other measured failure modes include wrong chart
+  types for Tableau idioms, field-parameter swaps that validate but do not engage, bindings that
+  validate but render against the wrong field, and pages that fail outright in high-page-count
+  workbooks. This is the tail of an estate rather than the median outcome, and the available evidence
+  does not yet prove which part of "not great" on CAPS was chart choice, data binding, layout, or
+  formatting, so treat the report layer as a first draft that needs explicit fidelity validation.
 
 ## Bottom line
 

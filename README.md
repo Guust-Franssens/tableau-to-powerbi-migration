@@ -369,9 +369,12 @@ repository, on identical code:
 The global install cannot see the project's optional dependencies, so it invents import errors CI
 never reports. Chasing those is pure waste, and the real signal is buried among them.
 
-The paths are CI's paths, deliberately. Running `ruff format .` instead reformats fenced Python
-inside two committed markdown files under `docs/` and `.github/pbi.kb/` — measured — which CI neither
-checks nor fixes, so you would carry unrelated modifications in your diff forever.
+The paths are CI's paths, deliberately. Repo-wide `ruff format .` is safe because
+`pyproject.toml` excludes the two documentation trees where the drift was measured (`docs/`,
+`.github/pbi.kb/`) and uses `force-exclude = true` so explicitly named files in those trees are
+excluded too. Other Markdown outside CI's roots is still formatted by `ruff format .` and still
+ungated. Keep the commands scoped anyway: the `pylint` roots below are intentionally separate, and
+local lint should mirror CI rather than relying on broader repo defaults.
 
 ```powershell
 uv sync --all-extras   # NOT --extra dev: several tests import tableauhyperapi, which lives in `extract`

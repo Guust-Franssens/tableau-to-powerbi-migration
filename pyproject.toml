@@ -57,7 +57,12 @@ exclude = [
     # both nested trees (the user's own workbook and data-source migrations).
     "examples",
     "migrations",
+    # Ruff formats fenced Python in Markdown. Exclude only the documentation trees CI does not lint;
+    # keep Markdown under scripts/tests/.github/skills covered by the CI ruff roots.
+    "docs/**/*.md",
+    ".github/pbi.kb/**/*.md",
 ]
+force-exclude = true
 line-length = 120
 indent-width = 4
 target-version = "py311"
