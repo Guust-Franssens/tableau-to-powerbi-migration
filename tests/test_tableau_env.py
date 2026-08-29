@@ -373,10 +373,116 @@ def test_redact_removes_every_occurrence_not_just_the_first():
     assert te.redact(text, "abcdefghij").count("[REDACTED]") == 2
 
 
-def test_redact_ignores_empty_and_short_values_that_would_scrub_unrelated_text():
-    """A blank or 2-char 'secret' would redact half the message and hide the real error."""
-    assert te.redact("no secret here", "") == "no secret here"
-    assert te.redact("a error about ab", "ab") == "a error about ab"
+def test_redact_ignores_an_unset_secret_without_complaining():
+    """Every caller passes `... or ""` for a credential it may not have; that is the normal case."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert te.redact("no secret here", "") == "no secret here"
+
+
+def test_redact_warns_and_skips_a_whitespace_only_secret():
+    """The one value that genuinely cannot be redacted: it matches between every character."""
+    with pytest.warns(UserWarning, match="whitespace-only"):
+        assert te.redact("a error about ab", "   ") == "a error about ab"
+
+
+@pytest.mark.parametrize("password", ["Tr0ub4d", "hunter2", "s3cr3t", "abcd", "ab", "a"])
+def test_redact_removes_a_short_human_chosen_password(password):
+    """#381: the 8-char floor was sound for a machine-generated PAT and wrong for a password.
+
+    `provision_tableau_estate.py` embeds a WAREHOUSE password in a published datasource, and its
+    error paths route through `redact` precisely because a failure echoes the request body into
+    `ContentRecord.notes` -> `manifest.json`, on disk, in a PUBLIC repository.
+    """
+    reflected = f'ServerResponseError 400006: echo <connectionCredentials password="{password}" />'
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact(reflected, password)
+    assert password not in out
+    assert "[REDACTED]" in out
+
+
+@pytest.mark.parametrize("length", [7, 8])
+def test_redact_pins_the_old_floor_from_both_sides(length):
+    """One value just under the removed floor, one just over. Both must be redacted now."""
+    secret = "P" + "a" * (length - 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert secret not in te.redact(f'{{"password":"{secret}"}}', secret)
+
+
+def test_redact_keeps_the_diagnostic_when_a_short_password_is_removed():
+    """Measured: a 7-char password costs exactly 7 characters of collateral, nothing else."""
+    text = "ServerResponseError: 400006: Bad Request -- invalid credentials for 'Sales Extract'"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact(f'{text} password="Tr0ub4d"', "Tr0ub4d")
+    assert text in out
+    assert out.count("[REDACTED]") == 1
+
+
+def test_redact_warns_once_that_a_short_secret_makes_output_noisy():
+    """The 8 survives as advice, never as protection: silence is the outcome #381 was about."""
+    with pytest.warns(UserWarning, match="shorter than 8 characters"):
+        te.redact("nothing to see", "abc")
+
+
+def test_redact_does_not_warn_for_a_normal_length_secret():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert te.redact("tok=abcdefghij", "abcdefghij") == "tok=[REDACTED]"
+
+
+def test_redact_leaves_no_tail_of_a_longer_secret_when_a_shorter_one_shares_its_head():
+    """Sequential replacement let "abc" eat the head of "abcdef" and leave "def" in the output.
+
+    Only reachable once short values are redacted at all, so removing the floor is what makes the
+    single longest-first pass load-bearing rather than tidy.
+    """
+    text = '{"password":"abcdef","user":"abc"}'
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact(text, "abc", "abcdef")
+    assert "def" not in out
+    assert "abcdef" not in out
+
+
+def test_redact_does_not_match_inside_a_marker_it_just_inserted():
+    """A 2-char secret matching the marker produced `[R[REDACTED]ACT[REDACTED]]` when done in two
+    passes - garbling the evidence that redaction happened at all."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact('{"secret":"SECRETVALUE","pw":"ED"}', "SECRETVALUE", "ED")
+    assert "SECRETVALUE" not in out
+    assert out == '{"secret":"[REDACTED]","pw":"[REDACTED]"}'
+
+
+def test_redact_is_independent_of_the_order_secrets_are_passed_in():
+    text = '{"a":"abcdef","b":"abc","c":"abcdefghijkl"}'
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert te.redact(text, "abc", "abcdef", "abcdefghijkl") == te.redact(text, "abcdefghijkl", "abcdef", "abc")
+
+
+def test_a_short_warehouse_password_does_not_reach_the_provisioner_manifest(tmp_path):
+    """End to end at the call site the issue names: `scrub` -> `ContentRecord.notes` -> manifest.json.
+
+    Five error paths in `provision_tableau_estate.py` route through `_describe`; this pins the one
+    the issue cites as durable. A synthetic 7-character value, never a real one.
+    """
+    _ = tmp_path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import provision_tableau_estate as p  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    env = {"TABLEAU_PAT_SECRET": "SENTINEL_PAT_abcdefghijklmnop", "TABLEAU_SF_PASSWORD": "Tr0ub4d"}
+    exc = RuntimeError('400006: echo <connectionCredentials name="svc" password="Tr0ub4d" />')
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        note = p._describe(exc, env)  # pylint: disable=protected-access
+
+    assert "Tr0ub4d" not in note
+    assert "Tr0ub4d" not in json.dumps({"notes": [note]}), "the warehouse password reached manifest.json"
+    assert "400006" in note, "redaction must not destroy the diagnostic"
 
 
 def test_redact_tolerates_a_secret_that_is_absent():

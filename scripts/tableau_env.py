@@ -74,6 +74,13 @@ ACCEPTED_ENV_KEYS = frozenset(CANONICAL_ENV_KEYS) | {"TABLEAU_SERVER", "TABLEAU_
 
 _TABLEAU_AUTH_HEADER_RE = re.compile(r"(?i)([\"']?x-tableau-auth[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;<>]+)")
 
+_REDACTION_MARK = "[REDACTED]"
+
+# The length below which a secret starts to collide with ordinary words. It is a NOISE threshold and
+# nothing else: `redact` warns here, it never skips. It used to be a skip, which meant a human-chosen
+# warehouse password shorter than this was silently published verbatim (#381).
+NOISY_SECRET_LEN = 8
+
 
 def load_env(path: Path) -> dict[str, str]:
     """Read a git-ignored KEY=VALUE file. Secrets are never logged or written to the store.
@@ -226,12 +233,66 @@ def redact(text: str, *secrets: str) -> str:
 
     Scrub at the point of capture rather than trusting another tool's logging discipline: the secret
     is ours, the file is ours, and the engine's error text is not something we control.
+
+    **There is no minimum length.** There was one -- 8 characters -- and it was sound while the only
+    thing in scope was a machine-generated PAT. ``provision_tableau_estate.py`` then put a
+    human-chosen warehouse password in scope, and a 7-character ``TABLEAU_SF_PASSWORD`` went straight
+    through into ``manifest.json`` on a PUBLIC repository (#381). Measured before removing it, on
+    reflected errors of the shape these callers actually persist:
+
+    ============  =====  ==========  =================  ==================
+    secret        chars  redactions  collateral (chars) diagnostic tokens
+    ============  =====  ==========  =================  ==================
+    25-character      25           1                 25  all kept
+    ``Tr0ub4d``        7           1                  7  all kept
+    ``ci``             2           3                  6  all kept
+    ``e``              1          30                 30  HTTP status kept
+    ============  =====  ==========  =================  ==================
+
+    So the feared damage does not appear until 1-2 characters, and even there the output is merely
+    noisy -- a false redaction is recoverable, a published credential is not. The 8 survives only as
+    ``NOISY_SECRET_LEN``, a warning: nothing is silently unprotected any more.
+
+    Two alternatives were measured and rejected. Redacting the whole word around a short match cost
+    4-5x more text (24 chars vs 6 for ``ci``) while leaving a known-plaintext oracle almost as intact
+    (5/7 vs 7/7 secrets uniquely recovered from a fixed error template), and its natural spelling,
+    ``\\w*(?:secret)\\w*``, backtracks quadratically -- 826 ms on 16 KB, still running after 180 s on
+    500 KB. Withholding the whole text instead destroys the diagnostic in every case, including the
+    common one where the collateral is zero.
+
+    An empty value is skipped silently: an optional credential that is simply not set is the normal
+    case, and every caller passes ``... or ""``. A whitespace-only value is skipped *with a warning*,
+    because it would match between every character and means nothing.
+
+    One pass, longest secret first. Replacing sequentially is only safe while short values are
+    skipped, and both failures it allows are leaks of a sort: passing ``("abc", "abcdef")`` in that
+    order redacted the head of the longer secret and left ``def`` in the output, and a 2-character
+    value matched inside a marker this call had just inserted (``[R[REDACTED]ACT[REDACTED]]``). A
+    single pass makes the result independent of the caller's argument order.
     """
+    live: list[str] = []
     for secret in secrets:
-        # A short or empty value would redact unrelated text; a real PAT secret is far longer.
-        if secret and len(secret) >= 8:
-            text = text.replace(secret, "[REDACTED]")
-    return _TABLEAU_AUTH_HEADER_RE.sub(r"\1[REDACTED]", text)
+        if not secret:
+            continue
+        if not secret.strip():
+            warnings.warn(
+                "A whitespace-only secret cannot be redacted -- it would match between every "
+                "character. Unset the variable or give it a real value.",
+                stacklevel=2,
+            )
+            continue
+        live.append(secret)
+    if live:
+        ordered = sorted(set(live), key=lambda s: (-len(s), s))
+        if len(ordered[-1]) < NOISY_SECRET_LEN:
+            warnings.warn(
+                f"A configured secret is shorter than {NOISY_SECRET_LEN} characters. It IS redacted, "
+                "but a short value also matches unrelated text, so persisted diagnostics may be "
+                "noisy. Prefer a longer secret.",
+                stacklevel=2,
+            )
+        text = re.sub("|".join(re.escape(s) for s in ordered), _REDACTION_MARK, text)
+    return _TABLEAU_AUTH_HEADER_RE.sub(r"\1" + _REDACTION_MARK, text)
 
 
 def engine_child_env(env: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:
