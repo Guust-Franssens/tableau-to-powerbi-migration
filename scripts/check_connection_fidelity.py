@@ -5,6 +5,8 @@ purpose: fail loudly when a Tableau data source that must connect to a LIVE upst
 usage:   python scripts/check_connection_fidelity.py <bundle-or-unit-dir> [...]
                                               [--model <dir>] [--json <file>] [--quiet]
                                               [--verbose] [--warn-only]
+         Accepts BOTH migration tiers: a parser `migration-spec.json` unit, and an engine bundle
+         (`report.json` / `handover/*.json`) built by `run_estate.py`.
 
 Why this exists
 ---------------
@@ -51,6 +53,43 @@ judgement and would make this a review, not a gate. A live source is treated as 
   * a generated-edit declaration (see `generated_edit_declarations.py`) targets a file-backed table
     in the emitted model - an explicit recorded edit to the very partition in question.
 
+Two migration tiers, two evidence scopes (issue #366)
+-----------------------------------------------------
+A unit reaches Power BI by one of two paths, and only one of them has a spec:
+
+  * the PARSER path - `parse_tableau.py` emits `migration-spec.json`, which names each data source's
+    TABLES. Evidence is scoped per source, table by table (`SCOPE_TABLE`).
+  * the ENGINE path - `migrate_estate.py` (via `run_estate.py`) emits a bundle with NO spec. Nine of
+    fourteen units in a real 2026-08-28 field run were therefore reported SKIPPED "no spec with
+    data_sources" - the gate built for a WORKBOOK incident silently covering no workbook at all.
+
+The engine bundle is not evidence-free, so this gate now reads it instead of refusing. Its
+`embedded_datasources` telemetry (engine `migrate_estate._embedded_datasource_telemetry`) carries
+`connection_class` per datasource AND per federated leg, plus `pbip_folder` - the exact model that
+workbook built. What it does NOT carry, at engine 2.339.0, is TABLE NAMES: only a `table_count`. So
+per-table attribution is impossible there, and pretending otherwise would be a fabricated pass.
+
+Engine units are therefore judged at MODEL scope (`SCOPE_MODEL`), against the one consolidated model
+named by `pbip_folder`. That is weaker than table scope, and the verdict rules say so out loud:
+
+  | model-scope evidence                          | verdict                                       |
+  |-----------------------------------------------|-----------------------------------------------|
+  | connector absent, some partition file-backed  | DOWNGRADED - the incident, provable           |
+  | connector absent, nothing file-backed         | NOT_CHECKED                                   |
+  | connector present, nothing file-backed        | CONNECTED - nothing here reads a file at all  |
+  | connector present, some partition file-backed | NOT_CHECKED - cannot attribute without names  |
+
+The asymmetry is the same one the rest of this module runs on: a FINDING may rest on partial
+evidence, a PASS may not.
+
+Absent is not empty
+-------------------
+A SKIPPED unit now carries a machine-readable `reason`: `nothing_to_check` (no live source in this
+unit - a real, complete answer) or `not_evaluated` (this unit could not be examined - no telemetry,
+no model, no attribution) or `partial_coverage`. Reading the second as the first is exactly how nine
+unexamined workbooks looked like a clean bill of health. The estate summary reports coverage
+(n checked / n total) for the same reason.
+
 What this gate does NOT tell you
 --------------------------------
 * Whether a live source that DID stay connected points at the right server - that is fidelity, and
@@ -58,9 +97,19 @@ What this gate does NOT tell you
 * A PARTIAL downgrade inside a source that still has one live partition, or an exotic connection
   class this module cannot map to an M connector: both are reported as NOT_CHECKED for that source,
   never as PASS. Anything this module cannot prove is a downgrade is not called one.
+* On the ENGINE path, whether ONE table of a live source was materialised while its siblings stayed
+  connected. The bundle does not name tables, so that shape reports NOT_CHECKED, never PASS.
 """
 
 from __future__ import annotations
+
+# One gate, two evidence tiers. The length is the recorded knowledge - twenty-odd blind-review
+# defects, each kept beside the guard that closes it - not sprawl. The real fix it defers is lifting
+# the engine-telemetry READER (`EngineUnit`, `engine_datasource_telemetry`, `engine_sources`,
+# `engine_model_dirs`) beside `migration_bundle.py`, which is where a second consumer would want it;
+# that seam saves ~170 lines and leaves only ~12 of headroom, so it is worth doing when there IS a
+# second consumer and not merely to duck this cap.
+# pylint: disable=too-many-lines
 
 import argparse
 import json
@@ -71,6 +120,7 @@ from pathlib import Path
 from typing import Any
 
 import check_empty_model
+import read_handover
 from bundle_corpus import shipping_models
 
 # `_partition_blocks` is a private helper reused as-is; check_empty_model.py must not be edited, so it
@@ -89,6 +139,26 @@ EXIT_OK = 0
 EXIT_DOWNGRADED = 1
 EXIT_USAGE = 2
 EXIT_SKIPPED = 3
+
+# Why a SKIPPED unit was skipped. `check_unit.py` keys off STATUS_SKIPPED/exit 3, so the umbrella
+# status is unchanged; this says which of the two very different things it means. Acceptance
+# criterion 2 of issue #366: "nothing to compare here" and "this unit could not be examined" printed
+# identically, and nine unexamined workbooks read as a clean bill of health.
+REASON_NOTHING_TO_CHECK = "nothing_to_check"
+REASON_PARTIAL_COVERAGE = "partial_coverage"
+REASON_NOT_EVALUATED = "not_evaluated"
+
+# How much of the model a source's verdict is allowed to look at.
+SCOPE_TABLE = "table"  # parser path: the spec names this source's tables, so evidence is per table
+SCOPE_MODEL = "model"  # engine path: no table names exist, so evidence is the whole emitted model
+
+# The engine's `embedded_datasources` telemetry, with absence kept distinct from emptiness - the same
+# MISSING/INVALID/NONE/PRESENT ladder `read_handover.partitions_needs_review_status` uses, and for the
+# same reason: this repo has shipped a false "0" from that conflation three times (#276, #299, #309).
+TELEMETRY_MISSING = "missing"
+TELEMETRY_INVALID = "invalid"
+TELEMETRY_NONE = "none"
+TELEMETRY_PRESENT = "present"
 
 # Emitted-M categories (from check_empty_model.classify_partition) that mean the rows come from a
 # live connection at query time or an Import over a database connector - i.e. the connection was
@@ -378,6 +448,7 @@ class UnitContext:
     limitations: tuple[dict[str, Any], ...]
     declarations: tuple[dict[str, Any], ...]
     source_ids: frozenset[str] = frozenset()
+    scope: str = SCOPE_TABLE
 
 
 @dataclass(frozen=True)
@@ -388,6 +459,18 @@ class Coverage:
     verdict rules differ for a finding and for a pass. A FINDING may rest on partial coverage - the
     matched tables carry real evidence. A PASS may not, because a declared table we could not find in
     the model could be exactly the one that was downgraded.
+
+    `scope` records WHICH evidence produced it. `SCOPE_TABLE` is the parser path, where the spec names
+    this source's tables. `SCOPE_MODEL` is the engine path, where no table names exist anywhere in the
+    bundle (issue #366) and the strongest honest scope is the one model the workbook built. Under
+    model scope `unmatched` is always empty - there is nothing declared to be unmatched - so a
+    "partial coverage" note there would be a lie of a different kind; the model-scope refusals say
+    what they actually mean instead.
+
+    `connector_present` is kept separately from `connected` because they answer different questions.
+    `connected` means "rows demonstrably arrive through this connector"; `connector_present` means
+    only "the connector is named in live M somewhere". Under model scope the second is not enough to
+    call a downgrade, and keeping them apart is what stops that.
     """
 
     connected: bool
@@ -395,6 +478,8 @@ class Coverage:
     file_tables: list[str]
     attributable: bool
     unmatched: list[str]
+    connector_present: bool = False
+    scope: str = SCOPE_TABLE
 
     @property
     def complete(self) -> bool:
@@ -480,13 +565,34 @@ def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> Co
     CONNECTED and the unit exited 0.
     """
     matched, unmatched = _attribute(models, tables)
+    connector_present = any(model.has_connector(token) for model in models)
     if not matched:
-        return Coverage(False, False, [], False, unmatched)
-    connected = any(part["category"] in CONNECTED_CATEGORIES for part in matched) and any(
-        model.has_connector(token) for model in models
-    )
+        return Coverage(False, False, [], False, unmatched, connector_present, SCOPE_TABLE)
+    connected = any(part["category"] in CONNECTED_CATEGORIES for part in matched) and connector_present
     file_tables = sorted({part["table"] for part in matched if part["category"] in FILE_CATEGORIES})
-    return Coverage(connected, bool(file_tables), file_tables, True, unmatched)
+    return Coverage(connected, bool(file_tables), file_tables, True, unmatched, connector_present, SCOPE_TABLE)
+
+
+def _model_coverage(models: tuple[Model, ...], token: str) -> Coverage:
+    """Connectivity evidence for ONE source when NOTHING names its tables (the engine path).
+
+    The engine bundle records a `table_count` per embedded datasource and no table names at all
+    (verified against the canonical engine 2.339.0, `_embedded_datasource_telemetry`), so `_attribute`
+    has nothing to attribute WITH. Widening the scope to the whole model is the strongest honest
+    answer available, and it is genuinely weaker than table scope in one direction only: it cannot
+    separate this source's file-backed partitions from a sibling's. `_judge_source` therefore refuses
+    to call a PASS or a FINDING whenever both signals are present under this scope.
+
+    What it CAN prove is the incident itself. A live class whose connector appears nowhere in the
+    emitted model, in a model whose rows come off disk, was materialised - no table names needed.
+    """
+    partitions = [part for model in models for part in model.partitions]
+    connector_present = any(model.has_connector(token) for model in models)
+    if not partitions:
+        return Coverage(False, False, [], False, [], connector_present, SCOPE_MODEL)
+    connected = any(part["category"] in CONNECTED_CATEGORIES for part in partitions) and connector_present
+    file_tables = sorted({part["table"] for part in partitions if part["category"] in FILE_CATEGORIES})
+    return Coverage(connected, bool(file_tables), file_tables, True, [], connector_present, SCOPE_MODEL)
 
 
 def _coverage_note(cov: "Coverage") -> str:
@@ -514,11 +620,17 @@ def _connected_verdict(token: str, cov: "Coverage") -> tuple[str, str]:
     may rest on partial evidence, a pass may not.
     """
     if cov.file_backed:
+        scope_note = (
+            " (evidence is MODEL-scoped: the engine bundle names no tables, so this source's "
+            "partitions cannot be told apart from a sibling's)"
+            if cov.scope == SCOPE_MODEL
+            else ""
+        )
         return (
             SOURCE_NOT_CHECKED,
             f"PARTIAL: a `{token}.*` connector is present AND {len(cov.file_tables)} table(s) of this "
             f"source are file-backed ({', '.join(cov.file_tables)}). Per-partition attribution to a "
-            "source is not reliable enough to call this either way - inspect it by hand",
+            f"source is not reliable enough to call this either way - inspect it by hand{scope_note}",
         )
     if cov.unmatched:
         return (
@@ -583,14 +695,61 @@ def _declared_verdict(
     )
 
 
-def _judge_source(
+def _name_sample(names: list[str], limit: int = 6) -> str:
+    """A bounded, sorted rendering of a name list for a diagnostic line."""
+    ordered = sorted(names)
+    if not ordered:
+        return "(none)"
+    if len(ordered) <= limit:
+        return ", ".join(ordered)
+    return ", ".join(ordered[:limit]) + f", ... (+{len(ordered) - limit} more)"
+
+
+def _unattributable_detail(cov: "Coverage", data_source: dict[str, Any], models: tuple[Model, ...]) -> str:
+    """Why nothing could be attributed - and, for a spec unit, WHICH kind of gap it is.
+
+    Issue #366 acceptance criterion 4 asks whether two unattributed sources in a field run were a
+    name-matching gap or a genuinely unemitted source. This gate cannot answer that from a message
+    that prints neither side, so it prints both: the names the spec declared and the names the model
+    actually emitted. A reader can then tell a rename (`FLIGHTS` vs `SF_FLIGHTS`) from a source that
+    never landed at all (nothing plausibly corresponding emitted), which is the difference between a
+    naming fix and a re-migration.
+    """
+    if cov.scope == SCOPE_MODEL:
+        return (
+            "the model this workbook built has no partitions at all, so there is nothing to compare "
+            "the workbook's declared live connection against - inspect the emitted model by hand"
+        )
+    declared = _table_names(data_source)
+    emitted = sorted({part["table"] for model in models for part in model.partitions})
+    if not declared:
+        return (
+            "this source declares NO tables in the spec, so no evidence can be attributed to it - it "
+            "must not borrow another source's verdict. The emitted model holds: "
+            f"{_name_sample(emitted)}"
+        )
+    return (
+        "none of this source's declared tables match an emitted model partition, so no evidence "
+        "can be attributed to it - it must not borrow another source's verdict. Declared: "
+        f"{_name_sample(declared)}; emitted: {_name_sample(emitted)}. Matching names on both sides "
+        "means a spec-to-TMDL NAMING gap; nothing corresponding on the emitted side means the "
+        "source did not land at all"
+    )
+
+
+def _judge_source(  # pylint: disable=too-many-return-statements
     data_source: dict[str, Any],
     target: str,
     connection_class: str,
     mode: str,
     ctx: UnitContext,
 ) -> SourceVerdict:
-    """Decide the connection-fidelity verdict for one live data source."""
+    """Decide the connection-fidelity verdict for one live data source.
+
+    The return count IS the decision ladder, and each rung is a distinct refusal a blind-review round
+    put there. Collapsing them into a lookup would make the ladder unreadable and every guard harder
+    to argue with, which is the opposite of what this module needs.
+    """
     source_id = str(data_source.get("id") or "<unnamed>")
     caption = str(data_source.get("caption") or data_source.get("internal_name") or source_id)
     token = CLASS_TO_CONNECTOR.get(_norm_class(connection_class))
@@ -609,21 +768,31 @@ def _judge_source(
             "attribute a downgrade offline; verify this source connects live by hand",
             [],
         )
-    cov = _connectivity(ctx.models, token, set(_table_names(data_source)))
+    cov = (
+        _model_coverage(ctx.models, token)
+        if ctx.scope == SCOPE_MODEL
+        else _connectivity(ctx.models, token, set(_table_names(data_source)))
+    )
 
     def make(verdict: str, detail: str) -> SourceVerdict:
         """Build the verdict for this source, carrying the shared identity fields."""
         return SourceVerdict(source_id, caption, connection_class, mode, target, verdict, detail, list(cov.file_tables))
 
     if not cov.attributable:
-        return make(
-            SOURCE_NOT_CHECKED,
-            "none of this source's declared tables match an emitted model partition, so no evidence "
-            "can be attributed to it - it must not borrow another source's verdict. Check the "
-            "spec-to-TMDL table naming by hand",
-        )
+        return make(SOURCE_NOT_CHECKED, _unattributable_detail(cov, data_source, ctx.models))
     if cov.connected:
         return make(*_connected_verdict(token, cov))
+    if cov.scope == SCOPE_MODEL and cov.connector_present:
+        # MODEL scope only, and deliberately not applied to table scope. Under table scope a
+        # sibling's preserved connector must NOT stop this source's own file-backed tables from
+        # reading as a downgrade - that is blind review round 2's finding, and applying this guard
+        # there would restore it. Under model scope there is no "own" table, so a present connector
+        # with no partition loading through it is genuinely undecidable rather than a finding.
+        return make(
+            SOURCE_NOT_CHECKED,
+            f"a `{token}.*` connector is present in the emitted model but no partition loads through "
+            "it, and the engine bundle names no tables to attribute by - inspect this model by hand",
+        )
     if not cov.file_backed:
         return make(
             SOURCE_NOT_CHECKED,
@@ -649,6 +818,7 @@ def _live_verdicts(
     models: list[Model],
     limitations: list[dict[str, Any]],
     declarations: list[dict[str, Any]],
+    scope: str = SCOPE_TABLE,
 ) -> list[SourceVerdict]:
     """Judge every live-source data source; flat_file/unknown sources are not this gate's concern."""
     ctx = UnitContext(
@@ -656,6 +826,7 @@ def _live_verdicts(
         tuple(limitations),
         tuple(declarations),
         frozenset(str(ds.get("id") or "") for ds in data_sources),
+        scope,
     )
     verdicts: list[SourceVerdict] = []
     for data_source in data_sources:
@@ -667,29 +838,60 @@ def _live_verdicts(
 
 
 def scan_unit(spec_path: Path) -> dict[str, Any]:
-    """Judge one migration unit: a migration-spec.json plus the models that ship beside it."""
+    """Judge one PARSER-path migration unit: a migration-spec.json plus the models beside it."""
     unit_dir = spec_path.parent
     try:
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return _unit_result(spec_path, STATUS_SKIPPED, [], detail=f"spec unreadable: {exc}")
+        return _unit_result(
+            spec_path, STATUS_SKIPPED, [], detail=f"spec unreadable: {exc}", reason=REASON_NOT_EVALUATED
+        )
     if not isinstance(spec, dict):
-        return _unit_result(spec_path, STATUS_SKIPPED, [], detail="spec is not a JSON object")
+        return _unit_result(
+            spec_path, STATUS_SKIPPED, [], detail="spec is not a JSON object", reason=REASON_NOT_EVALUATED
+        )
 
     data_sources = [ds for ds in (spec.get("data_sources") or []) if isinstance(ds, dict)]
     if not data_sources:
-        return _unit_result(spec_path, STATUS_SKIPPED, [], detail="spec declares no data_sources")
+        # NOT `nothing_to_check`: a spec with no data_sources does not say the workbook had none, it
+        # says nobody recorded any. Absence is not emptiness.
+        return _unit_result(
+            spec_path, STATUS_SKIPPED, [], detail="spec declares no data_sources", reason=REASON_NOT_EVALUATED
+        )
 
     models = [load_model(model_dir) for model_dir in shipping_models(unit_dir, include_standalone=True)]
     if not models:
-        return _unit_result(spec_path, STATUS_SKIPPED, [], detail="no semantic model ships beside this spec")
+        return _unit_result(
+            spec_path,
+            STATUS_SKIPPED,
+            [],
+            detail="no semantic model ships beside this spec",
+            reason=REASON_NOT_EVALUATED,
+        )
 
     limitations = [e for e in (spec.get("limitations_encountered") or []) if isinstance(e, dict)]
     declarations = load_generated_edit_declarations(unit_dir)
-    return _finalize_unit(spec_path, _live_verdicts(data_sources, models, limitations, declarations))
+    verdicts = _live_verdicts(data_sources, models, limitations, declarations)
+    return _finalize_unit(spec_path, verdicts, live_declared=_count_judgeable(data_sources))
 
 
-def _finalize_unit(spec_path: Path, verdicts: list[SourceVerdict]) -> dict[str, Any]:
+def _count_judgeable(data_sources: list[dict[str, Any]]) -> int:
+    """How many declared sources could carry a live connection this gate is responsible for.
+
+    LIVE_SOURCE **and** UNKNOWN both count. A source whose class could not be resolved is not
+    evidence that nothing live exists - it is the absence of evidence, and counting it as zero is the
+    same conflation issue #366 is about, one level down. Only a resolved `flat_file` is a real zero.
+    """
+    return sum(1 for ds in data_sources if _expected_target(ds.get("connection") or {})[0] != FLAT_FILE)
+
+
+def _finalize_unit(
+    spec_path: Path,
+    verdicts: list[SourceVerdict],
+    *,
+    unit_name: str | None = None,
+    live_declared: int | None = None,
+) -> dict[str, Any]:
     """Fold per-source verdicts into one unit result.
 
     An UNCHECKED source keeps the unit off a clean OK. Blind review round 3 surfaced a unit with one
@@ -698,35 +900,67 @@ def _finalize_unit(spec_path: Path, verdicts: list[SourceVerdict]) -> dict[str, 
     (#276, #299, #309). `check_stub_measures.py:68-69` states the rule: "no stubs" and "no model" must
     never print or exit the same way. A finding still outranks it: a real downgrade is worth more than
     a partial-coverage note.
+
+    `live_declared` separates the two SKIPPED reasons that used to print identically (issue #366).
+    ZERO live sources declared is a complete answer - `nothing_to_check`. One or more declared and
+    none examinable is `not_evaluated`, which is the answer that must never be read as clean.
     """
     downgraded = [v for v in verdicts if v.verdict == SOURCE_DOWNGRADED]
     unchecked = [v for v in verdicts if v.verdict == SOURCE_NOT_CHECKED]
     checked = [v for v in verdicts if v.verdict in {SOURCE_CONNECTED, SOURCE_DECLARED, SOURCE_DOWNGRADED}]
+    declared_live = len(verdicts) if live_declared is None else live_declared
     if downgraded:
         status = STATUS_DOWNGRADED
         detail = None
+        reason = None
+    elif not checked and not declared_live:
+        status = STATUS_SKIPPED
+        detail = "no live source was declared here, so there is nothing this gate can compare"
+        reason = REASON_NOTHING_TO_CHECK
     elif not checked:
         status = STATUS_SKIPPED
-        detail = "no live-source data source was checkable (all flat_file, unknown, or unattributable)"
+        detail = (
+            f"{declared_live} data source(s) that could carry a live connection were declared, but "
+            "NONE could be examined (unresolved or unmappable connection class, or nothing "
+            "attributable in the emitted model)"
+        )
+        reason = REASON_NOT_EVALUATED
     elif unchecked:
         status = STATUS_SKIPPED
         detail = (
             f"{len(checked)} live source(s) checked, but {len(unchecked)} could NOT be attributed to an "
             f"emitted table ({', '.join(v.source_id for v in unchecked)}) - partial coverage, not a pass"
         )
+        reason = REASON_PARTIAL_COVERAGE
     else:
         status = STATUS_OK
         detail = None
-    return _unit_result(spec_path, status, verdicts, detail=detail)
+        reason = None
+    return _unit_result(spec_path, status, verdicts, detail=detail, reason=reason, unit_name=unit_name)
 
 
-def _unit_result(spec_path: Path, status: str, verdicts: list[SourceVerdict], detail: str | None) -> dict[str, Any]:
-    """Shape one unit's result for JSON and rendering."""
+def _unit_result(  # pylint: disable=too-many-arguments
+    spec_path: Path,
+    status: str,
+    verdicts: list[SourceVerdict],
+    detail: str | None,
+    *,
+    reason: str | None = None,
+    unit_name: str | None = None,
+) -> dict[str, Any]:
+    """Shape one unit's result for JSON and rendering.
+
+    Six parameters because a unit result now carries WHY it was skipped and, on the engine path, a
+    name that is not its parent folder. They are flat rather than bundled into a record because this
+    function is pinned by `test_unit_result_only_counts_and_never_decides` as a pure shaper: adding a
+    type it could read a decision out of is the thing that pin exists to prevent.
+    """
     return {
         "spec": str(spec_path),
-        "unit": spec_path.parent.name,
+        "unit": unit_name or spec_path.parent.name,
         "status": status,
         "detail": detail,
+        "reason": reason,
         "live_sources_checked": sum(1 for v in verdicts if v.verdict != SOURCE_NOT_CHECKED),
         "downgraded": sum(1 for v in verdicts if v.verdict == SOURCE_DOWNGRADED),
         "declared": sum(1 for v in verdicts if v.verdict == SOURCE_DECLARED),
@@ -734,6 +968,158 @@ def _unit_result(spec_path: Path, status: str, verdicts: list[SourceVerdict], de
         "not_checked": sum(1 for v in verdicts if v.verdict == SOURCE_NOT_CHECKED),
         "sources": [v.__dict__ for v in verdicts],
     }
+
+
+@dataclass(frozen=True)
+class EngineUnit:
+    """One workbook of an ENGINE bundle: its telemetry payload, and where the bundle lives."""
+
+    name: str
+    source: Path
+    bundle: Path
+    workbook: dict[str, Any]
+
+
+def engine_datasource_telemetry(workbook: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """`(status, rows)` for a workbook's `embedded_datasources`, absence kept distinct from empty.
+
+    Mirrors `read_handover.partitions_needs_review_status` deliberately. An older engine build, or a
+    workbook detail assembled before the telemetry existed, has NO key - and answering that with an
+    empty list would say "this workbook touches no live system", which is the one wrong answer a
+    connection gate must never give.
+    """
+    if "embedded_datasources" not in workbook:
+        return TELEMETRY_MISSING, []
+    rows = workbook.get("embedded_datasources")
+    if not isinstance(rows, list):
+        return TELEMETRY_INVALID, []
+    rows = [row for row in rows if isinstance(row, dict)]
+    if not rows:
+        return TELEMETRY_NONE, []
+    return TELEMETRY_PRESENT, rows
+
+
+def engine_sources(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Engine `embedded_datasources` telemetry as this gate's data-source records.
+
+    ONE RECORD PER DISTINCT CONNECTION CLASS, not per datasource. A Tableau datasource can federate
+    several upstream systems at once (the engine's own `_connection_facts` says Azure SQL + Snowflake
+    + Databricks in one datasource is a real shipped shape), and the connector token - the thing this
+    gate looks for in the emitted M - is per CLASS. Collapsing the legs into one `federated` record,
+    as `migration_bundle._engine_embedded_source` does for its own purpose, maps to no connector at
+    all and would report every federated source NOT_CHECKED.
+
+    `tables` is deliberately left empty rather than invented: the engine records a `table_count` and
+    no names (verified against canonical engine 2.339.0). `mode` is `unknown` for the same reason -
+    the telemetry does not record extract-vs-live, and `powerbi_target` does not need it.
+    """
+    sources: list[dict[str, Any]] = []
+    for row in rows:
+        label = str(row.get("label") or row.get("caption") or "embedded datasource")
+        caption = str(row.get("caption") or label)
+        legs = [leg for leg in (row.get("connections") or []) if isinstance(leg, dict)]
+        classes = [str(leg.get("connection_class") or "") for leg in legs]
+        classes = [cls for cls in classes if cls] or [str(row.get("connection_class") or "")]
+        seen: set[str] = set()
+        for connection_class in classes:
+            if connection_class in seen:
+                continue
+            seen.add(connection_class)
+            target, _reason = powerbi_target(connection_class or UNKNOWN, "unknown")
+            source_id = label if len(classes) == 1 else f"{label}#{connection_class or UNKNOWN}"
+            sources.append(
+                {
+                    "id": source_id,
+                    "caption": caption if len(classes) == 1 else f"{caption} [{connection_class or UNKNOWN}]",
+                    "connection": {
+                        "class": connection_class,
+                        "mode": "unknown",
+                        "powerbi_target": target,
+                    },
+                    "tables": [],
+                }
+            )
+    return sources
+
+
+def engine_model_dirs(bundle: Path, workbook: dict[str, Any]) -> tuple[list[Path], str | None]:
+    """`(model dirs, why-not)` for the model ONE workbook built, from the engine's own pointer.
+
+    `pbip_folder` is a run-relative `pbip/<Name>/<Name>.pbip` recorded by the engine itself, so the
+    model scope is read, never guessed. Guessing it - matching a workbook name to a folder name - is
+    how a workbook would silently borrow a sibling's model and, with it, a sibling's verdict.
+    """
+    folder = workbook.get("pbip_folder")
+    if isinstance(folder, str) and folder.strip():
+        project = (bundle / Path(folder.strip())).parent
+        if project.is_dir():
+            models = shipping_models(project, include_standalone=True)
+            if models:
+                return models, None
+            return [], f"the engine recorded pbip_folder '{folder}' but no .SemanticModel ships under {project}"
+        return [], f"the engine recorded pbip_folder '{folder}' but {project} does not exist"
+    bound = workbook.get("bound_model")
+    if isinstance(bound, str) and bound.strip():
+        wanted = bound.strip().casefold()
+        models = [m for m in shipping_models(bundle, include_standalone=True) if m.stem.casefold() == wanted]
+        if models:
+            return models, None
+        return [], f"the engine recorded bound_model '{bound}' but no matching .SemanticModel ships in {bundle}"
+    return [], (
+        "the engine recorded neither pbip_folder nor bound_model for this workbook, so no emitted "
+        "model can be attributed to it (the workbook produced no bound project)"
+    )
+
+
+def scan_engine_unit(unit: EngineUnit) -> dict[str, Any]:
+    """Judge one ENGINE-path workbook unit at model scope. Never silently passes."""
+    status, rows = engine_datasource_telemetry(unit.workbook)
+    if status == TELEMETRY_MISSING:
+        return _engine_skip(
+            unit,
+            "this workbook's engine telemetry carries NO `embedded_datasources` key, so what it "
+            "connected to is UNRECORDED - not absent. Re-run the engine, or check this unit by hand",
+            REASON_NOT_EVALUATED,
+        )
+    if status == TELEMETRY_INVALID:
+        return _engine_skip(
+            unit,
+            "this workbook's `embedded_datasources` telemetry is present but is not a list - "
+            "inspect the raw handover; nothing can be concluded from it",
+            REASON_NOT_EVALUATED,
+        )
+    if status == TELEMETRY_NONE:
+        binding = unit.workbook.get("binding_signal")
+        published = isinstance(binding, dict) and binding.get("kind") == "published"
+        note = (
+            " - it binds a PUBLISHED datasource, whose connection is checked in that datasource's own "
+            "unit, so co-migrate it and check that unit"
+            if published
+            else ""
+        )
+        return _engine_skip(
+            unit,
+            f"the engine recorded ZERO embedded datasources for this workbook{note}",
+            REASON_NOTHING_TO_CHECK,
+        )
+
+    model_dirs, why_not = engine_model_dirs(unit.bundle, unit.workbook)
+    if not model_dirs:
+        return _engine_skip(unit, str(why_not), REASON_NOT_EVALUATED)
+
+    sources = engine_sources(rows)
+    models = [load_model(model_dir) for model_dir in model_dirs]
+    # An engine bundle has no `limitations_encountered` - that field is a parser-spec artifact. The
+    # sanctioned escape hatch on this path is therefore the generated-edit declaration, which is our
+    # own tier's artifact and works on either path.
+    declarations = load_generated_edit_declarations(unit.bundle)
+    verdicts = _live_verdicts(sources, models, [], declarations, SCOPE_MODEL)
+    return _finalize_unit(unit.source, verdicts, unit_name=unit.name, live_declared=_count_judgeable(sources))
+
+
+def _engine_skip(unit: EngineUnit, detail: str, reason: str) -> dict[str, Any]:
+    """A SKIPPED engine unit that says which kind of skip it is."""
+    return _unit_result(unit.source, STATUS_SKIPPED, [], detail=detail, reason=reason, unit_name=unit.name)
 
 
 def _find_specs(root: Path) -> list[Path]:
@@ -746,9 +1132,61 @@ def _find_specs(root: Path) -> list[Path]:
     return sorted(root.rglob("migration-spec.json"), key=str)
 
 
+def _engine_bundle_roots(root: Path) -> list[Path]:
+    """Directories under a target that could hold engine telemetry.
+
+    The root itself, plus the parent of any `handover/` folder beneath it, so pointing at an estate
+    of bundles works as well as pointing at one bundle. Deliberately NOT an rglob for `report.json`:
+    every PBIR report definition in this repo is a file called `report.json`, and a recursive search
+    would sweep hundreds of them in. `read_handover.load_workbooks` then rejects any payload without a
+    `workbook`/`workbooks` key, which is the content-level half of the same guard.
+    """
+    roots = [root]
+    roots.extend(path.parent for path in root.rglob("handover") if path.is_dir())
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for candidate in roots:
+        resolved = candidate.resolve()
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        ordered.append(candidate)
+    return ordered
+
+
+def _find_engine_units(root: Path) -> list[EngineUnit]:
+    """Every engine-bundle workbook unit under a target.
+
+    Skipped entirely when the target IS a parser unit (a root-level `migration-spec.json`): that
+    contract governs the unit, carries table names, and gives the stronger table-scoped verdict, so
+    scanning the same models twice under a weaker scope would only add noise.
+    """
+    if root.is_file():
+        if root.name == "migration-spec.json":
+            return []
+        try:
+            found = read_handover.load_workbooks(root)
+        except read_handover.HandoverError:
+            return []
+        bundle = root.parent.parent if root.parent.name == "handover" else root.parent
+        return [EngineUnit(name=name, source=src, bundle=bundle, workbook=wb) for name, wb, src in found]
+    if (root / "migration-spec.json").is_file():
+        return []
+    units: list[EngineUnit] = []
+    for bundle in _engine_bundle_roots(root):
+        try:
+            found = read_handover.load_workbooks(bundle)
+        except read_handover.HandoverError:
+            continue
+        for name, workbook, source in found:
+            units.append(EngineUnit(name=name, source=source, bundle=bundle, workbook=workbook))
+    return units
+
+
 def scan(root: Path) -> dict[str, Any]:
-    """Scan every migration unit under one path."""
+    """Scan every migration unit under one path, on EITHER migration tier."""
     units = [scan_unit(spec) for spec in _find_specs(root)]
+    units.extend(scan_engine_unit(unit) for unit in _find_engine_units(root))
     return merge(units)
 
 
@@ -774,13 +1212,42 @@ def merge(units: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "status": status,
         "units_scanned": len(units),
+        "units_checked": len(units) - len(skipped),
         "units_with_downgrade": len(downgraded),
         "units_unchecked": len(skipped),
+        # Coverage, split by WHY - acceptance criterion 2 of issue #366. A unit nobody could examine
+        # and a unit with genuinely nothing to examine both printed "SKIPPED" and were both read as
+        # fine; nine workbooks went unchecked behind that word.
+        "units_not_evaluated": sum(1 for u in skipped if u.get("reason") == REASON_NOT_EVALUATED),
+        "units_nothing_to_check": sum(1 for u in skipped if u.get("reason") == REASON_NOTHING_TO_CHECK),
+        "units_partial_coverage": sum(1 for u in skipped if u.get("reason") == REASON_PARTIAL_COVERAGE),
         "downgraded_sources": sum(u["downgraded"] for u in units),
         "declared_sources": sum(u["declared"] for u in units),
         "connected_sources": sum(u["connected"] for u in units),
         "units": units,
     }
+
+
+def _coverage_line(report: dict[str, Any]) -> str:
+    """One line of coverage, printed on EVERY verdict.
+
+    Acceptance criterion 3. "No findings" is not "all clear" until you know how many units the gate
+    actually looked at, and the field run that produced this issue read nine unexamined workbooks as
+    a pass precisely because that number was never printed.
+    """
+    scanned = report.get("units_scanned", 0)
+    checked = report.get("units_checked", scanned - report.get("units_unchecked", 0))
+    parts = [f"  COVERAGE: {checked} of {scanned} unit(s) examined"]
+    not_evaluated = report.get("units_not_evaluated", 0)
+    nothing = report.get("units_nothing_to_check", 0)
+    partial = report.get("units_partial_coverage", 0)
+    if not_evaluated:
+        parts.append(f"{not_evaluated} COULD NOT BE evaluated")
+    if partial:
+        parts.append(f"{partial} partially covered")
+    if nothing:
+        parts.append(f"{nothing} with nothing to check")
+    return "; ".join(parts) + "."
 
 
 def render(report: dict[str, Any], *, verbose: bool = False) -> str:
@@ -789,36 +1256,43 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
         unchecked = report.get("units_unchecked", 0)
         checked = report["units_scanned"] - unchecked
         if not checked:
-            return (
-                "CONNECTION FIDELITY CHECK: SKIPPED - nothing measured "
-                "(no spec with data_sources, no shipped model, or no live source to check)"
+            return "\n".join(
+                [
+                    "CONNECTION FIDELITY CHECK: SKIPPED - nothing measured "
+                    "(no spec with data_sources, no shipped model, or no live source to check)",
+                    _coverage_line(report),
+                    *_skipped_unit_lines(report),
+                ]
             )
         # PARTIAL COVERAGE is not "nothing measured", and saying so told the operator the opposite of
         # what happened: some units WERE checked and passed, others could not be attributed at all.
         lines = [
             f"CONNECTION FIDELITY CHECK: SKIPPED - partial coverage: {checked} of "
-            f"{report['units_scanned']} unit(s) checked, {unchecked} could not be checked."
+            f"{report['units_scanned']} unit(s) checked, {unchecked} could not be checked.",
+            _coverage_line(report),
+            *_skipped_unit_lines(report),
         ]
-        for unit in report["units"]:
-            if unit["status"] != STATUS_SKIPPED:
-                continue
-            lines.append(f"  {unit['unit']}: {unit['detail']}")
         lines.append(
-            "  A unit is unchecked when no live source could be attributed to the emitted model - "
-            "usually a spec table name that does not match any emitted table. Inspect it by hand; a "
-            "downgrade cannot be ruled out here."
+            "  Read the labels: [NOT EVALUATED] means a downgrade CANNOT be ruled out here - the unit "
+            "was not examined (no telemetry, no model, or nothing attributable; on the parser path "
+            "usually a spec table name matching no emitted table). [nothing to check] means there was "
+            "no live source to compare, which IS a complete answer."
         )
         return "\n".join(lines)
     if report["status"] == STATUS_OK:
-        return (
-            f"CONNECTION FIDELITY CHECK: OK - every live source stays connected across "
-            f"{report['units_scanned']} unit(s) ({report['connected_sources']} connected, "
-            f"{report['declared_sources']} declared downgrade(s))."
+        return "\n".join(
+            [
+                f"CONNECTION FIDELITY CHECK: OK - every live source stays connected across "
+                f"{report['units_scanned']} unit(s) ({report['connected_sources']} connected, "
+                f"{report['declared_sources']} declared downgrade(s)).",
+                _coverage_line(report),
+            ]
         )
     lines = [
         f"CONNECTION FIDELITY CHECK: DOWNGRADED - {report['downgraded_sources']} live source(s) "
         f"silently shipped as flat files in {report['units_with_downgrade']} of "
-        f"{report['units_scanned']} unit(s)."
+        f"{report['units_scanned']} unit(s).",
+        _coverage_line(report),
     ]
     for unit in report["units"]:
         if unit["status"] != STATUS_DOWNGRADED:
@@ -832,18 +1306,48 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
             )
             if verbose and source["tables"]:
                 lines.append(f"        file-backed tables: {', '.join(source['tables'])}")
+    lines.extend(_skipped_unit_lines(report))
     lines.append(
         "  DOWNGRADED = connect the semantic model to the live upstream system (the packaged extract "
-        "is only Tableau's cache), or - if materialising IS correct - record the decision in "
-        "limitations_encountered (stage semantic_build) or a generated-edit declaration."
+        "is only Tableau's cache), or - if materialising IS correct - record the decision. On the "
+        "parser path that is a build-stage limitations_encountered entry (stage semantic_build) or a "
+        "generated-edit declaration; an engine bundle has no limitations_encountered, so there it is "
+        "the generated-edit declaration."
     )
     return "\n".join(lines)
+
+
+_REASON_LABELS = {
+    REASON_NOT_EVALUATED: "NOT EVALUATED",
+    REASON_PARTIAL_COVERAGE: "PARTIAL",
+    REASON_NOTHING_TO_CHECK: "nothing to check",
+}
+
+
+def _skipped_unit_lines(report: dict[str, Any]) -> list[str]:
+    """One line per skipped unit, LABELLED with which kind of skip it is.
+
+    The label is the whole point. "SKIPPED" alone reads as fine; "NOT EVALUATED" does not, and those
+    are the units where a downgrade is still possible and simply unproved.
+    """
+    lines = []
+    for unit in report.get("units", []):
+        if unit.get("status") != STATUS_SKIPPED:
+            continue
+        label = _REASON_LABELS.get(unit.get("reason"), "SKIPPED")
+        lines.append(f"  [{label}] {unit.get('unit')}: {unit.get('detail')}")
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("paths", nargs="*", type=Path, help="bundle/unit folder(s) or a migration-spec.json")
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        type=Path,
+        help="bundle/unit folder(s), a migration-spec.json, or an engine handover slice / report.json",
+    )
     parser.add_argument("--model", type=Path, help="unused override kept for CLI symmetry with sibling gates")
     parser.add_argument("--json", type=Path, help="write the machine-readable verdict here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered verdict")
@@ -855,8 +1359,8 @@ def main(argv: list[str] | None = None) -> int:
     if not targets:
         parser.error("give a bundle/unit path or a migration-spec.json")
     for path in targets:
-        if not (path.is_dir() or (path.is_file() and path.name == "migration-spec.json")):
-            parser.error(f"{path} is not a directory or migration-spec.json")
+        if not (path.is_dir() or (path.is_file() and path.suffix.lower() == ".json")):
+            parser.error(f"{path} is not a directory or a JSON unit/telemetry file")
 
     merged = merge([unit for target in targets for unit in scan(target)["units"]])
 
