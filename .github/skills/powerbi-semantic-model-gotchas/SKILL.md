@@ -80,7 +80,7 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   | same, with blank lines between the fragments (the reported crash) | ❌ identical failure; the blank line is **not** the trigger |
   | inline start whose continuation is `VAR x = 1` / `RETURN x` | ❌ `UnsupportedObjectType — VAR is not a supported property in the current context` |
   | multi-line whose continuation **dedents to the object's own indent** | ❌ `Invalid indentation was detected!` |
-  | multi-line indented to the **same level as the properties** | ⚠️ **opens, silently corrupt** — `formatString: 0.0%` is swallowed *into the DAX* |
+  | multi-line indented to the **same level as the properties** | ⚠️ **opens, silently corrupt** — the properties are swallowed *into the DAX* and never set |
 
   **The rule, stated positively:** an expression is either **entirely on the `=` line**, or it
   **starts on the line after `=`** and every one of its lines is indented **strictly deeper than the
@@ -101,17 +101,43 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   multi-line expressions, zero backtick blocks) — so single-line remains the **house default**, but
   it is a style choice now, not a format constraint.
 
-  **The under-indented case deserves its own fear.** It is the only one that *passes* the parser: the
-  expression eats the object's own properties, so `formatString`/`displayFolder`/`dataType` silently
-  vanish from the model and nothing reports it. That is worse than the crash, which at least tells
-  you.
+  **The under-indented case deserves its own fear, and it is broader than it looks.** It is the only
+  one that *passes* the parser. The contract is that a multi-line expression must be indented **one
+  level deeper than the object's properties** — so if it starts at the *property* level instead,
+  **every** property the object declares after it is read as DAX and silently never set. Measured:
+  `formatString`, a bare `isHidden` (shortcut syntax, no colon), a documented `isKey: true`, an
+  `annotation` — all absorbed, `IsHidden`/`IsKey` come back `False`, and AMO reports nothing.
+  Do not think of this as "watch out for `formatString`"; think of it as "the indent decides".
 
-  ✅ **Gated offline:** `python scripts/check_datamodel.py <model>` now reports
-  `TMDL_EXPRESSION_CONTINUATION`, `TMDL_EXPRESSION_UNINDENTED`, `TMDL_EXPRESSION_ABSORBS_PROPERTY`,
-  `TMDL_MISPLACED_DESCRIPTION`, `TMDL_UNTERMINATED_EXPRESSION` and `TMDL_UNREADABLE`, exiting **1**
-  on any finding. It agreed with the real parser on all 34 variants and fires on none of the 16
-  committed example models. Run it **before** the first Desktop open — that is the whole point, since
-  after the crash Desktop names no file and no line.
+  ✅ **Gated offline:** `python scripts/check_datamodel.py <model>` (checks live in
+  `scripts/tmdl_checks.py`) reports `TMDL_EXPRESSION_CONTINUATION`, `TMDL_EXPRESSION_UNINDENTED`,
+  `TMDL_EXPRESSION_ABSORBS_PROPERTY`, `TMDL_MISPLACED_DESCRIPTION`, `TMDL_UNTERMINATED_EXPRESSION`,
+  `TMDL_BOM` and `TMDL_UNREADABLE`, exiting **1** on any finding. The absorption check enforces the
+  **indentation contract**, not a list of property names — an earlier revision matched known names
+  and so missed a bare `isHidden`, missed `isKey:`, and was structurally unable to catch a property
+  it had never heard of. It agrees with the real parser on 42 variants and fires on none of the 16
+  committed example models (167 TMDL docs) nor a 58-model / 471-document estate run. Run it
+  **before** the first Desktop open — that is the whole point, since after the crash Desktop names
+  no file and no line.
+
+- ⚠️ **A UTF-8 BOM on a `.tmdl` file is invisible to every parser except the one that matters.**
+  `TmdlSerializer` accepts it happily; Power BI Desktop's *project reader* does not
+  (`UTF8EncodingThrowOnBOM.CheckBom` → *"Only text with UTF8 encoding without BOM is supported"*)
+  and the project simply does not open — see
+  [`pbip-model-refresh`](../pbip-model-refresh/SKILL.md). So an AMO round-trip is **not** sufficient
+  evidence that a file you wrote is loadable. Always write with `encoding="utf-8"` in Python or
+  `-Encoding utf8NoBOM` in PowerShell; `check_datamodel.py` now reports `TMDL_BOM` rather than
+  quietly stripping it, because normalising it in memory made a broken deliverable pass the gate.
+
+- ❌ **Known gap — TMDL also enforces an ORDERING rule inside an object, and nothing gates it.**
+  Measured alongside the above: `source =` followed by `mode: import` is rejected (*"Invalid
+  indentation was detected!"*) while `source =` followed by `annotation Foo = Bar` is accepted, and
+  a nested multi-line `formatStringDefinition =` followed by `isHidden` is rejected (*"The keyword
+  'isHidden' is neither a property nor an object in the current context"*). This is the same family
+  as the documented "every property must precede every annotation" rule above. Consequence in
+  practice: **put every scalar property BEFORE any expression-valued property** (`source`,
+  `formatStringDefinition`, `detailRowsDefinition`), and annotations last. `check_datamodel.py`
+  does **not** detect violations of this — treat a clean gate as silent on ordering.
 - **A measure's suffix-qualified name must never collide with any column name in the same table**
   (e.g. `measure 'X'` next to `column 'X'`, even if one is hidden). Tabular's naming rule shares one
   namespace between columns and measures per table — a bare-named "value" measure over a same-named
