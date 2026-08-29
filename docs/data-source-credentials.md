@@ -93,13 +93,48 @@ NOT be trusted on its own for a serverless source — always confirm with `DATA_
 
 `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` triggers a refresh via UI Automation and
 watches for the connector modal:
-- Modal appears (or is already open) -> `VERDICT: CREDENTIAL_MISSING` -> prompt the user to sign in once.
-- No modal within the timeout -> `VERDICT: CREDENTIAL_PRESENT`, **but** re-confirm with the data probe
-  before trusting it (see the serverless false-positive above).
+- Modal appears (or is already open) -> `VERDICT: CREDENTIAL_MISSING` (exit 1) -> prompt the user to
+  sign in once. **This is the only verdict that is a hard stop.**
+- No modal within the timeout -> `VERDICT: CREDENTIAL_PRESENT` (exit 0), **but** re-confirm with the
+  data probe before trusting it (see the serverless false-positive above).
+- A dialog is up that is *not* a credential prompt -> one of `REFRESH_IN_PROGRESS` (another refresh
+  already owns this instance — wait for it or cancel the stale one), `DIALOG_NEEDS_HUMAN` (a **known**
+  human-blocking prompt that is not a credential prompt — the native-database-query approval modal;
+  approve it, no sign-in implied), `DIALOG_UNRECOGNIZED` (no signature matched, or progress text
+  alongside prose that is not progress status) or `DIALOG_UNREADABLE` (its **content** could not be
+  shown to be harmless), each **exit 3**. All four mean *"could not probe"*, never *"a human must sign
+  in"*.
+
+⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall.** Until issue #367 the probe
+returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
+Refresh progress dialog trips that trivially, and a field report on 2026-08-28 caught it doing so under
+three concurrent refreshes against a cold Snowflake warehouse. The probe now classifies a dialog by its
+text and reports what it actually saw; the size test only decides which windows are worth reading. The
+**Python** fast check (`probe_desktop_query.py` / `refresh_pbip_model.py`) still emits
+`BLOCKED_BY_DIALOG` from a size-only rule, so treat that token — wherever it comes from — as
+"something is on screen", not as "sign-in required".
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and
 (b) also treat an **already-open** modal as MISSING (check before triggering refresh).
+
+⚠️ **A third, found in blind review 2026-08-29: Win32 child-HWND text cannot see inside a WPF dialog,
+and no proxy for "we read the content" survives contact.** WPF renders its whole visual tree into one
+HWND, so only the window *caption* survives child enumeration. A real owned WPF modal captioned
+`Refresh`, whose content read `Enter your credentials`, was classified as a progress dialog and the
+probe exited **0 with `CREDENTIAL_PRESENT`** — a silent false negative on a hard stop. A second attempt
+that also required "we harvested some text" fell to a `Cancel` button. The probe now merges **UI
+Automation** text (`Name`, `ValuePattern`, `TextPattern`) before matching any signature, runs that
+harvest in a **killable child process** (a hung provider held a 1 s probe for 15 s+ producing no verdict
+at all), and — the load-bearing part — **suppresses a dialog only when it positively reads benign
+CONTENT**, never because a caption looked reassuring. If you extend this probe, or write another dialog
+detector: **a caption is not content, and "we read something" is not "we read the thing that matters".**
+A third round found the same shape twice more: the **first** benign element used to classify the whole
+window (so `Evaluating` beside *"Permission is required to run this native database query"* cleared it),
+and a **missing JSON property** in the harvest child's payload computed to "complete" because
+`-not $null` is `$true`. The probe now scans all content, recognises known human-blocking prompts by
+name (`DIALOG_NEEDS_HUMAN`, exit 3), and validates the child's schema and exit code. The one-line
+lesson across all three rounds: **missing evidence must never read as good evidence.**
 
 **The robust positive check: query one row from the Desktop model (verified 2026-07).** Modal-absence is
 a *negative* signal; the *positive* proof that data actually flows is to query the loaded model. Power BI

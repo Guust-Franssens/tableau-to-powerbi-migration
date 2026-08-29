@@ -1,0 +1,1 @@
+^Refresh$|^Refreshing[\s\.]*$|^Evaluating[\s\.]*$|^Waiting for other queries[\s\.]*$|^\d[\d,\. ]*rows?\s+loaded[\s\.]*$|^Loading data[\s\.]*$|^Preparing to load[\s\.]*$
