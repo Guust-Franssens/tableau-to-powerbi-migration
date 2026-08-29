@@ -559,6 +559,7 @@ and 2/5 reproduced by running the command:
 | `6` | `EXIT_EMPTY_MODEL` | **live** — a model would open and load **zero rows** (an Import partition over a flat file that never landed) | read `<bundle>/empty-model-check.json`; see the block below |
 | `7` | `EXIT_INVALID_PBIR` | **live** ✅ reproduced — a shipped report FAILS the first-party `powerbi-report-author validate` (measured: `PBIR_ROLE_REQUIRED_MISSING` from a stubbed calc whose projection was dropped) | read `<bundle>/pbir-validity-check.json`; **bind the stub**, do not delete the visual |
 | `8` | `EXIT_BLANK_PLACEHOLDER` | **live** ✅ reproduced — a handover-backed `BLANK()` placeholder is consumed by a report filter or visual field binding | read `<bundle>/blank-placeholder-check.json`; translate the calc or remove the consuming report dependency knowingly |
+| `9` | `EXIT_BUNDLE_REWRITE` | **pre-engine refusal** (#250) — the `--output` bundle already holds work an engine re-run would delete, and/or a **different engine version** built it | land into a FRESH `--output`, or acknowledge with `--accept-bundle-rewrite` / `--accept-engine-version-change`; the acknowledgement is written to `<bundle>/bundle-rewrite-acknowledgement.json` |
 
 ❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
 §5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
@@ -593,6 +594,15 @@ Reference run ✅ verified from `_convert.log`: `bound=23/38 failed=15 warned=20
 > and the stale-output guard *exempts* that path — so the most destructive re-run is the one that
 > needs no `--force`. **All DAX approvals land in ONE run; per-workbook agent work starts only
 > afterwards.** ✅ verified from `run_estate.py`'s own docstring.
+>
+> ✅ **This is now ENFORCED, not just documented** (#250). `run_estate.py` re-hashes the target
+> bundle against `engine-output-receipt.json` and `input_manifest.json`'s `generated_artifacts`
+> **before** the engine runs, and **exits 9** naming every file the re-run would destroy. Proceeding
+> anyway needs `--accept-bundle-rewrite`, and the acknowledgement (including the file list) is
+> written to `<bundle>/bundle-rewrite-acknowledgement.json`. A bundle built by a **different engine
+> version** is refused the same way and acknowledged separately with
+> `--accept-engine-version-change` — deliberately two flags, so accepting a known engine bump does
+> not silently waive the destruction guard. `--slice-only` never runs the engine and is exempt.
 
 What a bundle contains ✅ verified against the reference bundle by listing it, 2026-08-13:
 
@@ -607,7 +617,8 @@ What a bundle contains ✅ verified against the reference bundle by listing it, 
 | `data/` | flat-file data landed next to the models that import it (4 folders on the reference bundle) | no |
 | `empty-model-check.json` | the exit-6 verdict: every model, its partitions, and why any of them would load zero rows. **Written on every run, pass or fail** | — |
 | `phase-timings.json` | per-phase elapsed seconds — see the note under §2's table for what it does *not* cover | — |
-| `engine-output-receipt.json` | hashes of the engine's output **and `engine` — what built this bundle** (§1.2) | — |
+| `engine-output-receipt.json` | hashes of the engine's output **and `engine` — what built this bundle** (§1.2). Read back by the pre-engine rewrite barrier (exit 9) to tell engine output from downstream work | — |
+| `bundle-rewrite-acknowledgement.json` | present only when someone knowingly re-ran the engine over downstream work or a different engine version — records when, which flag, and every file destroyed | — |
 | `.credential-gate-audit.log` | append-only audit trail; `credential_gate.py verify` reads it. **This is the non-narrative record** — trust it over any summary, including your own | — |
 | `input_manifest.json`, `source-provenance.json` | what went in, and where upstream it came from | — |
 | `deploy-journal.jsonl` | written by step 6, not step 5: intent-then-outcome per item (§6.1) | — |
@@ -1236,12 +1247,12 @@ Placeholders used in this document — and where the real value lives:
 
 `—` means that script cannot return that exit code.
 
-| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
-|---|---|---|---|---|---|---|---|---|---|
-| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — |
-| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — |
-| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** |
-| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — |
+| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — | — |
+| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — | — |
+| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** | **bundle rewrite refused** |
+| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — | — |
 
 One run returns **one** code, in the order collision → DoD → invalid PBIR → BLANK() placeholder →
 empty model — so a bundle can trip a gate the exit code never mentions. Read the log body,

@@ -715,3 +715,335 @@ def test_the_coordinator_never_emits_model_content() -> None:
     body = source.split('"""', 2)[-1]  # skip the module docstring, which explains these very terms
     for forbidden in ("write_model_folder", "write_local_pbip", ".tmdl", "visual.json"):
         assert forbidden not in body, f"coordinator must not emit model content ({forbidden})"
+
+
+# ---------------------------------------------------------------------------
+# issue #250: the destructive-re-run barrier is CHECKED now, not merely documented
+#
+# The docstring claimed "this script owns that ordering so no agent has to remember it" and owned
+# nothing: every gate ran in phase 2, reading output the engine had already written. A landing
+# re-run into a bundle holding ~20 items of hand-authored fix work destroyed all of it with no
+# --force, no prompt and no pre-check. These tests drive `main()` so that a guard moved back after
+# the engine, or quietly turned into an opt-in, fails them.
+# ---------------------------------------------------------------------------
+
+
+def _versioned_engine(root: Path, version: str) -> Path:
+    """An engine tree whose VERSION is what `engine_provenance` reads back off disk."""
+    skill = root / "skills" / "tableau-migration"
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "VERSION").write_text(version + "\n", encoding="utf-8")
+    return root
+
+
+def _bundle_engine(calls: list[Path] | None = None):
+    """A stand-in engine emitting a stable, realistic bundle: a model, a PBIR report and a .pbip.
+
+    `calls` is how a test proves the guard is PRE-engine: a refusal must leave it empty. Asserting
+    only on the exit code would still pass if the bundle were destroyed first and refused after.
+    """
+
+    def _fake(_engine: Path, _src: Path, dest: Path, _dax: Path | None) -> tuple[int, str]:
+        if calls is not None:
+            calls.append(dest)
+        _write(dest / "report.json", json.dumps(_report()))
+        _write(dest / "input_manifest.json", '{"inputs": []}')
+        model = dest / "pbip" / "WB" / "WB.SemanticModel"
+        _write(model / "definition.pbism", "{}")
+        _write(model / "definition" / "tables" / "Orders.tmdl", "table Orders")
+        report = dest / "pbip" / "WB" / "WB.Report"
+        _write(report / "definition.pbir", "{}")
+        _write(report / "definition" / "report.json", '{"pages": []}')
+        _write(dest / "pbip" / "WB" / "WB.pbip", "{}")
+        return 0, ""
+
+    return _fake
+
+
+ORDERS_TMDL = "pbip/WB/WB.SemanticModel/definition/tables/Orders.tmdl"
+REPORT_JSON = "pbip/WB/WB.Report/definition/report.json"
+
+
+def _landing_argv(engine: Path, src: Path, out: Path, *extra: str) -> list[str]:
+    return [
+        "--engine",
+        str(engine),
+        "--allow-noncanonical-engine",
+        "--input",
+        str(src),
+        "--output",
+        str(out),
+        *extra,
+    ]
+
+
+def _first_run(tmp_path: Path, monkeypatch, version: str = "2.339.0") -> tuple[Path, Path, Path]:
+    """Build the bundle the way a real run builds it, so both baselines are the real ones."""
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", version)
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_OK
+    return engine, src, out
+
+
+def _relanding(monkeypatch) -> list[Path]:
+    """Re-arm the stand-in engine for a SECOND run and return the call log."""
+    calls: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine(calls))
+    return calls
+
+
+def test_a_landing_rerun_into_a_pristine_bundle_still_proceeds(tmp_path: Path, monkeypatch) -> None:
+    """The documented one-run landing flow must survive the guard (issue #250, DoD 2).
+
+    A guard that blocked every re-run would be trivially "safe" and would break the exact workflow
+    the barrier exists to protect. Both baselines are re-hashed here against a bundle nothing has
+    touched, so a false positive fails this test rather than an operator's estate.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    calls = _relanding(monkeypatch)
+    dax = _write(tmp_path / "approved.json", json.dumps({"Rank": "RANKX(...)"}))
+
+    code = run_estate.main(_landing_argv(engine, src, out, "--approved-dax", str(dax)))
+
+    assert code == run_estate.EXIT_OK
+    assert calls == [out], "a pristine bundle must still be re-runnable"
+
+
+def test_hand_authored_work_in_the_bundle_refuses_the_landing_rerun(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The reported case: bulk approved DAX landed into a bundle holding manual fix work.
+
+    The engine's own stale-output guard exempts `--approved-dax`, so nothing upstream refuses this.
+    `calls` is the load-bearing assertion: the refusal has to happen BEFORE the delete-and-recreate,
+    not after it.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    (out / ORDERS_TMDL).write_text("table Orders\n\n\tmeasure Sales = SUM(Orders[Amount])\n", encoding="utf-8")
+    calls = _relanding(monkeypatch)
+    dax = _write(tmp_path / "approved.json", json.dumps({"Rank": "RANKX(...)"}))
+
+    code = run_estate.main(_landing_argv(engine, src, out, "--approved-dax", str(dax)))
+
+    assert code == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == [], "the engine ran anyway - the barrier must be PRE-engine"
+    assert ORDERS_TMDL in capsys.readouterr().out, "a refusal must name what would be destroyed"
+
+
+def test_a_hand_edited_report_file_is_work_the_receipt_alone_cannot_see(tmp_path: Path, monkeypatch) -> None:
+    """PBIR JSON is outside `ARTIFACT_SUFFIXES`, so the receipt does not record it at all.
+
+    That is why the guard reads the generated-artifact baseline too. The second assertion pins the
+    reason: if the receipt ever did cover these files, this test would be passing for a different
+    reason than it was written for.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    receipt = json.loads((out / run_estate.ENGINE_RECEIPT).read_text(encoding="utf-8"))
+    assert REPORT_JSON not in {record["path"] for record in receipt["artifacts"]}
+
+    (out / REPORT_JSON).write_text('{"pages": [{"name": "p1"}]}', encoding="utf-8")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == []
+
+
+def test_a_new_artifact_under_pbip_counts_as_downstream_work(tmp_path: Path, monkeypatch) -> None:
+    """An agent-authored model file the engine never wrote is work too, not just an edit."""
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Custom.tmdl", "table Custom")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == []
+
+
+def test_a_deleted_engine_artifact_counts_as_downstream_work(tmp_path: Path, monkeypatch) -> None:
+    """A bundle missing something the receipt attests to is no longer the bundle that was measured."""
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    (out / ORDERS_TMDL).unlink()
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == []
+
+
+def test_accepting_the_rewrite_proceeds_and_the_bundle_records_what_was_destroyed(tmp_path: Path, monkeypatch) -> None:
+    """DoD 3: the opt-out works, and the ARTIFACT says the loss was deliberate.
+
+    The record is written before the engine runs and lives at the bundle root, which the engine's
+    rmtree sites do not touch - so it survives the rewrite it describes.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    (out / ORDERS_TMDL).write_text("table Orders\n\n\tmeasure Sales = 1\n", encoding="utf-8")
+    calls = _relanding(monkeypatch)
+
+    code = run_estate.main(_landing_argv(engine, src, out, "--accept-bundle-rewrite"))
+
+    assert code == run_estate.EXIT_OK
+    assert calls == [out]
+    record = json.loads((out / run_estate.BUNDLE_REWRITE_RECORD).read_text(encoding="utf-8"))
+    assert len(record["records"]) == 1
+    assert record["records"][0]["accepted_bundle_rewrite"] is True
+    assert ORDERS_TMDL in record["records"][0]["destroyed"]["modified"]
+
+
+def test_a_bundle_with_neither_baseline_warns_instead_of_hard_failing(tmp_path: Path, monkeypatch, capsys) -> None:
+    """DoD 4: a pre-receipt or third-party bundle must not be bricked by the guard."""
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir()
+    _write(out / "report.json", json.dumps(_report()))
+    _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Orders.tmdl", "table Orders")
+    calls = _relanding(monkeypatch)
+
+    code = run_estate.main(_landing_argv(engine, src, out))
+
+    assert code == run_estate.EXIT_OK
+    assert calls == [out]
+    assert f"no usable {run_estate.ENGINE_RECEIPT}" in capsys.readouterr().out
+
+
+def test_a_bundle_built_by_a_different_engine_version_is_not_rewritten_by_default(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """2.113.0 and 2.126.0 are not interchangeable (#107) - rewriting in place mixes both."""
+    _, src, out = _first_run(tmp_path, monkeypatch, version="2.141.0")
+    newer = _versioned_engine(tmp_path / "engine2", "2.260.0")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(newer, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == []
+    printed = capsys.readouterr().out
+    assert "2.141.0" in printed and "2.260.0" in printed
+
+    assert run_estate.main(_landing_argv(newer, src, out, "--accept-engine-version-change")) == run_estate.EXIT_OK
+    assert calls == [out]
+
+
+def test_the_same_engine_version_is_not_a_finding(tmp_path: Path, monkeypatch) -> None:
+    """The version guard must not fire on the ordinary case, or it is noise that gets flagged away."""
+    engine, src, out = _first_run(tmp_path, monkeypatch, version="2.339.0")
+    same = _versioned_engine(tmp_path / "engine-copy", "2.339.0")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(same, src, out)) == run_estate.EXIT_OK
+    assert calls == [out]
+    assert engine != same
+
+
+def test_accepting_an_engine_version_change_does_not_waive_the_destruction_guard(tmp_path: Path, monkeypatch) -> None:
+    """The reason these are two flags and not one.
+
+    A single acknowledgement would mean an operator who knows the engine moved silently also waives
+    the guard on downstream work they did not know was there - which moves the failure boundary
+    instead of removing it.
+    """
+    _, src, out = _first_run(tmp_path, monkeypatch, version="2.141.0")
+    (out / ORDERS_TMDL).write_text("table Orders\n\n\tmeasure Sales = 1\n", encoding="utf-8")
+    newer = _versioned_engine(tmp_path / "engine2", "2.260.0")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(newer, src, out, "--accept-engine-version-change")) == (
+        run_estate.EXIT_BUNDLE_REWRITE
+    )
+    assert calls == []
+
+
+def test_accepting_the_rewrite_does_not_waive_the_engine_version_guard(tmp_path: Path, monkeypatch) -> None:
+    """The mirror image: accepting the loss of work says nothing about mixing engine versions."""
+    _, src, out = _first_run(tmp_path, monkeypatch, version="2.141.0")
+    (out / ORDERS_TMDL).write_text("table Orders\n\n\tmeasure Sales = 1\n", encoding="utf-8")
+    newer = _versioned_engine(tmp_path / "engine2", "2.260.0")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(newer, src, out, "--accept-bundle-rewrite")) == (
+        run_estate.EXIT_BUNDLE_REWRITE
+    )
+    assert calls == []
+
+
+def test_slice_only_still_works_against_a_bundle_full_of_downstream_work(tmp_path: Path, monkeypatch) -> None:
+    """`--slice-only` legitimately points at an EXISTING bundle on every invocation.
+
+    It never invokes the engine (see `resolve_run_engine`), so there is no delete-and-recreate to
+    guard against. A barrier that fired here would break the documented re-derivation flow outright.
+    """
+    _, _, out = _first_run(tmp_path, monkeypatch)
+    (out / ORDERS_TMDL).write_text("table Orders\n\n\tmeasure Sales = 1\n", encoding="utf-8")
+    _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Custom.tmdl", "table Custom")
+
+    assert run_estate.main(["--output", str(out), "--slice-only"]) == run_estate.EXIT_OK
+    assert not (out / run_estate.BUNDLE_REWRITE_RECORD).exists()
+
+
+def test_a_desktop_refresh_sidecar_is_not_downstream_work(tmp_path: Path, monkeypatch) -> None:
+    """A normal refresh writes `.pbi/cache.abf`; blocking on that would train operators to flag past it.
+
+    The `.pbi` model file is the sharp case: it carries an artifact suffix the receipt DOES record
+    elsewhere, so only the explicit volatile-folder exclusion keeps it out of the accounting.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    _write(out / "pbip" / "WB" / "WB.SemanticModel" / ".pbi" / "cache.abf", "refresh cache")
+    _write(out / "pbip" / "WB" / "WB.SemanticModel" / ".pbi" / "unapplied" / "Orders.tmdl", "table Orders")
+    _write(out / "pbip" / "WB" / "WB.Report" / ".pbi" / "localSettings.json", "{}")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_OK
+    assert calls == [out]
+
+
+def test_a_receipt_that_attests_to_nothing_is_not_read_as_a_clean_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
+    """An empty `artifacts` list is an absence of evidence, not evidence of absence.
+
+    Taking it at face value would flip the guard from "refuse" to "silently proceed" on exactly the
+    bundles whose provenance is weakest, and the engine-version half must still bind.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch, version="2.141.0")
+    receipt = json.loads((out / run_estate.ENGINE_RECEIPT).read_text(encoding="utf-8"))
+    receipt["artifacts"] = []
+    (out / run_estate.ENGINE_RECEIPT).write_text(json.dumps(receipt), encoding="utf-8")
+    (out / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    newer = _versioned_engine(tmp_path / "engine2", "2.260.0")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(newer, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == []
+    assert "lists no artifacts" in capsys.readouterr().out
+    assert engine != newer
+
+
+def test_a_receipt_that_attests_to_nothing_does_not_invent_a_finding(tmp_path: Path, monkeypatch) -> None:
+    """The other half of DoD 4: unattestable is not the same as dirty.
+
+    Comparing disk against an EMPTY attestation naively reports every file in the bundle as newly
+    added and refuses a run that has nothing wrong with it - a guard that cries wolf gets flagged
+    past, which is the failure mode this whole barrier exists to avoid.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    receipt = json.loads((out / run_estate.ENGINE_RECEIPT).read_text(encoding="utf-8"))
+    receipt["artifacts"] = []
+    (out / run_estate.ENGINE_RECEIPT).write_text(json.dumps(receipt), encoding="utf-8")
+    (out / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_OK
+    assert calls == [out]
+
+
+def test_a_dry_run_reports_the_refusal_and_never_writes_an_acknowledgement(tmp_path: Path, monkeypatch) -> None:
+    """`--dry-run` says what WOULD happen, so it must say "this would be refused" - and change nothing."""
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    (out / ORDERS_TMDL).write_text("table Orders\n\n\tmeasure Sales = 1\n", encoding="utf-8")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out, "--dry-run")) == run_estate.EXIT_BUNDLE_REWRITE
+    assert run_estate.main(_landing_argv(engine, src, out, "--dry-run", "--accept-bundle-rewrite")) == (
+        run_estate.EXIT_OK
+    )
+    assert calls == []
+    assert not (out / run_estate.BUNDLE_REWRITE_RECORD).exists(), "a dry run must not write into the bundle"
