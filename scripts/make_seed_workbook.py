@@ -26,6 +26,21 @@ from xml.sax.saxutils import escape
 
 CSV_ROWS = "region,amount\nNorth,120\nSouth,95\nEast,143\n"
 
+# The inline datasource's name doubles as the MARKER that identifies a workbook as one this tool
+# built: `provision_tableau_estate.py` refuses to Overwrite a workbook it cannot positively confirm
+# is a seed, and a name prefix is not evidence of authorship. Keep this constant and the template in
+# step - `tests/test_make_seed_workbook.py` pins that they agree.
+SEED_DATASOURCE_NAME = "federated.seed01"
+
+# Tableau caps a sheet name at 60 characters and requires it unique ACROSS worksheets and dashboards.
+# Composing first and truncating afterwards (`f"{name} Sheet"[:60]`) broke both rules at once: for a
+# name of 54 characters or more the worksheet and the dashboard both truncate to `name[:60]` - the
+# same string - and slicing an already-escaped string can cut an entity in half (`&amp;` straddling
+# index 60 leaves a bare `&a`). Truncate the RAW base, then append the suffix, then escape.
+MAX_SHEET_NAME = 60
+SHEET_SUFFIX = " Sheet"
+DASHBOARD_SUFFIX = " Dashboard"
+
 # Tableau accepts a federated textscan datasource with an inline column list. The relation name and
 # the `directory`/`filename` pair must agree with the packaged path, or the workbook opens broken.
 TWB_TEMPLATE = """<?xml version='1.0' encoding='utf-8' ?>
@@ -134,6 +149,29 @@ TWB_TEMPLATE = """<?xml version='1.0' encoding='utf-8' ?>
 """
 
 
+def _attr(value: str) -> str:
+    """Escape `value` for one of TWB_TEMPLATE's SINGLE-quoted attributes.
+
+    `saxutils.escape` covers `&`, `<` and `>` only - not quotes. Every attribute in the template is
+    single-quoted, so an apostrophe closes it early and the file stops being XML. Seed names are
+    `"Seed - " + <live project name>`, i.e. the apostrophe is the customer's, not ours: measured, a
+    project named `L'Equipe` produced `caption='Seed - L'Equipe'` and
+    `not well-formed (invalid token), line 4, column 34`. `"` is escaped too, so the template can
+    switch to double quotes without silently re-opening this.
+    """
+    return escape(value, {"'": "&apos;", '"': "&quot;"})
+
+
+def sheet_names(name: str) -> tuple[str, str]:
+    """Return the `(worksheet, dashboard)` names for a seed, truncated so they cannot collide.
+
+    Both are derived from a base truncated to leave room for the LONGEST suffix, so the two always
+    differ by their suffix no matter how long the workbook name is.
+    """
+    base = name[: MAX_SHEET_NAME - max(len(SHEET_SUFFIX), len(DASHBOARD_SUFFIX))]
+    return f"{base}{SHEET_SUFFIX}", f"{base}{DASHBOARD_SUFFIX}"
+
+
 def build_twbx(name: str, out: Path) -> Path:
     """Write a minimal packaged workbook whose only job is to exist inside a given project.
 
@@ -145,11 +183,12 @@ def build_twbx(name: str, out: Path) -> Path:
     """
     csv_name = "seed_data.csv"
     entry = "".join(c if (c.isalnum() or c in " -_()") else "_" for c in name).strip() or "seed"
+    sheet, dashboard = sheet_names(name)
     twb = TWB_TEMPLATE.format(
-        caption=escape(name),
+        caption=_attr(name),
         csv_name=csv_name,
-        sheet=escape(f"{name} Sheet")[:60],
-        dashboard=escape(f"{name} Dashboard")[:60],
+        sheet=_attr(sheet),
+        dashboard=_attr(dashboard),
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)

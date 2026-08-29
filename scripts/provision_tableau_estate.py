@@ -30,17 +30,29 @@ Three things this encodes that are easy to get wrong
 
 Deliberate non-goals
 --------------------
-Permissions and group MEMBERSHIP are not reproduced. Groups are created (they are needed for the RLS
-fixtures to bind), but who belongs to them, and every permission rule, is left alone: on a fresh site
-the user LUIDs differ, and a half-correct permission model is more dangerous than an obviously absent
-one. `apply` says so on completion rather than letting you assume it was handled.
+Permission RULES and group MEMBERSHIP are not reproduced. Groups are created (they are needed for the
+RLS fixtures to bind), but who belongs to them, and every permission rule, is left alone: on a fresh
+site the user LUIDs differ, and a half-correct permission model is more dangerous than an obviously
+absent one.
+
+Several other properties are not reproduced either, and saying only "permissions" implied the rest
+was faithful. Verified against TSC 0.41's request factory: content OWNERSHIP (everything lands owned
+by the PAT's user), tags, certification, workbook descriptions, and extract DATA unless `capture` ran
+with `--include-extract`. Two more used to be in that list and are now captured and re-applied,
+because both change what a downstream migration SEES: a project's `content_permissions` (a
+`LockedToProject` project came back `ManagedByOwner`) and a workbook's `show_tabs` (the publish
+request omits `showTabs` when it is false, so every re-applied workbook came back with its tabs
+hidden). `apply` prints the honest list on completion rather than letting you assume it was handled.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
+import zipfile
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,7 +65,17 @@ try:
 except ImportError:  # pragma: no cover - dependency is optional until the script is actually run
     tsc = None
 
-from tableau_env import pat_secret, require, resolve_env, server_url  # noqa: E402  # pylint: disable=wrong-import-position
+from harvest_estate_assets import refuse_unignored_output  # noqa: E402  # pylint: disable=wrong-import-position
+from make_seed_workbook import SEED_DATASOURCE_NAME, build_twbx  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
+    pat_secret,
+    redact,
+    require,
+    resolve_env,
+    server_url,
+)
+
+LOG = logging.getLogger("provision_tableau_estate")
 
 # Content Tableau Cloud provisions itself. Capturing it is useful (it explains what is on the site);
 # recreating it is wrong - the originals already exist on any new site.
@@ -71,6 +93,41 @@ KEEP_EMPTY = frozenset({"ZZ Migration Torture > Empty On Purpose"})
 # Marks a workbook this script published, so "genuinely empty" can be told from "only holds a seed".
 SEED_PREFIX = "Seed - "
 
+# The FILES `capture` writes under `--out`. Probed as files, never as the bare directory: a
+# directory-only ignore rule (`/_runs/`) is applied by `git check-ignore` only to a path it already
+# knows is a directory, which a not-yet-created `--out` is not. `manifest.json` alone is enough to
+# leak - it names every project, workbook and datasource on a live site.
+CAPTURE_ARTIFACTS = ("manifest.json", "assets/captured-workbook.twbx", "assets/captured-datasource.tdsx")
+
+CAPTURE_UNIGNORED_HINT = (
+    "Fix: use the ignored default `--out _runs/tableau-estate` (every `_*` path at the repo root is "
+    "ignored), point --out outside the checkout, or add a rule to .gitignore."
+)
+
+# Segments the ancestry walk inserts when it could NOT complete. A path carrying one is not a safe
+# create target: `apply` reports it instead of creating a project literally named after the marker.
+CYCLE_MARKER = "<cycle:{}>"
+UNRESOLVED_PARENT_MARKER = "<unresolved-parent:{}>"
+_TRUNCATION_PREFIXES = ("<cycle:", "<unresolved-parent:")
+
+# What a dry run puts in `path_to_id` for a project it has only PLANNED. Never a real LUID, and never
+# None: `None` is what made a dry run against an EMPTY site - the one scenario this tool exists for -
+# report every project below depth 1 as an orphan.
+PLANNED_ID = "<planned:{}>"
+
+# Printed after every `apply`. The previous version named only permissions and membership, which
+# implied the STRUCTURE came back faithful; the list below is what was verified against TSC 0.41's
+# request factory, and naming it is the difference between a known gap and a silent one.
+NOT_REPRODUCED_NOTE = (
+    "\nNOT reproduced by design: permission RULES and group MEMBERSHIP. User LUIDs differ on a fresh "
+    "site, and a half-correct permission model is worse than an absent one."
+    "\nAlso NOT reproduced, because a publish cannot carry it: content OWNERSHIP (everything lands "
+    "owned by the PAT's user), tags, certification, workbook descriptions, and extract DATA unless "
+    "the manifest was captured with --include-extract."
+    "\nReproduced on CREATE only: a project's content_permissions and a workbook's show_tabs. A "
+    "project that already exists keeps whatever it has - this tool never edits existing content."
+)
+
 
 @dataclass
 class ProjectRecord:
@@ -79,6 +136,7 @@ class ProjectRecord:
     path: list[str]
     name: str
     description: str = ""
+    content_permissions: str = ""
     tableau_managed: bool = False
 
     @property
@@ -102,29 +160,62 @@ class ContentRecord:  # pylint: disable=too-many-instance-attributes
     content_type: str = ""
     filename: str = ""
     embed_credentials: bool = True
+    show_tabs: bool = False
     tableau_managed: bool = False
     notes: list[str] = field(default_factory=list)
 
 
+@dataclass
+class SeedTarget:
+    """A leaf project that needs a seed, plus the workbook a seed publish would REPLACE, if any.
+
+    `existing_id` is what makes `--refresh-seeded` safe. Without it the only evidence of authorship
+    was the name prefix, and a genuine workbook that happens to be called `Seed - <project>` counts
+    as "no non-seed content", becomes a target, and is replaced by a 1.8 KB stub.
+    """
+
+    segments: tuple[str, ...]
+    project_id: str
+    name: str
+    existing_id: str | None = None
+
+
 def project_path_of(project: Any, by_id: dict[str, Any]) -> tuple[str, ...]:
-    """Build the ancestry as SEGMENTS, guarding against a cyclic parent chain.
+    """Build the ancestry as SEGMENTS, marking a walk that could not complete.
 
     Segments, not a joined string, because a project may legitimately be named `R/D`. Joining on `/`
     makes that indistinguishable from a project `D` nested inside `R`, and the trial site has exactly
     that fixture - it caught this function's first version, which mislabelled the seed for `R/D` as
     belonging to a project called `D`.
+
+    Two ways the walk can end early, and BOTH are now marked. A cycle always was. An ancestor that is
+    simply not in `by_id` - a PAT that can see a nested project but not the projects above it -
+    ended the walk silently, so the project was recorded as TOP-LEVEL and `apply` recreated it, with
+    its content, at the site root. A wrong answer given confidently is worse than a marked one:
+    `apply` refuses a marked path rather than guessing.
     """
     parts: list[str] = []
     seen: set[str] = set()
     node = project
     while node is not None:
         if node.id in seen:
-            parts.insert(0, f"<cycle:{node.name}>")
+            parts.insert(0, CYCLE_MARKER.format(node.name))
             break
         seen.add(node.id)
         parts.insert(0, node.name)
-        node = by_id.get(node.parent_id) if node.parent_id else None
+        if not node.parent_id:
+            break
+        parent = by_id.get(node.parent_id)
+        if parent is None:
+            parts.insert(0, UNRESOLVED_PARENT_MARKER.format(node.parent_id))
+            break
+        node = parent
     return tuple(parts)
+
+
+def path_is_truncated(segments: tuple[str, ...] | list[str]) -> bool:
+    """True when the ancestry is incomplete, so this path must not be used as a create target."""
+    return any(str(s).startswith(_TRUNCATION_PREFIXES) for s in segments)
 
 
 def show_path(segments: tuple[str, ...] | list[str]) -> str:
@@ -147,6 +238,23 @@ def _sign_in(env: dict[str, str]) -> Any:
         raise SystemExit("tableauserverclient is not installed - run: uv pip install tableauserverclient")
     auth = tsc.PersonalAccessTokenAuth(env["TABLEAU_PAT_NAME"], pat_secret(env), site_id=env.get("TABLEAU_SITE", ""))
     return tsc.Server(server_url(env), use_server_version=True), auth
+
+
+def scrub(text: str, env: dict[str, str]) -> str:
+    """Strip every secret this script handles out of text about to be printed or PERSISTED.
+
+    Not just the PAT: this is the one script in the repo that puts a WAREHOUSE password in a request
+    body (`connection_credentials`), so the Snowflake password and the Databricks token are in scope
+    too. `redact`'s own docstring records the risk as measured, not hypothesised - a sign-in failure
+    can echo the request body, and anything that reflects it lands in `ContentRecord.notes`, which
+    `asdict` copies verbatim into the on-disk `manifest.json`.
+    """
+    return redact(text, pat_secret(env), env.get("TABLEAU_SF_PASSWORD", ""), env.get("TABLEAU_DBX_TOKEN", ""))
+
+
+def _describe(exc: BaseException, env: dict[str, str]) -> str:
+    """One redacted `Type: message` string, for a note or a problem line."""
+    return scrub(f"{type(exc).__name__}: {exc}", env)
 
 
 def _unique(base: str, taken: set[str]) -> str:
@@ -180,6 +288,7 @@ def capture(  # pylint: disable=too-many-locals
                     path=list(path := project_path_of(p, by_id)),
                     name=p.name,
                     description=p.description or "",
+                    content_permissions=getattr(p, "content_permissions", "") or "",
                     tableau_managed=_managed(path),
                 )
                 for p in raw_projects
@@ -193,7 +302,9 @@ def capture(  # pylint: disable=too-many-locals
         for kind, endpoint in (("datasource", server.datasources), ("workbook", server.workbooks)):
             for item in tsc.Pager(endpoint):
                 segments = (
-                    project_path_of(by_id[item.project_id], by_id) if item.project_id in by_id else (item.project_name,)
+                    project_path_of(by_id[item.project_id], by_id)
+                    if item.project_id in by_id
+                    else (UNRESOLVED_PARENT_MARKER.format(item.project_id), item.project_name or "")
                 )
                 managed = _managed(segments)
                 rec = ContentRecord(
@@ -202,6 +313,7 @@ def capture(  # pylint: disable=too-many-locals
                     kind=kind,
                     content_type=getattr(item, "datasource_type", "") or "",
                     embed_credentials=not any(m in item.name.lower() for m in _NO_CREDENTIAL_MARKERS),
+                    show_tabs=bool(getattr(item, "show_tabs", False)) if kind == "workbook" else False,
                     tableau_managed=managed,
                 )
                 if not rec.embed_credentials:
@@ -210,12 +322,14 @@ def capture(  # pylint: disable=too-many-locals
                     try:
                         rec.filename = _download_asset(endpoint, item, assets, taken, include_extract)
                     except Exception as exc:  # pylint: disable=broad-except
-                        rec.notes.append(f"download failed: {type(exc).__name__}: {exc}")
+                        # Redacted: a failure from the REST layer can carry the request that caused
+                        # it, and this note is copied verbatim into the durable manifest.
+                        rec.notes.append(f"download failed: {_describe(exc, env)}")
                         rec.filename = ""
                 content.append(rec)
 
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "site": env.get("TABLEAU_SITE", ""),
         "server_url": server_url(env),
         "include_extract": include_extract,
@@ -284,6 +398,13 @@ def apply_manifest(  # pylint: disable=too-many-branches,too-many-locals,too-man
             segments = tuple(rec["path"])
             if rec["tableau_managed"]:
                 continue
+            if path_is_truncated(segments):
+                problems.append(
+                    f"project {show_path(segments)!r}: ancestry could not be resolved at capture time "
+                    "(cycle, or an ancestor this PAT cannot see) - refusing to create it, because the "
+                    "alternative is recreating a nested project at the site ROOT"
+                )
+                continue
             if segments in path_to_id:
                 planned.append(f"  = project exists   {show_path(segments)}")
                 continue
@@ -293,9 +414,27 @@ def apply_manifest(  # pylint: disable=too-many-branches,too-many-locals,too-man
                 problems.append(f"project {show_path(segments)!r}: parent {show_path(parent)!r} missing")
                 continue
             planned.append(f"  + project CREATE   {show_path(segments)}")
-            if not dry_run:
-                item = tsc.ProjectItem(name=rec["name"], description=rec["description"] or None, parent_id=parent_id)
+            if dry_run:
+                # A dry run must record the projects it PLANNED, or `path_to_id.get(parent)` is None
+                # from depth 2 down and every descendant is reported as an orphan. Against the
+                # populated SOURCE site this never showed, because `path_to_id` is pre-filled from
+                # the live server - so the bug was invisible in every scenario except the empty
+                # target site the tool exists to rebuild.
+                path_to_id[segments] = PLANNED_ID.format(show_path(segments))
+                continue
+            item = tsc.ProjectItem(
+                name=rec["name"],
+                description=rec["description"] or None,
+                content_permissions=rec.get("content_permissions") or None,
+                parent_id=parent_id,
+            )
+            try:
                 path_to_id[segments] = server.projects.create(item).id
+            except Exception as exc:  # pylint: disable=broad-except
+                # Recorded, not raised. An exception escaping here discards `planned` - the operator's
+                # only record of what this run already created on a LIVE site - and replaces it with a
+                # traceback. Descendants then fail the parent check above, which is the honest result.
+                problems.append(f"project {show_path(segments)!r}: create failed: {_describe(exc, env)}")
 
         existing_groups = {g.name for g in tsc.Pager(server.groups)}
         for name in manifest.get("groups", []):
@@ -304,7 +443,10 @@ def apply_manifest(  # pylint: disable=too-many-branches,too-many-locals,too-man
                 continue
             planned.append(f"  + group CREATE     {name}")
             if not dry_run:
-                server.groups.create(tsc.GroupItem(name))
+                try:
+                    server.groups.create(tsc.GroupItem(name))
+                except Exception as exc:  # pylint: disable=broad-except
+                    problems.append(f"group {name!r}: create failed: {_describe(exc, env)}")
 
         # Datasources strictly before workbooks, so a workbook's published binding resolves.
         for kind, endpoint, item_cls in (
@@ -317,6 +459,9 @@ def apply_manifest(  # pylint: disable=too-many-branches,too-many-locals,too-man
                 label = f"{show_path(segments)} > {rec['name']}"
                 if rec["tableau_managed"]:
                     continue
+                if path_is_truncated(segments):
+                    problems.append(f"{kind} {label!r}: its project's ancestry could not be resolved at capture time")
+                    continue
                 if not rec["filename"]:
                     problems.append(f"{kind} {label!r}: no captured file")
                     continue
@@ -325,7 +470,10 @@ def apply_manifest(  # pylint: disable=too-many-branches,too-many-locals,too-man
                     problems.append(f"{kind} {label!r}: missing asset {src.name}")
                     continue
                 project_id = path_to_id.get(segments)
-                if project_id is None and not dry_run:
+                # No `and not dry_run` here any more. That exemption existed because a dry run never
+                # recorded a planned project, so None was ambiguous; now that it does, None means
+                # what it says in BOTH modes, and a dry run reports the same set a real run would.
+                if project_id is None:
                     problems.append(f"{kind} {label!r}: project {show_path(segments)!r} not found")
                     continue
                 if (rec["name"], project_id) in present and not overwrite:
@@ -348,28 +496,30 @@ def apply_manifest(  # pylint: disable=too-many-branches,too-many-locals,too-man
                 mode = "Overwrite" if overwrite else "CreateNew"
                 item = item_cls(project_id)
                 item.name = rec["name"]
+                if kind == "workbook":
+                    # TSC omits `showTabs` from the publish request when it is false, and Tableau
+                    # then defaults to hidden - so without this every re-applied workbook came back
+                    # with its tabs hidden, changing what the migration engine sees.
+                    item.show_tabs = bool(rec.get("show_tabs", False))
                 try:
                     if kind == "datasource":
                         endpoint.publish(item, str(src), mode, connection_credentials=creds)
                     else:
                         endpoint.publish(item, str(src), mode)
                 except Exception as exc:  # pylint: disable=broad-except
-                    problems.append(f"{kind} {label!r}: publish failed: {type(exc).__name__}: {exc}")
+                    problems.append(f"{kind} {label!r}: publish failed: {_describe(exc, env)}")
 
     print("\n".join(planned) or "  (nothing to do)")
     if problems:
         print(f"\n{len(problems)} problem(s):")
         for p in problems:
             print(f"  ! {p}")
-    print(
-        "\nNOT reproduced by design: permission rules and group MEMBERSHIP. "
-        "User LUIDs differ on a fresh site, and a half-correct permission model is worse than an absent one."
-    )
+    print(NOT_REPRODUCED_NOTE)
     return 1 if problems else 0
 
 
-def empty_leaf_projects(server: Any, *, include_seeded: bool = False) -> list[tuple[tuple[str, ...], str, str]]:
-    """Return `(segments, project_id, name)` for every leaf project that needs a seed.
+def empty_leaf_projects(server: Any, *, include_seeded: bool = False) -> list[SeedTarget]:
+    """Return a `SeedTarget` for every leaf project that needs a seed.
 
     A leaf with nothing in it is an inert fixture: the migration never walks that path, so whatever
     the folder was built to stress - 11 levels of nesting, a slash in the name - is never exercised.
@@ -381,6 +531,10 @@ def empty_leaf_projects(server: Any, *, include_seeded: bool = False) -> list[tu
     `<metadata-records>` the engine needs to type a model, every already-seeded project was
     non-empty, so a plain `seed` run correctly skipped it - leaving a site full of fixtures that
     still could not migrate.
+
+    Each target also carries the LUID of the workbook a seed publish would replace, if one is already
+    there. `name.startswith("Seed - ")` is a naming convention, not proof of authorship, so the
+    caller verifies that workbook before overwriting anything.
     """
     projects = list(tsc.Pager(server.projects))
     by_id = {p.id: p for p in projects}
@@ -389,38 +543,102 @@ def empty_leaf_projects(server: Any, *, include_seeded: bool = False) -> list[tu
 
     total = {pid: 0 for pid in paths}
     non_seed = {pid: 0 for pid in paths}
-    for endpoint in (server.datasources, server.workbooks):
+    workbook_ids: dict[tuple[str, str], str] = {}
+    for endpoint, kind in ((server.datasources, "datasource"), (server.workbooks, "workbook")):
         for item in tsc.Pager(endpoint):
             if item.project_id in total:
                 total[item.project_id] += 1
                 if not item.name.startswith(SEED_PREFIX):
                     non_seed[item.project_id] += 1
+                elif kind == "workbook":
+                    workbook_ids[(item.project_id, item.name)] = item.id
 
     def needs_seed(pid: str) -> bool:
         return total[pid] == 0 or (include_seeded and non_seed[pid] == 0)
 
     return sorted(
-        (paths[pid], pid, by_id[pid].name)
-        for pid in total
-        if needs_seed(pid)
-        and paths[pid] not in parents
-        and not _managed(paths[pid])
-        and show_path(paths[pid]) not in KEEP_EMPTY
+        (
+            SeedTarget(
+                segments=paths[pid],
+                project_id=pid,
+                name=by_id[pid].name,
+                existing_id=workbook_ids.get((pid, f"{SEED_PREFIX}{by_id[pid].name}")),
+            )
+            for pid in total
+            if needs_seed(pid)
+            and paths[pid] not in parents
+            and not _managed(paths[pid])
+            and show_path(paths[pid]) not in KEEP_EMPTY
+        ),
+        key=lambda t: t.segments,
     )
 
 
-def _publish_seed(server: Any, target: tuple[tuple[str, ...], str, str], work_dir: Path) -> str | None:
-    """Publish one seed workbook. Returns an error string, or None on success."""
-    from make_seed_workbook import build_twbx  # pylint: disable=import-outside-toplevel
+def _is_our_seed(server: Any, workbook_id: str, work_dir: Path) -> bool:
+    """Download `workbook_id` and confirm THIS tool built it, before anything is overwritten.
 
-    segments, project_id, leaf = target
-    name = f"{SEED_PREFIX}{leaf}"
-    item = tsc.WorkbookItem(project_id)
+    The name prefix is not evidence. `--refresh-seeded` targets a leaf whose only content is named
+    `Seed - <project>`, so one genuine workbook that happens to carry that name reads as "no non-seed
+    content", becomes a target, and is replaced by the 1.8 KB stub - a destructive edit to real
+    content, from a flag whose whole purpose is to refresh a stub. Content is the only honest test:
+    a seed always carries `make_seed_workbook`'s inline datasource name, and nothing else does.
+
+    Any failure - download error, unreadable archive, no `.twb` inside - returns False, i.e. "do not
+    overwrite". An unprovable answer is treated as unsafe, never as safe.
+    """
+    probe = work_dir / "_verify"
+    probe.mkdir(parents=True, exist_ok=True)
+    downloaded: Path | None = None
+    try:
+        downloaded = Path(server.workbooks.download(workbook_id, filepath=str(probe), include_extract=False))
+        if zipfile.is_zipfile(downloaded):
+            with zipfile.ZipFile(downloaded) as archive:
+                entries = [n for n in archive.namelist() if n.lower().endswith(".twb")]
+                text = archive.read(entries[0]).decode("utf8", "replace") if entries else ""
+        else:
+            text = downloaded.read_text(encoding="utf8", errors="replace")
+    except Exception:  # pylint: disable=broad-except
+        return False
+    finally:
+        if downloaded is not None:
+            downloaded.unlink(missing_ok=True)
+        with suppress(OSError):
+            probe.rmdir()
+    return SEED_DATASOURCE_NAME in text
+
+
+def _seed_mode(server: Any, target: SeedTarget, work_dir: Path) -> tuple[str, str | None]:
+    """Decide `CreateNew` / `Overwrite` for one target, or return the refusal that stops it.
+
+    Split out of `_publish_seed` so `--dry-run` reaches it too. Left inside the publisher, the plan
+    asserted an authorship it had not checked - printing `[replaces an existing seed]` and exiting 0
+    for a target the real run refuses with exit 1. That is the same plan/run divergence `apply` was
+    just fixed for, one function away, and a plan that disagrees with its run is worse than none.
+
+    The cost is that a dry run now DOWNLOADS each existing seed candidate (a read-only call, a few KB,
+    and only for leaves that already hold one, i.e. only under `--refresh-seeded`). Nothing is written
+    to the site.
+    """
+    if target.existing_id is None:
+        return "CreateNew", None
+    if not _is_our_seed(server, target.existing_id, work_dir):
+        return "", (
+            f"{show_path(target.segments)} > {SEED_PREFIX}{target.name}: a workbook of this name "
+            "already exists and is NOT one of ours - refusing to Overwrite real content with a "
+            "1.8 KB stub. Rename or delete it first if it really is a stale seed."
+        )
+    return "Overwrite", None
+
+
+def _publish_seed(server: Any, target: SeedTarget, work_dir: Path, env: dict[str, str], mode: str) -> str | None:
+    """Publish one seed workbook in the already-decided `mode`. Error string, or None on success."""
+    name = f"{SEED_PREFIX}{target.name}"
+    item = tsc.WorkbookItem(target.project_id)
     item.name = name
     try:
-        server.workbooks.publish(item, str(build_twbx(name, work_dir / _safe_filename(name, ".twbx"))), "Overwrite")
+        server.workbooks.publish(item, str(build_twbx(name, work_dir / _safe_filename(name, ".twbx"))), mode)
     except Exception as exc:  # pylint: disable=broad-except
-        return f"{show_path(segments)} > {name}: {type(exc).__name__}: {exc}"
+        return f"{show_path(target.segments)} > {name}: {_describe(exc, env)}"
     return None
 
 
@@ -434,11 +652,16 @@ def seed_empty_projects(env: dict[str, str], work_dir: Path, *, dry_run: bool, i
             print("  (no leaf projects need seeding)")
             return 0
         for target in targets:
-            action = "PLAN" if dry_run else "PUBLISH"
-            print(f"  + seed {action}  {show_path(target[0])} > {SEED_PREFIX}{target[2]}")
+            label = f"{show_path(target.segments)} > {SEED_PREFIX}{target.name}"
+            # Decided in BOTH modes, so the plan reports the refusal the run would make.
+            mode, refusal = _seed_mode(server, target, work_dir)
+            if refusal is not None:
+                problems.append(refusal)
+                continue
+            print(f"  + seed {'PLAN' if dry_run else 'PUBLISH'}  {label}  [{mode}]")
             if dry_run:
                 continue
-            if (err := _publish_seed(server, target, work_dir)) is not None:
+            if (err := _publish_seed(server, target, work_dir, env, mode)) is not None:
                 problems.append(err)
 
     if problems:
@@ -448,7 +671,7 @@ def seed_empty_projects(env: dict[str, str], work_dir: Path, *, dry_run: bool, i
     return 1 if problems else 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -457,6 +680,11 @@ def main() -> int:
     cap.add_argument("--out", type=Path, default=REPO_ROOT / "_runs" / "tableau-estate")
     cap.add_argument("--include-extract", action="store_true", help="include extract data in downloads")
     cap.add_argument("--no-download", action="store_true", help="write the manifest only")
+    cap.add_argument(
+        "--allow-unignored-out",
+        action="store_true",
+        help="write to --out even when git does not ignore it (escape hatch; logs a warning instead)",
+    )
 
     app = sub.add_parser("apply", help="recreate the estate from a manifest")
     app.add_argument("--manifest", type=Path, required=True)
@@ -472,14 +700,24 @@ def main() -> int:
         help="also republish leaves whose only content is an existing seed (use after changing the template)",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     env = resolve_env(REPO_ROOT / ".env")
     require(env, "TABLEAU_SITE", "TABLEAU_PAT_NAME")
 
     if args.command == "capture":
-        out = args.out.resolve()
+        # Normalised ONCE, then the SAME value is used for the guard, the download and the write. A
+        # guard that validates one form of the path while the write uses another proves nothing.
+        out = args.out.expanduser().resolve()
+        # Before the sign-in and above all before the first download: `manifest.json` names every
+        # project, workbook and datasource on a live site, and this repo is PUBLIC (issue #322).
+        if refuse_unignored_output(
+            out, args.allow_unignored_out, artifacts=CAPTURE_ARTIFACTS, hint=CAPTURE_UNIGNORED_HINT
+        ):
+            return 2
         manifest = capture(out, env, include_extract=args.include_extract, download=not args.no_download)
         target = out / "manifest.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf8")
         ours = [c for c in manifest["content"] if not c["tableau_managed"]]
         print(f"captured -> {target}")

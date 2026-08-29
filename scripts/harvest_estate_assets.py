@@ -50,6 +50,7 @@ import sys
 import time
 import traceback
 from collections import deque
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,15 @@ OUTPUT_ARTIFACTS = (
     "parse-sweep.md",
 )
 
+# The remedy sentence, kept separate from the diagnosis so another tool can reuse the guard without
+# advertising THIS tool's ignored folder convention. `provision_tableau_estate.py capture` writes a
+# manifest naming every project/workbook/datasource on a live site plus the downloads themselves, so
+# it needs the same refusal - and an operator told to `--out _sweep` there would be misdirected.
+DEFAULT_UNIGNORED_HINT = (
+    "Fix: use the ignored convention `--out _sweep` (any `_sweep*` variant works, e.g. "
+    "`_sweep-2026-08-13`), point --out outside the checkout, or add a rule to .gitignore."
+)
+
 
 class OutputPathNotIgnoredError(RuntimeError):
     """`--out` is inside a git work tree that would commit it, or git cannot prove otherwise."""
@@ -105,7 +115,7 @@ def _existing_ancestor(path: Path) -> Path | None:
     return next((p for p in (path, *path.parents) if p.is_dir()), None)
 
 
-def unignored_output_paths(out: Path) -> list[Path]:
+def unignored_output_paths(out: Path, artifacts: Sequence[str] = OUTPUT_ARTIFACTS) -> list[Path]:
     """Which artifacts under `out` git would offer to commit. Empty list means safe to write.
 
     Two measured details decide this implementation, and getting either wrong yields a guard that
@@ -141,7 +151,7 @@ def unignored_output_paths(out: Path) -> list[Path]:
         return []  # outside any work tree: nothing here can be committed by accident
 
     unignored: list[Path] = []
-    for artifact in OUTPUT_ARTIFACTS:
+    for artifact in artifacts:
         target = out / artifact
         probe = _git(["check-ignore", "-q", "--", str(target)], anchor)
         # 0 = ignored, 1 = not ignored, anything else (128, or no git) = no answer, so do not guess.
@@ -153,10 +163,21 @@ def unignored_output_paths(out: Path) -> list[Path]:
     return unignored
 
 
-def refuse_unignored_output(out: Path, allow_unignored: bool) -> bool:
-    """True when the run must STOP before downloading anything. Logs the reason either way."""
+def refuse_unignored_output(
+    out: Path,
+    allow_unignored: bool,
+    *,
+    artifacts: Sequence[str] = OUTPUT_ARTIFACTS,
+    hint: str = DEFAULT_UNIGNORED_HINT,
+) -> bool:
+    """True when the run must STOP before downloading anything. Logs the reason either way.
+
+    `artifacts` and `hint` exist so a second tool that downloads customer content can reuse this one
+    implementation rather than growing a near-copy that drifts. Pass the FILES that tool writes: the
+    probe must name a file, never a bare directory (see `unignored_output_paths`).
+    """
     try:
-        unignored = unignored_output_paths(out)
+        unignored = unignored_output_paths(out, artifacts)
     except OutputPathNotIgnoredError as exc:
         message = str(exc)
     else:
@@ -165,14 +186,12 @@ def refuse_unignored_output(out: Path, allow_unignored: bool) -> bool:
         message = (
             f"git does not ignore {', '.join(str(p) for p in unignored)}. This run downloads a real "
             "site's .twbx/.tdsx and records every workbook name, and this repo is PUBLIC, so a "
-            "`git add -A` would stage customer content (issue #125). Fix: use the ignored convention "
-            "`--out _sweep` (any `_sweep*` variant works, e.g. `_sweep-2026-08-13`), point --out "
-            "outside the checkout, or add a rule to .gitignore."
+            f"`git add -A` would stage customer content (issue #125). {hint}"
         )
     if allow_unignored:
         LOG.warning("--allow-unignored-out: proceeding anyway, but %s", message)
         return False
-    LOG.error("REFUSING to harvest into %s: %s", out, message)
+    LOG.error("REFUSING to write customer content into %s: %s", out, message)
     LOG.error("Nothing was downloaded. Pass --allow-unignored-out to override this deliberately.")
     return True
 
