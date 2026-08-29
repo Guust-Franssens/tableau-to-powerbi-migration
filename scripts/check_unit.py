@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import check_desktop_orphans as check_desktop_orphans_module
+import read_handover
 from bundle_corpus import shipping_models, shipping_reports
 from check_field_bindings import model_for_report
 
@@ -67,7 +68,7 @@ EXIT_PRECONDITION_FAILED = 4
 EXIT_USAGE = 64
 
 EXEMPTIONS_FILE = "unit-check-exemptions.json"
-VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity"})
+VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity", "scaffold-partitions"})
 
 SCOPE_MODEL = "model"
 SCOPE_REPORT = "report"
@@ -76,6 +77,7 @@ SCOPE_ALL = "all"
 SCOPES = (SCOPE_MODEL, SCOPE_REPORT, SCOPE_INTEGRATION, SCOPE_ALL)
 MODEL_CHECK_IDS = frozenset(
     {
+        "scaffold-partitions",
         "sqlproxy-connections",
         "relationship-health",
         "data-model",
@@ -97,6 +99,7 @@ OWNER_HINTS = {
     "field-bindings": "integration (report reference vs model field)",
     MODEL_REFERENCE_ID: "integration (report -> semantic model reference)",
     "connection-fidelity": "integration (spec connection target vs emitted model M)",
+    "scaffold-partitions": "model",
     "sqlproxy-connections": "model",
     "relationship-health": "model",
     "data-model": "model",
@@ -634,10 +637,11 @@ def load_exemptions(target: Path) -> dict[str, Any]:
         reason = str(entry.get("reason") or "").strip()
         decided_by = str(entry.get("decided_by") or entry.get("owner") or "").strip()
         if check not in VALID_EXEMPTION_CHECKS or not item or not reason or not decided_by:
+            valid = ", ".join(sorted(VALID_EXEMPTION_CHECKS))
             invalid.append(
                 {
                     "item": item or f"#{index}",
-                    "reason": "requires check in {page-parity, stub-measures}, item, reason, and decided_by",
+                    "reason": f"requires check in {{{valid}}}, item, reason, and decided_by",
                 }
             )
             continue
@@ -649,6 +653,119 @@ def _exempted(entries: list[dict[str, str]], check: str, item: str, aliases: set
     wanted = {item, *(aliases or set())}
     normalized = {_slug(value) for value in wanted if value}
     return any(entry["check"] == check and _slug(entry["item"]) in normalized for entry in entries)
+
+
+def _handover_workbooks(target: Path) -> tuple[list[tuple[Path, str, dict[str, Any]]], list[str]]:
+    """Workbook payloads from handover slices/estate reports, using read_handover's resolver."""
+    unit = _unit_dir(target)
+    roots = []
+    for candidate in (unit / "handover", target / "handover"):
+        if candidate.is_dir() and candidate not in roots:
+            roots.append(candidate)
+    workbooks: list[tuple[Path, str, dict[str, Any]]] = []
+    unreadable: list[str] = []
+    for root in roots:
+        for path in sorted(root.glob("*.json"), key=str):
+            payload = _json_object(path)
+            if payload is not None and _is_handover_slice(path):
+                try:
+                    resolved = read_handover._workbooks_from_payload(payload, path)  # pylint: disable=protected-access
+                except read_handover.HandoverError:
+                    unreadable.append(_display_path(path))
+                    continue
+                if not resolved:
+                    unreadable.append(_display_path(path))
+                    continue
+                for name, workbook, source in resolved:
+                    workbooks.append((source, name, workbook))
+    return workbooks, unreadable
+
+
+def _scaffold_row_identity(row: dict[str, Any], handover: Path) -> tuple[str, set[str]]:
+    """Canonical exemption identity for one unresolved M-partition scaffold."""
+    table = str(row.get("table") or row.get("name") or "").strip()
+    reason = str(row.get("reason") or "").strip()
+    item = table or reason or handover.stem
+    aliases = {table, reason, f"{handover.stem}:{table}", f"{handover.stem}:{reason}"}
+    return item, {alias for alias in aliases if alias}
+
+
+def _scaffold_partition_rows(
+    workbooks: list[tuple[Path, str, dict[str, Any]]], entries: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Classify scaffold rows plus workbook payloads whose key is missing/invalid."""
+    rows: list[dict[str, Any]] = []
+    missing: list[str] = []
+    invalid: list[str] = []
+    for path, workbook_name, workbook in workbooks:
+        status, raw_rows = read_handover.partitions_needs_review_status(workbook)
+        handover = f"{_display_path(path)}::{workbook_name}"
+        if status == read_handover.PARTITION_REVIEW_MISSING:
+            missing.append(handover)
+        elif status == read_handover.PARTITION_REVIEW_INVALID:
+            invalid.append(handover)
+        elif status == read_handover.PARTITION_REVIEW_PRESENT:
+            for row in raw_rows:
+                item, aliases = _scaffold_row_identity(row, path)
+                rows.append(
+                    {
+                        "handover": handover,
+                        "table": str(row.get("table") or ""),
+                        "reason": str(row.get("reason") or ""),
+                        "item": item,
+                        "exempted": _exempted(entries, "scaffold-partitions", item, aliases),
+                    }
+                )
+    return rows, missing, invalid
+
+
+def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[str, Any] | None:
+    """Gate engine-recorded empty M-partition scaffolds from handover slices.
+
+    No handover slice means there is nothing new for this gate to read; the brownfield section already
+    reports that phase as absent. A present handover with a missing key is different and stays
+    NOT_CHECKED rather than being conflated with "zero scaffolds".
+    """
+    workbooks, unreadable = _handover_workbooks(target)
+    if not workbooks:
+        if not unreadable:
+            return None
+        return {
+            "id": "scaffold-partitions",
+            "status": STATUS_FINDINGS,
+            "detail": "handover JSON could not be read as a slice or estate report",
+            "scaffolds": [],
+            "unexempted_scaffolds": 0,
+            "scaffold_exemptions": 0,
+            "missing_handover_keys": [],
+            "invalid_handover_keys": unreadable,
+        }
+    rows, missing, invalid = _scaffold_partition_rows(workbooks, exemptions["entries"])
+    invalid.extend(unreadable)
+    unexempted = [row for row in rows if not row["exempted"]]
+    if unexempted or invalid:
+        status = STATUS_FINDINGS
+    elif missing:
+        status = STATUS_NOT_CHECKED
+    else:
+        status = STATUS_PASS
+    detail = None
+    if unexempted:
+        detail = f"{len(unexempted)} partition scaffold(s) need manual completion"
+    elif invalid:
+        detail = "partition scaffold status has invalid shape in handover"
+    elif missing:
+        detail = "partition scaffold status not recorded in handover; this is not a zero-deferral signal"
+    return {
+        "id": "scaffold-partitions",
+        "status": status,
+        "detail": detail,
+        "scaffolds": rows,
+        "unexempted_scaffolds": len(unexempted),
+        "scaffold_exemptions": len(rows) - len(unexempted),
+        "missing_handover_keys": missing,
+        "invalid_handover_keys": invalid,
+    }
 
 
 def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any]:
@@ -1291,6 +1408,10 @@ def run_all(
         checks.append(check_oracle_coverage(target, reference_dir, oracle_dir))
     if _in_scope("engine-receipt", scope):
         checks.append(check_engine_receipt(target))
+    if _in_scope("scaffold-partitions", scope):
+        scaffold_check = check_scaffold_partitions(target, exemptions)
+        if scaffold_check is not None:
+            checks.append(scaffold_check)
     if _in_scope("field-bindings", scope) and model_loc.state in (MODEL_LOC_EXTERNAL, MODEL_LOC_BROKEN):
         checks.append(_model_reference_check(model_loc))
     _append_cli_checks(checks, target, exemptions, scope, model_loc)
@@ -1398,6 +1519,8 @@ def _render_actionable_detail(check: dict[str, Any]) -> list[str]:
         lines.append(f"      rerun: {check['native_command']}")
     for finding in _payload_findings(check.get("payload")):
         lines.append(f"      finding: {finding}")
+    for path in check.get("invalid_handover_keys", [])[:3]:
+        lines.append(f"      unreadable handover: {path}")
     if check.get("stderr"):
         lines.append(f"      stderr: {check['stderr'][:500]}")
     return lines
@@ -1405,6 +1528,52 @@ def _render_actionable_detail(check: dict[str, Any]) -> list[str]:
 
 def _count_suffix(missing: int) -> str:
     return f"   [{missing} MISSING]" if missing else ""
+
+
+def _declared_downgrade_count(check: dict[str, Any]) -> int:
+    """Declared connection downgrades are accepted compromises, not indistinguishable clean passes."""
+    if check.get("id") != "connection-fidelity":
+        return 0
+    payload = check.get("payload")
+    if not isinstance(payload, dict):
+        return 0
+    declared = payload.get("declared_sources")
+    return declared if isinstance(declared, int) and declared > 0 else 0
+
+
+def _compromise_not_evaluated_count(report: dict[str, Any]) -> int:
+    """Accepted-decision channels selected but not measured; unknown is not zero."""
+    total = 0
+    seen_connection_fidelity = False
+    for check in report["checks"]:
+        if check.get("id") != "connection-fidelity":
+            continue
+        seen_connection_fidelity = True
+        if check.get("status") == STATUS_NOT_CHECKED:
+            total += 1
+    if (
+        report.get("stopped_after")
+        and not seen_connection_fidelity
+        and _in_scope("connection-fidelity", report["scope"])
+    ):
+        total += 1
+    return total
+
+
+def _compromise_count(report: dict[str, Any]) -> int:
+    """Human-accepted deviations that should stay visible even when they do not fail the run."""
+    declared = sum(_declared_downgrade_count(check) for check in report["checks"])
+    return int(report.get("exemptions", {}).get("accepted", 0)) + declared
+
+
+def _blocking_count(report: dict[str, Any]) -> int:
+    """Rows that prevent calling the selected scope complete."""
+    return sum(
+        1
+        for check in report["checks"]
+        if check["status"] in {STATUS_FINDINGS, STATUS_PRECONDITION_FAILED}
+        or (_is_blocking_not_checked(check) and check.get("verification") != VERIFICATION_EXTERNAL)
+    )
 
 
 def _summary_counts(report: dict[str, Any]) -> tuple[dict[str, int], int, int, int]:
@@ -1439,6 +1608,9 @@ def _summary_line(report: dict[str, Any]) -> str:
     findings = ",".join(f"{owner}={count}" for owner, count in sorted(owner_findings.items())) or "none"
     return (
         "SUMMARY: "
+        f"blockers={_blocking_count(report)}; "
+        f"compromises={_compromise_count(report)}; "
+        f"compromises_not_evaluated={_compromise_not_evaluated_count(report)}; "
         f"findings_by_owner={findings}; "
         f"not_checked_structural={structural}; "
         f"not_checked_external={external}; "
@@ -1513,6 +1685,16 @@ def render(report: dict[str, Any]) -> str:
             lines.append(
                 f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']}; "
                 f"{check['stub_exemptions']} exempted, {check['unexempted_stubs']} unexempted)"
+            )
+        elif check_id == "connection-fidelity" and _declared_downgrade_count(check):
+            lines.append(
+                f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']}; "
+                f"{_declared_downgrade_count(check)} declared downgrade compromise(s))"
+            )
+        elif check_id == "scaffold-partitions" and "scaffold_exemptions" in check:
+            lines.append(
+                f"  {check_id}: {status} ({check['scaffold_exemptions']} exempted, "
+                f"{check['unexempted_scaffolds']} unexempted)"
             )
         elif "native_exit" in check:
             lines.append(f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']})")

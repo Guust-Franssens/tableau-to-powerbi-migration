@@ -24,6 +24,8 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
 import check_field_bindings  # noqa: E402  # pylint: disable=wrong-import-position
+import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
+import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 
 ORIGINAL_CHECK_OCCLUSION = cu.check_occlusion
 ORIGINAL_GATES = cu.GATES
@@ -214,6 +216,17 @@ def test_page_count_mismatch_is_a_precondition_and_stops_before_oracle(tmp_path:
     assert [check["id"] for check in report["checks"]] == ["page-parity"]
 
 
+def test_early_stop_marks_compromise_channel_not_evaluated(tmp_path: Path) -> None:
+    """A precondition stop is loud, but downstream compromise channels are unknown, not zero."""
+    _write_spec(tmp_path, ["A", "B"])
+    _write_report(tmp_path, ["A"])
+
+    rendered = cu.render(cu.run_all(tmp_path, scope=cu.SCOPE_ALL))
+
+    assert "stopped after failed precondition: page-parity" in rendered
+    assert "compromises=0; compromises_not_evaluated=1" in rendered
+
+
 def test_page_count_deviation_requires_a_complete_exemption(tmp_path: Path) -> None:
     """The documented-why-not file is not a rubber stamp: missing fields are findings."""
     _write_spec(tmp_path, ["A", "B"])
@@ -362,9 +375,232 @@ def test_summary_line_counts_findings_and_not_checked_classes(tmp_path: Path, mo
     # not_checked_external is a third bucket (issue #317) so a model deferred to its datasource unit
     # stops inflating missing_input; here nothing is external, so the bucket is 0.
     assert rendered.splitlines()[-1] == (
-        "SUMMARY: findings_by_owner=model=1; not_checked_structural=1; "
-        "not_checked_external=0; not_checked_missing_input=0; ladder=FINDINGS exit=1"
+        "SUMMARY: blockers=1; compromises=0; compromises_not_evaluated=0; findings_by_owner=model=1; "
+        "not_checked_structural=1; not_checked_external=0; not_checked_missing_input=0; ladder=FINDINGS exit=1"
     )
+
+
+def _write_handover(unit: Path, workbook: dict[str, object]) -> Path:
+    """Write the same {estate, workbook} envelope as run_estate.slice_handovers."""
+    report = {"tool": "test", "generated_at": "now", "workbooks": [workbook]}
+    return run_estate.slice_handovers(report, unit)[0]
+
+
+def test_scaffold_partitions_are_blockers_until_exempted(tmp_path: Path) -> None:
+    """An engine-recorded empty M partition is outstanding work, not a hidden compromise."""
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Unit",
+            "partitions_needs_review": [
+                {
+                    "kind": "m_partition",
+                    "table": "Orders",
+                    "reason": "custom SQL native query for this connector is not verified",
+                }
+            ],
+        },
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    rendered = cu.render(report)
+
+    assert report["status"] == cu.STATUS_FINDINGS
+    assert report["exit_code"] == cu.EXIT_FINDINGS
+    assert "scaffold-partitions: FINDINGS (0 exempted, 1 unexempted)" in rendered
+    assert "partition scaffold(s) need manual completion" in rendered
+    assert "blockers=" in rendered and "compromises=0" in rendered
+
+
+def test_scaffold_partitions_agree_with_read_handover_on_engine_slice(tmp_path: Path) -> None:
+    """Acceptance: the facade and read_handover unwrap the same engine-shaped slice."""
+    path = _write_handover(
+        tmp_path,
+        {
+            "name": "Unit",
+            "partitions_needs_review": [
+                {
+                    "kind": "m_partition",
+                    "table": "Orders",
+                    "reason": "custom SQL native query for this connector is not verified",
+                }
+            ],
+        },
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    _name, workbook, _source = read_handover._workbooks_from_payload(payload, path)[0]  # pylint: disable=protected-access
+    status, rows = read_handover.partitions_needs_review_status(workbook)
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+
+    assert status == read_handover.PARTITION_REVIEW_PRESENT
+    assert len(rows) == 1
+    assert scaffold["status"] == cu.STATUS_FINDINGS
+    assert scaffold["unexempted_scaffolds"] == len(rows)
+
+
+def test_scaffold_partitions_keep_good_slice_when_stray_json_is_unreadable(tmp_path: Path) -> None:
+    """A drop-zone stray JSON must not crash or hide a neighbouring scaffold finding."""
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Unit",
+            "partitions_needs_review": [
+                {
+                    "kind": "m_partition",
+                    "table": "Orders",
+                    "reason": "custom SQL native query for this connector is not verified",
+                }
+            ],
+        },
+    )
+    (tmp_path / "handover" / "estate-summary.json").write_text(
+        json.dumps({"estate": {"tool": "test"}}), encoding="utf-8"
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    rendered = cu.render(report)
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+
+    assert report["exit_code"] == cu.EXIT_FINDINGS
+    assert scaffold["status"] == cu.STATUS_FINDINGS
+    assert scaffold["unexempted_scaffolds"] == 1
+    assert "estate-summary.json" in scaffold["invalid_handover_keys"][0]
+    assert "scaffold-partitions: FINDINGS (0 exempted, 1 unexempted)" in rendered
+    assert "unreadable handover:" in rendered
+    assert "SUMMARY:" in rendered
+
+
+def test_scaffold_partitions_unreadable_only_is_a_finding(tmp_path: Path) -> None:
+    """A malformed handover-like file alone is a gate finding, not a missing-input skip."""
+    handover = tmp_path / "handover"
+    handover.mkdir()
+    (handover / "estate-summary.json").write_text(json.dumps({"estate": {"tool": "test"}}), encoding="utf-8")
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    rendered = cu.render(report)
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+
+    assert report["exit_code"] == cu.EXIT_FINDINGS
+    assert scaffold["status"] == cu.STATUS_FINDINGS
+    assert scaffold["unexempted_scaffolds"] == 0
+    assert "estate-summary.json" in scaffold["invalid_handover_keys"][0]
+    assert "unreadable handover:" in rendered
+
+
+def test_empty_workbooks_handover_is_not_silent_absence(tmp_path: Path) -> None:
+    """A handover file that resolves zero workbooks is still a visible malformed handover."""
+    handover = tmp_path / "handover"
+    handover.mkdir()
+    (handover / "only.json").write_text(json.dumps({"tool": "t", "workbooks": []}), encoding="utf-8")
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+
+    assert report["exit_code"] == cu.EXIT_FINDINGS
+    assert scaffold["status"] == cu.STATUS_FINDINGS
+    assert "only.json" in scaffold["invalid_handover_keys"][0]
+
+
+def test_scaffold_partitions_accept_signed_exemptions(tmp_path: Path) -> None:
+    """A signed scaffold exemption is a visible compromise and keeps the scaffold gate from failing."""
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Unit",
+            "partitions_needs_review": [
+                {
+                    "kind": "m_partition",
+                    "table": "Orders",
+                    "reason": "flat-file source; set the file path manually",
+                }
+            ],
+        },
+    )
+    (tmp_path / "unit-check-exemptions.json").write_text(
+        json.dumps(
+            {
+                "exemptions": [
+                    {
+                        "check": "scaffold-partitions",
+                        "item": "Orders",
+                        "reason": "customer accepted static table for this proof of concept",
+                        "decided_by": "migration lead",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    rendered = cu.render(report)
+
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+    assert scaffold["status"] == cu.STATUS_PASS
+    assert "scaffold-partitions: PASS (1 exempted, 0 unexempted)" in rendered
+    assert "documented why-not exemptions: 1 accepted, 0 invalid" in rendered
+    assert "compromises=1" in rendered
+
+
+def test_handover_missing_scaffold_key_is_not_zero_scaffolds(tmp_path: Path) -> None:
+    """MISSING is its own state: old handovers did not record scaffold status at all."""
+    path = _write_handover(tmp_path, {"name": "Unit"})
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    _name, workbook, _source = read_handover._workbooks_from_payload(payload, path)[0]  # pylint: disable=protected-access
+    status, rows = read_handover.partitions_needs_review_status(workbook)
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    rendered = cu.render(report)
+
+    assert status == read_handover.PARTITION_REVIEW_MISSING
+    assert rows == []
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+    assert scaffold["status"] == cu.STATUS_NOT_CHECKED
+    assert "partition scaffold status not recorded in handover" in rendered
+    assert "scaffold-partitions: PASS" not in rendered
+
+
+def test_declared_connection_downgrade_is_a_visible_compromise() -> None:
+    """A declared downgrade must not render byte-identically to a genuinely connected source."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "check_unit.py"),
+            str(REPO_ROOT / "tests" / "fixtures" / "connection-fidelity" / "declared-downgrade"),
+            "--scope",
+            "integration",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert "connection-fidelity: PASS (native OK exit 0; 1 declared downgrade compromise(s))" in result.stdout
+    assert "compromises=1" in result.stdout
+    assert "compromises_not_evaluated=0" in result.stdout
+
+
+def test_skipped_connection_fidelity_marks_compromise_channel_unknown() -> None:
+    """A skipped declared-downgrade channel is UNKNOWN/unevaluated, not zero compromises."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "check_unit.py"),
+            str(REPO_ROOT / "tests" / "fixtures" / "check-unit-clean-integration"),
+            "--scope",
+            "integration",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert "connection-fidelity: NOT_CHECKED" in result.stdout
+    assert "compromises=0; compromises_not_evaluated=1" in result.stdout
 
 
 def _gate(check_id: str = "x", script: str = "x.py") -> cu.Gate:
