@@ -5,8 +5,9 @@ description: Repairs and finishes the Power BI PBIR report that the deterministi
 
 # PBI Report Builder — Subagent
 
-You turn a `migration-spec.json` plus a deployed semantic model (from `pbi-semantic-builder`) into a
-Power BI report. You are invoked by the `tableau-migrator` orchestrator.
+You repair and finish the PBIR report the deterministic tier already emitted and bound. You are
+invoked by the `tableau-migrator` orchestrator with an engine bundle/handover slice, or a
+parser-path `migration-spec.json` when no bundle exists yet.
 
 <!-- BEGIN:shared-conventions -->
 > Step 0: read [`docs/INDEX.md`](../../docs/INDEX.md) before searching the repo.
@@ -109,10 +110,12 @@ Power BI report. You are invoked by the `tableau-migrator` orchestrator.
    from the design brief, and validates in Desktop.
 4. **Read-only DAX (you need this — several of your own rules require it).** DoD #5 and the
    `formatString` gotcha require sampling a *real* value before choosing e.g. `0.00%` vs `0.00"%"`;
-   you cannot infer that from a field name. Use `powerbi-modeling-mcp` → `connection_operations`
-   **ConnectFolder** on the `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**.
-   This is **read-only inspection**, so it does not violate layer ownership — you still never edit
-   TMDL; anything needing a model change goes back to `pbi-semantic-builder`.
+   you cannot infer that from a field name. Use a pid-scoped Desktop query (for example
+   `python scripts/probe_desktop_query.py --pid <pid>`). `powerbi-modeling-mcp` **ConnectFolder** is
+   metadata-only for offline folders; verified 2026-08-29, `dax_query_operations Execute` returns
+   "DAX query operations are not supported on offline connections." This is **read-only inspection**,
+   so it does not violate layer ownership — you still never edit TMDL; anything needing a model
+   change goes back to `pbi-semantic-builder`.
 5. **`powerbi-report-author` CLI previews** — `preview-visuals|pages|filters|themes` summarise the
    whole report as JSON; self-check your own output (especially filter placement) with them.
 
@@ -242,7 +245,9 @@ it is slow, and `validate` will not catch a wrong encoding.
    because it is per-visual.
 2. **Take the validator's classification of `viz_fidelity`, not the raw list.** Repair only rows it
    routes to you as fixable. A `tier: "empty"` row (nothing to rebuild) is usually correct; a
-   `degraded` row may be a deliberate and correct deferral.
+   `degraded` row may be a deliberate and correct deferral. For rendering findings, treat the
+   classification as a hypothesis until you render or compare the Tableau source/reference; agreement
+   between the shipped visual and the handover claim is not evidence.
 3. **Fix with the smallest blast radius first.** Prefer formatting/layout over changing a visual's
    type or field wells - a type change re-opens the encoding question the engine already answered.
    Where you do change it, justify against the reference, not against taste.
@@ -255,7 +260,10 @@ it is slow, and `validate` will not catch a wrong encoding.
    survive a landing re-run.
 7. Report back: what you repaired, what you left as an accepted limitation *and why*, any
    `viz_fidelity` row you believe is a false claim (route it back, never silently fix), and new
-   `limitations_encountered` entries (`stage: "report_build"`); then run `python scripts/validate_spec.py <migration-spec.json>`.
+   `limitations_encountered` entries (`stage: "report_build"`). On parser-path migrations, rerun
+   `python scripts/validate_spec.py <migration-spec.json>`; on engine-bundle handoff with no spec,
+   state that the gate is not applicable and run `check_unit.py --scope report`, then
+   `check_unit.py --scope integration`.
 
 **If a page must be built from scratch** (no rebuilt equivalent - rare), fall back to the full
 authoring chain: `powerbi-report-planning` -> `powerbi-report-design` -> **empty layout skeleton,

@@ -383,27 +383,30 @@ replace the blunt "never mid-migration" it used to read:
 | Re-running a unit with **substantial hand-authored TMDL/PBIR** on top | ⛔ finish or checkpoint that unit first | **either** diff is large |
 | **Partial** re-run into an **existing** bundle (some workbooks, not all) | ⛔ **never** | `write_engine_receipt` stamps one `engine.version` over the whole bundle, so it would claim a single version for artifacts two builds produced — the #107 shape, and `check_engine_receipts.py` cannot see an intra-bundle mix |
 
-⚠️ **`reports/` is the REPORT baseline only, and a workbook bundle has NO model baseline at all.**
+⚠️ **`reports/` is the REPORT baseline only, and a workbook bundle may have NO paired model baseline.**
 The `reports/`-vs-`pbip/` diff is therefore structurally blind to hand-authored TMDL — measured,
 `reports/` holds **0** `.tmdl` files — so an agent that authored DAX, relationships, RLS or AI
 metadata but left the report alone sees an ~empty diff, reads row 2's "nothing hand-made is lost",
 re-runs, and loses all of it. That is exactly what `pbi-semantic-builder` produces, so it is a
 first-class case, not an edge one.
 
-⚠️ **Do NOT reach for `<bundle>/semantic_models/<WB>.SemanticModel` as the missing baseline.** It is
-not emitted for workbook migrations — measured on a fresh 2.339.0 run, the bundle contains only
-`data`, `handover`, `pbip`, `reports`. That tree is for models **not owned by a single workbook**
+⚠️ **Do NOT reach for `<bundle>/semantic_models/<WB>.SemanticModel` as the missing baseline.** That
+tree is keyed by model, not workbook, and is emitted for models **not owned by a single workbook**
 (published/shared datasources; `bundle_corpus.py:33` — "datasource-only migrations can legitimately
-ship a standalone model there"). And the miss is silent: `git diff --no-index` exits **1** for
+ship a standalone model there"), not as a guaranteed workbook-model pair. The miss is silent:
+`git diff --no-index` exits **1** for
 *"could not access"* exactly as it does for *"they differ"*, so a missing baseline reads as
-"large diff — do not re-run". See #359.
+"large diff — do not re-run". If there is no counterpart, record **BASELINE UNAVAILABLE**, never a
+clean/no-change diff. See #359.
 
 **What actually answers the question, verified:** compare the OLD bundle against a FRESH run of the
-new engine, model to model —
+new engine, model to model — or, when a standalone/shared model counterpart exists, compare by
+`<Model>` name, not `<WB>` name:
 
 ```
-git diff --no-index --stat <bundle>/reports/<WB>.Report               <bundle>/pbip/<WB>/<WB>.Report
-git diff --no-index --stat <old-bundle>/pbip/<WB>/<WB>.SemanticModel  <new-bundle>/pbip/<WB>/<WB>.SemanticModel
+git diff --no-index --stat <bundle>/reports/<WB>.Report                       <bundle>/pbip/<WB>/<WB>.Report
+git diff --no-index --stat <bundle>/semantic_models/<Model>.SemanticModel     <bundle>/pbip/<WB>/<Model>.SemanticModel
+git diff --no-index --stat <old-bundle>/pbip/<WB>/<Model>.SemanticModel       <new-bundle>/pbip/<WB>/<Model>.SemanticModel
 ```
 
 Measured 2.208.0 vs 2.339.0 on Superstore: `13 files changed, 488 insertions(+), 169 deletions(-)`,
@@ -546,6 +549,33 @@ overstated (issue #194). Do not quietly drop this, and do not inflate it.
 > section: the day-before checklist, expected timings, the failure playbook (the `estate_survey.py`
 > site-wide silent sweep, the `exit 3` DoD gate, the storage-decision/union skip), the verification
 > checklist and — importantly — what that checklist does **not** prove.
+
+### Migration cost attribution
+
+Every migrated workbook or datasource **must have its own** `_runs/<NNN>-<slug>/run.json` before
+agentic work starts. Record attribution at dispatch/allocation time, not at completion: a crash after
+spend but before stamping the root makes the spend permanently unattributable.
+
+A dedicated Copilot **session** per migration unit is the reliable attribution anchor; record its
+`session_id` in `run.json` and do **not** mix unrelated questions or other units into that session. If
+unrelated work happens anyway, flag the run as polluted in `run.json`; it remains visible but must not
+be silently averaged into customer budget estimates.
+
+A dispatched `@tableau-migrator` root `agent_id` may be recorded as an additional label under
+`attribution.roots[]`, but it captures only that agent's own calls, never its descendants.
+`parent_tool_call_id` is the agent's own spawning tool call, not a parent-agent id, and no table
+available in one store maps that tool-call id back to its issuing agent (`assistant_usage_events` is
+local-only; `tool_requests` is cloud-only). So a subtree walk is not reconstructible and spend cannot
+be rolled up: issue #364's original premise was right after all, and the session is the only bucket
+that contains a dispatched agent and all of its child agents.
+
+A session with no `run.json` is development work for cost-reporting purposes and is excluded.
+Retroactive attribution is impossible: old units migrated without a dispatch/allocation anchor cannot
+be backfilled honestly.
+
+Report **both** model time and elapsed time. They can differ by a large factor because tool execution
+(dependency sync, Desktop work, test suites, file operations) consumes elapsed time outside model
+calls. A customer estimate that quotes only one is misleading.
 
 ### Gate B — after parse + probe, before building
 

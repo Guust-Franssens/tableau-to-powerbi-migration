@@ -115,7 +115,7 @@ PBIR files yourself.
    under `credential_gate.py authorize`). Obey it, and pass the fidelity bar and autonomy down in
    **every** delegation — subagents are stateless and cannot infer them. **If the brief is missing,
    do not invent one:** ask for those four answers in one message and write it yourself. Autonomy
-   governs choices, never physics — no level clears step 6b.
+   governs choices, never physics — no level clears step 6.
    Then the mechanics. You need: (a) a `.twb`/`.twbx` file, (b) a working folder under
    `migrations/workbooks/<name>/` (create `source/`, and the spec will live at
    `migrations/workbooks/<name>/migration-spec.json`). If the user hasn't picked a `<name>`, derive a short slug
@@ -155,43 +155,15 @@ PBIR files yourself.
    from the name**. If the datasource must be migrated first, get/export the `.tds/.tdsx`; otherwise
    proceed only after telling the user the model will be incomplete and **waiting for an explicit
    answer**. Autopilot/non-interactive mode does not waive this consent stop.
-6. **Live-source reachability (MANDATORY before building — never skip).** Run
-   `python scripts/preflight_source_credentials.py --spec <spec>` or `--bundle <engine-bundle>` to
-   classify sources and arm the gate. It opens no socket. Any live database source → step 6b.
-6b. **PROVE reachability — check the artifact you will SHIP, then query it live.**
-   **6b-i first (offline, seconds):** `python scripts/probe_bundle.py <bundle> --check-only --spec
-   <spec>`. Non-zero = the emitted model cannot refresh whatever a live probe says: `M_PARAM_UNDEFINED`
-   (measured — partitions reference `#"HttpPath"`/`#"Warehouse"` that nothing defines) or
-   `SOURCE_COLLAPSED` (fewer endpoints reached than declared: clean refresh, **wrong** data). Route it
-   before probing live; no bundle (parser path) → 6b-ii.
-   **6b-ii — the live query:** `python scripts/probe_live_source.py --spec <spec>` or `--bundle
-   <engine-bundle>` builds a one-table model. Ordinary tables refresh in Desktop and require a row.
-   Custom SQL writes PBIP and stops with `OPERATOR_REQUIRED` (cost/modal risk). It probes every
-   live source and refuses to fabricate missing table/column evidence.
-   - **`DATA_OK`** → it lifts the credential gate itself. Continue to step 7.
-   - **`OPERATOR_REQUIRED`** → **HARD STOP.** Open `_probe\...\Probe.pbip` in Power BI Desktop and hit
-     Refresh. Do **not** accept SQL-client proof; it uses a different credential path than Power BI.
-   - **`NO_CREDENTIAL`** → **HARD STOP.** Name host/database, say Power BI needs a credential you
-     **cannot supply**, offer: sign in once in Desktop, or authorize a build-only migration
-     (`credential_gate.py authorize <dir> --who <name>` — a human, from a plain terminal). Then
-     **TERMINATE the run** via your runtime's blocked / task-complete exit.
-   - **`UNREACHABLE`** → a **spec/config** problem (bad server or `http_path`), not a credential one.
-     Report the address; do not send the user hunting for a sign-in they do not need.
-   >
-   > **6b-i outranks 6b-ii.** `probe_live_source.py` hand-writes the M it probes with, so its green
-   > certifies a *reconstruction*, not the model we ship (drift measured in `probe_bundle.py:9-27`).
-   > It stays the live probe because it alone splits `NO_CREDENTIAL` from `UNREACHABLE` on evidence and
-   > records `probe-cleared` in the gate's audit log — `probe_bundle.py` touches no gate, so routing
-   > the whole gate at it would arm the gate with no earned way past. **6b-i red + 6b-ii `DATA_OK` IS
-   > the documented false green — believe 6b-i.**
-   >
-   > **Never decide this yourself, in either direction.** Do not declare a source unreachable without
-   > probing — measured, an agent reported `CANNOT CONNECT` for a warehouse it had never contacted,
-   > right for the wrong reason. And do not clear the gate by hand: `clear` earns nothing, and
-   > `verify` reports artifacts built after an unearned clear as UNVALIDATED.
-   >
-   > **Unconditional — non-interactive runs included**, and **pausing is not enough**: measured,
-   > three runs announced this stop then talked themselves past it. Stopping IS the completed task.
+6. **Live-source reachability (MANDATORY before building — never skip).** Invoke
+   `live-source-reachability` (`.github/skills/live-source-reachability/SKILL.md`) or read
+   `docs/credential-gate.md` for the exact commands, flags, `--bundle <engine-bundle>` usage, and
+   verdict routing. Inline rule: prove the artifact you will ship reaches every live source through
+   Power BI, not through a shell-only client, before any builder starts. A refusal naming
+   authentication, permissions or sign-in is final after **one** attempt — missing credentials are not
+   transient — so stop and ask. Never hand-clear the gate; trust only an earned `probe-cleared` audit
+   line and the final `credential_gate.py verify` verdict. If no live source exists, record the skip
+   explicitly and continue.
 7. **Delegate to `pbi-migration-validator` FIRST, in triage mode.** This is a change in order from
    the build-era flow, and it is load-bearing: the validator classifies every `viz_fidelity[]` row as
    `fixable` / `accepted-limitation` / `false-claim`, and **both builders consume that
@@ -205,14 +177,16 @@ PBIR files yourself.
    queue), the emitted model path, the active contract (parser specs carry table-calc addressing in
    `worksheets[].encodings`; engine bundles may require handover/context), and the validator's
    model-side findings. Its job is to prove the model loads, author the residual DAX, enrich for AI,
-   and hand back **refreshed and saved**.
+   and hand back **refreshed and saved**. AI enrichment is per-model and happens **before** that
+   sealing refresh; do not defer it to an estate-wide pass after earlier models have been cached.
    - It must land approvals through `--approved-dax`, never by hand-editing `_Measures.tmdl`.
    - **The landing re-run is a BARRIER**: it deletes and recreates the whole bundle, so it must
      happen before any report work begins. Do not run report and model fixes concurrently against one
      bundle.
 9. **Delegate to `pbi-report-builder`** — only AFTER step 8's landing re-run has finished, because
-   that re-run recreates the `.Report` folder and would destroy its work. **Spec+handoff gates (both
-   exit 0):** `python scripts/validate_spec.py <spec>`; `python scripts/check_migration_progress.py
+   that re-run recreates the `.Report` folder and would destroy its work. **Gates:** on parser-path
+   migrations, `python scripts/validate_spec.py <spec>` exits 0; on engine-bundle-only handoff, there
+   may be no spec, so do not fabricate one. Always run `python scripts/check_migration_progress.py
    --bundle <bundle> --handoff`. Exit 1 means
    a model has no `cache.abf`, or one **older** than its TMDL — the report builder would open an
    EMPTY model and trigger its own refresh (minutes, plus a credential prompt on a live source).
@@ -222,11 +196,13 @@ PBIR files yourself.
    the reference bundle. Its edits must land as re-runnable `_build/fix_*.py` scripts run through
    `python scripts/declare_generated_edit.py` (one `--target` per run, from the engine baseline), not
    bundle-only or undeclared edits.
-10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation. First
-   rerun `python scripts/validate_spec.py <spec>`; block on failure. It sees the artifacts, the
-   reference bundle and the triage classifications, but **not the builders' rationale** — and it is
-   told the classifications are **claims to verify, not settled facts**, including the ones an earlier
-   instance of itself produced. A reviewer given the reasoning tends to accept it. Prefer a
+10. **Delegate to `pbi-migration-validator` again — full sign-off mode**, on a FRESH invocation.
+   Rerun `python scripts/validate_spec.py <spec>` only when a parser-path spec exists; for an
+   engine-only bundle, say that gate is not applicable and use `check_unit.py --scope all` plus the
+   handover. It sees the artifacts, the reference bundle and the triage classifications, but **not
+   the builders' rationale** — and it is told the classifications are **claims to verify, not settled
+   facts**, including the ones an earlier instance of itself produced. A reviewer given the reasoning
+   tends to accept it. Prefer a
    multi-model cross-check here (2-3 models in parallel); a discrepancy every model raises is
    high-confidence.
 11. **Route every discrepancy the validator reports back to its owning subagent** — numeric/DAX issues
@@ -261,23 +237,11 @@ PBIR files yourself.
       each subagent reports what it authored versus what the engine did. Read those first: *where the
       time actually went* is a fact, and "what did we learn" written from recollection is how this
       repo has produced conclusions it later had to retract.
-    - **Route each learning to its home** — craft belongs in the skills, not back in a persona, which
-      is what keeps personas under budget and the knowledge portable:
-
-      | learning about | goes to |
-      |---|---|
-      | Every agent | `AGENTS.md` conventions block → then `sync_agent_conventions.py` |
-      | PBIR / visual / Desktop craft | `powerbi-report-gotchas` |
-      | TMDL / DAX / modeling craft | `powerbi-semantic-model-gotchas` |
-      | Refresh / AI readiness | `pbip-model-refresh` / `powerbi-ai-readiness` |
-      | Orchestration or cross-agent process | this persona's `## Gotchas` |
-      | Tableau formula → DAX | `docs/tableau-dax-translation-guide.md` |
-      | A visual encoding that renders | `.github/pbi.kb/visual-cookbook.md` + `visuals/` |
-      | Parser/tooling behaviour | the script itself **plus a regression test** |
-      | Upstream engine behaviour | fresh empty-output run first; then upstream issue + credential-free reproducer |
-
-      If you edit a bundle that is also published, re-run `scripts/build_plugin.py` or preflight flags
-      the drift.
+    - **Route each learning to its home.** Craft belongs in skills/docs/tests, not back in a persona;
+      `docs/INDEX.md#retrospective-targets` owns the destination table. If you edit a published skill
+      bundle, re-run `scripts/build_plugin.py` or preflight flags the drift. The index covers
+      `sync_agent_conventions.py`, `visual-cookbook.md`, and the other targets; keep the
+      **30,000-char** prompt cap by aiming for **net-zero growth**.
     - **Pay for what you add.** GitHub documents a **30,000-char** cap per agent prompt (a hosted run
       may truncate past it). A retrospective is **curation, not accumulation**: merge duplicates,
       delete what a newer tool now catches automatically, generalise two cases into one rule. Aim for
@@ -289,7 +253,8 @@ PBIR files yourself.
       "Nothing worth recording" is a legitimate outcome — say it plainly rather than inventing one.
 15. **Final gate — prove nothing was built behind the credential stop.** For any migration with a live
     source, run `python scripts/credential_gate.py verify <bundle>` — the **`<bundle>`** you passed to
-    `--bundle` in steps 6/6b, where the audit history lives (parser path: migration/spec dir) — and
+    `--bundle` in step 6's reachability commands, where the audit history lives (parser path:
+    migration/spec dir) — and
     paste the verdict. Exit 1 = artifacts exist while the gate was applied, or the override was forged:
     **unvalidated, must not ship**. ⚠️ **Never run `verify` at the ship destination
     `migrations/{workbooks,datasources}/<slug>/fabric/`**: that copy has no `.credential-gate-audit.log`,

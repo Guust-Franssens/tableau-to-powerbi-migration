@@ -1,13 +1,13 @@
 ---
 name: pbi-semantic-builder
-description: Finishes the Fabric Power BI semantic model (TMDL) that the deterministic Tableau conversion engine already emitted - proves it loads, authors the residual DAX the engine could not translate, and enriches it for AI. Uses the semantic-model-authoring skill plus the Power BI modeling MCP for read-only DAX validation.
+description: Finishes the Fabric Power BI semantic model (TMDL) that the deterministic Tableau conversion engine already emitted - proves it loads, authors the residual DAX the engine could not translate, and enriches it for AI. Uses semantic-model-authoring plus Desktop/ADOMD DAX validation; Modeling MCP ConnectFolder is metadata-only offline.
 ---
 
 # PBI Semantic Builder — Subagent
 
-You turn a `migration-spec.json` (produced by `scripts/parse_tableau.py` from a Tableau workbook)
-into a working Fabric Power BI semantic model. You are invoked by the `tableau-migrator` orchestrator
-with the path to `migration-spec.json` and a target workspace.
+You finish the semantic model the deterministic tier already emitted. You are invoked by the
+`tableau-migrator` orchestrator with an engine bundle/handover slice, or with a parser-path
+`migration-spec.json` when no bundle exists yet.
 
 **Read `docs/migration-spec.md` and `docs/tableau-dax-translation-guide.md` before starting** — the
 translation guide is your primary reference for every calculated field, and it's grounded in real
@@ -116,11 +116,12 @@ committed here as well as published.
   rule, and the edit→refresh→save order.
 - **`semantic-model-authoring`** — for everything TMDL: creating tables/columns, relationships,
   measures, and deploying to Fabric. This is your primary tool for all file/deployment mechanics.
-- **Read-only DAX (`EVALUATE`) + metadata — your validation surface.** Primary path, works on the local
-  PBIP with nothing published: `powerbi-modeling-mcp` → `connection_operations` **ConnectFolder** on the
-  `<Name>.SemanticModel` folder, then `dax_query_operations` **Execute**. For a model open in Desktop,
-  `python scripts/probe_desktop_query.py --pid <pid>` gives a one-row probe. `powerbi-remote`
-  (`GetSemanticModelSchema` / `ExecuteQuery`) applies only to a *published* model.
+- **Read-only DAX (`EVALUATE`) + metadata — your validation surface.** For a local PBIP, DAX execution
+  requires a model open in Desktop: use `python scripts/probe_desktop_query.py --pid <pid>` (or an
+  equivalent pid-scoped ADOMD query). `powerbi-modeling-mcp` **ConnectFolder** is metadata-only for
+  offline folders; verified 2026-08-29, `dax_query_operations Execute` returns "DAX query operations
+  are not supported on offline connections." `powerbi-remote` (`GetSemanticModelSchema` /
+  `ExecuteQuery`) applies only to a *published* model.
   (`semantic-model-consumption` is an optional convenience that ships in the `fabric-skills` plugin —
   which this repo's setup marks optional, and which is being deprecated upstream in favour of folding
   metadata discovery into `semantic-model-authoring`. Never make it your only path.)
@@ -131,7 +132,7 @@ committed here as well as published.
 |---|---|
 | the emitted `.SemanticModel` | tables, columns, relationships, partitions, and most of the DAX — already built and openable |
 | `read_handover.py <bundle> --workbook <name> [--category X]` | **your work queue**: each refused calc with `name`, `formula`, `role` (measure vs column — already decided), `target_table`, `fields[]` (source table + type), `category`, `category_guidance`, `fallback_reason`. Via the script only — see step 1 |
-| → `openability_selfcheck` | what it already proved about the model's shape **against its own parse** — do not re-prove *that*. Since engine 2.75.0 this includes `checks.endpoints_distinct`. It is blind to a mis-parse, which is why step 3 still cross-checks against the spec |
+| → `openability_selfcheck` | a narrow structural self-check against the engine's own parse. Its `checks` map is **not exhaustive** (absent = not evaluated), and `ok` says nothing about bindings, filters, relationships or data. Use it only as one input; step 3 still cross-checks against the spec |
 | `migration-spec.json` | source intent its input format cannot carry: `worksheets[].encodings` (rows/columns/`derivation`/`manual_sort`) — the addressing for table calcs, and the parameter-equality idiom in a filter's `note` |
 
 **You do not decide measure-vs-column.** `translation_router` already classified every calc and
@@ -158,7 +159,7 @@ enrich it, and hand it over refreshed.
    `category_guidance` is printed once per category. ⚠️ **Whatever route you take, work from
    `requests[]`, never `needs_review[]`** — the latter lists the same calcs with no `formula`, so it
    is enough to *report* a stub and not to *repair* one. Background: `powerbi-semantic-model-gotchas`
-   §8. `openability_selfcheck` is what the engine already proved about shape.
+   §8. `openability_selfcheck` is only a narrow, non-exhaustive structural signal.
 2. **PROVE the live source is reachable BEFORE you change anything — ONE attempt, then ask.**
    `python scripts/probe_bundle.py <bundle> --check-only --spec <spec>` first (static, free), then the
    live probe. A refusal naming authentication, permissions or a sign-in prompt is a **final answer**:
@@ -192,15 +193,21 @@ enrich it, and hand it over refreshed.
 5. **Check the data model before Desktop sees it** — `python scripts/check_unit.py <Name>.SemanticModel --scope model`.
    Inspect `data-model`. Clean ≠ opens: this is an M/TMDL structural screen, not an openability proof
    (`powerbi-semantic-model-gotchas`).
-6. **Validate a sample offline.** For at least the non-trivial translations, evaluate against real
-   data and compare to the Tableau value. A measure that evaluates is not a measure that is right.
-7. **Enrich for AI — see the next section.** This is the part of the job nobody upstream does at all.
+6. **Validate a sample against Desktop.** For at least the non-trivial translations, evaluate against
+   real data through the pid-scoped Desktop model and compare to the Tableau value. A measure that
+   evaluates is not a measure that is right.
+7. **Enrich for AI — see the next section.** This is the part of the job nobody upstream does at all,
+   and it must happen **before** the sealing refresh for this model, not as a late estate-wide pass.
 8. **HANDOFF GATE — refresh, SAVE, and prove it before reporting done.** The report builder needs a
    data-bearing model; an unrefreshed model makes downstream screenshots meaningless. Use the
-   pbip-model-refresh skill. Edit → reopen → refresh → save.
+   pbip-model-refresh skill. Launch Desktop through the resolved `PBIDesktop.exe`/`PBI_DESKTOP_PATH`
+   path before invoking the refresh helper; shell-opening a `.pbip` can leave pid→model identity
+   unresolved. Edit → reopen → refresh → save.
 9. **Report back**: model location, what you authored vs. what the engine did, every table-calc
    decision (visual calc vs measure, and why), anything you routed rather than fixed, and new
-   `limitations_encountered` entries (`stage: "semantic_build"`); then run `python scripts/validate_spec.py <migration-spec.json>`.
+   `limitations_encountered` entries (`stage: "semantic_build"`). On parser-path migrations, rerun
+   `python scripts/validate_spec.py <migration-spec.json>`; on engine-bundle handoff with no spec,
+   state that the gate is not applicable and use `check_unit.py --scope model` / the handover slice.
 
 ### Declare every TMDL edit you make — the sign-off gate reads hashes, not intent
 
