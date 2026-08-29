@@ -139,6 +139,21 @@ def test_registry_value_is_reported_so_a_reader_is_never_fooled(tmp_path, monkey
     text = cpc.render(cpc.scan(tmp_path))
     assert "LongPathsEnabled" in text
     assert "NON-DEFAULT" in text
+    # The correction that matters: Desktop enforces its own limit in managed code (EnsureNotLong),
+    # so the registry opt-in never rescues it. A reader must not infer "we are protected".
+    assert "does NOT affect Power BI Desktop" in text
+
+
+def test_both_ceilings_are_reported_separately_and_unambiguously(tmp_path):
+    """#235 asked for the file AND directory limits, stated so neither can be misread.
+
+    259/247 (longest legal) and 260/248 (first refused) are the same fact in two framings, and the
+    issue was written in the second. Printing both is what stops an off-by-one argument.
+    """
+    _tree(tmp_path)
+    text = cpc.render(cpc.scan(tmp_path))
+    assert "file <= 259" in text and "directory <= 247" in text
+    assert "refuses 260" in text and "refuses 248" in text
 
 
 def test_over_ceiling_is_reported_for_files_this_host_can_open_perfectly_well(tmp_path):

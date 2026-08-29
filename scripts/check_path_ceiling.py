@@ -8,73 +8,96 @@ usage:   python scripts/check_path_ceiling.py <bundle-or-any-dir> [...]
 
 Why this exists
 ---------------
-Every bundle this toolkit produces is a SHIPPED artifact. A path that writes fine on the build
-machine and cannot be opened on a customer's default Windows box is the worst shape of defect we
-have, and it is invisible here because this build machine carries a non-default opt-in:
+Every bundle this toolkit produces is a SHIPPED artifact, and Power BI Desktop refuses to open one
+whose deepest path crosses a limit it enforces ITSELF. Issue #235 measured 93 files already over 260
+characters in bundles on this machine; the 52-unit estate run of 2026-08-29 has 183.
+
+The mechanism, and why `LongPathsEnabled` is a red herring for Desktop
+----------------------------------------------------------------------
+Desktop's failure is NOT an OS error it inherited. It is its own managed guard, named in the crash
+report a failing open produced:
+
+    Microsoft.PowerBI.Packaging.Project.PBIProjectUtils.EnsureNotLong(String path, Boolean isFolder)
+      at Microsoft.PowerBI.Client.Windows.Services.DiskProjectFilesReader.<GetAsync>d__2.MoveNext()
+
+surfaced as `FilePathTooLongError`, wrapped in `Error Reading StorageSection: ReportDocument`:
+
+    The specified path, file name, or both are too long. The fully qualified file name must be
+    less than 260 characters, and the directory name must be less than 248 characters.
+
+`EnsureNotLong` is a length comparison in Desktop's own code, executed before any filesystem call.
+So the Windows opt-in
 
     HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem  ->  LongPathsEnabled = 1   (default is 0)
 
-That switch only helps a process whose application manifest declares `longPathAware`. Python 3.6+
-declares it, which is exactly why our generator writes paths a stock machine cannot use, and why we
-never felt it. Issue #235 measured 93 files already over 260 characters in bundles on this machine,
-while two customer machines on the Windows default sat at 258 and 248 - under the limit, but with
-2 and 12 characters of headroom respectively.
+**cannot help, and does not**: every measurement below was taken on a machine with that value set to
+1, and Desktop refused anyway. This is materially worse than the issue's original worst case. It is
+not "customers on stock Windows are at risk" - it is **every consumer on every machine, including
+ours**, regardless of registry configuration. The registry setting only ever governed whether our
+*generator* could WRITE these paths (Python 3.6+ declares `longPathAware`, so here it can), which is
+precisely why the defect was invisible: we could produce artifacts we could never open.
 
-The measurement that sets the ceiling (2026-08-29, this worktree)
------------------------------------------------------------------
-The open question was whether Power BI Desktop is long-path aware, because that decides whether the
-effective ceiling is 260 or merely an archive budget. It is NOT, and this was established twice.
-
-1. STATIC - the embedded Win32 application manifest (RT_MANIFEST, id 1) of
-   `PBIDesktop.exe` 2.157.828.0 contains NO `longPathAware` element. Neither does `msmdsrv.exe`
-   (the Analysis Services engine that loads the model) nor `Microsoft.Mashup.Container.NetFX45.exe`
-   (the M engine that reads source files). Controls for the extraction harness: `python.exe` -> True
-   (element present and found), `explorer.exe` -> False.
+The measurements (2026-08-29, this worktree, LongPathsEnabled = 1 throughout)
+-----------------------------------------------------------------------------
+1. STATIC - the embedded Win32 application manifest (RT_MANIFEST, id 1) of `PBIDesktop.exe`
+   2.157.828.0 contains NO `longPathAware` element. Neither does `msmdsrv.exe` (the Analysis
+   Services engine that loads the model) nor `Microsoft.Mashup.Container.NetFX45.exe` (the M engine
+   that reads source files). Controls for the extraction harness: `python.exe` -> True (element
+   present and found), `explorer.exe` -> False.
 
    Static evidence alone is NOT conclusive, and this module does not pretend otherwise: a program can
    also opt in per-call by prefixing `\\\\?\\`. Measured here, `node.exe` and `pwsh.exe` both report
    manifest `longPathAware=False` yet read a 262-character path successfully, because libuv and
-   .NET Core prepend the prefix themselves. So the manifest was treated as a hypothesis, not a
-   verdict, and a live A/B was run.
+   .NET Core prepend the prefix themselves. So the manifest was a hypothesis; `EnsureNotLong` above
+   is the actual mechanism, and the A/B below is the proof.
 
-2. LIVE A/B - the same known-good PBIP (`examples/shipping-kpis/fabric`, 27 files, byte-identical
-   copies) was opened in Power BI Desktop from two roots on THIS machine, with LongPathsEnabled=1:
+2. LIVE A/B, BOUNDARY-PINNED - byte-identical copies of `examples/shipping-kpis/fabric` (27 files)
+   differing ONLY in the length of their root, each opened in Power BI Desktop and then probed with
+   the Desktop Bridge (a second, independent instrument - a window title is a loading state before
+   it is a verdict, the bridge is not):
 
-   | copy    | longest path | .pbip entry point | result at t+190s                              |
-   |---------|-------------:|------------------:|-----------------------------------------------|
-   | control |          159 |                78 | opens; window title becomes `ShippingKPIs`     |
-   | long    |          268 |               187 | FAILS; title stuck `Untitled - Power BI Desktop`|
+   | copy    | deepest file | deepest dir | window title at t+200s | bridge `status --pid`        |
+   |---------|-------------:|------------:|------------------------|------------------------------|
+   | control |          200 |         188 | `ShippingKPIs`         | (not probed)                 |
+   | F259    |      **259** |     **247** | `ShippingKPIs`         | `ready` / `connected`, pages |
+   | S260    |      **260** |     **248** | `Untitled - Power BI D.`| `error`: "Host is not ready" |
 
-   The long copy raised a modal dialog titled "Issues were found" reading, verbatim:
+   Entry-point `.pbip` paths were 119 / 178 / 179 characters - far below any limit - so the failure
+   is attributable to a deep child file and to nothing else. S260 raised a modal "Issues were found"
+   dialog naming the exact `visual.json`.
 
-       Cannot read '<...>\\ShippingKPIs.Report\\definition\\pages\\51c062066e7c504dcbb5
-       \\visuals\\2069ecf9b8b2e1212571\\visual.json'. The specified path, file name, or both are
-       too long. The fully qualified file name must be less than 260 characters, and the
-       directory name must be less than 248 characters.
+   This pins BOTH ceilings at their exact boundary in one pair, because the PBIR layout places the
+   deepest directory exactly 12 characters below the deepest file, and 260 - 248 is also 12. F259
+   proves 259/247 are legal; S260 proves 260/248 are not.
 
-   Both entry-point `.pbip` paths were far under any limit (78 and 187), so the failure is
-   attributable to a deep child file and to nothing else. The two copies differed only in the length
-   of their root.
+Hence the two ceilings this module enforces - measured, not inferred:
 
-Hence the two ceilings this module enforces, taken from Desktop's own stated rule rather than from
-folklore or a bisect:
+    FILE_CEILING = 259    legal at 259, refused at 260  ("must be less than 260 characters")
+    DIR_CEILING  = 247    legal at 247, refused at 248  ("directory name must be less than 248")
 
-    FILE_CEILING = 259    ("fully qualified file name must be less than 260 characters")
-    DIR_CEILING  = 247    ("the directory name must be less than 248 characters")
+⚠️ Because the S260 fixture crosses BOTH boundaries at once (file 260 AND directory 248), that single
+A/B cannot attribute which of the two guards fired. F259 opening proves both 259 and 247 are legal,
+which is what a gate needs; separating the two guards would need a fixture the PBIR layout cannot
+produce (see "What it will NOT tell you").
 
 A note on why both, and why including the directory rule adds no false-alarm surface: in a real PBIR
 tree the deepest file is `visual.json`, whose `\\visual.json` tail is exactly 12 characters, and
 260 - 248 is also exactly 12. The two rules therefore bite at the same point for the most numerous
-and deepest file we emit. The directory rule only becomes the stricter of the two for shorter names
-(`page.json`, `.platform`), which is precisely the case a file-only check would miss.
+and deepest file we emit - which is also the shape that actually fails in the wild:
+
+    <unit>\\<unit>.Report\\definition\\pages\\<page-id>\\visuals\\<visual-id>\\visual.json
+
+The directory rule only becomes the stricter of the two for shorter names (`page.json`, `.platform`),
+which is precisely the case a file-only check would miss.
 
 Why this cannot silently inherit LongPathsEnabled=1
 ---------------------------------------------------
 The verdict is computed ARITHMETICALLY from path strings. This module never asks the operating
 system whether a path can be opened, so there is no code path by which the host's registry setting,
 or the host's OS, can soften the answer. The registry value IS read and printed - because issue #235
-exists entirely because nobody printed it - but it is reported as context and is never an input to
-the verdict. Running on Linux CI produces the same numbers for the same tree.
+exists entirely because nobody printed it - but it is reported as context, is never an input to the
+verdict, and is labelled in the output as not affecting Desktop at all. Running on Linux CI produces
+the same numbers for the same tree.
 
 The portable number, and why it matters more than the absolute one
 ------------------------------------------------------------------
@@ -98,6 +121,13 @@ clean bucket.
 
 What it will NOT tell you
 -------------------------
+* Which of the two guards fired. The PBIR layout cannot produce a tree whose deepest directory
+  breaks 247 while every file stays within 259 (the `\\visual.json` tail is 12, and so is the gap
+  between the rules), so the two were pinned together rather than separated.
+* Whether the classic per-machine Power BI Desktop installer behaves identically. Everything above
+  was measured against **2.157.828.0, the MSIX / Microsoft Store package** (`...\\Power BI Desktop
+  Store App\\...`). `EnsureNotLong` is managed code shared by both, so a difference would be
+  surprising - but surprising is not measured.
 * Whether the archive step (zip/7z) has its own, lower budget. 282 remains an unreproduced anecdote
   and this module does not encode it; pass `--ceiling 282` explicitly if you want to test it.
 * Whether a path that fits will open. Length is one failure mode among many.
@@ -115,9 +145,10 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-# Both taken verbatim from the PathTooLongException text Power BI Desktop raised in the live A/B
-# above: "must be less than 260 characters" -> longest legal value 259, and "the directory name must
-# be less than 248 characters" -> longest legal value 247.
+# Both pinned by live A/B against Power BI Desktop 2.157.828.0 (see the module docstring): a PBIP
+# whose deepest file was 259 chars / deepest directory 247 OPENED and answered the Desktop Bridge;
+# one character longer on each (260 / 248) was REFUSED. Desktop's own `EnsureNotLong` guard states
+# the rule as "less than 260" / "less than 248", so these are the longest legal values.
 FILE_CEILING = 259
 DIR_CEILING = 247
 
@@ -292,11 +323,12 @@ def scan(root: Path, limits: Limits = DEFAULT_LIMITS) -> dict:
 
 def _registry_line(report: dict) -> str:
     value = report["host_long_paths_enabled"]
+    suffix = "does NOT affect Power BI Desktop, which enforces its own limit in managed code"
     if value is None:
         detail = "unreadable" if report["host_platform"] == "win32" else f"not applicable ({report['host_platform']})"
-        return f"  host LongPathsEnabled : {detail} - verdict below does not depend on it"
-    note = "Windows default" if value == 0 else "NON-DEFAULT - it masks this defect locally"
-    return f"  host LongPathsEnabled : {value} ({note}) - verdict below does not depend on it"
+        return f"  host LongPathsEnabled : {detail} - {suffix}"
+    note = "Windows default" if value == 0 else "NON-DEFAULT"
+    return f"  host LongPathsEnabled : {value} ({note}) - {suffix}"
 
 
 def render(report: dict) -> str:
@@ -305,8 +337,9 @@ def render(report: dict) -> str:
     lines = [
         f"{report['status'].upper()}: {report['root']}",
         _registry_line(report),
-        f"  ceilings              : file <= {report['file_ceiling']}, directory <= {report['dir_ceiling']}"
-        " (Power BI Desktop, measured - see module docstring)",
+        f"  ceilings              : file <= {report['file_ceiling']} (Desktop refuses"
+        f" {report['file_ceiling'] + 1}), directory <= {report['dir_ceiling']} (refuses"
+        f" {report['dir_ceiling'] + 1}) - measured, see module docstring",
         f"  measured              : {counted['measured']} paths"
         f" ({counted['files']} files, {counted['directories']} directories)",
     ]
