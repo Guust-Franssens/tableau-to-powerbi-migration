@@ -26,6 +26,10 @@ server = [
 ]
 dev = [
     "pytest>=8.2",
+    # Parallel test loop (issue #387): measured 740s serial -> ~215s with `-n auto --dist loadfile`
+    # on 22 logical cores. A dev dependency, not an optional nicety, because every agent works in its
+    # own `git worktree` + `uv sync` venv - anything not declared here is absent from all of them.
+    "pytest-xdist>=3.6",
     "ruff>=0.6",
     "pylint>=3.2",
 ]
@@ -46,6 +50,18 @@ py-modules = []
 testpaths = ["tests", ".github/skills"]
 markers = [
     "slow: joined offline Tableau-to-Fabric mock integration tests",
+    # `slow` is about DURATION; this is about EXCLUSIVITY. A test earns `serial` when it contends for a
+    # singleton external resource - a real Power BI Desktop instance, its UI-Automation tree, a live
+    # credential dialog - so two of them running at once degrade each other. Measured (issue #387):
+    # concurrent live suites turned one harvest into `DIALOG_UNREADABLE` and made another test SKIP.
+    # See docs/parallel-test-loop.md for the tier that runs these on their own.
+    "serial: contends for a singleton external resource; must not run beside another such test",
+    # Different hazard, same tier. A `timing` test asserts a sub-second WALL-CLOCK budget, so it
+    # measures the machine as much as the code. Measured (issue #387): 1 failure in 8 whole-suite
+    # `-n auto` runs - `test_refresh_main_returns_credential_missing_fast_at_t0` took 0.941s against
+    # a 0.5s budget on worker gw9. The root `conftest.py` applies this marker automatically; you do
+    # not write it by hand.
+    "timing: asserts a sub-second wall-clock budget, so a saturated box fails it",
 ]
 
 [tool.ruff]
