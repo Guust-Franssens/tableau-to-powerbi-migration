@@ -1066,10 +1066,13 @@ def _window(**overrides) -> dict:
         # `None` = the window has no owner, so the modality test could not be applied at all. That is
         # NOT the same as `False` (owner disabled), and the classifier must not treat it as such.
         "OwnerEnabled": None,
-        # Whether text beyond the CAPTION was obtained. Defaults true here because most fixtures model
-        # a window whose content was read; the fail-safe default for a MISSING field is pinned
-        # separately by `test_a_window_with_no_content_read_field_at_all_fails_safe`.
-        "ContentRead": True,
+        # Texts belonging to interactive controls. Excluded from the PROSE JOIN only - an interposed
+        # `Cancel` button between `Enter your` and `credentials` defeated a naive whole-window join.
+        "InteractiveTexts": [],
+        # Whether the UIA harvest ran to completion: not truncated by the element cap, not timed out,
+        # no pattern read that threw. Defaults true here because most fixtures model a complete read;
+        # the fail-safe treatment of every non-Boolean value is pinned by its own test.
+        "HarvestComplete": True,
     }
     window.update(overrides)
     return window
@@ -1103,6 +1106,7 @@ REFRESH_PROGRESS = _window(
     Title="Refresh",
     ClassName="HwndWrapper[PBIDesktop.exe;;refresh]",
     Texts=["Refresh", "Orders", "1,204 rows loaded", "Cancel"],
+    InteractiveTexts=["Cancel"],
     # A Power BI refresh dialog DOES disable its owner, so modality alone cannot tell it from a
     # credential modal. Pinned false on purpose: the fix must not lean on the owner test.
     OwnerEnabled=False,
@@ -1114,22 +1118,32 @@ CREDENTIAL_MODAL = _window(
 )
 # The review defect of 2026-08-29, as the collector actually produced it. A WPF modal renders its
 # whole visual tree into ONE HWND, so `EnumChildWindows` harvested nothing and only the caption
-# survived - a caption that matches the progress signature. `ContentRead` false is the collector
-# saying so.
+# survived - a caption that matches the progress signature.
 WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY = _window(
     Title="Refresh",
     ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
     Texts=["Refresh"],
     OwnerEnabled=False,
-    ContentRead=False,
+    HarvestComplete=False,
+)
+# The second round's defect: a `Cancel` button was enough to satisfy the old "we read SOME text"
+# proxy, so a benign CAPTION cleared the window while the credential text stayed unread.
+WPF_CREDENTIAL_MODAL_WITH_ONLY_A_BUTTON_READ = _window(
+    Title="Refresh",
+    ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
+    Texts=["Refresh", "Cancel"],
+    InteractiveTexts=["Cancel"],
+    OwnerEnabled=False,
+    HarvestComplete=True,
 )
 # The same window once UI Automation supplies the visual text the Win32 collector could not see.
 WPF_CREDENTIAL_MODAL_WITH_UIA_TEXT = _window(
     Title="Refresh",
     ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
     Texts=["Refresh", "Enter your credentials", "OK", "Cancel"],
+    InteractiveTexts=["OK", "Cancel"],
     OwnerEnabled=False,
-    ContentRead=True,
+    HarvestComplete=True,
 )
 
 
@@ -1503,16 +1517,91 @@ def test_uia_harvested_text_turns_the_same_window_into_a_credential_stop(tmp_pat
     assert result["credential"] == "Enter your credentials"
 
 
-def test_a_window_with_no_content_read_field_at_all_fails_safe(tmp_path: Path) -> None:
-    """A MISSING ContentRead field must read as "not read", never as "read".
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("__absent__", id="field-missing"),
+        pytest.param(None, id="null"),
+        pytest.param(False, id="false"),
+        pytest.param(0, id="int-0"),
+        pytest.param(1, id="int-1"),
+        pytest.param("true", id="str-true"),
+        pytest.param("false", id="str-false"),
+        pytest.param("", id="empty-string"),
+        pytest.param([], id="empty-list"),
+    ],
+)
+def test_only_a_real_boolean_true_can_authorise_suppression(tmp_path: Path, value) -> None:
+    """`-eq $true` is COERCIVE, and review proved it: integer `1` and the string `"true"` both cleared.
 
-    This is the shape a future collector change, or a caller that predates the field, would produce.
-    Defaulting it to true would silently restore the suppression path with nothing to notice it.
+    Anything that is not a Boolean is an unknown window shape - a future collector change, a caller
+    that predates the field, a JSON round-trip that widened a type - and an unknown shape must never be
+    able to authorise suppression. Only `$true` itself counts.
     """
-    window = _window(Title="Refresh", Texts=["Refresh"], OwnerEnabled=False)
-    del window["ContentRead"]
+    window = _window(Title="Refresh", Texts=["Refresh", "1,204 rows loaded"], OwnerEnabled=False)
+    if value == "__absent__":
+        del window["HarvestComplete"]
+    else:
+        window["HarvestComplete"] = value
 
-    assert classify(tmp_path, [window])["kind"] == "benign-title-only"
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["kind"] == "benign-unverified", f"HarvestComplete={value!r} must not count as complete"
+    assert result["verdict"] == "DIALOG_UNREADABLE"
+    assert result["exit_code"] == 3
+
+
+def test_a_real_boolean_true_does_authorise_suppression(tmp_path: Path) -> None:
+    """The positive control for the test above - otherwise it could pass by refusing everything."""
+    window = _window(Title="Refresh", Texts=["Refresh", "1,204 rows loaded"], OwnerEnabled=False)
+    window["HarvestComplete"] = True
+
+    assert classify(tmp_path, [window], refresh_in_flight=True)["verdict"] is None
+
+
+def test_reading_only_a_button_does_not_authorise_a_benign_caption(tmp_path: Path) -> None:
+    """Round 2's defect: "we harvested SOME text" was a proxy for "we read the credential content".
+
+    A `Cancel` button satisfied it. Under the inverted rule the harvest being complete is necessary but
+    not sufficient - the BENIGN SIGNATURE ITSELF must match content, and `Cancel` does not. So the
+    three separate exploits that beat the old proxy (TextPattern-only content, content past the element
+    cap, a split defeated by an interposed element) all stop being silent clears at once: none of them
+    ever produced benign content to read.
+    """
+    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_WITH_ONLY_A_BUTTON_READ], refresh_in_flight=True)
+
+    assert result["kind"] != "benign", "a button label is not evidence that a dialog is harmless"
+    assert result["verdict"] == "DIALOG_UNREADABLE"
+    assert result["exit_code"] == 3
+
+
+def test_a_benign_caption_over_unreadable_content_is_never_suppressed(tmp_path: Path) -> None:
+    """Whatever the collector missed, a caption alone cannot clear a window - in flight or at t=0."""
+    for in_flight in (False, True):
+        result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY], refresh_in_flight=in_flight)
+        assert result["kind"] == "benign-title-only", f"in_flight={in_flight}"
+        assert result["verdict"] == "DIALOG_UNREADABLE"
+        assert result["exit_code"] == 3
+
+
+def test_benign_content_from_a_truncated_harvest_is_not_benign(tmp_path: Path) -> None:
+    """Truncated must never read as "complete and clean" - the element cap was independently exploitable.
+
+    450 ordinary elements followed by the credential `TextBlock` cleared the window because the cap
+    silently stopped short. The cap still exists (it bounds the work), but hitting it now withholds the
+    right to suppress instead of quietly granting it.
+    """
+    window = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Evaluating"],
+        OwnerEnabled=False,
+        HarvestComplete=False,
+    )
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["kind"] == "benign-unverified"
+    assert result["exit_code"] == 3
 
 
 def test_a_credential_signature_split_across_wpf_elements_still_convicts(tmp_path: Path) -> None:
@@ -1578,16 +1667,273 @@ def test_the_pinned_alternative_list_still_covers_the_shipped_signature() -> Non
 
 
 def test_the_probe_harvests_window_text_through_ui_automation() -> None:
-    """Regression pin on the collector: the UIA harvest must stay wired into `Get-PidWindows`.
+    """Regression pin on the collector: the harvest, its patterns, and its BOUNDS stay wired in.
 
-    The behavioural tests above take `ContentRead` as an input. Only the live WPF test proves it is
-    produced, and that one skips where there is no interactive desktop - so this keeps the wiring
-    itself gated everywhere.
+    The behavioural tests above take `Texts`/`HarvestComplete` as inputs. Only the live tests prove
+    they are produced, and those skip where there is no interactive desktop - so this keeps the wiring
+    gated everywhere, including on Linux CI.
     """
     body = PROBE_PS1.read_text(encoding="utf-8")
 
-    assert "function Get-AutomationText" in body
+    assert "function Get-AutomationHarvest" in body
     assert "AutomationElement]::FromHandle" in body, "the harvest must start from the window handle"
+    assert "TextPattern]::Pattern" in body, (
+        "TextPattern is not optional: a read-only RichTextBox with an empty Name exposes its text only there"
+    )
+    assert "ValuePattern]::Pattern" in body
+    assert "$truncated = $true" in body, "hitting the element cap must be recorded, not silently absorbed"
+    assert "PatternsIncomplete" in body, "a pattern read that threw must withhold the right to suppress"
     assert "ConvertTo-ProbeWindow" in body and "-Enrich:$isCandidate" in body, (
         "Get-PidWindows must enrich candidate windows, or the classifiers only ever see the caption"
+    )
+    assert "function Get-BoundedAutomationHarvest" in body and "WaitForExit" in body and "Kill()" in body, (
+        "the harvest must run in a killable child process: a hung UIA provider cannot be cancelled in-process"
+    )
+
+
+def test_the_harvest_child_process_is_this_same_script() -> None:
+    """The bounded harvest re-invokes THIS file, so the bundle stays copyable as one folder.
+
+    A second script would have to be copied too, and `SKILL.md` promises that copying this one folder
+    takes the whole procedure with it.
+    """
+    body = PROBE_PS1.read_text(encoding="utf-8")
+
+    assert "$PSCommandPath" in body, "the child must be this script, not a sibling file"
+    assert "ParameterSetName -eq 'Harvest'" in body
+    assert "'HARVEST:'" in body, "the child's payload needs a marker the parent can find in its output"
+
+
+# --------------------------------------------------------------------------------------------------
+# Live regressions for the round-2 exploits (blind review, 2026-08-29)
+# --------------------------------------------------------------------------------------------------
+#
+# Each of these beat the previous `ContentRead` proxy and ended at CREDENTIAL_PRESENT, exit 0. They are
+# kept as LIVE tests, not synthesised ones, because every one of them lived in the COLLECTOR - the part
+# a synthesised window object cannot exercise by construction.
+
+_WPF_APP_PREAMBLE = r"""
+param([Parameter(Mandatory = $true)][string]$ReadyFile)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName WindowsFormsIntegration
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$script:form = New-Object System.Windows.Forms.Form
+$script:form.Text = 'Fake Desktop'
+$script:form.Width = 640
+$script:form.Height = 480
+$button = New-Object System.Windows.Controls.Button
+$button.Content = 'Refresh'
+$hostControl = New-Object System.Windows.Forms.Integration.ElementHost
+$hostControl.Width = 140
+$hostControl.Height = 48
+$hostControl.Child = $button
+$script:form.Controls.Add($hostControl)
+$script:timer = New-Object System.Windows.Forms.Timer
+$script:timer.Interval = 800
+"""
+
+_WPF_APP_EPILOGUE = r"""
+$button.Add_Click({ $script:timer.Start() })
+$script:form.Add_Shown({ Set-Content -LiteralPath $ReadyFile -Value 'ready' -Encoding ascii })
+[System.Windows.Forms.Application]::Run($script:form)
+"""
+
+# Credential text in a read-only RichTextBox: reachable ONLY through TextPattern, with an empty Name,
+# and a Cancel button alongside it so the old "we harvested some text" proxy would have been satisfied.
+_MODAL_TEXTPATTERN_ONLY = r"""
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = 'Refresh'
+    $modal.Width = 520
+    $modal.Height = 320
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $rich = New-Object System.Windows.Controls.RichTextBox
+    $rich.IsReadOnly = $true
+    $paragraph = New-Object System.Windows.Documents.Paragraph
+    $paragraph.Inlines.Add((New-Object System.Windows.Documents.Run('Enter your credentials')))
+    $rich.Document = New-Object System.Windows.Documents.FlowDocument($paragraph)
+    $null = $panel.Children.Add($rich)
+    $cancel = New-Object System.Windows.Controls.Button
+    $cancel.Content = 'Cancel'
+    $null = $panel.Children.Add($cancel)
+    $modal.Content = $panel
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $null = $modal.ShowDialog()
+  })
+"""
+
+# 450 ordinary elements ahead of the credential text: the old 400-element cap truncated silently and
+# the result was indistinguishable from "read it all, found nothing".
+_MODAL_PAST_THE_ELEMENT_CAP = r"""
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = 'Refresh'
+    $modal.Width = 520
+    $modal.Height = 320
+    $panel = New-Object System.Windows.Controls.StackPanel
+    for ($i = 0; $i -lt 450; $i++) {
+      $filler = New-Object System.Windows.Controls.TextBlock
+      $filler.Text = "row $i"
+      $null = $panel.Children.Add($filler)
+    }
+    $block = New-Object System.Windows.Controls.TextBlock
+    $block.Text = 'Enter your credentials'
+    $null = $panel.Children.Add($block)
+    $scroller = New-Object System.Windows.Controls.ScrollViewer
+    $scroller.Content = $panel
+    $modal.Content = $scroller
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $null = $modal.ShowDialog()
+  })
+"""
+
+# `Enter your` / `Cancel` / `credentials`: an interactive element interposed between the two halves of
+# the signature, which defeated a naive whole-window join.
+_MODAL_INTERPOSED_SPLIT = r"""
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = 'Refresh'
+    $modal.Width = 520
+    $modal.Height = 320
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $first = New-Object System.Windows.Controls.TextBlock
+    $first.Text = 'Enter your'
+    $null = $panel.Children.Add($first)
+    $cancel = New-Object System.Windows.Controls.Button
+    $cancel.Content = 'Cancel'
+    $null = $panel.Children.Add($cancel)
+    $second = New-Object System.Windows.Controls.TextBlock
+    $second.Text = 'credentials'
+    $null = $panel.Children.Add($second)
+    $modal.Content = $panel
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $null = $modal.ShowDialog()
+  })
+"""
+
+# A modal that WEDGES its own UI thread. UI Automation's FindAll then blocks cross-process, which is
+# what held a `-TimeoutSec 1` probe for 15.1s and produced no verdict at all.
+_MODAL_WEDGED_UI_THREAD = r"""
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = 'Refresh'
+    $modal.Width = 520
+    $modal.Height = 320
+    $block = New-Object System.Windows.Controls.TextBlock
+    $block.Text = 'Enter your credentials'
+    $modal.Content = $block
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $modal.Add_ContentRendered({ Start-Sleep -Seconds 120 })
+    $null = $modal.ShowDialog()
+  })
+"""
+
+
+def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: list[str] | None = None):
+    """Launch the fake-Desktop app with ``modal_body``, run the probe, return the completed process."""
+    exe = _powershell()
+    app_script = tmp_path / "fake_desktop.ps1"
+    app_script.write_text(_WPF_APP_PREAMBLE + modal_body + _WPF_APP_EPILOGUE, encoding="utf-8")
+    ready = tmp_path / "ready.txt"
+    app = subprocess.Popen(  # pylint: disable=consider-using-with
+        [exe, "-Sta", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_script), "-ReadyFile", str(ready)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(60):
+            if ready.exists():
+                break
+            time.sleep(0.5)
+        if not ready.exists():
+            pytest.skip("the WPF fixture app never showed a window (no interactive desktop?)")
+        argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PROBE_PS1)]
+        argv += ["-DesktopPid", str(app.pid)]
+        extra = extra_args or []
+        if "-TimeoutSec" not in extra:
+            argv += ["-TimeoutSec", "12"]
+        argv += extra
+        started = time.monotonic()
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False)
+        done.elapsed = time.monotonic() - started  # type: ignore[attr-defined]
+        if "refresh invoked: True" not in done.stdout:
+            pytest.skip(f"the fixture app exposed no invokable Refresh to UI Automation:\n{done.stdout}")
+        return done
+    finally:
+        app.kill()
+        app.wait(timeout=30)
+
+
+def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_path: Path) -> None:
+    """Exploit 1. `Name` + `ValuePattern` alone miss a read-only RichTextBox's content entirely."""
+    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY)
+
+    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
+    assert done.returncode == 1
+
+
+def test_credential_text_beyond_the_element_cap_never_reads_as_clean(tmp_path: Path) -> None:
+    """Exploit 2. Truncation must not be indistinguishable from a complete, clean read.
+
+    Two acceptable outcomes and one forbidden one: read it all and convict (exit 1), or report the
+    harvest incomplete (exit 3). Never exit 0.
+    """
+    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PAST_THE_ELEMENT_CAP, ["-HarvestMaxElements", "400"])
+
+    assert done.returncode != 0, f"a truncated harvest must never clear a window:\n{done.stdout}"
+    assert "CREDENTIAL_PRESENT" not in done.stdout
+
+
+def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(tmp_path: Path) -> None:
+    """The same window with the shipped cap: read in full, and convicted."""
+    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PAST_THE_ELEMENT_CAP)
+
+    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
+    assert done.returncode == 1
+
+
+def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path) -> None:
+    """Exploit 3. The prose join must skip interactive elements, or `Cancel` breaks the sentence."""
+    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_INTERPOSED_SPLIT)
+
+    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
+    assert done.returncode == 1
+
+
+def test_a_wedged_uia_provider_still_produces_a_verdict(tmp_path: Path) -> None:
+    """The MEDIUM finding: an uncapped UIA walk let a 1s probe run 15s+ and emit nothing at all.
+
+    `FindAll` is a synchronous cross-process call, so neither `try/catch` nor a background thread can
+    interrupt it - only killing a child process can.
+
+    The bound is what this test is FOR, and it has to be tight enough to fail. Measured here against a
+    modal that sleeps 120s on its own UI thread, with `-TimeoutSec 1 -HarvestTimeoutSec 2`:
+
+        bounded child process : 6.2s   exit 3  VERDICT: DIALOG_UNREADABLE
+        in-process harvest    : 70.5s  exit 3  VERDICT: DIALOG_UNREADABLE
+
+    Note both eventually print the SAME verdict - the defect is purely the time budget, so an assertion
+    on the verdict alone cannot see it. A first draft used `elapsed < 120` and the mutation walked
+    straight through at 70.5s. 25s sits ~4x above the bounded case and ~3x below the unbounded one.
+    """
+    done = _run_probe_against_wpf_modal(
+        tmp_path, _MODAL_WEDGED_UI_THREAD, ["-TimeoutSec", "1", "-HarvestTimeoutSec", "2"]
+    )
+
+    assert "VERDICT:" in done.stdout, f"a wedged provider must not swallow the verdict:\n{done.stdout}"
+    assert "CREDENTIAL_PRESENT" not in done.stdout, "an unreadable window is not a clean bill of health"
+    assert done.returncode == 3
+    assert done.elapsed < 25, (
+        f"the probe inherited the provider's wedge instead of bounding it (took {done.elapsed:.1f}s)"
     )
