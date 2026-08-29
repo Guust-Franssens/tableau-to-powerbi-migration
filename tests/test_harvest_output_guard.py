@@ -800,3 +800,33 @@ def test_an_ignored_out_named_through_a_resolvable_alias_still_proceeds(lab) -> 
         assert h.refuse_unignored_output(alias / "_sweep-alias", allow_unignored=False) is False, (
             f"an ignored --out spelled {alias} was refused"
         )
+
+
+def test_a_path_longer_than_git_can_access_is_still_judged_correctly(lab) -> None:
+    """git and the filesystem disagree about long paths on Windows; the verdict must not.
+
+    Measured on this machine - `core.longpaths` UNSET while the OS has `LongPathsEnabled=1`, git
+    2.55.0.windows.3 - at 310 characters `git check-ignore` still returns the RIGHT answer, 0 for an
+    ignored prefix and 1 for an unignored one, while printing `warning: unable to access ...` to
+    stderr. The guard reads the exit code, not the warning, so the verdict survives; and a path git
+    cannot answer for at all raises and refuses, which the fail-closed rule already covers.
+
+    Characterisation, not new coverage: it pins a boundary where the two layers are known to
+    disagree, and it is near-vacuous on POSIX where 310 characters is unremarkable. Nothing is
+    created on disk - the guard judges paths that do not exist, by design, so this needs no deep
+    directory tree and leaves nothing to clean up.
+    """
+
+    def long_out(first: str) -> Path:
+        out = lab.repo / first
+        while len(str(out / "assets" / "harvested-workbook.twbx")) < 300:
+            out = out / ("d" * 40)
+        return out
+
+    ignored, unignored = long_out("_sweep-long"), long_out("leaky-long")
+    assert min(len(str(ignored)), len(str(unignored))) > 260, "fixture proves nothing: the paths are not long"
+    assert not ignored.exists() and not unignored.exists(), "the guard must judge these without creating them"
+
+    assert h.refuse_unignored_output(unignored, allow_unignored=False) is True
+    assert h.refuse_unignored_output(ignored, allow_unignored=False) is False
+    assert not ignored.exists() and not unignored.exists(), "the guard created a directory while judging"
