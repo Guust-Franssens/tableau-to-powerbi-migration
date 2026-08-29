@@ -55,10 +55,11 @@
     exit 3  DIALOG_UNRECOGNIZED  a dialog is up whose text matched NEITHER signature. We read it and
                                  it is not a credential prompt - so it is not a credential wall - but
                                  we cannot say what it is. A human should look at the screen.
-    exit 3  DIALOG_UNREADABLE    a dialog is up that exposes NO readable text at all. Distinct from
-                                 DIALOG_UNRECOGNIZED on purpose: "we could not read it" is a weaker
-                                 state of knowledge than "we read it and it did not match", and the
-                                 two must not collapse into one verdict.
+    exit 3  DIALOG_UNREADABLE    a dialog is up whose CONTENT could not be read - either it exposes no
+                                 text at all, or its caption matched the progress signature while its
+                                 content stayed unread. Distinct from DIALOG_UNRECOGNIZED on purpose:
+                                 "we could not read it" is a weaker state of knowledge than "we read
+                                 it and it did not match", and the two must not collapse into one.
 
   ⚠️ `BLOCKED_BY_DIALOG` is deliberately NOT emitted here any more (issue #367). It used to be, on a
   size-only test - ANY visible non-main window >=100x100 - which a Power BI Refresh progress dialog
@@ -97,12 +98,37 @@ $sig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'credential_modal_sign
 # this file could hide a genuine blocker.
 $benignSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_dialog_signature.regex') -Raw).Trim()
 
+function Get-NormalizedText {
+  <# Whitespace-normalised, de-duplicated window text, optionally plus a JOINED variant.
+
+  The joined variant exists because a WPF dialog splits one sentence across several visual elements,
+  so `Enter your credentials` can arrive as `Enter your` + `credentials` and match neither fragment.
+
+  ⚠️ It is applied ASYMMETRICALLY, and that is the whole point: the credential signature searches the
+  joined text (broadest possible recall for the detector that CONVICTS), while the benign signature
+  searches the individual elements only (narrowest possible reach for the detector that EXONERATES).
+  Joining can in principle manufacture a phrase - two adjacent table names reading `Account` `Key`
+  would join to the signature `Account Key` - and the direction that error takes matters: on the
+  credential path it produces a LOUD false stop a human resolves by looking at the screen, whereas on
+  the benign path it would produce a SILENT false clear. Never give the benign path the joined text.
+  #>
+  param([object[]]$Texts, [switch]$IncludeJoined)
+  $clean = @()
+  foreach ($t in $Texts) {
+    if ($null -eq $t) { continue }
+    $normalized = (([string]$t) -replace '\s+', ' ').Trim()
+    if ($normalized -and ($clean -notcontains $normalized)) { $clean += $normalized }
+  }
+  if ($IncludeJoined -and $clean.Count -gt 1) { $clean += ($clean -join ' ') }
+  return $clean
+}
+
 function Test-CredentialModal {
   <# First matching credential-signature text across EVERY window, any class, any size. #>
   param([object[]]$Windows)
   foreach ($w in $Windows) {
-    foreach ($n in $w.Texts) {
-      if ($n -and $n -match $sig) { return $n }
+    foreach ($n in (Get-NormalizedText -Texts $w.Texts -IncludeJoined)) {
+      if ($n -match $sig) { return $n }
     }
   }
   return $null
@@ -129,42 +155,57 @@ function Get-DialogClassification {
   <# Classify ONE candidate window from what it says, and from whether it disables its owner.
 
   Kinds, in the order they are tested:
-    credential    text matched the credential signature -> the hard stop.
-    benign        text matched the progress signature   -> Power BI is working.
-    non-blocking  the owner window is ENABLED. Modality is a ONE-WAY test: a modal dialog disables its
-                  owner, so an enabled owner PROVES this window is not blocking anything. The converse
-                  does not hold - Power BI's refresh dialog also disables the owner - so a disabled
-                  owner is never used to convict. `$null` (no owner at all) proves nothing either way.
-    unreadable    no readable text at all: we could not classify it.
-    unrecognized  readable text that matched neither signature: we looked, and it is not a credential
-                  prompt. Distinct from `unreadable` on purpose - absent is not empty.
+    credential        text matched the credential signature -> the hard stop. Searched over the JOINED
+                      text too, so a signature split across WPF elements still convicts.
+    benign            a text ELEMENT matched the progress signature AND the window's content was
+                      actually read -> Power BI is working.
+    benign-title-only the progress signature matched, but `ContentRead` is not `$true`: the caption
+                      says "Refresh" and the CONTENT was never read. Reported as indeterminate, not
+                      suppressed. This is the review defect of 2026-08-29: a WPF modal titled
+                      `Refresh` whose visual content read `Enter your credentials` was classified
+                      benign from its caption, suppressed in flight, and the probe exited 0 -
+                      a SILENT false negative on a hard stop, strictly worse than the false positive
+                      #367 set out to remove. `absent != empty`, one level down: content we did not
+                      read cannot be evidence of harmlessness.
+    non-blocking      the owner window is ENABLED. Modality is a ONE-WAY test: a modal dialog disables
+                      its owner, so an enabled owner PROVES this window is not blocking anything. The
+                      converse does not hold - Power BI's refresh dialog also disables the owner - so a
+                      disabled owner is never used to convict. `$null` (no owner) proves nothing.
+    unreadable        no readable text at all: we could not classify it.
+    unrecognized      readable text that matched neither signature: we looked, and it is not a
+                      credential prompt. Distinct from `unreadable` on purpose - absent is not empty.
   #>
   param([Parameter(Mandatory = $true)][object]$Window)
 
-  $texts = @()
-  if ($null -ne $Window.Texts) {
-    $texts = @($Window.Texts | Where-Object { $_ -and $_.Trim() })
-  }
-  foreach ($t in $texts) {
+  $elements = Get-NormalizedText -Texts $Window.Texts
+  $searchable = Get-NormalizedText -Texts $Window.Texts -IncludeJoined
+  foreach ($t in $searchable) {
     if ($t -match $sig) { return [pscustomobject]@{ Kind = 'credential'; Evidence = $t } }
   }
-  foreach ($t in $texts) {
-    if ($t -match $benignSig) { return [pscustomobject]@{ Kind = 'benign'; Evidence = $t } }
+  foreach ($t in $elements) {
+    if ($t -match $benignSig) {
+      # `$null`/missing ContentRead fails SAFE: a window whose collector never said it read the
+      # content is treated as unread, so a synthesised or future window shape cannot silently
+      # re-open the suppression path.
+      if ($Window.ContentRead -eq $true) { return [pscustomobject]@{ Kind = 'benign'; Evidence = $t } }
+      return [pscustomobject]@{ Kind = 'benign-title-only'; Evidence = $t }
+    }
   }
   if ($Window.OwnerEnabled -eq $true) {
     return [pscustomobject]@{ Kind = 'non-blocking'; Evidence = 'owner window is enabled' }
   }
-  if ($texts.Count -eq 0) {
+  if ($elements.Count -eq 0) {
     return [pscustomobject]@{ Kind = 'unreadable'; Evidence = '' }
   }
-  return [pscustomobject]@{ Kind = 'unrecognized'; Evidence = $texts[0] }
+  return [pscustomobject]@{ Kind = 'unrecognized'; Evidence = $elements[0] }
 }
 
 function Format-DialogEvidence {
   <# One-line window description for a verdict line. #>
   param([object]$Window)
   $title = if ($Window.Title) { $Window.Title } else { '(empty title)' }
-  return ("class={0} title='{1}' size={2}x{3}" -f $Window.ClassName, $title, $Window.Width, $Window.Height)
+  $read = if ($Window.ContentRead -eq $true) { 'read' } else { 'UNREAD' }
+  return ("class={0} title='{1}' size={2}x{3} content={4}" -f $Window.ClassName, $title, $Window.Width, $Window.Height, $read)
 }
 
 function Get-DialogVerdict {
@@ -177,6 +218,9 @@ function Get-DialogVerdict {
       outrank a window we could not classify - otherwise one progress dialog masks a real modal.
     * `unreadable` outranks `unrecognized` because it is the weaker state of knowledge, and the weaker
       state is the one that must stay visible.
+    * `benign-title-only` joins the `unreadable` band, NOT the benign one. Its content was never read,
+      so it is an indeterminate wearing a reassuring caption - and it is the one shape that must not be
+      suppressible, because suppression is what turned a real credential modal into exit 0.
 
   `-RefreshInFlight` is set only inside the poll loop, i.e. after THIS script invoked the refresh.
   There, a progress dialog is our own and is ignored. At t=0 it is somebody else's, and stacking a
@@ -197,6 +241,7 @@ function Get-DialogVerdict {
         return $found
       }
       'unreadable' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
+      'benign-title-only' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
       'unrecognized' { if ($null -eq $unrecognized) { $found.Verdict = 'DIALOG_UNRECOGNIZED'; $unrecognized = $found } }
       'benign' { if ($null -eq $benign) { $found.Verdict = 'REFRESH_IN_PROGRESS'; $benign = $found } }
       default { }
@@ -298,10 +343,94 @@ public static class Win32CredentialWindows {
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $DesktopPid)
 
+function Get-AutomationText {
+  <# UI Automation descendant Name/Value text for one HWND, or `$null` if the harvest FAILED.
+
+  Win32 `EnumChildWindows` is not enough and this is not a corner case: WPF renders its visual tree
+  into ONE HWND, so a WPF dialog's entire content is invisible to child-HWND enumeration and only its
+  caption survives. Measured 2026-08-29 in review - an owned WPF modal titled `Refresh` containing
+  `Enter your credentials` read as a progress dialog and the probe exited 0. UI Automation sees that
+  text; a UIA dump of the same window returned `DescendantNames: Enter your credentials`.
+
+  Three distinct outcomes, kept distinct on purpose: `$null` = the harvest could not run, `@()` = it
+  ran and the window genuinely exposes nothing, a populated array = content. The caller turns the
+  first two into "content unread", which is an indeterminate, never a clean bill of health.
+  #>
+  param([long]$Hwnd, [int]$MaxElements = 400)
+  $texts = @()
+  try {
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Hwnd)
+    if ($null -eq $element) { return $null }
+    $descendants = $element.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition)
+    $seen = 0
+    foreach ($d in $descendants) {
+      if ($seen -ge $MaxElements) { break }
+      $seen++
+      try {
+        if ($d.Current.Name) { $texts += $d.Current.Name }
+        $pattern = $null
+        if ($d.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+          if ($pattern.Current.Value) { $texts += $pattern.Current.Value }
+        }
+      } catch {
+        # One unreachable element must not discard the text already harvested from its siblings.
+        continue
+      }
+    }
+  } catch {
+    return $null
+  }
+  return , $texts
+}
+
+function ConvertTo-ProbeWindow {
+  <# Win32 `WindowInfo` -> the plain window object the pure classifiers consume.
+
+  `ContentRead` is the field the classifiers gate the benign path on: it is true only when text was
+  obtained that is NOT merely the window caption - a Win32 child text (WinForms dialogs expose those)
+  or a UIA descendant. A caption on its own can never establish that a dialog is harmless.
+  #>
+  param([object]$Window, [switch]$Enrich)
+  $title = [string]$Window.Title
+  $texts = @()
+  foreach ($t in $Window.Texts) { if ($t) { $texts += [string]$t } }
+  $contentRead = @($texts | Where-Object { $_ -ne $title }).Count -gt 0
+  if ($Enrich) {
+    $hwnd = if ($Window.Hwnd -is [IntPtr]) { $Window.Hwnd.ToInt64() } else { [long]$Window.Hwnd }
+    $harvested = Get-AutomationText -Hwnd $hwnd
+    if ($null -ne $harvested) {
+      foreach ($t in $harvested) { if ($t -and ($texts -notcontains $t)) { $texts += [string]$t } }
+      if (@($harvested | Where-Object { $_ -and $_ -ne $title }).Count -gt 0) { $contentRead = $true }
+    }
+  }
+  return [pscustomobject]@{
+    Hwnd         = $Window.Hwnd
+    Title        = $title
+    ClassName    = [string]$Window.ClassName
+    Width        = [int]$Window.Width
+    Height       = [int]$Window.Height
+    Minimized    = [bool]$Window.Minimized
+    OwnerEnabled = $Window.OwnerEnabled
+    Texts        = $texts
+    ContentRead  = $contentRead
+  }
+}
+
 function Get-PidWindows {
   # EVERY visible top-level/owned window of the target process, not UIA RootElement children. A
   # Power BI credential modal is an owned window; UIA root-child discovery misses it.
-  return [Win32CredentialWindows]::GetPidWindows($DesktopPid)
+  #
+  # The UIA text harvest is applied to CANDIDATE windows only. Walking the main Power BI window's
+  # visual tree would cost seconds per poll for text the classifiers never read (it is excluded by
+  # class), and this loop runs every 2s.
+  $enriched = @()
+  foreach ($w in [Win32CredentialWindows]::GetPidWindows($DesktopPid)) {
+    $isCandidate = @(Select-DialogCandidate -Windows @($w)).Count -eq 1
+    $enriched += (ConvertTo-ProbeWindow -Window $w -Enrich:$isCandidate)
+  }
+  return $enriched
 }
 
 $windows = Get-PidWindows
@@ -324,9 +453,10 @@ if ($blocker) {
   if ($blocker.Evidence) {
     Write-Output ("  matched text: '{0}'" -f $blocker.Evidence.Substring(0, [Math]::Min(80, $blocker.Evidence.Length)))
   }
-  switch ($blocker.Verdict) {
-    'REFRESH_IN_PROGRESS' { Write-Output "  a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack a second refresh on it" }
-    'DIALOG_UNREADABLE' { Write-Output "  this window exposes no readable text, so it could not be classified at all - look at the Desktop screen" }
+  switch ($blocker.Kind) {
+    'benign' { Write-Output "  a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack a second refresh on it" }
+    'benign-title-only' { Write-Output "  its CAPTION looks like a progress dialog, but its content could not be read - an unread window is not evidence that it is harmless; look at the Desktop screen" }
+    'unreadable' { Write-Output "  this window exposes no readable text, so it could not be classified at all - look at the Desktop screen" }
     default { Write-Output "  its text matches no credential-prompt signature, so this is not a credential wall - look at the Desktop screen" }
   }
   Write-Output ("VERDICT: {0}" -f $blocker.Verdict)

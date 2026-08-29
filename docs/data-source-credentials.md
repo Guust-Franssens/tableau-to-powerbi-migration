@@ -99,8 +99,9 @@ watches for the connector modal:
   data probe before trusting it (see the serverless false-positive above).
 - A dialog is up that is *not* a credential prompt -> one of `REFRESH_IN_PROGRESS` (another refresh
   already owns this instance — wait for it or cancel the stale one), `DIALOG_UNRECOGNIZED` (we read its
-  text and it matched no credential signature) or `DIALOG_UNREADABLE` (it exposes no readable text at
-  all), each **exit 3**. All three mean *"could not probe"*, never *"a human must sign in"*.
+  text and it matched no credential signature) or `DIALOG_UNREADABLE` (its **content** could not be
+  read — no text at all, or only a caption), each **exit 3**. All three mean *"could not probe"*, never
+  *"a human must sign in"*.
 
 ⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall.** Until issue #367 the probe
 returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
@@ -114,6 +115,14 @@ text and reports what it actually saw; the size test only decides which windows 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and
 (b) also treat an **already-open** modal as MISSING (check before triggering refresh).
+
+⚠️ **A third, found in blind review 2026-08-29: Win32 child-HWND text cannot see inside a WPF dialog.**
+WPF renders its whole visual tree into one HWND, so only the window *caption* survives child
+enumeration. A real owned WPF modal captioned `Refresh`, whose content read `Enter your credentials`,
+was classified as a progress dialog and the probe exited **0 with `CREDENTIAL_PRESENT`** — a silent
+false negative on a hard stop. The probe now merges **UI Automation** descendant text before matching
+any signature, and treats a caption-only match on unread content as indeterminate rather than benign.
+If you extend this probe, or write another dialog detector: **a caption is not content**.
 
 **The robust positive check: query one row from the Desktop model (verified 2026-07).** Modal-absence is
 a *negative* signal; the *positive* proof that data actually flows is to query the loaded model. Power BI

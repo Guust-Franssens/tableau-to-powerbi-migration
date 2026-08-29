@@ -156,7 +156,7 @@ stay byte-identical.
 > | `CREDENTIAL_PRESENT` | 0 | a refresh was invoked and ran to the deadline with nothing unclassifiable up. Still not the gate of record for a serverless source — confirm with the one-row data probe. |
 > | `REFRESH_IN_PROGRESS` | 3 | a progress dialog was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
 > | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched neither signature. We read it, and it is **not** a credential prompt — but we cannot say what it is. |
-> | `DIALOG_UNREADABLE` | 3 | a dialog is up that exposes no readable text at all. Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not read it" is a weaker state of knowledge than "we read it and it did not match". |
+> | `DIALOG_UNREADABLE` | 3 | a dialog is up whose **content** could not be read — either it exposes no text at all, or its *caption* matched the progress signature while its content stayed unread. Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not read it" is a weaker state of knowledge than "we read it and it did not match". |
 > | `UNKNOWN` | 3 | no window for the pid, a minimized owner, or no Refresh control was ever invoked. |
 >
 > **Which way it errs, and why.** A false *positive* here terminates at exit 1 and escalates to a
@@ -180,6 +180,40 @@ stay byte-identical.
 >   alternatives narrow and anchored; a broad pattern here is the one way this file could hide a real
 >   modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` gates exactly that. If
 >   you ever have a real progress dialog on screen, capture its exact text and tighten this file.
+
+> ⚠️ **Win32 child-HWND text does NOT see inside a WPF dialog — and the first fix for #367 shipped a
+> silent false negative because of it.** WPF renders its entire visual tree into **one** HWND, so
+> `EnumChildWindows` harvests nothing and only the window **caption** survives. Caught in blind review
+> 2026-08-29 against a real owned WPF modal (WinForms owner, `TextBlock` reading `Enter your
+> credentials`, `ShowDialog()` disabling the owner, raised 0.8 s after Refresh is invoked):
+>
+> | build | result |
+> |---|---|
+> | first #367 fix | `refresh invoked: True` → *no credential modal within 12s* → **`CREDENTIAL_PRESENT`, exit 0** |
+> | shipped fix | `credential modal detected: 'Enter your credentials'` → **`CREDENTIAL_MISSING`, exit 1** |
+>
+> The caption was `Refresh`, which matched the benign signature; in-flight suppression then discarded
+> it and the deadline printed a clean bill of health. **A silent false negative on a hard stop is
+> strictly worse than the loud false positive #367 removed** — and note that the old size-only detector
+> caught this case *by accident*, precisely because it never read text at all. Two independent guards
+> now cover it:
+>
+> 1. **UI Automation harvest.** `Get-AutomationText` walks each candidate's UIA descendants
+>    (`Name` + `ValuePattern`) and merges them into the window's text before either signature runs. It
+>    is applied to **candidates only** — walking the main window's visual tree would cost seconds on
+>    every 2 s poll for text no classifier reads. Failure to harvest returns `$null` (distinct from
+>    `@()`, "ran and found nothing"), and both mean *content unread*.
+> 2. **The `ContentRead` gate.** A benign match on the **caption** of a window whose content was never
+>    read is reported as indeterminate (`DIALOG_UNREADABLE`), never suppressed. A **missing**
+>    `ContentRead` field fails safe to "unread". This holds even if the harvest itself breaks.
+>
+> **The joined-text rule is asymmetric, on purpose.** WPF splits one sentence across elements, so the
+> **credential** signature also searches the whitespace-normalised *join* of a window's texts (maximum
+> recall for the detector that convicts). The **benign** signature searches individual elements only.
+> Joining can manufacture a phrase — two adjacent table names reading `Account` `Key` join to the
+> signature `Account Key` — and the direction matters: on the credential path that is a **loud** false
+> stop a human resolves by looking at the screen; on the benign path it would be a **silent** false
+> clear. Never give the benign path the joined text.
 >
 > The **Python** fast check (`_credential_modal.blocking_dialog_candidates`, used by
 > `refresh_pbip_model.py` and `probe_desktop_query.py`) still promotes any >= 100x100 non-main window

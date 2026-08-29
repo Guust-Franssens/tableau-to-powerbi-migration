@@ -1055,7 +1055,7 @@ def _powershell() -> str:
 
 
 def _window(**overrides) -> dict:
-    """A synthesised Desktop window, shaped exactly like `Win32CredentialWindows.WindowInfo`."""
+    """A synthesised Desktop window, shaped exactly like `ConvertTo-ProbeWindow`'s output."""
     window = {
         "Title": "",
         "ClassName": "#32770",
@@ -1066,6 +1066,10 @@ def _window(**overrides) -> dict:
         # `None` = the window has no owner, so the modality test could not be applied at all. That is
         # NOT the same as `False` (owner disabled), and the classifier must not treat it as such.
         "OwnerEnabled": None,
+        # Whether text beyond the CAPTION was obtained. Defaults true here because most fixtures model
+        # a window whose content was read; the fail-safe default for a MISSING field is pinned
+        # separately by `test_a_window_with_no_content_read_field_at_all_fails_safe`.
+        "ContentRead": True,
     }
     window.update(overrides)
     return window
@@ -1107,6 +1111,25 @@ CREDENTIAL_MODAL = _window(
     Title="",
     Texts=["Please specify how to connect", "Edit Credentials"],
     OwnerEnabled=False,
+)
+# The review defect of 2026-08-29, as the collector actually produced it. A WPF modal renders its
+# whole visual tree into ONE HWND, so `EnumChildWindows` harvested nothing and only the caption
+# survived - a caption that matches the progress signature. `ContentRead` false is the collector
+# saying so.
+WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY = _window(
+    Title="Refresh",
+    ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
+    Texts=["Refresh"],
+    OwnerEnabled=False,
+    ContentRead=False,
+)
+# The same window once UI Automation supplies the visual text the Win32 collector could not see.
+WPF_CREDENTIAL_MODAL_WITH_UIA_TEXT = _window(
+    Title="Refresh",
+    ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
+    Texts=["Refresh", "Enter your credentials", "OK", "Cancel"],
+    OwnerEnabled=False,
+    ContentRead=True,
 )
 
 
@@ -1314,3 +1337,257 @@ def test_the_benign_signature_matches_real_refresh_progress_text() -> None:
     for phrase in ["Refresh", "Evaluating", "1,204 rows loaded", "Waiting for other queries", "Loading data"]:
         assert benign.search(phrase), f"benign signature should match progress text: {phrase!r}"
     assert not benign.search("Refresh failed"), "'Refresh' is anchored so it cannot swallow arbitrary sentences"
+
+
+# --------------------------------------------------------------------------------------------------
+# WPF content harvest (blind review, 2026-08-29)
+# --------------------------------------------------------------------------------------------------
+#
+# The Win32 collector reads a window's caption plus its CHILD HWND text. WPF renders its whole visual
+# tree into ONE HWND, so a WPF dialog contributes nothing but its caption. A modal titled `Refresh`
+# whose content read `Enter your credentials` was therefore classified benign from the caption alone,
+# suppressed in-flight, and the probe exited 0 with `CREDENTIAL_PRESENT`.
+#
+# Measured here on an owned WPF modal (WinForms owner so it is excluded by class, WPF `TextBlock`
+# child, `ShowDialog()` disabling the owner, raised 0.8s after Refresh is invoked):
+#
+#   commit 0aa3767 : refresh invoked: True / no credential modal within 12s / CREDENTIAL_PRESENT  exit 0
+#   fixed          : refresh invoked: True / credential modal detected: 'Enter your credentials'  exit 1
+#
+# That is a SILENT false negative on a hard stop - strictly worse than the loud false positive #367
+# set out to remove. Two independent guards now cover it: the UIA harvest (below), and the
+# `ContentRead` gate that keeps a caption-only benign match indeterminate even if the harvest fails.
+
+CREDENTIAL_ALTERNATIVES = [
+    "You aren't signed in",
+    "Personal Access Token",
+    "Databricks Client Credentials",
+    "specify how to connect",
+    "Account Key",
+    "Enter your credentials",
+    "Please specify how to connect",
+]
+
+_FAKE_DESKTOP_APP = r"""
+param([Parameter(Mandatory = $true)][string]$ReadyFile)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName WindowsFormsIntegration
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# WinForms owner: its class starts with WindowsForms10.Window.8, so the probe excludes it exactly as
+# it excludes the real Power BI Desktop main window.
+$script:form = New-Object System.Windows.Forms.Form
+$script:form.Text = 'Fake Desktop'
+$script:form.Width = 640
+$script:form.Height = 480
+
+# A WPF button hosted in the form. A plain WinForms Button surfaces to UI Automation as
+# ControlType.Pane with NO patterns (measured), so the probe's `Name -eq 'Refresh'` + Invoke scan
+# would never fire and the run would end at the not-invoked guard instead of testing anything.
+$button = New-Object System.Windows.Controls.Button
+$button.Content = 'Refresh'
+$hostControl = New-Object System.Windows.Forms.Integration.ElementHost
+$hostControl.Width = 140
+$hostControl.Height = 48
+$hostControl.Child = $button
+$script:form.Controls.Add($hostControl)
+
+# Raised on a timer so the click handler returns immediately - InvokePattern.Invoke() must not be
+# left waiting on a modal message loop.
+$script:timer = New-Object System.Windows.Forms.Timer
+$script:timer.Interval = 800
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = 'Refresh'
+    $modal.Width = 520
+    $modal.Height = 320
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $block = New-Object System.Windows.Controls.TextBlock
+    $block.Text = 'Enter your credentials'
+    $null = $panel.Children.Add($block)
+    $modal.Content = $panel
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $null = $modal.ShowDialog()
+  })
+$button.Add_Click({ $script:timer.Start() })
+$script:form.Add_Shown({ Set-Content -LiteralPath $ReadyFile -Value 'ready' -Encoding ascii })
+[System.Windows.Forms.Application]::Run($script:form)
+"""
+
+
+def test_an_owned_wpf_credential_modal_titled_refresh_is_a_hard_stop(tmp_path: Path) -> None:
+    """Live regression for the review defect: the whole script, against a real owned WPF modal.
+
+    The offline tests below pin the classifier's half of this. This one pins the COLLECTOR's half -
+    that the probe actually harvests text a WPF window only exposes through UI Automation - and it is
+    the only test here that exercises the real Win32 + UIA + refresh-invoke path end to end.
+    """
+    exe = _powershell()
+    app_script = tmp_path / "fake_desktop.ps1"
+    app_script.write_text(_FAKE_DESKTOP_APP, encoding="utf-8")
+    ready = tmp_path / "ready.txt"
+    app = subprocess.Popen(  # pylint: disable=consider-using-with
+        [exe, "-Sta", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_script), "-ReadyFile", str(ready)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(60):
+            if ready.exists():
+                break
+            time.sleep(0.5)
+        if not ready.exists():
+            pytest.skip("the WPF fixture app never showed a window (no interactive desktop?)")
+        done = subprocess.run(
+            [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PROBE_PS1), "-DesktopPid", str(app.pid)]
+            + ["-TimeoutSec", "12"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if "refresh invoked: True" not in done.stdout:
+            pytest.skip(f"the fixture app exposed no invokable Refresh to UI Automation:\n{done.stdout}")
+
+        assert "Enter your credentials" in done.stdout, (
+            "the probe must harvest WPF visual text; child-HWND enumeration alone sees only the caption"
+        )
+        assert "VERDICT: CREDENTIAL_MISSING" in done.stdout
+        assert done.returncode == 1, (
+            f"a real credential modal must be a hard stop, not exit {done.returncode}:\n{done.stdout}"
+        )
+    finally:
+        app.kill()
+        app.wait(timeout=30)
+
+
+def test_a_caption_only_benign_match_stays_indeterminate(tmp_path: Path) -> None:
+    """The collector's half can fail; this is the guard that holds when it does.
+
+    A window whose CONTENT was never read cannot be evidence of harmlessness, however reassuring its
+    caption. `absent != empty`, applied one level down - so a `Refresh` caption over unread content is
+    reported as indeterminate rather than suppressed.
+    """
+    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY])
+
+    assert result["kind"] == "benign-title-only"
+    assert result["verdict"] == "DIALOG_UNREADABLE"
+    assert result["exit_code"] == 3
+
+
+def test_a_caption_only_benign_match_is_not_suppressed_in_flight(tmp_path: Path) -> None:
+    """The exact step that produced exit 0: in-flight suppression of a caption-only benign match.
+
+    In the poll loop a genuine `benign` window is ignored, because it is our own refresh. A
+    caption-only match must NOT get that treatment - nothing was read, so nothing was established, and
+    a suppressed observation leaves the deadline free to print CREDENTIAL_PRESENT.
+    """
+    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY], refresh_in_flight=True)
+
+    assert result["verdict"] == "DIALOG_UNREADABLE", "an unread window must stay latchable in flight"
+    assert result["exit_code"] == 3
+
+
+def test_uia_harvested_text_turns_the_same_window_into_a_credential_stop(tmp_path: Path) -> None:
+    """With the visual text merged in, the caption stops mattering: credential beats benign."""
+    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_WITH_UIA_TEXT], refresh_in_flight=True)
+
+    assert result["kind"] == "credential"
+    assert result["verdict"] == "CREDENTIAL_MISSING"
+    assert result["exit_code"] == 1
+    assert result["credential"] == "Enter your credentials"
+
+
+def test_a_window_with_no_content_read_field_at_all_fails_safe(tmp_path: Path) -> None:
+    """A MISSING ContentRead field must read as "not read", never as "read".
+
+    This is the shape a future collector change, or a caller that predates the field, would produce.
+    Defaulting it to true would silently restore the suppression path with nothing to notice it.
+    """
+    window = _window(Title="Refresh", Texts=["Refresh"], OwnerEnabled=False)
+    del window["ContentRead"]
+
+    assert classify(tmp_path, [window])["kind"] == "benign-title-only"
+
+
+def test_a_credential_signature_split_across_wpf_elements_still_convicts(tmp_path: Path) -> None:
+    """WPF splits one sentence across visual elements, so the signature must see the joined text.
+
+    Both readers are asserted: `Get-DialogVerdict` (the classifier) and `Test-CredentialModal` (the
+    all-windows scan the main body runs first). They are separate call sites and either one losing the
+    joined text re-opens the gap on its own.
+    """
+    window = _window(Title="Refresh", Texts=["Refresh", "Enter your", "credentials"], OwnerEnabled=False)
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["verdict"] == "CREDENTIAL_MISSING"
+    assert result["exit_code"] == 1
+    assert result["credential"] == "Refresh Enter your credentials", (
+        "Test-CredentialModal must search the joined text too, not just the classifier"
+    )
+
+
+def test_the_benign_signature_is_never_matched_against_joined_text(tmp_path: Path) -> None:
+    """The join is asymmetric on purpose, and the asymmetry is the safety property.
+
+    Joining can manufacture a phrase from adjacent fragments. On the credential path that yields a LOUD
+    false stop a human resolves by looking at the screen; on the benign path it would yield a SILENT
+    false clear. `Loading` + `data` must therefore not join into the benign signature `Loading data`.
+    """
+    window = _window(Title="Loading", Texts=["Loading", "data"], OwnerEnabled=False)
+
+    result = classify(tmp_path, [window])
+
+    assert result["kind"] == "unrecognized", "benign must read individual elements only, never the join"
+
+
+@pytest.mark.parametrize("phrase", CREDENTIAL_ALTERNATIVES)
+def test_every_credential_signature_alternative_is_still_a_hard_stop(tmp_path: Path, phrase: str) -> None:
+    """The full true-positive set, re-proved after the text pipeline was rewritten.
+
+    Fixing a false positive by eroding the true positives is the failure mode this whole change is
+    most exposed to, so the signature's alternatives are asserted one by one rather than sampled.
+    """
+    window = _window(Title="Refresh", Texts=["Refresh", phrase], OwnerEnabled=False)
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["verdict"] == "CREDENTIAL_MISSING", f"{phrase!r} must convict even under a benign caption"
+    assert result["exit_code"] == 1
+
+
+def test_the_pinned_alternative_list_still_covers_the_shipped_signature() -> None:
+    """If someone adds an alternative to the signature file, the parametrised set above must grow too.
+
+    Without this, the "all alternatives" claim quietly becomes "the alternatives that existed in 2026".
+    """
+    alternatives = [alt for alt in CREDENTIAL_SIGNATURE.read_text(encoding="utf-8").strip().split("|") if alt]
+    signature = re.compile(CREDENTIAL_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+
+    assert len(alternatives) == len(CREDENTIAL_ALTERNATIVES), (
+        f"signature has {len(alternatives)} alternatives but {len(CREDENTIAL_ALTERNATIVES)} are exercised"
+    )
+    for phrase in CREDENTIAL_ALTERNATIVES:
+        assert signature.search(phrase), f"pinned phrase no longer matches the shipped signature: {phrase!r}"
+
+
+def test_the_probe_harvests_window_text_through_ui_automation() -> None:
+    """Regression pin on the collector: the UIA harvest must stay wired into `Get-PidWindows`.
+
+    The behavioural tests above take `ContentRead` as an input. Only the live WPF test proves it is
+    produced, and that one skips where there is no interactive desktop - so this keeps the wiring
+    itself gated everywhere.
+    """
+    body = PROBE_PS1.read_text(encoding="utf-8")
+
+    assert "function Get-AutomationText" in body
+    assert "AutomationElement]::FromHandle" in body, "the harvest must start from the window handle"
+    assert "ConvertTo-ProbeWindow" in body and "-Enrich:$isCandidate" in body, (
+        "Get-PidWindows must enrich candidate windows, or the classifiers only ever see the caption"
+    )
