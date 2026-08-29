@@ -17,6 +17,7 @@ usage:   python scripts/parse_tableau.py <workbook.twb|.twbx|datasource.tds|.tds
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -43,6 +44,7 @@ _KEYWORDLESS_LOD_RE = re.compile(r"\{[^{}]*\b[A-Z][A-Z0-9_]*\s*\(", re.IGNORECAS
 _TABLE_CALC_RE = re.compile(r"\b(WINDOW_\w+|RUNNING_\w+|INDEX|RANK\w*|LOOKUP|TOTAL|PREVIOUS_VALUE)\s*\(", re.IGNORECASE)
 _PARAM_EQUALITY_RE = re.compile(r"if\s*\[Parameters\]\.\[[^\]]+\]\s*=\s*\[[^\]]+\]\s*then", re.IGNORECASE)
 _BRACKET_TOKEN_RE = re.compile(r"\[([^\[\]]+)\]")
+_ASCII_ALNUM_RE = re.compile(r"[a-zA-Z0-9]")
 # Tableau's feature-flagged attribute spelling: `_.fcp.<Feature>.<true|false>...<realAttrName>`
 _FCP_ATTR = re.compile(r"^_\.fcp\.(?P<feature>[^.]+)\.(?P<state>true|false)\.\.\.(?P<attr>.+)$")
 _SHELF_FIELD_RE = re.compile(r"\[([^\[\]]+)\]\.\[([^\[\]]+)\]")
@@ -76,9 +78,18 @@ class IdRegistry:
     def make(self, prefix: str, *parts: str) -> str:
         """Build a stable, unique id like 'fld.ds_name__field_name', disambiguating collisions."""
         base = f"{prefix}.{'__'.join(slugify(p) for p in parts if p)}"
-        count = self.seen.get(base, 0)
+        if base not in self.seen:
+            self.seen[base] = 1
+            return base
+
+        count = self.seen[base]
+        candidate = f"{base}_{count}"
+        while candidate in self.seen:
+            count += 1
+            candidate = f"{base}_{count}"
         self.seen[base] = count + 1
-        return base if count == 0 else f"{base}_{count}"
+        self.seen[candidate] = 1
+        return candidate
 
 
 def _wrap_datasource_as_workbook(ds_el: etree._Element) -> etree._Element:
@@ -381,6 +392,25 @@ def _parse_published_datasource(ds_el: etree._Element, connection: dict[str, Any
     }
 
 
+def _datasource_display_name(
+    ds_el: etree._Element, connection: dict[str, Any], published: dict[str, Any] | None
+) -> str:
+    """Return the stable label used for both datasource caption fallback and synthetic id seed."""
+    for candidate in (
+        ds_el.get("caption"),
+        published.get("id") if published else None,
+        ds_el.get("formatted-name"),
+        ds_el.get("name"),
+    ):
+        if candidate and candidate.strip() and _ASCII_ALNUM_RE.search(candidate):
+            return candidate.strip()
+
+    raw = etree.tostring(ds_el, method="c14n", exclusive=True)
+    digest = hashlib.sha256(raw).hexdigest()[:12]
+    conn_class = connection.get("class") or "unknown"
+    return f"{conn_class}_{digest}"
+
+
 def _collect_leaf_relations(rel: etree._Element) -> list[etree._Element]:
     """Descend container relations (collection/join/union wrappers) to their leaf table/text relations,
     so a multi-file collection or a join surfaces each underlying physical table instead of one opaque
@@ -578,7 +608,9 @@ def _parse_single_data_source(
     column-instances (declared only inside a worksheet's <datasource-dependencies>, not centrally on
     the datasource) can still be resolved later."""
     internal_name = ds_el.get("name", "")
-    caption = ds_el.get("caption") or internal_name
+    connection = _parse_connection(ds_el, hyper_files)
+    published = _parse_published_datasource(ds_el, connection)
+    caption = _datasource_display_name(ds_el, connection, published)
     ds_id = ids.make("ds", caption)
 
     tables = _parse_tables(ds_el, ids)
@@ -591,7 +623,6 @@ def _parse_single_data_source(
         if ci.get("column", "") in name_to_id
     }
 
-    connection = _parse_connection(ds_el, hyper_files)
     data_source = {
         "id": ds_id,
         "caption": caption,
@@ -601,7 +632,6 @@ def _parse_single_data_source(
         "joins": _parse_joins(ds_el),
         "fields": fields,
     }
-    published = _parse_published_datasource(ds_el, connection)
     if published is not None:
         data_source["published_datasource"] = published
     return data_source, internal_name, instance_map, name_to_id
@@ -624,6 +654,13 @@ def parse_data_sources(
         data_sources.append(data_source)
         instance_maps[internal_name] = instance_map
         name_to_id_maps[internal_name] = name_to_id
+
+    seen_ids: set[str] = set()
+    for data_source in data_sources:
+        ds_id = data_source["id"]
+        if ds_id in seen_ids:
+            raise ValueError(f"Duplicate datasource id {ds_id!r}; migration-spec ids must be unique")
+        seen_ids.add(ds_id)
 
     logger.info("Parsed %d data source(s)", len(data_sources))
     return data_sources, instance_maps, name_to_id_maps

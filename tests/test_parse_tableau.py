@@ -8,14 +8,22 @@ usage:   pytest -q
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from parse_tableau import _conn_attr, _published_ds_name, _parse_published_datasource, parse_workbook  # noqa: E402  (path insert must precede this import)
+import parse_tableau  # noqa: E402  (path insert must precede this import)
+from parse_tableau import _conn_attr, _published_ds_name, _parse_published_datasource, parse_workbook  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
 TDS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "standalone_datasource.tds"
 FEDERATED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "federated_multi_connection.twb"
+CAPTIONLESS_TDS_FIXTURES = {
+    "CustomSQL_Parameter_And_Doubled_Operators.tds": "ds.customsqlparametertest",
+    "Meridian_Custom_SQL_Databricks.tds": "ds.meridiantripslivedatabricks",
+    "Meridian_Custom_SQL_Snowflake.tds": "ds.meridiancalcgauntletlivesnowflake",
+}
 
 
 def test_parses_top_level_shape():
@@ -443,6 +451,96 @@ def test_empty_repository_location_in_tds_is_not_a_published_datasource():
     spec = parse_workbook(TDS_FIXTURE)
     assert "published_datasource" not in spec["data_sources"][0]
     assert not [limit for limit in spec["limitations_encountered"] if "PUBLISHED Tableau data source" in limit["issue"]]
+
+
+def test_captionless_datasources_use_stable_published_names_for_ids():
+    """Regression for #333, grounded in three real caption-less .tds exports.
+
+    They used to all emit id='ds.' because standalone .tds roots often carry neither caption nor
+    internal name. Published datasource identity is already parsed from repository-location, so it is
+    the stable readable fallback before opaque formatted-name/hash fallbacks.
+    """
+    seen_ids = set()
+    for fixture_name, expected_id in CAPTIONLESS_TDS_FIXTURES.items():
+        spec = parse_workbook(Path(__file__).resolve().parent / "fixtures" / fixture_name)
+        ds = spec["data_sources"][0]
+
+        assert ds["id"] == expected_id
+        assert ds["id"] != "ds."
+        assert ds["caption"] == ds["published_datasource"]["id"]
+        assert all(field["id"].startswith(f"fld.{expected_id.replace('.', '_')}__") for field in ds["fields"])
+        assert not any(field["id"].startswith("fld.ds__") for field in ds["fields"])
+        seen_ids.add(ds["id"])
+
+    assert len(seen_ids) == len(CAPTIONLESS_TDS_FIXTURES)
+
+
+def test_unsluggable_datasource_name_falls_through_to_stable_ascii_name():
+    """Non-ASCII-only names must not short-circuit to slugify's constant 'field' fallback."""
+    from lxml import etree  # noqa: PLC0415
+
+    def ids_by_internal_name(datasource_names: list[str]) -> dict[str, str]:
+        datasources = "".join(
+            f"<datasource name='{name}'><repository-location id='{published_name}' site='s' /></datasource>"
+            for name, published_name in zip(datasource_names, ["売上マスタ", "顧客分析"], strict=True)
+        )
+        root = etree.fromstring(f"<workbook><datasources>{datasources}</datasources></workbook>")
+        parsed, _, _ = parse_tableau.parse_data_sources(root, {}, parse_tableau.IdRegistry())
+        return {ds["internal_name"]: ds["id"] for ds in parsed}
+
+    forward = ids_by_internal_name(["federated.aaa111", "federated.bbb222"])
+    reversed_order = ids_by_internal_name(["federated.bbb222", "federated.aaa111"])
+
+    assert forward == {
+        "federated.aaa111": "ds.federated_aaa111",
+        "federated.bbb222": "ds.federated_bbb222",
+    }
+    assert forward == reversed_order
+    assert "ds.field" not in forward.values()
+
+
+def test_duplicate_datasource_id_guard_fails_loudly(monkeypatch):
+    """If id generation regresses, duplicate datasource ids must fail instead of corrupting the spec."""
+    from lxml import etree  # noqa: PLC0415
+
+    original_make = parse_tableau.IdRegistry.make
+
+    def duplicate_datasource_id(self, prefix: str, *parts: str) -> str:
+        if prefix == "ds":
+            return "ds.duplicate"
+        return original_make(self, prefix, *parts)
+
+    root = etree.fromstring(
+        "<workbook><datasources>"
+        "<datasource caption='Orders'><connection class='federated' /></datasource>"
+        "<datasource caption='Customers'><connection class='federated' /></datasource>"
+        "</datasources></workbook>"
+    )
+    monkeypatch.setattr(parse_tableau.IdRegistry, "make", duplicate_datasource_id)
+
+    with pytest.raises(ValueError, match="Duplicate datasource id 'ds\\.duplicate'"):
+        parse_tableau.parse_data_sources(root, {}, parse_tableau.IdRegistry())
+
+
+def test_field_id_suffixes_cannot_collide_with_legitimate_slugged_names():
+    """A generated _1 suffix must not collide with a real field whose caption slug already ends _1."""
+    from lxml import etree  # noqa: PLC0415
+
+    root = etree.fromstring(
+        "<workbook><datasources>"
+        "<datasource caption='Orders'>"
+        "<column caption='Sales' name='[sales_a]' datatype='real' role='measure' type='quantitative' />"
+        "<column caption='Sales' name='[sales_b]' datatype='real' role='measure' type='quantitative' />"
+        "<column caption='Sales 1' name='[sales_1]' datatype='real' role='measure' type='quantitative' />"
+        "</datasource>"
+        "</datasources></workbook>"
+    )
+
+    parsed, _, _ = parse_tableau.parse_data_sources(root, {}, parse_tableau.IdRegistry())
+    field_ids = [field["id"] for field in parsed[0]["fields"]]
+
+    assert field_ids == ["fld.ds_orders__sales", "fld.ds_orders__sales_1", "fld.ds_orders__sales_1_1"]
+    assert len(field_ids) == len(set(field_ids))
 
 
 def test_published_datasource_raises_high_severity_limitation():
