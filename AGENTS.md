@@ -383,20 +383,35 @@ replace the blunt "never mid-migration" it used to read:
 | Re-running a unit with **substantial hand-authored TMDL/PBIR** on top | ⛔ finish or checkpoint that unit first | **either** diff is large |
 | **Partial** re-run into an **existing** bundle (some workbooks, not all) | ⛔ **never** | `write_engine_receipt` stamps one `engine.version` over the whole bundle, so it would claim a single version for artifacts two builds produced — the #107 shape, and `check_engine_receipts.py` cannot see an intra-bundle mix |
 
-⚠️ **There are TWO baselines, and checking only one gives a false "safe".** The engine writes a
-pristine copy of *both* layers, in *different* trees, and `reports/` is the **report** baseline only:
+⚠️ **`reports/` is the REPORT baseline only, and a workbook bundle has NO model baseline at all.**
+The `reports/`-vs-`pbip/` diff is therefore structurally blind to hand-authored TMDL — measured,
+`reports/` holds **0** `.tmdl` files — so an agent that authored DAX, relationships, RLS or AI
+metadata but left the report alone sees an ~empty diff, reads row 2's "nothing hand-made is lost",
+re-runs, and loses all of it. That is exactly what `pbi-semantic-builder` produces, so it is a
+first-class case, not an edge one.
+
+⚠️ **Do NOT reach for `<bundle>/semantic_models/<WB>.SemanticModel` as the missing baseline.** It is
+not emitted for workbook migrations — measured on a fresh 2.339.0 run, the bundle contains only
+`data`, `handover`, `pbip`, `reports`. That tree is for models **not owned by a single workbook**
+(published/shared datasources; `bundle_corpus.py:33` — "datasource-only migrations can legitimately
+ship a standalone model there"). And the miss is silent: `git diff --no-index` exits **1** for
+*"could not access"* exactly as it does for *"they differ"*, so a missing baseline reads as
+"large diff — do not re-run". See #359.
+
+**What actually answers the question, verified:** compare the OLD bundle against a FRESH run of the
+new engine, model to model —
 
 ```
-git diff --no-index --stat <bundle>/reports/<WB>.Report            <bundle>/pbip/<WB>/<WB>.Report
-git diff --no-index --stat <bundle>/semantic_models/<WB>.SemanticModel  <bundle>/pbip/<WB>/<WB>.SemanticModel
+git diff --no-index --stat <bundle>/reports/<WB>.Report               <bundle>/pbip/<WB>/<WB>.Report
+git diff --no-index --stat <old-bundle>/pbip/<WB>/<WB>.SemanticModel  <new-bundle>/pbip/<WB>/<WB>.SemanticModel
 ```
 
-Measured on a real bundle: `reports/` contains **0** `.tmdl` files, while `semantic_models/` holds
-119 and `pbip/` 481. So a `reports/`-vs-`pbip/` diff is **structurally blind to hand-authored TMDL** —
-and an agent that authored DAX, relationships, RLS or AI metadata but left the report alone would see
-an ~empty diff, read row 2's "nothing hand-made is lost", re-run, and lose all of it. That is exactly
-what `pbi-semantic-builder` produces, so it is a first-class case, not an edge one. A check that is
-*evaluable but incomplete* is worse than a blunt prohibition, because it grants false confidence.
+Measured 2.208.0 vs 2.339.0 on Superstore: `13 files changed, 488 insertions(+), 169 deletions(-)`,
+with a real stat line — a genuine answer, not an access error. **Check for the stat line, never the
+exit code.** Note this answers *"what does the new engine produce differently"* rather than *"what
+have I hand-edited"*; for the latter, `_build/generated-edit-declarations.json` records our tier's
+changes deliberately and is the better source. A check that is *evaluable but incomplete* is worse
+than a blunt prohibition, because it grants false confidence.
 
 So the escape hatch above is usable between migrations, and mid-migration when **both** diffs show
 little at risk; the one move that is *always* wrong is the last row — a partial re-run into a live
