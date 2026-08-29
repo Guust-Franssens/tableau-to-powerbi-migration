@@ -604,15 +604,26 @@ class BundleRewriteFindings(NamedTuple):
         )
 
 
-def _is_guarded_path(relative: Path) -> bool:
-    """Whether a bundle-relative path is accounted for by the barrier at all.
+def _barrier_covers_path(relative: Path) -> bool:
+    """Whether a bundle-relative path is accounted for by the REWRITE BARRIER.
 
-    ``.pbi`` sidecars and scratch folders are excluded on BOTH sides of every comparison - current
-    disk state and recorded baseline alike - so a Power BI Desktop refresh can never read as
-    downstream work, and a pristine bundle still reconciles exactly.
+    Only Power BI Desktop's `.pbi` sidecars are excluded, so a normal refresh never reads as
+    downstream work. Applied to BOTH sides of every comparison - current disk state and recorded
+    baseline alike - so a pristine bundle still reconciles exactly.
+
+    Deliberately NOT `_is_scratch_path`. That predicate answers a DIFFERENT question - "is this a
+    stable deliverable worth putting in the tamper-audit manifest?" - and reusing it here made one
+    predicate do two jobs and punched a hole straight through the barrier: `_build/` is this repo's
+    durable REPLAY-SCRIPT convention (`AGENTS.md`: "every edit re-runnable from `_build/`"), so
+    `pbip/<project>/_build/replay.py` is precisely where an agent's re-runnable work lives - and it
+    sits inside a directory the engine rmtree()s. Skipping it meant a re-run destroyed the replay
+    script for the very edits it was written to reproduce, at exit 0.
+
+    A bundle-ROOT `_build/` is still unguarded, and correctly so: it is outside `ENGINE_TREE_ROOTS`
+    and therefore outside anything the engine deletes. The scope is the destructive roots, not the
+    folder name.
     """
-    lower = [part.lower() for part in relative.parts]
-    return not _is_scratch_path(relative) and not any(part in VOLATILE_GENERATED_DIRS for part in lower)
+    return not any(part.lower() in VOLATILE_GENERATED_DIRS for part in relative.parts)
 
 
 def engine_output_tree_hashes(bundle: Path) -> dict[str, str]:
@@ -631,7 +642,7 @@ def engine_output_tree_hashes(bundle: Path) -> dict[str, str]:
             if not path.is_file():
                 continue
             relative = path.relative_to(bundle)
-            if _is_guarded_path(relative):
+            if _barrier_covers_path(relative):
                 files[relative.as_posix()] = sha256_file(path)
     return files
 
@@ -694,7 +705,7 @@ def _receipt_artifact_hashes(receipt: dict | None) -> dict[str, str]:
         if not isinstance(record, dict):
             continue
         path, digest = record.get("path"), record.get("sha256")
-        if isinstance(path, str) and isinstance(digest, str) and _is_guarded_path(Path(path)):
+        if isinstance(path, str) and isinstance(digest, str) and _barrier_covers_path(Path(path)):
             hashes[path] = digest
     return hashes
 
@@ -719,7 +730,7 @@ def _hash_map(block: object) -> dict[str, str]:
     return {
         path: digest
         for path, digest in files.items()
-        if isinstance(path, str) and isinstance(digest, str) and _is_guarded_path(Path(path))
+        if isinstance(path, str) and isinstance(digest, str) and _barrier_covers_path(Path(path))
     }
 
 

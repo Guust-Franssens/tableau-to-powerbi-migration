@@ -1161,6 +1161,57 @@ def test_a_desktop_refresh_sidecar_is_not_downstream_work(tmp_path: Path, monkey
     assert calls == [out]
 
 
+def test_a_replay_script_nested_under_a_destructive_root_is_downstream_work(tmp_path: Path, monkeypatch) -> None:
+    """`_build/` is this repo's durable replay-script convention, not scratch.
+
+    AGENTS.md requires "every edit re-runnable from `_build/`", so `pbip/<project>/_build/replay.py`
+    is exactly where an agent's re-runnable work lives - and it sits inside a directory the engine
+    rmtree()s. The barrier used to borrow the generated-artifact manifest's SCRATCH predicate, which
+    answers a different question, and so walked straight past it: a re-run destroyed the replay
+    script for the very edits it reproduces, at exit 0.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    sentinel = _write(out / "pbip" / "WB" / "_build" / "replay.py", "# re-runnable edit for this unit\n")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == []
+    assert sentinel.is_file(), "the replay script was destroyed by a run the barrier let through"
+
+
+@pytest.mark.parametrize("scratch_dir", sorted(run_estate.SCRATCH_DIRS))
+def test_no_scratch_component_survives_inside_a_destructive_root(tmp_path: Path, monkeypatch, scratch_dir: str) -> None:
+    """`_build` was the reported case; the predicate had excluded the whole set.
+
+    Parametrised over the live constant rather than a copied list, so growing `SCRATCH_DIRS` cannot
+    silently re-open the hole for a name nobody thought to re-test.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    sentinel = _write(out / "pbip" / "WB" / scratch_dir / "work.py", "# agent work\n")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert calls == []
+    assert sentinel.is_file()
+
+
+def test_a_bundle_root_build_folder_is_not_guarded(tmp_path: Path, monkeypatch) -> None:
+    """The other side of the boundary: the fix must not over-reach into what the engine never deletes.
+
+    `<bundle>/_build/` sits outside `ENGINE_TREE_ROOTS`, survives a re-run untouched, and is where
+    replay scripts for the estate as a whole live. Guarding it would refuse every second run of a
+    bundle whose declared edits were recorded correctly - the scope is the destructive roots, not the
+    folder name.
+    """
+    engine, src, out = _first_run(tmp_path, monkeypatch)
+    sentinel = _write(out / "_build" / "replay.py", "# estate-level re-runnable edit\n")
+    calls = _relanding(monkeypatch)
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_OK
+    assert calls == [out]
+    assert sentinel.is_file()
+
+
 def test_a_receipt_that_attests_to_nothing_is_not_read_as_a_clean_bundle(tmp_path: Path, monkeypatch, capsys) -> None:
     """An empty `artifacts` list is an absence of evidence, not evidence of absence."""
     engine, src, out = _first_run(tmp_path, monkeypatch, version="2.141.0")

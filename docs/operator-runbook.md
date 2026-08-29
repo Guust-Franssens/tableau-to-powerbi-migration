@@ -609,8 +609,15 @@ Reference run ✅ verified from `_convert.log`: `bound=23/38 failed=15 warned=20
 > indeterminate state — never a pass. The first cut reported *clean* through five such routes and a
 > reviewer destroyed a sentinel through each at exit 0. **Bundles built before this shipped have no
 > `engine_output_tree`, so their first destructive re-run will need both flags** — that is the
-> intended cost of not being able to prove what is in them. `--slice-only` never runs the engine and
-> is exempt.
+> intended cost of not being able to prove what is in them, and it is **one-time**: that
+> acknowledged run writes the tree, and the next pristine invocation exits 0 again. `--slice-only`
+> never runs the engine and is exempt.
+>
+> ⚠️ **`_build/` inside a `pbip/<project>/` folder DOES trip the barrier — deliberately.** It is
+> this repo's durable replay-script convention (*"every edit re-runnable from `_build/`"*), so it is
+> exactly where an agent's re-runnable work lives, and it sits inside a directory the engine
+> `rmtree`s. A **bundle-root** `<bundle>/_build/` is outside the destructive roots, is never deleted,
+> and is not guarded. The scope is the folder the engine destroys, not the folder name.
 
 What a bundle contains ✅ verified against the reference bundle by listing it, 2026-08-13:
 
