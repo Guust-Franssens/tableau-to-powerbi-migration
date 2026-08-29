@@ -29,7 +29,10 @@ so `dotnet add` cannot silently no-op on a net10 default:
 - [**`scripts/probe_desktop_credential.ps1`**](scripts/probe_desktop_credential.ps1) - the arbiter a
   refresh TIMEOUT names: a UI-Automation check for a data-source sign-in modal, so "slow" and
   "blocked" are told apart by evidence, not guessed. Ships **inside** the bundle, so the instruction
-  the script prints at runtime resolves to a file that is actually here.
+  the script prints at runtime resolves to a file that is actually here. **Only `CREDENTIAL_MISSING`
+  (exit 1) is a hard stop**; everything it cannot positively identify as a credential prompt lands in
+  the exit-3 "could not probe" band (`REFRESH_IN_PROGRESS` / `DIALOG_UNRECOGNIZED` /
+  `DIALOG_UNREADABLE` / `UNKNOWN`) rather than escalating to a human — see the verdict table below.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
@@ -133,6 +136,55 @@ stay byte-identical.
 > `BLOCKED_BY_DIALOG` (visible non-main dialog, text unreadable/non-credential). In both cases a
 > human must look at Desktop before the run proceeds. Check this first before suspecting the bridge or
 > filing an upstream defect.
+
+> ⚠️ **A big window is NOT evidence of a credential wall — the arbiter no longer says it is
+> (issue #367).** `probe_desktop_credential.ps1` used to decide "blocking" from geometry alone: any
+> visible non-main window >= 100x100 was returned as a blocking dialog and reported
+> `VERDICT: BLOCKED_BY_DIALOG`, **exit 1 — the same hard-stop band as a real credential wall**. A Power
+> BI Refresh progress dialog satisfies that trivially. Field report, 2026-08-28: running three
+> concurrent refreshes, the probe returned a blocking verdict for one unit; screenshotting the window
+> showed Power BI's own Refresh progress dialog, stalled behind a Snowflake warehouse cold start. A
+> false credential wall is expensive precisely *because* the toolkit treats a real one as a hard stop
+> that no retry may override.
+>
+> It now classifies each candidate window from **what it says**, and only `CREDENTIAL_MISSING` reaches
+> exit 1:
+>
+> | verdict | exit | what was actually observed |
+> |---|---|---|
+> | `CREDENTIAL_MISSING` | 1 | text matched `credential_modal_signature.regex`. The hard stop. |
+> | `CREDENTIAL_PRESENT` | 0 | a refresh was invoked and ran to the deadline with nothing unclassifiable up. Still not the gate of record for a serverless source — confirm with the one-row data probe. |
+> | `REFRESH_IN_PROGRESS` | 3 | a progress dialog was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
+> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched neither signature. We read it, and it is **not** a credential prompt — but we cannot say what it is. |
+> | `DIALOG_UNREADABLE` | 3 | a dialog is up that exposes no readable text at all. Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not read it" is a weaker state of knowledge than "we read it and it did not match". |
+> | `UNKNOWN` | 3 | no window for the pid, a minimized owner, or no Refresh control was ever invoked. |
+>
+> **Which way it errs, and why.** A false *positive* here terminates at exit 1 and escalates to a
+> human, so nothing downstream ever runs. A false *negative* lands on `CREDENTIAL_PRESENT`, which the
+> repo already treats as untrustworthy on its own — `docs/data-source-credentials.md` records three
+> false `CREDENTIAL_PRESENT` results against a serverless warehouse, which is why the one-row data
+> probe is the gate of record. One direction has a backstop; the other does not. So this arbiter errs
+> **away from declaring a hard stop** — but never into silence: an unclassifiable dialog is *latched*
+> during the poll loop and reported at the deadline, so it can neither halt a healthy run nor be
+> erased by a quiet timeout.
+>
+> Two supporting mechanisms:
+> - **Modality is used ONE WAY.** `IsWindowEnabled(GetWindow(hwnd, GW_OWNER))` returning true proves a
+>   window blocks nothing, and exonerates it. The converse is not used: Power BI's refresh dialog also
+>   disables its owner, so a disabled owner would convict the innocent. No owner at all reports `null`
+>   — the test did not apply, which is not the same as passing it.
+> - **`scripts/benign_dialog_signature.regex`** is the progress vocabulary ("Evaluating", "N rows
+>   loaded", "Waiting for other queries"). ⚠️ It is **inferred** from Power BI's refresh UI, not
+>   captured from a live dialog, and it is deliberately not load-bearing: a miss only downgrades
+>   `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3, neither a credential wall. Keep its
+>   alternatives narrow and anchored; a broad pattern here is the one way this file could hide a real
+>   modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` gates exactly that. If
+>   you ever have a real progress dialog on screen, capture its exact text and tighten this file.
+>
+> The **Python** fast check (`_credential_modal.blocking_dialog_candidates`, used by
+> `refresh_pbip_model.py` and `probe_desktop_query.py`) still promotes any >= 100x100 non-main window
+> to `BLOCKED_BY_DIALOG` on a size-only test. That half was out of scope for #367 and is unchanged —
+> so the note above about `BLOCKED_BY_DIALOG` still describes the Python path exactly.
 
 > ⚠️ **Do not wait blindly for `NO_BRIDGE` / `not_connected` — bound the bridge wait, then prove the
 > executable by PID.** Field report, 2026-08-18, two machines: a box with two Desktop versions

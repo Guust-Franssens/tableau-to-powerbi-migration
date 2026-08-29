@@ -1,0 +1,1 @@
+^Refresh$|^Refreshing\b|\bEvaluating\b|\bWaiting for other queries\b|\b\d[\d,\. ]*rows?\s+loaded\b|\bLoading data\b|\bPreparing to load\b

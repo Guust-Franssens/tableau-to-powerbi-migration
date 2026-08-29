@@ -93,9 +93,23 @@ NOT be trusted on its own for a serverless source — always confirm with `DATA_
 
 `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` triggers a refresh via UI Automation and
 watches for the connector modal:
-- Modal appears (or is already open) -> `VERDICT: CREDENTIAL_MISSING` -> prompt the user to sign in once.
-- No modal within the timeout -> `VERDICT: CREDENTIAL_PRESENT`, **but** re-confirm with the data probe
-  before trusting it (see the serverless false-positive above).
+- Modal appears (or is already open) -> `VERDICT: CREDENTIAL_MISSING` (exit 1) -> prompt the user to
+  sign in once. **This is the only verdict that is a hard stop.**
+- No modal within the timeout -> `VERDICT: CREDENTIAL_PRESENT` (exit 0), **but** re-confirm with the
+  data probe before trusting it (see the serverless false-positive above).
+- A dialog is up that is *not* a credential prompt -> one of `REFRESH_IN_PROGRESS` (another refresh
+  already owns this instance — wait for it or cancel the stale one), `DIALOG_UNRECOGNIZED` (we read its
+  text and it matched no credential signature) or `DIALOG_UNREADABLE` (it exposes no readable text at
+  all), each **exit 3**. All three mean *"could not probe"*, never *"a human must sign in"*.
+
+⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall.** Until issue #367 the probe
+returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
+Refresh progress dialog trips that trivially, and a field report on 2026-08-28 caught it doing so under
+three concurrent refreshes against a cold Snowflake warehouse. The probe now classifies a dialog by its
+text and reports what it actually saw; the size test only decides which windows are worth reading. The
+**Python** fast check (`probe_desktop_query.py` / `refresh_pbip_model.py`) still emits
+`BLOCKED_BY_DIALOG` from a size-only rule, so treat that token — wherever it comes from — as
+"something is on screen", not as "sign-in required".
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and

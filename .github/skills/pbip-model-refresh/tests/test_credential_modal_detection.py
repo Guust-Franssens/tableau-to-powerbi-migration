@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import threading
 import time
+import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -994,3 +998,319 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
     assert first_out.startswith("PREFLIGHT: CREDENTIAL_MISSING")
     assert "DATA_OK_FROM_WORKER_AFTER_RELEASE" not in first_out
     assert later_out == ""
+
+
+# ==================================================================================================
+# probe_desktop_credential.ps1 - the PowerShell arbiter's own dialog classifiers (issue #367)
+# ==================================================================================================
+#
+# The arbiter used to decide "blocking" from GEOMETRY alone: `Test-BlockingDialog` returned the first
+# visible non-main window >= 100x100 as a blocking dialog, and the caller printed
+# `VERDICT: BLOCKED_BY_DIALOG`, exit 1 - the same hard-stop band as a real credential wall. A Power BI
+# Refresh progress dialog satisfies that trivially, and on 2026-08-28 a field report caught it doing
+# exactly that under three concurrent refreshes: the "credential wall" was an ordinary progress dialog
+# stalled behind a Snowflake cold start.
+#
+# These tests drive the SHIPPED classifiers directly, through the `-LoadDetectorsOnly` dot-source seam,
+# with synthesised window objects. That seam exists so the part that decides a hard stop is testable on
+# a machine with no Power BI Desktop; everything past it (UI Automation, the Win32 shim, the refresh
+# invoke) still needs a live Desktop and is NOT covered here.
+
+PROBE_PS1 = Path(__file__).resolve().parents[1] / "scripts" / "probe_desktop_credential.ps1"
+CREDENTIAL_SIGNATURE = PROBE_PS1.parent / "credential_modal_signature.regex"
+BENIGN_SIGNATURE = PROBE_PS1.parent / "benign_dialog_signature.regex"
+
+_HARNESS = r"""
+param(
+  [Parameter(Mandatory = $true)][string]$Probe,
+  [Parameter(Mandatory = $true)][string]$WindowsJson,
+  [switch]$RefreshInFlight
+)
+$ErrorActionPreference = 'Stop'
+. $Probe -LoadDetectorsOnly
+$parsed = ConvertFrom-Json (Get-Content -LiteralPath $WindowsJson -Raw)
+$windows = @($parsed)
+$verdict = Get-DialogVerdict -Windows $windows -RefreshInFlight:$RefreshInFlight
+$credential = Test-CredentialModal -Windows $windows
+$payload = [ordered]@{
+  credential = $credential
+  verdict    = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Verdict })
+  kind       = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Kind })
+  exit_code  = $(if ($null -eq $verdict) { 0 } else { [int]$verdict.ExitCode })
+  evidence   = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Evidence })
+  candidates = @(Select-DialogCandidate -Windows $windows).Count
+}
+Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $payload -Compress -Depth 4))
+"""
+
+
+def _powershell() -> str:
+    """Path to Windows PowerShell, or skip - this arbiter is Windows-only by construction."""
+    if os.name != "nt":
+        pytest.skip("probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter")
+    exe = shutil.which("powershell") or shutil.which("pwsh")
+    if not exe:
+        pytest.skip("no PowerShell interpreter on PATH")
+    return exe
+
+
+def _window(**overrides) -> dict:
+    """A synthesised Desktop window, shaped exactly like `Win32CredentialWindows.WindowInfo`."""
+    window = {
+        "Title": "",
+        "ClassName": "#32770",
+        "Width": 600,
+        "Height": 400,
+        "Texts": [],
+        "Minimized": False,
+        # `None` = the window has no owner, so the modality test could not be applied at all. That is
+        # NOT the same as `False` (owner disabled), and the classifier must not treat it as such.
+        "OwnerEnabled": None,
+    }
+    window.update(overrides)
+    return window
+
+
+def classify(tmp_path: Path, windows: list[dict], *, refresh_in_flight: bool = False) -> dict:
+    """Run the SHIPPED classifiers over ``windows`` and return their verdict as a dict.
+
+    Deliberately routed through files and `-File` rather than `-Command`: a quoting slip in an inline
+    command is how a mutation run in this repo scored a false pass. A non-zero exit (a renamed or
+    deleted function, a parse error) raises here rather than degrading to an empty result, so a
+    mutation cannot pass by breaking the harness.
+    """
+    exe = _powershell()
+    harness = tmp_path / "classify.ps1"
+    harness.write_text(_HARNESS, encoding="utf-8")
+    payload = tmp_path / "windows.json"
+    payload.write_text(json.dumps(windows), encoding="utf-8")
+    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(PROBE_PS1)]
+    argv += ["-WindowsJson", str(payload)]
+    if refresh_in_flight:
+        argv.append("-RefreshInFlight")
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
+    marker = "<<<PROBE-JSON>>>"
+    assert marker in done.stdout, f"harness produced no result payload:\n{done.stdout}\n{done.stderr}"
+    return json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
+
+
+REFRESH_PROGRESS = _window(
+    Title="Refresh",
+    ClassName="HwndWrapper[PBIDesktop.exe;;refresh]",
+    Texts=["Refresh", "Orders", "1,204 rows loaded", "Cancel"],
+    # A Power BI refresh dialog DOES disable its owner, so modality alone cannot tell it from a
+    # credential modal. Pinned false on purpose: the fix must not lean on the owner test.
+    OwnerEnabled=False,
+)
+CREDENTIAL_MODAL = _window(
+    Title="",
+    Texts=["Please specify how to connect", "Edit Credentials"],
+    OwnerEnabled=False,
+)
+
+
+def test_a_refresh_progress_dialog_is_not_reported_as_a_credential_block(tmp_path: Path) -> None:
+    """AC1. The field-reported false positive: an ordinary progress dialog is not a hard stop.
+
+    Two separate claims, and both matter. It must not be classified as a credential prompt, AND its
+    verdict must not land in the exit-1 hard-stop band - `BLOCKED_BY_DIALOG` was exit 1, the same code
+    a genuine credential wall uses, which is what made the false positive halt an unattended run.
+    """
+    result = classify(tmp_path, [REFRESH_PROGRESS])
+
+    assert result["candidates"] == 1, "the size pre-filter must still SELECT it; only the verdict changed"
+    assert result["credential"] is None
+    assert result["kind"] == "benign"
+    assert result["verdict"] != "BLOCKED_BY_DIALOG"
+    assert result["exit_code"] != 1, "a progress dialog must never reach the credential hard-stop band"
+
+
+def test_a_refresh_progress_dialog_during_our_own_refresh_is_ignored_entirely(tmp_path: Path) -> None:
+    """AC1/AC3. Once THIS script invoked the refresh, the progress dialog it caused is not a finding.
+
+    The distinction is the whole point of `-RefreshInFlight`: the same window means "somebody else is
+    refreshing, do not stack a second one" at t=0, and "your own refresh is running" in the poll loop.
+    """
+    assert classify(tmp_path, [REFRESH_PROGRESS], refresh_in_flight=True)["verdict"] is None
+
+
+def test_a_progress_dialog_already_up_at_t0_reports_refresh_in_progress(tmp_path: Path) -> None:
+    """AC3. Concurrent multi-instance refresh, as a first-class condition rather than setup noise.
+
+    The 2026-08-28 report ran three refreshes at once and had to cancel a stale duplicate by hand. A
+    progress dialog already open before this probe triggers anything is exactly that state, and the
+    verdict has to say so: not a credential wall (exit 1), not "all clear" (exit 0), but "Desktop is
+    busy, I could not probe" (exit 3).
+    """
+    result = classify(tmp_path, [REFRESH_PROGRESS])
+
+    assert result["verdict"] == "REFRESH_IN_PROGRESS"
+    assert result["exit_code"] == 3
+
+
+def test_a_genuine_credential_modal_is_still_detected(tmp_path: Path) -> None:
+    """AC2. The true positive must survive the fix for the false positive.
+
+    This is the "moved the boundary" guard: silencing the progress dialog by loosening the credential
+    path would pass every other test in this section and destroy the arbiter's only reason to exist.
+    """
+    result = classify(tmp_path, [CREDENTIAL_MODAL])
+
+    assert result["credential"] == "Please specify how to connect"
+    assert result["verdict"] == "CREDENTIAL_MISSING"
+    assert result["exit_code"] == 1
+
+
+def test_a_credential_modal_is_still_detected_behind_a_concurrent_refresh_dialog(tmp_path: Path) -> None:
+    """AC2/AC3. A benign classification must never mask a real modal on another window.
+
+    Ordering matters here and is easy to get wrong: iterate windows and return the first classification,
+    and a progress dialog enumerated first swallows the credential modal enumerated second. Run with
+    `refresh_in_flight` so the progress dialog is in its most-ignorable state.
+    """
+    result = classify(tmp_path, [REFRESH_PROGRESS, CREDENTIAL_MODAL], refresh_in_flight=True)
+
+    assert result["verdict"] == "CREDENTIAL_MISSING"
+    assert result["exit_code"] == 1
+
+
+def test_an_unreadable_dialog_is_a_third_verdict_not_one_of_the_other_two(tmp_path: Path) -> None:
+    """A window exposing no text at all: "we could not read it" is its own answer.
+
+    Absent is not empty. It must not collapse into `CREDENTIAL_MISSING` (we have no evidence of a
+    credential prompt) nor into "nothing here" (we have no evidence of health either).
+    """
+    result = classify(tmp_path, [_window(Texts=[], OwnerEnabled=False)])
+
+    assert result["kind"] == "unreadable"
+    assert result["verdict"] == "DIALOG_UNREADABLE"
+    assert result["exit_code"] == 3
+    assert result["credential"] is None
+
+
+def test_a_readable_but_unrecognized_dialog_is_distinct_from_an_unreadable_one(tmp_path: Path) -> None:
+    """The two ambiguous states are NOT the same state, and the verdict has to distinguish them.
+
+    "We read this window and it is not a credential prompt" is strictly more knowledge than "we could
+    not read this window at all". Collapsing them loses the only fact that tells an operator whether
+    looking at the screen will help.
+    """
+    unrecognized = classify(tmp_path, [_window(Title="Whoops", Texts=["Whoops", "Something went wrong"])])
+    unreadable = classify(tmp_path, [_window(Texts=[])])
+
+    assert unrecognized["kind"] == "unrecognized"
+    assert unrecognized["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert unrecognized["exit_code"] == 3
+    assert unrecognized["verdict"] != unreadable["verdict"], "the two ambiguous states must not collapse"
+    assert unrecognized["evidence"], "the readable case must carry the text it read, or it proves nothing"
+
+
+def test_an_unclassifiable_window_outranks_a_benign_one(tmp_path: Path) -> None:
+    """Precedence. `benign` is the only classification carrying positive evidence of harmlessness.
+
+    So it must never outrank a window nobody could classify - otherwise one progress dialog is enough
+    to hide every other window Desktop has open.
+
+    Asserted at t=0 FIRST, and that ordering is load-bearing: in flight the benign branch is skipped
+    anyway, so an in-flight-only assertion passes even when the precedence is reversed. Caught by
+    mutation - moving the benign return above the unreadable one went undetected until t=0 was covered.
+    """
+    windows = [REFRESH_PROGRESS, _window(Texts=[])]
+
+    assert classify(tmp_path, windows)["verdict"] == "DIALOG_UNREADABLE"
+    assert classify(tmp_path, windows, refresh_in_flight=True)["verdict"] == "DIALOG_UNREADABLE"
+
+
+def test_a_readable_unrecognized_window_outranks_a_benign_one(tmp_path: Path) -> None:
+    """Same precedence rule for the other ambiguous state, at t=0 where both are live."""
+    windows = [REFRESH_PROGRESS, _window(Title="Whoops", Texts=["Whoops", "Something went wrong"])]
+
+    assert classify(tmp_path, windows)["verdict"] == "DIALOG_UNRECOGNIZED"
+
+
+def test_an_enabled_owner_window_exonerates_a_dialog(tmp_path: Path) -> None:
+    """Modality is used ONE WAY: it can exonerate a window, never convict one.
+
+    A modal dialog disables its owner, so an enabled owner proves this window blocks nothing. The
+    converse does not hold - `REFRESH_PROGRESS` above pins `OwnerEnabled=False` precisely because Power
+    BI's own progress dialog also disables the owner - so a disabled owner is never treated as evidence.
+    """
+    exonerated = classify(tmp_path, [_window(Texts=["Something else"], OwnerEnabled=True)])
+    not_exonerated = classify(tmp_path, [_window(Texts=["Something else"], OwnerEnabled=False)])
+    no_owner = classify(tmp_path, [_window(Texts=["Something else"], OwnerEnabled=None)])
+
+    assert exonerated["verdict"] is None
+    assert not_exonerated["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert no_owner["verdict"] == "DIALOG_UNRECOGNIZED", "no owner means the test did not apply, not that it passed"
+
+
+def test_the_main_window_and_tiny_helper_windows_are_still_not_candidates(tmp_path: Path) -> None:
+    """The class and size pre-filters survive; they were never the defect, only their promotion to a verdict."""
+    main_window = _window(
+        Title="MyReport - Power BI Desktop",
+        ClassName="WindowsForms10.Window.8.app.0.141b42a_r6_ad1",
+        Width=1920,
+        Height=1080,
+        Texts=["MyReport - Power BI Desktop", "Refresh"],
+    )
+    tiny = _window(Width=10, Height=10)
+
+    result = classify(tmp_path, [main_window, tiny])
+
+    assert result["candidates"] == 0
+    assert result["verdict"] is None
+
+
+def test_the_arbiter_no_longer_derives_a_blocking_verdict_from_size_alone() -> None:
+    """Regression pin on the shipped file: the size-only detector and its exit-1 verdict are gone.
+
+    The behavioural tests above prove the classifiers are right; this proves the CALLERS were rewired to
+    them. A revert that restored `Test-BlockingDialog` while leaving the new functions in place would
+    pass every behavioural test in this section and still ship the defect.
+    """
+    body = PROBE_PS1.read_text(encoding="utf-8")
+
+    assert "function Test-BlockingDialog" not in body, "the size-only detector must not come back"
+    emitted = re.findall(r'VERDICT:\s*\{?0?\}?\s*"|VERDICT: ([A-Z_]+)', body)
+    assert "BLOCKED_BY_DIALOG" not in [name for name in emitted if name], (
+        "this arbiter must not emit BLOCKED_BY_DIALOG: it cannot establish that a dialog is blocking"
+    )
+    assert "exit $blocker.ExitCode" in body, "the t=0 branch must exit with the classifier's code, not a literal 1"
+
+
+def test_the_benign_signature_can_never_shadow_a_credential_prompt() -> None:
+    """The one way this fix could fail OPEN: a benign pattern broad enough to match a real modal.
+
+    In the poll loop a `benign` classification is IGNORED, so a credential prompt that matched the
+    benign signature would end the probe at `CREDENTIAL_PRESENT` - the fail-open the script's own header
+    calls worse than no arbiter. Platform-independent by design: it reads the two shipped resources, so
+    it gates on Linux CI too, where the PowerShell tests above skip.
+    """
+    benign = re.compile(BENIGN_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+    credential_phrases = [
+        "You aren't signed in",
+        "Personal Access Token",
+        "Databricks Client Credentials",
+        "Please specify how to connect",
+        "Account Key",
+        "Enter your credentials",
+        "Permission is required to run this native database query",
+    ]
+
+    for phrase in credential_phrases:
+        assert not benign.search(phrase), f"benign signature must not match a credential prompt: {phrase!r}"
+
+
+def test_the_benign_signature_matches_real_refresh_progress_text() -> None:
+    """The progress vocabulary the arbiter is meant to recognise, pinned as data.
+
+    ⚠️ INFERRED from Power BI Desktop's refresh UI, not captured from a live dialog - so treat a miss as
+    a specificity gap, not a correctness one: an unmatched progress dialog degrades to
+    `DIALOG_UNRECOGNIZED`, which is still exit 3 and still not a credential wall.
+    """
+    benign = re.compile(BENIGN_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+
+    for phrase in ["Refresh", "Evaluating", "1,204 rows loaded", "Waiting for other queries", "Loading data"]:
+        assert benign.search(phrase), f"benign signature should match progress text: {phrase!r}"
+    assert not benign.search("Refresh failed"), "'Refresh' is anchored so it cannot swallow arbitrary sentences"
