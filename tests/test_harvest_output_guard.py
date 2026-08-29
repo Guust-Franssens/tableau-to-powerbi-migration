@@ -18,6 +18,7 @@ No customer data is used or created anywhere below: every fixture is an empty te
 
 from __future__ import annotations
 
+import ctypes
 import os
 import subprocess
 import sys
@@ -577,3 +578,225 @@ def test_the_out_of_checkout_remedy_still_works(lab) -> None:
     )
     assert result.returncode != 2, f"the guard blocked its own recommended remedy:\n{result.stdout}{result.stderr}"
     assert "REFUSING" not in (result.stdout + result.stderr)
+
+
+# ------------------------------------------------------- issue #374, second round (blind review)
+#
+# Junctions were only the first spelling. Three more got past the guard, each writing a stageable
+# file INSIDE the checkout while the plain spelling of the SAME target was correctly refused - so
+# they are bypasses of the comparison, not of the rule. Measured before the fix, CLI exit 0 for all
+# three where the plain form exits 2:
+#
+#   \\?\<repo>\leak-extended                    extended-length prefix
+#   \\localhost\c$\...\<repo>\leak-unc          UNC administrative-share alias
+#   <8.3 repo>\link-out\leak-short              8.3 short name PLUS an outbound junction
+#
+# The third is the one that decides the fix: 8.3 alone is expanded by `resolve()` and caught, but
+# combined with a junction the lexical form stays short and the resolved form lands outside, so BOTH
+# forms pass. Only filesystem identity (`os.path.samefile`) answers it - and resolving the lexical
+# form to "fix" it would re-open the outbound-junction hole the first round closed.
+#
+# Plus two that are not about spelling at all: a repository git cannot read was read as "no work
+# tree here, carry on", and the documented out-of-checkout remedy was refused in its `..` spelling.
+
+WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific path spelling")
+
+
+def _short_name(path: Path) -> str | None:
+    """`path`'s 8.3 alias, or None when the volume has 8.3 generation disabled."""
+    buffer = ctypes.create_unicode_buffer(1024)
+    if not ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 1024):  # pragma: no cover
+        return None
+    return buffer.value if buffer.value.lower() != str(path).lower() else None
+
+
+def _assert_alias_reproduces(alias: Path, repo: Path) -> None:
+    """The fixture must be a genuine alias: same directory, spelling git cannot lexically relate.
+
+    Without this a "bypass" test can pass for the wrong reason - because the spelling collapsed back
+    to the plain path that was already refused, proving nothing about the alias.
+    """
+    with pytest.raises(ValueError):
+        alias.relative_to(repo)
+    assert h.refuse_unignored_output(repo / alias.name, allow_unignored=False) is True, (
+        "fixture proves nothing: the plain spelling of this target is not refused either"
+    )
+
+
+@WINDOWS_ONLY
+def test_an_extended_length_prefix_cannot_smuggle_a_path_into_the_checkout(lab) -> None:
+    r"""`\\?\C:\...` names the same directory, and both `absolute()` and `resolve()` preserve it."""
+    alias = Path(f"\\\\?\\{lab.repo}\\leaky-extended")
+    _assert_alias_reproduces(alias, lab.repo)
+    assert h.refuse_unignored_output(alias, allow_unignored=False) is True
+
+
+@WINDOWS_ONLY
+def test_a_unc_admin_share_alias_cannot_smuggle_a_path_into_the_checkout(lab) -> None:
+    r"""`\\localhost\c$\...` is the same directory over a different namespace."""
+    drive = str(lab.repo)[0]
+    share = f"\\\\localhost\\{drive}$"
+    try:
+        reachable = Path(share).is_dir()
+    except OSError:  # pragma: no cover - depends on local policy
+        reachable = False
+    if not reachable:
+        pytest.skip("the administrative share is not reachable on this machine")
+    alias = Path(str(lab.repo).replace(f"{drive}:", share, 1)) / "leaky-unc"
+    _assert_alias_reproduces(alias, lab.repo)
+    assert h.refuse_unignored_output(alias, allow_unignored=False) is True
+
+
+@WINDOWS_ONLY
+def test_an_8_3_short_name_plus_an_outbound_junction_cannot_smuggle_a_path_in(lab) -> None:
+    """The combination that defeats resolving: short lexically, outside once resolved.
+
+    Asserted explicitly, because this is the one case where fixing the alias by resolving the
+    lexical form would silently re-open the junction hole instead of closing anything.
+    """
+    short = _short_name(lab.repo)
+    if short is None:
+        pytest.skip("8.3 name generation is disabled on this volume")
+    alias = Path(short) / "linkdir" / "leaky-short"
+    with pytest.raises(ValueError):
+        alias.relative_to(lab.repo)
+    resolved = h._resolved(alias)  # pylint: disable=protected-access
+    assert not _same_path(resolved, lab.repo) and lab.outside in resolved.parents, (
+        f"fixture proves nothing: the resolved form {resolved} is not outside the checkout"
+    )
+    assert h.refuse_unignored_output(lab.repo / "linkdir" / "leaky-short", allow_unignored=False) is True, (
+        "fixture proves nothing: the plain spelling of this junctioned target is not refused either"
+    )
+    assert h.refuse_unignored_output(alias, allow_unignored=False) is True
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return str(a).lower() == str(b).lower()
+
+
+def test_a_repository_git_cannot_read_is_treated_as_unsafe(lab) -> None:
+    """A `.git` that yields no work tree means git could not answer, not that nothing is here.
+
+    Reachable without sabotage: a dubious-ownership refusal over UNC produces exactly this shape in
+    the wild. Reproduced deterministically with a stale gitdir pointer, which any moved worktree
+    leaves behind.
+    """
+    (lab.repo / ".git").rename(lab.repo / ".git-disabled")
+    (lab.repo / ".git").write_text("gitdir: does-not-exist\n", encoding="utf-8")
+    assert _git(["rev-parse", "--show-toplevel"], lab.repo).returncode != 0, "fixture: rev-parse must fail"
+    assert (lab.repo / ".git").exists(), "fixture: the checkout marker must still be there"
+
+    with pytest.raises(h.OutputPathNotIgnoredError):
+        h.unignored_output_paths(lab.repo / "leaky-broken")
+    assert h.refuse_unignored_output(lab.repo / "leaky-broken", allow_unignored=False) is True
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"),
+            "--out",
+            "leaky-broken",
+            "--skip-download",
+        ],
+        cwd=lab.repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 2, f"the CLI wrote into a checkout git could not read:\n{result.stdout}{result.stderr}"
+    assert not (lab.repo / "leaky-broken").exists()
+
+
+def test_a_failing_rev_parse_is_unsafe_even_when_check_ignore_would_answer(lab, monkeypatch) -> None:
+    """`test_an_unanswerable_git_is_treated_as_unsafe` forces `check-ignore` to 128 while leaving
+    `rev-parse` healthy - a different call on a different path, so it cannot cover this.
+
+    The `--out` here is `_sweep`, which the real `.gitignore` DOES ignore, so this can only pass
+    because worktree discovery failed closed - never because the path happened to be unignored.
+    """
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, "", "fatal: detected dubious ownership in repository")
+        return real_run(cmd, **kwargs)
+
+    assert h.refuse_unignored_output(lab.repo / "_sweep", allow_unignored=False) is False, (
+        "fixture proves nothing: `_sweep` must be ignored here, or the refusal below is trivial"
+    )
+    monkeypatch.setattr(h.subprocess, "run", fake_run)
+    with pytest.raises(h.OutputPathNotIgnoredError):
+        h.unignored_output_paths(lab.repo / "_sweep")
+    assert h.refuse_unignored_output(lab.repo / "_sweep", allow_unignored=False) is True
+
+
+def test_the_relative_dot_dot_spelling_of_the_remedy_still_works(lab, monkeypatch) -> None:
+    """`--out ..\\outside\\out` is the documented remedy in its most natural relative spelling.
+
+    `Path.absolute()` keeps `..` (measured on 3.11.9 and 3.13.2), and a surviving `..` still passes
+    a `relative_to(<repo>)` test, so the guard asked git about a path outside the repository, got
+    "outside repository", and refused the very thing the refusal message recommends.
+    """
+    monkeypatch.chdir(lab.repo)
+    relative = Path("..") / "outside" / "remedy"
+    assert ".." in relative.absolute().parts, "fixture proves nothing: this Python collapses `..` in absolute()"
+    assert h.refuse_unignored_output(relative, allow_unignored=False) is False
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"),
+            "--out",
+            str(relative),
+            "--skip-download",
+        ],
+        cwd=lab.repo,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode != 2, f"the guard refused its own remedy:\n{result.stdout}{result.stderr}"
+    assert "REFUSING" not in (result.stdout + result.stderr)
+
+
+def test_the_probe_is_rebuilt_from_the_work_tree_root_spelling(lab) -> None:
+    """A CONTRACT test, and labelled as one - it pins a defence, not an observed behaviour.
+
+    Measured on both platforms: `git check-ignore` answers an aliased spelling exactly as it answers
+    the plain one (`\\\\?\\` and 8.3 on Windows with git 2.55.0, a symlinked root on Linux with
+    2.43.0), or refuses to answer it at all (`\\\\localhost\\c$`, where `rev-parse` fails first and
+    the run is already refused). So rebuilding the probe from the ROOT's own spelling changes no
+    verdict this suite can observe, and no end-to-end test can kill it - said plainly rather than
+    dressed up as coverage.
+
+    It is kept because the one failure this guard cannot survive is git answering PERMISSIVELY for a
+    spelling it half-understands, and asking about a path the work tree itself named removes that
+    whole class. Pinned here so it cannot be dropped without a deliberate decision.
+    """
+    alias = lab.linked_repo / "_sweep-contract"
+    assert alias != lab.repo / "_sweep-contract", "fixture proves nothing: the alias is the plain spelling"
+    root, probe = h._canonical_probe_target(alias)  # pylint: disable=protected-access
+    assert _same_path(root, lab.repo), f"the work tree root was not resolved to the checkout: {root}"
+    assert probe == lab.repo / "_sweep-contract", f"the probe kept the caller's spelling: {probe}"
+
+
+@WINDOWS_ONLY
+def test_an_ignored_out_named_through_a_resolvable_alias_still_proceeds(lab) -> None:
+    """The guard refuses aliases it cannot verify, not aliases as a class.
+
+    `\\\\?\\` and 8.3 are spellings git CAN work from (measured: `rev-parse` with either as cwd exits
+    0 and reports the long-form toplevel), so an ignored `--out` named that way must still run. The
+    UNC admin share is deliberately excluded: `rev-parse` there exits 128, which is unanswerable and
+    therefore refused - a noisy outcome the asymmetry accepts, unlike a silent write.
+    """
+    aliases = [Path(f"\\\\?\\{lab.repo}")]
+    short = _short_name(lab.repo)
+    if short is not None:
+        aliases.append(Path(short))
+    assert h.refuse_unignored_output(lab.repo / "_sweep-alias", allow_unignored=False) is False, "control"
+    for alias in aliases:
+        with pytest.raises(ValueError):
+            alias.relative_to(lab.repo)  # a real alias, not the plain spelling in disguise
+        assert h.refuse_unignored_output(alias / "_sweep-alias", allow_unignored=False) is False, (
+            f"an ignored --out spelled {alias} was refused"
+        )

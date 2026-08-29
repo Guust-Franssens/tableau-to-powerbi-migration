@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -118,18 +119,17 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
         return None
 
 
-def _existing_ancestor(path: Path) -> Path | None:
-    """Nearest existing directory at or above `path` - git needs a real directory to run in."""
-    return next((p for p in (path, *path.parents) if p.is_dir()), None)
+def _lexical(path: Path) -> Path:
+    """`path` made absolute with `.`/`..` collapsed TEXTUALLY, following no junction or symlink.
 
-
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    """Lexical containment, the same question git's working-tree walk asks."""
-    try:
-        path.relative_to(parent)
-    except ValueError:
-        return False
-    return True
+    `Path.absolute()` keeps `..` verbatim (measured on Python 3.11.9 and 3.13.2, Windows), and a
+    surviving `..` then rides into `git check-ignore`, which answers about a directory the operator
+    never named: `<repo>\\..\\outside\\out` still passes a `relative_to(<repo>)` test, so the
+    documented "point --out outside the checkout" remedy was refused in its most natural relative
+    spelling. `os.path.abspath` collapses it the way git itself does - and only textually, because
+    `resolve()` here would dereference the junction and re-open the hole below.
+    """
+    return Path(os.path.abspath(path))
 
 
 def _resolved(path: Path) -> Path:
@@ -138,52 +138,97 @@ def _resolved(path: Path) -> Path:
     return path.expanduser().resolve()
 
 
-def _containing_worktree_root(out: Path, anchor: Path) -> Path | None:
-    """Root of the work tree that LEXICALLY contains `out`, or None when no work tree does.
+def _same_dir(a: Path, b: Path) -> bool:
+    """Do these two spellings name the SAME directory on disk? Never a string comparison."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
-    Not simply `git rev-parse` at `anchor`, because `anchor` can be reached through a junction and
-    the answer is then about somewhere else entirely (issue #374). Measured on Windows with
-    `mklink /J <repo>\\linkdir <outside>`: `git rev-parse --is-inside-work-tree` run with
-    cwd=`<repo>\\linkdir` exits 128 "not a git repository" -- the OS resolved the junction for the
-    child process's cwd -- so a guard anchored there concludes "outside any work tree" and passes,
-    while `git add -A` at `<repo>` happily stages `linkdir/sweepout/...`. Asked from `<repo>` the
-    same git answers `check-ignore` exit 1, correctly. POSIX has the identical hole via a symlink.
 
-    So walk the LEXICAL ancestors and take the first work tree whose root actually contains `out` as
-    a string. Anchoring at `Path.cwd()` closes the measured case too and is what #322 did; the walk
-    is a superset - it also holds when the script is invoked from outside the checkout entirely.
+def _identity_relative(node: Path, root: Path) -> list[str] | None:
+    """Segments from `root` down to `node` by FILE IDENTITY, or None when `root` does not hold it.
 
-    The containment test is not decoration: a checkout REACHED through a junction reports a
-    toplevel that does not contain the lexical path, and asking that repo anyway yields
-    "outside repository" (exit 128) -> an unprovable answer -> a refusal for a perfectly ignored
-    output. Such a repo cannot see this path form, so it is not asked; the resolved form covers it.
+    Windows can spell one directory several ways that are not lexically relative to each other, and
+    both `absolute()` and `resolve()` preserve every one of them, so comparing `--out` against
+    `git rev-parse --show-toplevel` as TEXT let three spellings write into the checkout unrefused
+    while the plain spelling of the same target was correctly refused:
+
+        \\\\?\\<repo>\\leak                     extended-length prefix
+        \\\\localhost\\c$\\...\\<repo>\\leak       UNC admin-share alias
+        <8.3 repo>\\link-out\\leak             8.3 short name PLUS an outbound junction
+
+    The third defeats the obvious fix: 8.3 alone is expanded by `resolve()` and caught, but combined
+    with a junction the lexical form stays short and the resolved form lands outside, so BOTH forms
+    pass. `os.path.samefile` answers the question the spellings obscure.
     """
-    for candidate in (anchor, *anchor.parents):
-        probe = _git(["rev-parse", "--show-toplevel"], candidate)
-        if probe is None:
-            # git being un-runnable is not evidence that no repository is here, so look for the
-            # checkout directly rather than letting a missing binary quietly disable the guard.
-            if any((parent / ".git").exists() for parent in (anchor, *anchor.parents)):
-                raise OutputPathNotIgnoredError(
-                    f"cannot run git, but {out} is inside a .git checkout, so it cannot be proven ignored"
-                )
+    segments: list[str] = []
+    current = node
+    while True:
+        if _same_dir(current, root):
+            return list(reversed(segments))
+        if current.parent == current:
             return None
-        if probe.returncode != 0:
-            continue  # not a work tree here; a junction may have hidden the real one further up
-        root = Path(probe.stdout.strip())
-        if _is_relative_to(out, root):
-            return root
-    return None
+        segments.append(current.name)
+        current = current.parent
+
+
+def _canonical_probe_target(out: Path) -> tuple[Path, Path] | None:
+    """`(work tree root, out re-spelled beneath it)`, or None when no work tree holds `out`.
+
+    Walks the LEXICAL ancestors, because an existing ancestor can be reached through a junction and
+    `git rev-parse` run there answers about somewhere else entirely (issue #374). Measured on Windows
+    with `mklink /J <repo>\\linkdir <outside>`: `rev-parse` with cwd=`<repo>\\linkdir` exits 128 "not
+    a git repository" -- the OS resolved the junction for the child process's cwd -- so a guard
+    anchored there concludes "outside any work tree" and passes, while `git add -A` at `<repo>`
+    stages `linkdir/sweepout/...`. Asked from `<repo>` the same git answers correctly.
+
+    Containment is then decided by `_identity_relative`, never by path spelling, and the probe is
+    rebuilt from the ROOT's own spelling so git is asked about a path it can actually see.
+
+    Fails closed on a broken repository. A `.git` entry whose directory yields no work-tree root
+    means git could not answer, not that there is nothing here: an ancestor with `.git` present and
+    `rev-parse` failing (a dubious-ownership refusal over UNC, a stale gitdir pointer, a damaged
+    config) previously skipped `check-ignore` altogether and permitted a write inside a known
+    checkout. Unanswerable is unsafe - the same rule the `check-ignore` probe already follows.
+    """
+    lexical = _lexical(out)
+    tail: list[str] = []
+    node = lexical
+    while True:
+        if node.is_dir():
+            probe = _git(["rev-parse", "--show-toplevel"], node)
+            root = (
+                Path(probe.stdout.strip())
+                if probe is not None and probe.returncode == 0 and probe.stdout.strip()
+                else None
+            )
+            if root is None:
+                if (node / ".git").exists():
+                    detail = "git could not be run" if probe is None else (probe.stderr.strip() or "no work tree")
+                    raise OutputPathNotIgnoredError(
+                        f"{node} holds a .git entry but git could not identify a work tree there "
+                        f"({detail}), so {lexical} cannot be proven ignored"
+                    )
+            else:
+                relative = _identity_relative(node, root)
+                if relative is not None:
+                    return root, root.joinpath(*relative, *reversed(tail))
+        if node.parent == node:
+            return None
+        tail.append(node.name)
+        node = node.parent
 
 
 def unignored_output_paths(out: Path, artifacts: Sequence[str] = OUTPUT_ARTIFACTS) -> list[Path]:
     """Which artifacts under `out` git would offer to commit. Empty list means safe to write.
 
-    `out` is judged EXACTLY as given (made absolute, nothing expanded or followed): the caller
-    decides which form of the path to ask about, because the forms disagree and both matter - see
-    `refuse_unignored_output`, which asks about all of them.
+    `out` is judged EXACTLY as given, beyond collapsing `.`/`..`: the caller decides which form of
+    the path to ask about, because the forms disagree and both matter - see `refuse_unignored_output`,
+    which asks about all of them. The returned paths are the CANONICAL spelling git was asked about,
+    which is the one that says where the bytes would actually be staged from.
 
-    Two measured details decide this implementation, and getting either wrong yields a guard that
+    Two measured details decide the probe itself, and getting either wrong yields a guard that
     silently always passes - worse than no guard, because it also reassures:
 
     * **Ask about paths INSIDE `out`, never `out` itself.** `/_sweep*/` is a directory-only pattern,
@@ -195,21 +240,18 @@ def unignored_output_paths(out: Path, artifacts: Sequence[str] = OUTPUT_ARTIFACT
       `git check-ignore -- 'zzz_not_ignored/'` exits 0 reporting an EMPTY matched pattern: with a
       trailing slash EVERY path looks ignored.
 
-    Raises `OutputPathNotIgnoredError` when git is present but cannot answer, or is absent while a
-    `.git` checkout is in scope: an unprovable path is treated as unsafe, never as safe.
+    Raises `OutputPathNotIgnoredError` when git is present but cannot answer, is absent while a
+    `.git` checkout is in scope, or finds a `.git` it cannot read: an unprovable path is treated as
+    unsafe, never as safe.
     """
-    out = out.absolute()
-    anchor = _existing_ancestor(out)
-    if anchor is None:  # pragma: no cover - a drive/filesystem root always exists
-        return []
-
-    root = _containing_worktree_root(out, anchor)
-    if root is None:
+    found = _canonical_probe_target(out)
+    if found is None:
         return []  # outside any work tree: nothing here can be committed by accident
+    root, base = found
 
     unignored: list[Path] = []
     for artifact in artifacts:
-        target = out / artifact
+        target = base / artifact
         probe = _git(["check-ignore", "-q", "--", str(target)], root)
         # 0 = ignored, 1 = not ignored, anything else (128, or no git) = no answer, so do not guess.
         if probe is None or probe.returncode not in (0, 1):
@@ -226,11 +268,11 @@ def output_path_forms(out: Path) -> list[Path]:
     A guard that judges one form while the writer uses another proves nothing. Both of these are
     real, and each catches what the other cannot:
 
-    * **lexical** - `out.absolute()`, nothing expanded or followed. This is the string git's own
+    * **lexical** - absolute, `.`/`..` collapsed, nothing dereferenced. This is the string git's own
       working-tree walk sees, so it is the honest answer to "would `git add -A` stage this?" for an
       `--out` that traverses a junction OUT of the checkout, and for a literal `~` (measured: from
       cmd.exe, a quoted PowerShell argument, or any programmatic call, `~` reaches argv unexpanded,
-      and `Path("~/x").absolute()` is `<cwd>/~/x` - inside the checkout, unignored).
+      and its absolute form is `<cwd>/~/x` - inside the checkout, unignored).
     * **resolved** - `~` expanded and every junction/symlink followed. This is where the bytes land,
       and it is what catches an `--out` that looks external but is a junction pointing INTO the
       checkout (measured: already refused before this function existed, precisely because the guard
@@ -239,7 +281,7 @@ def output_path_forms(out: Path) -> list[Path]:
     An unresolvable path raises rather than degrading to the lexical form alone: a form we cannot
     compute is a question we cannot answer, and unanswerable means unsafe.
     """
-    lexical = out.absolute()
+    lexical = _lexical(out)
     try:
         resolved = _resolved(out)
     except (OSError, RuntimeError, ValueError) as exc:
