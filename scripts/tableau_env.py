@@ -64,7 +64,13 @@ CANONICAL_ENV_KEYS = (
 
 # Every accepted spelling, canonical or alias. A name outside this set in a Tableau-auth script is a
 # new divergence.
-ACCEPTED_ENV_KEYS = frozenset(CANONICAL_ENV_KEYS) | {"TABLEAU_SERVER", "TABLEAU_PAT_VALUE"}
+#
+# `DATASOURCE_CREDENTIAL_KEYS` is a deliberately separate category: these are not how a script signs
+# in to TABLEAU, they are the warehouse credentials a *published datasource* needs embedding at
+# publish time (`provision_tableau_estate.py`). They share the `TABLEAU_` prefix only because that is
+# how `.env` groups everything belonging to the trial site.
+DATASOURCE_CREDENTIAL_KEYS = frozenset({"TABLEAU_SF_USER", "TABLEAU_SF_PASSWORD", "TABLEAU_DBX_TOKEN"})
+ACCEPTED_ENV_KEYS = frozenset(CANONICAL_ENV_KEYS) | {"TABLEAU_SERVER", "TABLEAU_PAT_VALUE"} | DATASOURCE_CREDENTIAL_KEYS
 
 _TABLEAU_AUTH_HEADER_RE = re.compile(r"(?i)([\"']?x-tableau-auth[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;<>]+)")
 
