@@ -105,6 +105,21 @@ def _write_model(unit: Path, tables: dict[str, str], model_name: str = "Unit") -
             (model.parent.parent / f"{name}.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
 
+def _model(name: str, parts: tuple[tuple[str, str], ...], m_text: str) -> ccf.Model:
+    """A Model from (table, category) pairs - the shape load_model produces.
+
+    Every partition carries the connectors derived from the shared `m_text`, which is what a
+    single-source model looks like. Tests that need partitions with DIFFERENT connectors - the shape
+    behind blind review's HIGH 2 - build the partition dicts directly with explicit `connectors`.
+
+    Defined up here rather than beside its first heavy user because EVERY hand-built Model must go
+    through it: `_partition_connects` fails closed on a partition with no recorded connector set, so
+    a raw `ccf.Model(...)` silently becomes "nothing is connected" and tests stop testing.
+    """
+    connectors = ccf.partition_connectors(m_text)
+    return ccf.Model(name, name, tuple({"table": t, "category": c, "connectors": connectors} for t, c in parts), m_text)
+
+
 def _connection(connection_class: str, mode: str, target: str | None) -> dict:
     conn = {"class": connection_class, "mode": mode}
     if target is not None:
@@ -431,11 +446,17 @@ def test_mutation_row3_disable_file_detection_survives_is_caught(
 
 
 def test_mutation_row1_ignore_connector_survives_is_caught(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Row 1 mutant: if a preserved connector is ignored, a connected source is misreported."""
+    """Row 1 mutant: if a preserved connector is ignored, a connected source is misreported.
+
+    Targets `partition_connectors`, which is where connector evidence now lives. The old mutation
+    patched `Model.has_connector`, and after blind review's HIGH 2 moved the pass path to per-partition
+    evidence that function no longer decides anything - the mutation landed and changed no verdict.
+    """
     connected = _build_unit(tmp_path / "u", [_live_source("ds.sf", "snowflake", tables=["S"])], {"S": "snowflake"})
     assert _run(connected)["status"] == ccf.STATUS_OK  # baseline
-    monkeypatch.setattr(ccf.Model, "has_connector", lambda self, token: False)
-    assert ccf.load_model(connected / "Unit.SemanticModel").has_connector("Snowflake") is False  # landed
+    monkeypatch.setattr(ccf, "partition_connectors", lambda body: frozenset())
+    loaded = ccf.load_model(connected / "Unit.SemanticModel")
+    assert all(not part["connectors"] for part in loaded.partitions)  # landed
     assert _run(connected)["status"] != ccf.STATUS_OK  # the row-1 test would fail
 
 
@@ -488,12 +509,7 @@ def test_a_partial_downgrade_is_not_checked_never_connected() -> None:
     returned CONNECTED and hid every downgraded table.
     """
     source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
-    model = ccf.Model(
-        "m",
-        "m",
-        ({"table": "A", "category": "live"}, {"table": "B", "category": "file_ok"}),
-        'Snowflake.Databases("s","d")',
-    )
+    model = _model("m", (("A", "live"), ("B", "file_ok")), 'Snowflake.Databases("s","d")')
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
     assert "PARTIAL" in verdict.detail
@@ -502,9 +518,7 @@ def test_a_partial_downgrade_is_not_checked_never_connected() -> None:
 def test_a_connector_named_only_in_a_comment_does_not_count_as_connected() -> None:
     """`// prior source was Snowflake.Databases(...)` is prose, not a connection."""
     source = _live_source("ds.sf", "snowflake", tables=["A"])
-    model = ccf.Model(
-        "m", "m", ({"table": "A", "category": "file_ok"},), '// prior source was Snowflake.Databases("s","d")'
-    )
+    model = _model("m", (("A", "file_ok"),), '// prior source was Snowflake.Databases("s","d")')
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict != ccf.SOURCE_CONNECTED
 
@@ -512,12 +526,7 @@ def test_a_connector_named_only_in_a_comment_does_not_count_as_connected() -> No
 def test_a_genuinely_connected_source_still_passes() -> None:
     """The negative case beside the positive one: the fix must not make everything NOT_CHECKED."""
     source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
-    model = ccf.Model(
-        "m",
-        "m",
-        ({"table": "A", "category": "live"}, {"table": "B", "category": "live"}),
-        'Snowflake.Databases("s","d")',
-    )
+    model = _model("m", (("A", "live"), ("B", "live")), 'Snowflake.Databases("s","d")')
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_CONNECTED
 
@@ -529,12 +538,7 @@ def test_a_file_table_belonging_to_ANOTHER_source_does_not_taint_this_one() -> N
     model as a preserved live one, and must not drag it to NOT_CHECKED.
     """
     source = _live_source("ds.sf", "snowflake", tables=["A"])
-    model = ccf.Model(
-        "m",
-        "m",
-        ({"table": "A", "category": "live"}, {"table": "ZZ_OTHER", "category": "file_ok"}),
-        'Snowflake.Databases("s","d")',
-    )
+    model = _model("m", (("A", "live"), ("ZZ_OTHER", "file_ok")), 'Snowflake.Databases("s","d")')
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_CONNECTED
 
@@ -554,12 +558,7 @@ def _two_source_unit(declared_b: str) -> tuple[list[dict], ccf.UnitContext]:
         _live_source("ds.a", "snowflake", tables=["ORDERS"]),
         _live_source("ds.b", "snowflake", tables=[declared_b] if declared_b else []),
     ]
-    model = ccf.Model(
-        "m",
-        "m",
-        ({"table": "ORDERS", "category": "live"}, {"table": "FLIGHTS", "category": "file_ok"}),
-        'Snowflake.Databases("s","d")',
-    )
+    model = _model("m", (("ORDERS", "live"), ("FLIGHTS", "file_ok")), 'Snowflake.Databases("s","d")')
     return sources, ccf.UnitContext((model,), (), ())
 
 
@@ -629,12 +628,7 @@ def _qualified_collision_unit():
         _live_source("ds.sales", "snowflake", tables=["SALES.ORDERS"]),
         _live_source("ds.hr", "snowflake", tables=["HR.ORDERS"]),
     ]
-    model = ccf.Model(
-        "m",
-        "m",
-        ({"table": "SALES.ORDERS", "category": "live"}, {"table": "HR_ORDERS_EXPORT", "category": "file_ok"}),
-        'Snowflake.Databases("s","d")',
-    )
+    model = _model("m", (("SALES.ORDERS", "live"), ("HR_ORDERS_EXPORT", "file_ok")), 'Snowflake.Databases("s","d")')
     return sources, ccf.UnitContext((model,), (), ())
 
 
@@ -664,12 +658,7 @@ def test_an_unattributable_source_keeps_the_unit_off_a_clean_pass() -> None:
 def test_csv_filenames_are_not_collapsed_to_their_extension() -> None:
     """`tree.csv` and `orders.csv` share the leaf `csv` - leaf matching would have merged every one."""
     source = _live_source("ds.t", "snowflake", tables=["tree.csv"])
-    model = ccf.Model(
-        "m",
-        "m",
-        ({"table": "tree.csv", "category": "file_ok"}, {"table": "orders.csv", "category": "live"}),
-        'Snowflake.Databases("s","d")',
-    )
+    model = _model("m", (("tree.csv", "file_ok"), ("orders.csv", "live")), 'Snowflake.Databases("s","d")')
     verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_DOWNGRADED
 
@@ -677,7 +666,7 @@ def test_csv_filenames_are_not_collapsed_to_their_extension() -> None:
 def test_a_source_with_no_declared_tables_cannot_borrow_a_sibling_connector() -> None:
     """No declared tables means nothing to scope by - not "every table belongs to me"."""
     source = _live_source("ds.empty", "snowflake", tables=[])
-    model = ccf.Model("m", "m", ({"table": "UNRELATED", "category": "live"},), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("UNRELATED", "live"),), 'Snowflake.Databases("s","d")')
     verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
 
@@ -686,11 +675,6 @@ def test_a_source_with_no_declared_tables_cannot_borrow_a_sibling_connector() ->
 
 _CONN_M = 'Snowflake.Databases("acme-fixture.snowflakecomputing.com", "WH")'
 _COMMENTED_M = f"// Source = {_CONN_M}"
-
-
-def _model(name: str, parts: tuple[tuple[str, str], ...], m_text: str) -> ccf.Model:
-    """A Model from (table, category) pairs - the shape load_model produces."""
-    return ccf.Model(name, name, tuple({"table": t, "category": c} for t, c in parts), m_text)
 
 
 def _judge(
@@ -1515,18 +1499,24 @@ def _mutations():
         return lambda: setattr(ccf, "_declaration_scope", original)
 
     def loose_edit_matching():
-        """Restore stem-only generated-edit matching (round 11) so I8 must fire."""
-        original = ccf._declared_by_edit
+        """Restore stem-only generated-edit matching (round 11) so I8 must fire.
+
+        Now patches `_declared_by_edits` (plural), which returns the SET of covered file-backed
+        tables. Blind review HIGH 4 renamed it: returning the FIRST match and treating it as
+        sufficient is what let one declaration certify a second, undeclared table.
+        """
+        original = ccf._declared_by_edits
 
         def stem_only(declarations, file_tables, owners):  # noqa: ARG001
+            covered = set()
             for declaration in declarations:
                 target = str(declaration.get("target") or "")
                 if target and Path(target).stem in file_tables:
-                    return target
-            return None
+                    covered.add(Path(target).stem)
+            return covered
 
-        setattr(ccf, "_declared_by_edit", stem_only)
-        return lambda: setattr(ccf, "_declared_by_edit", original)
+        setattr(ccf, "_declared_by_edits", stem_only)
+        return lambda: setattr(ccf, "_declared_by_edits", original)
 
     def restore_underscore_delimiter():
         """Round 11's regression, restored (round 12) so I8 must fire on the ambiguous form."""
@@ -1594,19 +1584,27 @@ def test_each_invariant_fires_under_its_own_mutation(tag: str, mutate) -> None:
 # scope and why a mixed model reports NOT_CHECKED rather than PASS.
 
 
-def _embedded(connection_class: str, *, legs: list[str] | None = None, caption: str = "Embedded") -> dict:
-    """One `embedded_datasources` entry in the engine's own shape - table_count, never table names."""
-    entry = {
+def _embedded(
+    connection_class: str, *, legs: list[str | None] | None = None, caption: str = "Embedded", tables: int = 1
+) -> dict:
+    """One `embedded_datasources` entry in the engine's own shape - table_count, never table names.
+
+    ⚠️ `tables` MUST match the number of this source's tables the fixture actually emits. The first
+    draft hard-coded `table_count: 3` while emitting one, and four tests then asserted a clean PASS
+    over deliberately partial evidence - enshrining the fail-open that blind review found. A fixture
+    whose declared count and emitted reality disagree is not "a smaller fixture", it is the defect.
+    """
+    entry: dict = {
         "caption": caption,
         "label": f"federated.{caption.lower()}",
         "connection_class": connection_class,
-        "named_connection_count": len(legs or [connection_class]),
-        "table_count": 3,
+        "named_connection_count": len(legs) if legs else 1,
+        "table_count": tables,
         "connections": [],
     }
     for leg in legs or []:
         entry["connections"].append(
-            {"connection_class": leg, "server": f"{leg}.example.com", "database": "DB", "auth_method": "oauth"}
+            {"connection_class": leg, "server": "host.example.com", "database": "DB", "auth_method": "oauth"}
         )
     return entry
 
@@ -1621,6 +1619,7 @@ def _build_engine_bundle(  # pylint: disable=too-many-arguments,too-many-positio
     extra: dict | None = None,
     declarations: list[dict] | None = None,
     as_report_json: bool = False,
+    datasources: list[dict] | None = None,
 ) -> Path:
     """Write an engine bundle: pbip/<WB>/<WB>.SemanticModel + a handover slice (or report.json).
 
@@ -1648,7 +1647,8 @@ def _build_engine_bundle(  # pylint: disable=too-many-arguments,too-many-positio
 
     if as_report_json:
         (bundle / "report.json").write_text(
-            json.dumps({"tool": "migrate_estate", "workbooks": [detail]}, indent=2), encoding="utf-8"
+            json.dumps({"tool": "migrate_estate", "workbooks": [detail], "datasources": datasources or []}, indent=2),
+            encoding="utf-8",
         )
         return bundle / "report.json"
     handover = bundle / "handover"
@@ -1686,13 +1686,59 @@ def test_engine_workbook_live_source_shipped_as_a_flat_file_is_a_finding(tmp_pat
 
 
 def test_engine_report_json_payload_works_as_well_as_a_handover_slice(tmp_path: Path) -> None:
-    """`read_handover` resolves both payload shapes; the gate must accept whichever the bundle has."""
+    """`read_handover` resolves both payload shapes; the gate must accept whichever the bundle has.
+
+    The report carries a `datasources[]` entry too, so this test can actually observe the census: an
+    earlier fixture wrote `workbooks[]` only and therefore structurally could not detect that direct
+    `report.json` input dropped every datasource unit.
+    """
     bundle = tmp_path / "b"
     _build_engine_bundle(
-        bundle, "CasDashboard", {"FLIGHTS": "csv_missing"}, [_embedded("snowflake")], as_report_json=True
+        bundle,
+        "CasDashboard",
+        {"FLIGHTS": "csv_missing"},
+        [_embedded("snowflake")],
+        as_report_json=True,
+        datasources=[
+            {
+                "name": "ds-caps",
+                "connector": "snowflake",
+                "tables": ["CAPS"],
+                "pbip_folder": "pbip/CasDashboard/CasDashboard.pbip",
+            }
+        ],
     )
     assert not (bundle / "handover").exists()
-    assert ccf.scan(bundle)["status"] == ccf.STATUS_DOWNGRADED
+    report = ccf.scan(bundle)
+    assert report["status"] == ccf.STATUS_DOWNGRADED
+    assert {u["unit"] for u in report["units"]} == {"CasDashboard", "ds-caps"}
+
+
+def test_direct_report_json_input_enumerates_datasources_too(tmp_path: Path) -> None:
+    """Pointing at `report.json` itself must not silently drop every datasource unit.
+
+    Blind review, HIGH 1: the file branch returned handover-resolved workbooks and never called
+    `engine_datasource_units`, so on the real bundle direct report input reported `0 of 1` with the
+    Snowflake datasource absent entirely.
+    """
+    bundle = tmp_path / "b"
+    path = _build_engine_bundle(
+        bundle,
+        "CasDashboard",
+        {"FLIGHTS": "snowflake"},
+        [_embedded("snowflake")],
+        as_report_json=True,
+        datasources=[
+            {
+                "name": "ds-caps",
+                "connector": "snowflake",
+                "tables": ["FLIGHTS"],
+                "pbip_folder": "pbip/CasDashboard/CasDashboard.pbip",
+            }
+        ],
+    )
+    assert {u.name for u in ccf._find_engine_units(path)} == {"CasDashboard", "ds-caps"}
+    assert ccf.scan(path)["units_scanned"] == 2
 
 
 def test_engine_absent_telemetry_is_NOT_EVALUATED_never_a_pass(tmp_path: Path) -> None:
@@ -1889,18 +1935,44 @@ def test_engine_generated_edit_declaration_excuses_the_downgrade(tmp_path: Path)
 
     An engine bundle has no `limitations_encountered` - that field is a parser-spec artifact - so the
     generated-edit declaration is the sanctioned way to record a deliberate materialisation here.
+
+    ⚠️ ONE declared table, ONE file-backed partition, ONE declaration. The earlier fixture declared
+    three tables and one edit and still asserted a source-wide pass, which is precisely blind review's
+    HIGH 4: a table-scoped record certifying tables nobody examined.
     """
     bundle = tmp_path / "b"
     _build_engine_bundle(
         bundle,
         "Wb",
         {"FLIGHTS": "csv_missing"},
-        [_embedded("snowflake")],
+        [_embedded("snowflake", tables=1)],
         declarations=[{"target": "pbip/Wb/Wb.SemanticModel/definition/tables/FLIGHTS.tmdl"}],
     )
     report = ccf.scan(bundle)
     assert report["status"] == ccf.STATUS_OK
     assert report["declared_sources"] == 1
+
+
+def test_one_declaration_cannot_excuse_a_SECOND_file_backed_table(tmp_path: Path) -> None:
+    """Blind review HIGH 4: a table-scoped record attests to ITS table and no other.
+
+    Two file-backed tables, one declaration naming one of them. The second was recorded by nobody, so
+    the source must not clear. The module's own contract already said a table-scoped decision cannot
+    vouch for a table nobody examined; at model scope `unmatched` is empty, so `cov.complete` was
+    vacuously true and the rule never fired.
+    """
+    bundle = tmp_path / "b"
+    _build_engine_bundle(
+        bundle,
+        "Wb",
+        {"T1": "csv_missing", "T2": "csv_missing"},
+        [_embedded("snowflake", tables=2)],
+        declarations=[{"target": "pbip/Wb/Wb.SemanticModel/definition/tables/T1.tmdl"}],
+    )
+    report = ccf.scan(bundle)
+    assert report["status"] != ccf.STATUS_OK
+    assert report["declared_sources"] == 0
+    assert _cli(bundle).returncode != ccf.EXIT_OK
 
 
 def test_engine_units_are_scoped_to_their_own_pbip_folder(tmp_path: Path) -> None:
@@ -2303,3 +2375,179 @@ def test_the_real_workbook_telemetry_shape_is_pinned() -> None:
     assert detail["tables"] == ["FACT_ORDERS", "DIM_CUSTOMER", "DIM_DATE", "Date"]
     assert ccf.engine_datasource_sources(detail)[0]["tables"] == detail["tables"]
     assert ccf.engine_datasource_sources(detail)[0]["connection"]["powerbi_target"] == "live_source"
+
+
+# --- blind review, round 16: five paths where a PASS rested on partial evidence --------------------
+#
+# One defect wearing five faces. The module's stated invariant is "a finding may rest on partial
+# evidence, a pass may not"; the asymmetry was designed for and NOT enforced on the engine paths.
+# Four of the five were false PASSES (exit 0), which is the direction that ships stale data.
+#
+# Four earlier tests ENSHRINED the fail-open by asserting a clean pass over deliberately partial
+# fixtures, which is why 2196 green tests and 17/17 mutations surfaced none of it. Those fixtures are
+# corrected above; these lock the behaviour down.
+
+
+def test_HIGH1_a_declared_unit_with_no_slice_does_not_vanish(tmp_path: Path) -> None:
+    """A missing unit must never be indistinguishable from a fully-checked estate.
+
+    Coverage used to count only what `read_handover` returned, and any valid slice made it ignore
+    `report.json` entirely - so a report-declared workbook whose slice was missing, stale or malformed
+    dropped out of the numerator AND the denominator. Measured before the fix: `COVERAGE: 1 of 1`,
+    exit 0, with the downgraded unit simply absent.
+    """
+    bundle = tmp_path / "b"
+    _build_engine_bundle(bundle, "Broken", {"T": "csv_missing"}, [_embedded("snowflake", tables=1)])
+    detail = json.loads((bundle / "handover" / "Broken.json").read_text(encoding="utf-8"))["workbook"]
+    (bundle / "report.json").write_text(
+        json.dumps({"tool": "migrate_estate", "workbooks": [detail], "datasources": []}), encoding="utf-8"
+    )
+    (bundle / "handover" / "Broken.json").unlink()
+
+    report = ccf.scan(bundle)
+    assert report["status"] == ccf.STATUS_DOWNGRADED
+    assert "Broken" in {u["unit"] for u in report["units"]}
+    assert _cli(bundle).returncode == ccf.EXIT_DOWNGRADED
+
+
+def test_HIGH1_a_stale_slice_cannot_shadow_the_report_census(tmp_path: Path) -> None:
+    """`report.json` is the authority; slices are copies of it and never replace it."""
+    bundle = tmp_path / "b"
+    _build_engine_bundle(bundle, "Broken", {"T": "csv_missing"}, [_embedded("snowflake", tables=1)])
+    detail = json.loads((bundle / "handover" / "Broken.json").read_text(encoding="utf-8"))["workbook"]
+    (bundle / "report.json").write_text(json.dumps({"tool": "migrate_estate", "workbooks": [detail]}), encoding="utf-8")
+    (bundle / "handover" / "Broken.json").write_text("{ this is not json", encoding="utf-8")
+    assert ccf.scan(bundle)["status"] == ccf.STATUS_DOWNGRADED
+
+
+def test_HIGH1_an_unreadable_slice_with_no_census_is_still_a_unit(tmp_path: Path) -> None:
+    """With no `report.json` to cross-check against, an unreadable slice must not just disappear."""
+    bundle = tmp_path / "b"
+    _build_engine_bundle(bundle, "Wb", {"T": "snowflake"}, [_embedded("snowflake", tables=1)])
+    (bundle / "handover" / "Wb.json").write_text("{ not json", encoding="utf-8")
+    report = ccf.scan(bundle)
+    assert report["units_scanned"] == 1
+    assert report["units"][0]["reason"] == ccf.REASON_NOT_EVALUATED
+    assert "unreadable" in report["units"][0]["detail"]
+
+
+def test_HIGH2_a_connector_from_one_partition_cannot_certify_another(tmp_path: Path) -> None:
+    """ "Rows arrive" and "this connector is named" must be the SAME partition.
+
+    Both were model-wide facts, so a live `Sql.Database` partition certified a Snowflake source whose
+    only partition was an empty `#table` stub: two sources reported connected, exit 0.
+    """
+    bundle = tmp_path / "b"
+    _build_engine_bundle(
+        bundle,
+        "Wb",
+        {"SALES": "sqlserver", "SF_STUB": "snowflake_stub"},
+        [_embedded("sqlserver", caption="A", tables=1), _embedded("snowflake", caption="B", tables=1)],
+    )
+    report = ccf.scan(bundle)
+    assert report["status"] != ccf.STATUS_OK
+    verdicts = {s["connection_class"]: s["verdict"] for s in report["units"][0]["sources"]}
+    assert verdicts["snowflake"] == ccf.SOURCE_NOT_CHECKED
+    assert _cli(bundle).returncode != ccf.EXIT_OK
+
+
+def test_HIGH2_the_same_borrow_is_closed_at_TABLE_scope_too(tmp_path: Path) -> None:
+    """The identical model-wide agreement existed on the parser path and is closed by the same rule.
+
+    A source's own table classified `remote_import` through `Sql.Database` used to be certified by a
+    Snowflake token emitted for an unrelated table - a false pass on the tier this gate started on.
+    """
+    source = _live_source("ds.sf", "snowflake", tables=["MINE"])
+    model = ccf.Model(
+        "m",
+        "m",
+        (
+            {"table": "MINE", "category": "remote_import", "connectors": frozenset({"Sql"})},
+            {"table": "THEIRS", "category": "live", "connectors": frozenset({"Snowflake"})},
+        ),
+        'Sql.Database("s","d")\nSnowflake.Databases("s","d")',
+    )
+    verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
+    assert verdict.verdict != ccf.SOURCE_CONNECTED
+
+
+def test_HIGH3_table_count_is_carried_into_the_judgment(tmp_path: Path) -> None:
+    """3 declared tables against 1 emitted partition is not a clean bill of health.
+
+    `table_count` is the only completeness evidence the workbook payload has, and it was discarded.
+    """
+    bundle = tmp_path / "b"
+    _build_engine_bundle(bundle, "Wb", {"T1": "snowflake"}, [_embedded("snowflake", tables=3)])
+    report = ccf.scan(bundle)
+    assert report["status"] != ccf.STATUS_OK
+    assert report["units"][0]["sources"][0]["verdict"] == ccf.SOURCE_NOT_CHECKED
+    assert _cli(bundle).returncode != ccf.EXIT_OK
+
+
+def test_HIGH3_a_matching_table_count_still_passes(tmp_path: Path) -> None:
+    """The negative beside the positive: completeness must not make everything NOT_CHECKED."""
+    bundle = tmp_path / "b"
+    _build_engine_bundle(bundle, "Wb", {"T1": "snowflake"}, [_embedded("snowflake", tables=1)])
+    assert ccf.scan(bundle)["status"] == ccf.STATUS_OK
+
+
+def test_HIGH3_an_unrecorded_table_count_cannot_support_a_pass(tmp_path: Path) -> None:
+    """Absence again: no `table_count` means unknown completeness, not complete."""
+    bundle = tmp_path / "b"
+    row = _embedded("snowflake", tables=1)
+    row.pop("table_count")
+    _build_engine_bundle(bundle, "Wb", {"T1": "snowflake"}, [row])
+    assert ccf.scan(bundle)["status"] != ccf.STATUS_OK
+
+
+def test_HIGH3_an_unclassified_federated_leg_is_preserved_not_filtered(tmp_path: Path) -> None:
+    """A leg with no recorded `connection_class` was silently dropped and the source passed clean.
+
+    Two assertions, because "preserved" and "acted on" are different claims. `engine_sources` keeps it
+    as an UNKNOWN-target record (visibility at the seam); the unit refuses a pass because the live
+    sibling carries the unaccounted-leg count. It gets no verdict ROW of its own - `_live_verdicts`
+    judges live-target sources only, and widening that is a separate change to the parser path too.
+    """
+    row = _embedded("snowflake", legs=["snowflake", None], tables=1)
+    derived = ccf.engine_sources([row])
+    assert any("unclassified-leg" in s["id"] for s in derived), f"the leg was filtered out: {derived}"
+    assert ccf._count_judgeable(derived) == 2
+
+    bundle = tmp_path / "b"
+    _build_engine_bundle(bundle, "Wb", {"T1": "snowflake"}, [row])
+    assert ccf.scan(bundle)["status"] != ccf.STATUS_OK
+    assert _cli(bundle).returncode != ccf.EXIT_OK
+
+
+def test_MED5_a_legitimate_flat_file_sibling_is_not_reported_as_a_downgrade(tmp_path: Path) -> None:
+    """The gate's central discrimination, at model scope: a CSV is not evidence against a live source.
+
+    One declared Snowflake source and one legitimate Excel source, with only the Excel CSV emitted.
+    Nothing supports attributing that file to Snowflake. Unlike the other four this is a false
+    FINDING, and a gate that fires on correct work gets muted and then misses the real case.
+    """
+    bundle = tmp_path / "b"
+    _build_engine_bundle(
+        bundle,
+        "Wb",
+        {"REF": "csv_present"},
+        [_embedded("snowflake", caption="Live", tables=1), _embedded("excel-direct", caption="Ref", tables=1)],
+    )
+    report = ccf.scan(bundle)
+    assert report["status"] != ccf.STATUS_DOWNGRADED
+    assert report["downgraded_sources"] == 0
+    assert _cli(bundle).returncode != ccf.EXIT_DOWNGRADED
+
+
+def test_MED5_more_file_tables_than_the_flat_siblings_can_explain_is_still_a_finding(tmp_path: Path) -> None:
+    """Detection stays alive on a genuinely mixed unit - the refusal is bounded, not blanket."""
+    bundle = tmp_path / "b"
+    _build_engine_bundle(
+        bundle,
+        "Wb",
+        {"REF": "csv_present", "SF1": "csv_missing", "SF2": "csv_missing"},
+        [_embedded("snowflake", caption="Live", tables=2), _embedded("excel-direct", caption="Ref", tables=1)],
+    )
+    report = ccf.scan(bundle)
+    assert report["status"] == ccf.STATUS_DOWNGRADED
+    assert _cli(bundle).returncode == ccf.EXIT_DOWNGRADED

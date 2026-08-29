@@ -111,7 +111,25 @@ A SKIPPED unit now carries a machine-readable `reason`: `nothing_to_check` (no l
 unit - a real, complete answer) or `not_evaluated` (this unit could not be examined - no telemetry,
 no model, no attribution) or `partial_coverage`. Reading the second as the first is exactly how nine
 unexamined workbooks looked like a clean bill of health. The estate summary reports coverage
-(n checked / n total) for the same reason.
+(n checked / n total) for the same reason, and `report.json` - not the handover slices copied from
+it - is the CENSUS that denominator counts, so a unit whose slice is missing or malformed shows up
+as not-evaluated instead of disappearing from numerator and denominator alike.
+
+The asymmetry is ENFORCED, not merely designed to
+-------------------------------------------------
+"A finding may rest on partial evidence, a pass may not" was the stated rule while four independent
+paths let a PASS through on partial evidence (blind review, 2026-08-29). Each is now a refusal:
+
+  * rows and connector must come from the SAME partition. Two model-wide facts - "something is
+    connected" and "this token appears somewhere" - certified a Snowflake source whose only partition
+    was an empty scaffold, on the strength of a sibling's live Sql partition.
+  * a declared `table_count` that the model cannot account for, and a federated leg with no recorded
+    `connection_class`, are both incompleteness. They used to be discarded and filtered out.
+  * a table-scoped decision must cover EVERY file-backed table of its source. One generated-edit
+    declaration used to clear a source that had materialised two tables.
+  * at model scope a file-backed partition that a declared FLAT-FILE sibling could legitimately own
+    is not evidence against a live source - that one was a false FINDING, and a gate that fires on
+    correct work gets muted and then misses the real case.
 
 What this gate does NOT tell you
 --------------------------------
@@ -231,6 +249,9 @@ CLASS_TO_CONNECTOR: dict[str, str] = {
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# Every connector token this module can look for, derived from the class map so the two cannot drift.
+CONNECTOR_TOKENS = frozenset(CLASS_TO_CONNECTOR.values())
+
 # Tableau connection classes that are a PROXY to another migration unit rather than an upstream
 # system. Measured on a real 2.339.0 bundle: a workbook binding a published datasource reports
 # `sqlproxy`, and its real connection (Snowflake) is not in the workbook payload at all. These are
@@ -245,7 +266,7 @@ class Model:
 
     name: str
     path: str
-    partitions: tuple[dict[str, str], ...]
+    partitions: tuple[dict[str, Any], ...]
     m_text: str
 
     @property
@@ -260,6 +281,12 @@ class Model:
 
     def has_connector(self, token: str) -> bool:
         """Whether the emitted M references a specific connector token (e.g. `Snowflake.Databases`).
+
+        MODEL-WIDE, and therefore never sufficient for a PASS - see `_partition_connects`. Blind
+        review found that "some partition carries rows" AND "the token appears somewhere in the
+        model" need not be the SAME partition: a live Sql partition certified a Snowflake source
+        whose only partition was an empty `#table` stub, and the unit exited 0. This is kept for the
+        model-wide "is the connector present at all" question, which only ever produces NOT_CHECKED.
 
         Comments are stripped first. Blind review demonstrated that a connector name sitting in an M
         comment - `// prior source was Snowflake.Databases("s","d")` - made a fully file-backed source
@@ -331,17 +358,44 @@ def _table_names(data_source: dict[str, Any]) -> list[str]:
     return names
 
 
+def partition_connectors(body: str) -> frozenset[str]:
+    """The connector tokens ONE partition's own M actually calls, comments stripped.
+
+    Per-partition rather than per-model, because "rows arrive" and "this connector is named" must be
+    the SAME partition before either can support a pass. Blind review, HIGH 2: they were separate
+    model-wide facts, so a live `Sql.Database` partition certified a Snowflake source whose only
+    partition was an empty `#table` stub - two sources reported connected, exit 0.
+    """
+    text = _strip_m_comments(body)
+    return frozenset(token for token in CONNECTOR_TOKENS if re.search(rf"\b{re.escape(token)}\.[A-Za-z]", text))
+
+
+def _partition_connects(part: dict[str, Any], token: str) -> bool:
+    """Whether THIS partition both carries rows from a connection and calls THIS connector.
+
+    A partition with no recorded connector set fails closed. The only producer is `load_model`, which
+    always records one; anything else is a hand-built object that has not proven what it claims.
+    """
+    return part["category"] in CONNECTED_CATEGORIES and token in (part.get("connectors") or frozenset())
+
+
 def load_model(model_dir: Path) -> Model:
     """Classify every partition of one `.SemanticModel` folder via check_empty_model."""
     params = model_parameters(model_dir)
-    partitions: list[dict[str, str]] = []
+    partitions: list[dict[str, Any]] = []
     m_chunks: list[str] = []
     for tmdl in sorted((model_dir / "definition" / "tables").glob("*.tmdl")):
         text = tmdl.read_text(encoding="utf-8-sig", errors="replace")
         m_chunks.append(text)
         for block in _partition_blocks(text):
             verdict = classify_partition(block, model_dir, params)
-            partitions.append({"table": tmdl.stem, "category": str(verdict.get("category", "unrecognized"))})
+            partitions.append(
+                {
+                    "table": tmdl.stem,
+                    "category": str(verdict.get("category", "unrecognized")),
+                    "connectors": partition_connectors(str(block.get("body") or "")),
+                }
+            )
     return Model(name=model_dir.name, path=str(model_dir), partitions=tuple(partitions), m_text="\n".join(m_chunks))
 
 
@@ -447,8 +501,12 @@ def _owning_model_names(models: tuple[Model, ...], file_tables: set[str]) -> set
     return owners
 
 
-def _declared_by_edit(declarations: list[dict[str, Any]], file_tables: set[str], owners: set[str]) -> str | None:
-    """A generated-edit declaration that provably touches THIS source's file-backed table.
+def _declared_by_edits(declarations: list[dict[str, Any]], file_tables: set[str], owners: set[str]) -> set[str]:
+    """EVERY file-backed table of this source that a generated-edit declaration provably touches.
+
+    Returns the SET, not the first hit. Blind review, HIGH 4: returning one declaration and treating
+    it as sufficient let a single recorded edit certify a second, undeclared file-backed table -
+    exactly the "a table-scoped record attests only to its table" rule this module already claimed.
 
     Round 11: matching on `Path(target).stem` alone discarded every other path component, so a target
     inside `OtherSource.SemanticModel/definition/tables/ORDERS.tmdl` declared a downgrade for a
@@ -458,6 +516,7 @@ def _declared_by_edit(declarations: list[dict[str, Any]], file_tables: set[str],
     target path must name a model that actually holds the file-backed table. If ownership cannot be
     established the declaration does not apply, and the downgrade stands as a finding.
     """
+    covered: set[str] = set()
     for declaration in declarations:
         target = str(declaration.get("target") or "")
         if not target:
@@ -467,8 +526,8 @@ def _declared_by_edit(declarations: list[dict[str, Any]], file_tables: set[str],
             continue
         if owners and not owners & {segment.casefold() for segment in path.parts}:
             continue
-        return target
-    return None
+        covered.add(path.stem)
+    return covered
 
 
 @dataclass(frozen=True)
@@ -480,6 +539,7 @@ class UnitContext:
     declarations: tuple[dict[str, Any], ...]
     source_ids: frozenset[str] = frozenset()
     scope: str = SCOPE_TABLE
+    flat_file_capacity: int | None = 0
 
 
 @dataclass(frozen=True)
@@ -594,36 +654,73 @@ def _connectivity(models: tuple[Model, ...], token: str, tables: set[str]) -> Co
     the same class, source A's preserved connector vouched for source B, and if B's declared table did
     not match the emitted one, B had no file evidence either - so a downgraded source reported
     CONNECTED and the unit exited 0.
+
+    `connected` is now PER PARTITION - the same partition must carry rows AND call this connector.
+    Model-wide agreement was blind review's HIGH 2 and it applies at table scope too: a source's own
+    table classified `remote_import` through `Sql.Database` used to be certified by a Snowflake token
+    emitted for an unrelated table.
     """
     matched, unmatched = _attribute(models, tables)
-    connector_present = any(model.has_connector(token) for model in models)
+    connector_present = any(token in (part.get("connectors") or frozenset()) for part in matched)
     if not matched:
         return Coverage(False, False, [], False, unmatched, connector_present, SCOPE_TABLE)
-    connected = any(part["category"] in CONNECTED_CATEGORIES for part in matched) and connector_present
+    connected = any(_partition_connects(part, token) for part in matched)
     file_tables = sorted({part["table"] for part in matched if part["category"] in FILE_CATEGORIES})
     return Coverage(connected, bool(file_tables), file_tables, True, unmatched, connector_present, SCOPE_TABLE)
 
 
-def _model_coverage(models: tuple[Model, ...], token: str) -> Coverage:
-    """Connectivity evidence for ONE source when NOTHING names its tables (the engine path).
+def _model_scope_unmatched(declared: int | None, located: int, unclassified_legs: int) -> list[str]:
+    """What a model-scope verdict could NOT account for, in the vocabulary `unmatched` already speaks.
 
-    The engine bundle records a `table_count` per embedded datasource and no table names at all
-    (verified against the canonical engine 2.339.0, `_embedded_datasource_telemetry`), so `_attribute`
-    has nothing to attribute WITH. Widening the scope to the whole model is the strongest honest
-    answer available, and it is genuinely weaker than table scope in one direction only: it cannot
-    separate this source's file-backed partitions from a sibling's. `_judge_source` therefore refuses
-    to call a PASS or a FINDING whenever both signals are present under this scope.
+    Blind review, HIGH 3 and HIGH 4 share one root cause: `unmatched` was hard-coded empty at model
+    scope, so `Coverage.complete` was VACUOUSLY TRUE and every rule keyed on it silently stopped
+    firing. Two rules the module already had - "a pass must cover every declared table" and "a
+    table-scoped decision cannot certify an unexamined sibling" - were dead there.
+
+    A declared table is LOCATED when some partition could be it: connected through this source's
+    connector, or file-backed. That over-counts (a sibling's CSV can inflate `located`), which is safe
+    because a model-scope coverage with any file-backed partition never reaches a pass anyway. What it
+    does NOT over-count is the case that matters: a source declaring three tables with one connected
+    partition and no files is short by two, and must not report CONNECTED.
+
+    An unrecorded `table_count` is absence, not zero - it cannot support a pass at all.
+    """
+    unmatched: list[str] = []
+    if declared is None:
+        unmatched.append("<the engine recorded no table_count for this source>")
+    elif declared > located:
+        unmatched.append(f"<{declared - located} of {declared} declared table(s) unaccounted for in the model>")
+    unmatched.extend(f"<connection leg {i + 1} has no recorded connection_class>" for i in range(unclassified_legs))
+    return unmatched
+
+
+def _model_coverage(models: tuple[Model, ...], token: str, source: dict[str, Any]) -> Coverage:
+    """Connectivity evidence for ONE source when NOTHING names its tables (the engine workbook path).
+
+    The engine's WORKBOOK emitter records a `table_count` per embedded datasource and no table names
+    (measured against canonical 2.339.0). Its DATASOURCE emitter does name them and never comes here.
+    So `_attribute` has nothing to attribute WITH, and the scope widens to the whole model - which is
+    weaker in exactly one direction: it cannot separate this source's file-backed partitions from a
+    sibling's. `_judge_source` refuses to call a PASS or a FINDING whenever both signals are present.
 
     What it CAN prove is the incident itself. A live class whose connector appears nowhere in the
     emitted model, in a model whose rows come off disk, was materialised - no table names needed.
     """
     partitions = [part for model in models for part in model.partitions]
-    connector_present = any(model.has_connector(token) for model in models)
-    if not partitions:
-        return Coverage(False, False, [], False, [], connector_present, SCOPE_MODEL)
-    connected = any(part["category"] in CONNECTED_CATEGORIES for part in partitions) and connector_present
+    connector_present = any(token in (part.get("connectors") or frozenset()) for part in partitions)
+    connected_parts = [part for part in partitions if _partition_connects(part, token)]
     file_tables = sorted({part["table"] for part in partitions if part["category"] in FILE_CATEGORIES})
-    return Coverage(connected, bool(file_tables), file_tables, True, [], connector_present, SCOPE_MODEL)
+    declared = source.get("declared_table_count")
+    unmatched = _model_scope_unmatched(
+        declared if isinstance(declared, int) else None,
+        len(connected_parts) + len(file_tables),
+        int(source.get("unclassified_legs") or 0),
+    )
+    if not partitions:
+        return Coverage(False, False, [], False, unmatched, connector_present, SCOPE_MODEL)
+    return Coverage(
+        bool(connected_parts), bool(file_tables), file_tables, True, unmatched, connector_present, SCOPE_MODEL
+    )
 
 
 def _coverage_note(cov: "Coverage") -> str:
@@ -674,31 +771,75 @@ def _connected_verdict(token: str, cov: "Coverage") -> tuple[str, str]:
     return SOURCE_CONNECTED, f"live source is connected in the model (a `{token}.*` connector is present)"
 
 
+def _limitation_table_coverage(
+    limitations: list[dict[str, Any]],
+    source_id: str,
+    table_names: list[str],
+    sibling_ids: frozenset[str] = frozenset(),
+) -> set[str]:
+    """Table names precisely declared by decision-stage limitation entries.
+
+    The companion to `_declared_by_limitation`'s table-scoped answer. That function reports THAT a
+    table-scoped record exists; this reports WHICH tables it covers, so a pass can require every
+    file-backed table to be covered rather than just one (blind review, HIGH 4).
+
+    ⚠️ Every delimiter decision is delegated to `_declaration_scope`, one table at a time, rather than
+    re-implementing the prefix rules here. The first draft re-implemented them and immediately went
+    out of step: the round-12 `_` mutation was neutralised at this second site, so invariant I8 read
+    VACUOUS. Two copies of a matching rule is how a mutation stops being observable.
+    """
+    covered: set[str] = set()
+    for entry in limitations:
+        if not isinstance(entry, dict) or str(entry.get("stage")) not in DECISION_STAGES:
+            continue
+        item = str(entry.get("item") or "")
+        for name in table_names:
+            if name and _declaration_scope(item, source_id, [name], sibling_ids) == "table":
+                covered.add(name)
+    return covered
+
+
 def _declared_reason(
     ctx: "UnitContext", source_id: str, data_source: dict[str, Any], file_tables: list[str]
 ) -> tuple[str, str] | None:
     """`(reason, scope)` for why this downgrade counts as DECIDED, or None if nobody recorded it.
 
-    `scope` is "source" or "table", and it decides whether the record can certify tables the model
-    never showed us. A record naming the SOURCE attests to the whole source, so it still stands when
-    some declared table is unmatched. A record naming ONE TABLE - a generated-edit target, or a
-    limitation whose item is a table name - attests only to that table, and must not vouch for a
-    sibling nobody examined.
+    `scope` is "source", "table" or "partial", and it decides whether the record can certify tables
+    the model never showed us. A record naming the SOURCE attests to the whole source, so it still
+    stands when some declared table is unmatched. A record naming ONE TABLE - a generated-edit target,
+    or a limitation whose item is a table name - attests only to that table.
+
+    ⚠️ "Attests only to that table" is now ENFORCED, not merely stated. Blind review, HIGH 4: a single
+    generated-edit declaration cleared a source with TWO file-backed tables, because the first
+    matching declaration was accepted and nobody checked whether the rest were covered. Table-scoped
+    records must now cover EVERY file-backed table of the source before they can produce a pass;
+    covering only some yields "partial", which is a refusal that names what is missing.
 
     Measured across every spec in this repo: 4 decision-stage limitations name a data-source id and
     **0** name a table. So the dangerous form does not occur in practice while the safe form does,
     which is why this distinguishes them rather than simply refusing every declaration on incomplete
     coverage - that would add noise to the only shape real specs actually use.
     """
-    limitation = _declared_by_limitation(ctx.limitations, source_id, _table_names(data_source), ctx.source_ids)
-    if limitation:
-        text, names_source = limitation
-        scope = "source" if names_source else "table"
-        return f"downgrade recorded in limitations_encountered: {text}", scope
-    edit = _declared_by_edit(ctx.declarations, set(file_tables), _owning_model_names(ctx.models, set(file_tables)))
-    if edit:
-        return f"downgrade recorded via generated-edit declaration: {edit}", "table"
-    return None
+    table_names = _table_names(data_source)
+    limitation = _declared_by_limitation(ctx.limitations, source_id, table_names, ctx.source_ids)
+    if limitation and limitation[1]:
+        return f"downgrade recorded in limitations_encountered: {limitation[0]}", "source"
+
+    wanted = set(file_tables)
+    covered = _limitation_table_coverage(ctx.limitations, source_id, table_names, ctx.source_ids)
+    covered |= _declared_by_edits(ctx.declarations, wanted, _owning_model_names(ctx.models, wanted))
+    if not covered:
+        return None
+    named = ", ".join(sorted(covered))
+    if wanted <= covered:
+        return f"downgrade recorded for every file-backed table of this source ({named})", "table"
+    return (
+        f"a table-scoped decision covers {named}, but {len(wanted - covered)} file-backed table(s) of "
+        f"this source are recorded by nobody ({', '.join(sorted(wanted - covered))}). A table-scoped "
+        "record attests only to its own table; record the decision against the data source, or add a "
+        "declaration for each materialised table",
+        "partial",
+    )
 
 
 def _declared_verdict(
@@ -710,17 +851,24 @@ def _declared_verdict(
     enforced only on the CONNECTED path, so an explicit decision about ORDERS silently certified an
     unexamined CUSTOMERS and the unit exited 0. A SOURCE-wide record does cover the whole source and
     still stands; a TABLE-scoped one cannot vouch for a table nobody examined.
+
+    Three refusals, not one, because they fail for different reasons: "partial" means some MATERIALISED
+    table was recorded by nobody (HIGH 4), while incomplete coverage means some DECLARED table was
+    never located at all. Both are refusals; conflating their messages sends an operator to the wrong
+    place.
     """
     declared = _declared_reason(ctx, source_id, data_source, cov.file_tables)
     if not declared:
         return None
     reason, scope = declared
+    if scope == "partial":
+        return SOURCE_NOT_CHECKED, reason
     if scope == "source" or cov.complete:
         return SOURCE_DECLARED, reason
     return (
         SOURCE_NOT_CHECKED,
         f"{reason} - but that record is scoped to a single table, and "
-        f"{len(cov.unmatched)} declared table(s) match no emitted partition "
+        f"{len(cov.unmatched)} declared table(s) could not be accounted for "
         f"({', '.join(cov.unmatched)}). A table-scoped decision cannot certify a table nobody "
         "examined; record the decision against the data source, or fix the spec-to-TMDL naming",
     )
@@ -817,7 +965,7 @@ def _judge_source(  # pylint: disable=too-many-return-statements
             [],
         )
     cov = (
-        _model_coverage(ctx.models, token)
+        _model_coverage(ctx.models, token, data_source)
         if ctx.scope == SCOPE_MODEL
         else _connectivity(ctx.models, token, set(_table_names(data_source)))
     )
@@ -847,6 +995,9 @@ def _judge_source(  # pylint: disable=too-many-return-statements
             "no live connection found, but no file-backed partition either - the source's rows were "
             "not clearly materialised to a file (another gate owns an empty/stub model)",
         )
+    unexplained = _unexplained_file_note(ctx, cov)
+    if unexplained:
+        return make(SOURCE_NOT_CHECKED, unexplained)
     declared = _declared_verdict(ctx, source_id, data_source, cov)
     if declared:
         return make(*declared)
@@ -859,6 +1010,55 @@ def _judge_source(  # pylint: disable=too-many-return-statements
         "land in a flat file - the connection was silently downgraded and the model can never refresh"
         + _coverage_note(cov),
     )
+
+
+def _unexplained_file_note(ctx: "UnitContext", cov: "Coverage") -> str | None:
+    """Refuse a model-scope FINDING when a declared flat-file sibling could own every file partition.
+
+    Blind review, MEDIUM 5 - the one false FINDING rather than a false pass. At model scope a
+    file-backed partition was attributed to EVERY live source whose connector is absent, so a unit
+    declaring one Snowflake source and one legitimate Excel source, emitting only the Excel CSV,
+    claimed the Snowflake rows had landed in that file. Nothing supports that attribution, and this
+    inverts the discrimination the whole gate turns on: flagging a legitimately-flat table is how a
+    gate gets muted and then misses the real case.
+
+    The capacity test keeps detection alive on genuinely mixed units: file-backed partitions beyond
+    what every declared flat-file source could account for are unexplained, and a finding may rest on
+    those. A flat-file sibling with NO recorded table_count has unknown capacity, so nothing is
+    unexplained and the verdict is a refusal.
+    """
+    if cov.scope != SCOPE_MODEL:
+        return None
+    capacity = ctx.flat_file_capacity
+    if capacity == 0:
+        return None  # no flat-file sibling exists that could own these partitions
+    if capacity is not None and len(cov.file_tables) > capacity:
+        return None  # more file-backed tables than every flat-file sibling could account for
+    limit = "an unrecorded number of" if capacity is None else str(capacity)
+    return (
+        f"{len(cov.file_tables)} file-backed table(s) are in this model, but the unit also declares "
+        f"FLAT-FILE source(s) accounting for {limit} table(s) - at model scope those partitions "
+        "cannot be told apart, so this source's rows may never have been materialised at all. "
+        "Inspect by hand; a legitimately-flat sibling must not be reported as this source's downgrade"
+    )
+
+
+def _flat_file_capacity(data_sources: list[dict[str, Any]]) -> int | None:
+    """How many file-backed tables the unit's declared FLAT-FILE sources could legitimately own.
+
+    `None` means unknown - at least one flat-file source has no recorded table count, so no number of
+    file partitions is "more than they can explain". Used only to refuse a model-scope FINDING
+    (blind review, MEDIUM 5); it can never turn a refusal into a pass.
+    """
+    total = 0
+    for source in data_sources:
+        if _expected_target(source.get("connection") or {})[0] != FLAT_FILE:
+            continue
+        count = source.get("declared_table_count")
+        if not isinstance(count, int):
+            return None
+        total += count
+    return total
 
 
 def _live_verdicts(
@@ -875,6 +1075,7 @@ def _live_verdicts(
         tuple(declarations),
         frozenset(str(ds.get("id") or "") for ds in data_sources),
         scope,
+        _flat_file_capacity(data_sources),
     )
     verdicts: list[SourceVerdict] = []
     for data_source in data_sources:
@@ -1048,6 +1249,7 @@ class EngineUnit:
     bundle: Path
     workbook: dict[str, Any]
     scope: str = SCOPE_MODEL
+    error: str | None = None
 
 
 def engine_datasource_sources(detail: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1073,6 +1275,8 @@ def engine_datasource_sources(detail: dict[str, Any]) -> list[dict[str, Any]]:
     connection_class = str(detail.get("connector") or detail.get("connection_class") or "")
     target, _reason = powerbi_target(connection_class or UNKNOWN, "unknown")
     tables = [str(t) for t in (detail.get("tables") or []) if isinstance(t, str)]
+    count = detail.get("table_count")
+    declared = len(tables) if tables else (count if isinstance(count, int) else None)
     return [
         {
             "id": name,
@@ -1083,6 +1287,7 @@ def engine_datasource_sources(detail: dict[str, Any]) -> list[dict[str, Any]]:
                 "powerbi_target": target,
             },
             "tables": tables,
+            "declared_table_count": declared,
         }
     ]
 
@@ -1090,38 +1295,10 @@ def engine_datasource_sources(detail: dict[str, Any]) -> list[dict[str, Any]]:
 def engine_datasource_units(bundle: Path) -> list[EngineUnit]:
     """Every DATASOURCE unit recorded in a bundle's `report.json`.
 
-    Read directly rather than through `read_handover`, which resolves WORKBOOKS only - and, when a
-    `handover/` folder exists, never opens `report.json` at all, so the datasource half would be
-    invisible. Measured: on the real cold-run bundle that is exactly what happened - one handover
-    slice, one workbook unit found, and the only genuinely live Snowflake source in the estate
-    (the datasource) never examined.
-
-    Guarded by CONTENT, not by filename: every PBIR report definition in this repo is also called
-    `report.json`, and one carries no `datasources` list.
+    A thin view over `_engine_census`, kept because "what datasource units does this bundle declare?"
+    is a question worth asking on its own.
     """
-    report = bundle / "report.json"
-    if not report.is_file():
-        return []
-    try:
-        payload = json.loads(report.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, dict) or not isinstance(payload.get("datasources"), list):
-        return []
-    units = []
-    for detail in payload["datasources"]:
-        if not isinstance(detail, dict):
-            continue
-        units.append(
-            EngineUnit(
-                name=str(detail.get("name") or report.stem),
-                source=report,
-                bundle=bundle,
-                workbook=detail,
-                scope=SCOPE_TABLE,
-            )
-        )
-    return units
+    return [unit for unit in _engine_census(bundle)[0] if unit.scope == SCOPE_TABLE]
 
 
 def engine_datasource_telemetry(workbook: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -1156,6 +1333,13 @@ def engine_sources(rows: list[dict[str, Any]], published_name: str = "") -> list
     `published_name` rides along from the workbook's `binding_signal` so a `sqlproxy` record can name
     the unit that actually holds its connection instead of reporting an unmapped class.
 
+    ⚠️ `table_count` and `named_connection_count` are CARRIED, not discarded. Blind review, HIGH 3:
+    dropping them threw away the only completeness evidence this payload has - a source declaring
+    three tables against one emitted partition passed clean, and a federated leg whose
+    `connection_class` is null was silently FILTERED OUT and passed clean too. Both are now
+    incompleteness that `_model_scope_unmatched` turns into a refusal. An unclassifiable leg also
+    becomes its own UNKNOWN-target record, so it is visible rather than merely counted.
+
     `tables` is deliberately left empty rather than invented: the WORKBOOK emitter records a
     `table_count` and no names (measured against canonical engine 2.339.0). The DATASOURCE emitter
     does name them - see `engine_datasource_sources`. `mode` is `unknown` because this payload does
@@ -1163,32 +1347,70 @@ def engine_sources(rows: list[dict[str, Any]], published_name: str = "") -> list
     """
     sources: list[dict[str, Any]] = []
     for row in rows:
-        label = str(row.get("label") or row.get("caption") or "embedded datasource")
-        caption = str(row.get("caption") or label)
-        legs = [leg for leg in (row.get("connections") or []) if isinstance(leg, dict)]
-        classes = [str(leg.get("connection_class") or "") for leg in legs]
-        classes = [cls for cls in classes if cls] or [str(row.get("connection_class") or "")]
-        seen: set[str] = set()
-        for connection_class in classes:
-            if connection_class in seen:
-                continue
-            seen.add(connection_class)
-            target, _reason = powerbi_target(connection_class or UNKNOWN, "unknown")
-            source_id = label if len(classes) == 1 else f"{label}#{connection_class or UNKNOWN}"
-            sources.append(
-                {
-                    "id": source_id,
-                    "caption": caption if len(classes) == 1 else f"{caption} [{connection_class or UNKNOWN}]",
-                    "connection": {
-                        "class": connection_class,
-                        "mode": "unknown",
-                        "powerbi_target": target,
-                    },
-                    "tables": [],
-                    "published_datasource_name": published_name,
-                }
-            )
+        sources.extend(_engine_row_sources(row, published_name))
     return sources
+
+
+def _engine_leg_classes(row: dict[str, Any]) -> tuple[list[str], int]:
+    """`(distinct classes, unclassifiable leg count)` for one embedded-datasource row.
+
+    An unclassifiable leg is COUNTED rather than dropped. Blind review, HIGH 3: filtering legs whose
+    `connection_class` is null made a datasource binding two systems look like one fully-understood
+    system, and it passed clean.
+    """
+    legs = [leg for leg in (row.get("connections") or []) if isinstance(leg, dict)]
+    named = row.get("named_connection_count")
+    declared_legs = named if isinstance(named, int) else len(legs)
+    if legs:
+        classified = [str(leg.get("connection_class") or "") for leg in legs]
+        classified = [cls for cls in classified if cls]
+    else:
+        classified = [str(row.get("connection_class"))] if row.get("connection_class") else []
+        declared_legs = max(declared_legs, 1)
+    ordered: list[str] = []
+    for cls in classified:
+        if cls not in ordered:
+            ordered.append(cls)
+    return ordered, max(0, declared_legs - len(classified))
+
+
+def _engine_row_sources(row: dict[str, Any], published_name: str) -> list[dict[str, Any]]:
+    """The data-source records for ONE embedded-datasource row: one per class, plus unknown legs."""
+    label = str(row.get("label") or row.get("caption") or "embedded datasource")
+    caption = str(row.get("caption") or label)
+    table_count = row.get("table_count")
+    declared_tables = table_count if isinstance(table_count, int) else None
+    classes, unclassified = _engine_leg_classes(row)
+    shared = {
+        "tables": [],
+        "declared_table_count": declared_tables,
+        "unclassified_legs": unclassified,
+        "published_datasource_name": published_name,
+    }
+    out: list[dict[str, Any]] = []
+    for connection_class in classes or [""]:
+        target, _reason = powerbi_target(connection_class or UNKNOWN, "unknown")
+        multi = len(classes) > 1
+        out.append(
+            {
+                "id": f"{label}#{connection_class or UNKNOWN}" if multi else label,
+                "caption": f"{caption} [{connection_class or UNKNOWN}]" if multi else caption,
+                "connection": {"class": connection_class, "mode": "unknown", "powerbi_target": target},
+                **shared,
+            }
+        )
+    for index in range(unclassified):
+        # Preserved as UNKNOWN rather than filtered out: an unrecorded leg is a system nobody
+        # classified, and dropping it made the datasource look like one fully-understood system.
+        out.append(
+            {
+                "id": f"{label}#unclassified-leg-{index + 1}",
+                "caption": f"{caption} [connection leg with no recorded class]",
+                "connection": {"class": "", "mode": "unknown", "powerbi_target": UNKNOWN},
+                **{**shared, "declared_table_count": None},
+            }
+        )
+    return out
 
 
 def engine_model_dirs(bundle: Path, workbook: dict[str, Any]) -> tuple[list[Path], str | None]:
@@ -1254,9 +1476,31 @@ def scan_engine_unit(unit: EngineUnit) -> dict[str, Any]:
     Dispatches on the unit's own scope: a DATASOURCE unit names its tables and gets the full-strength
     table-scoped rules; a WORKBOOK unit does not and gets the weaker model-scoped ones.
     """
+    if unit.error:
+        return _engine_skip(unit, unit.error, REASON_NOT_EVALUATED)
     if unit.scope == SCOPE_TABLE:
         return _scan_engine_datasource(unit)
     status, rows = engine_datasource_telemetry(unit.workbook)
+    binding = unit.workbook.get("binding_signal")
+    published = binding.get("published_ds_name") if isinstance(binding, dict) else None
+    unusable = _telemetry_refusal(unit, status, str(published or ""))
+    if unusable:
+        return unusable
+
+    model_dirs, why_not = engine_model_dirs(unit.bundle, unit.workbook)
+    if not model_dirs:
+        return _engine_skip(unit, str(why_not), REASON_NOT_EVALUATED)
+
+    sources = engine_sources(rows, str(published or ""))
+    return _judge_engine_models(unit, sources, model_dirs, SCOPE_MODEL)
+
+
+def _telemetry_refusal(unit: EngineUnit, status: str, published: str) -> dict[str, Any] | None:
+    """The skip result for a workbook whose `embedded_datasources` telemetry cannot be judged.
+
+    MISSING and INVALID are `not_evaluated` - the key is absent or malformed, so what the workbook
+    connected to is UNRECORDED. NONE is `nothing_to_check`, the one complete answer of the three.
+    """
     if status == TELEMETRY_MISSING:
         return _engine_skip(
             unit,
@@ -1271,8 +1515,6 @@ def scan_engine_unit(unit: EngineUnit) -> dict[str, Any]:
             "inspect the raw handover; nothing can be concluded from it",
             REASON_NOT_EVALUATED,
         )
-    binding = unit.workbook.get("binding_signal")
-    published = binding.get("published_ds_name") if isinstance(binding, dict) else None
     if status == TELEMETRY_NONE:
         note = (
             f" - it binds PUBLISHED datasource '{published}', whose connection is checked in that "
@@ -1285,13 +1527,7 @@ def scan_engine_unit(unit: EngineUnit) -> dict[str, Any]:
             f"the engine recorded ZERO embedded datasources for this workbook{note}",
             REASON_NOTHING_TO_CHECK,
         )
-
-    model_dirs, why_not = engine_model_dirs(unit.bundle, unit.workbook)
-    if not model_dirs:
-        return _engine_skip(unit, str(why_not), REASON_NOT_EVALUATED)
-
-    sources = engine_sources(rows, str(published or ""))
-    return _judge_engine_models(unit, sources, model_dirs, SCOPE_MODEL)
+    return None
 
 
 def _scan_engine_datasource(unit: EngineUnit) -> dict[str, Any]:
@@ -1362,8 +1598,74 @@ def _engine_bundle_roots(root: Path) -> list[Path]:
     return ordered
 
 
+def _engine_census(bundle: Path) -> tuple[list[EngineUnit], bool]:
+    """`(units, is_census)` from a bundle's `report.json` - workbooks AND datasources.
+
+    `report.json` is the AUTHORITY, and handover slices are copies of it (`run_estate.slice_handovers`
+    writes one per `report["workbooks"]` entry). Blind review, HIGH 1: resolving units through slices
+    let a missing, stale or malformed slice delete a declared unit from the numerator AND the
+    denominator, so a bundle whose downgraded workbook had no slice reported `COVERAGE: 1 of 1`,
+    exit 0. A unit that vanishes must never be indistinguishable from a unit that was checked - which
+    is the same defect this gate exists to prevent, one level up.
+
+    Guarded by CONTENT, not by filename: every PBIR report definition in this repo is also called
+    `report.json`, and one carries neither `workbooks` nor `datasources`.
+    """
+    report = bundle / "report.json"
+    if not report.is_file():
+        return [], False
+    try:
+        payload = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return [], False
+    if not isinstance(payload, dict):
+        return [], False
+    workbooks = payload.get("workbooks")
+    datasources = payload.get("datasources")
+    if not isinstance(workbooks, list) and not isinstance(datasources, list):
+        return [], False
+    units = []
+    for detail in workbooks if isinstance(workbooks, list) else []:
+        if isinstance(detail, dict):
+            units.append(EngineUnit(str(detail.get("name") or report.stem), report, bundle, detail, SCOPE_MODEL))
+    for detail in datasources if isinstance(datasources, list) else []:
+        if isinstance(detail, dict):
+            units.append(EngineUnit(str(detail.get("name") or report.stem), report, bundle, detail, SCOPE_TABLE))
+    return units, True
+
+
+def _slice_units(bundle: Path, known: set[str]) -> list[EngineUnit]:
+    """Workbook units from `handover/*.json` that the census did not already declare.
+
+    When there IS a census these only add units the report never mentioned. When there is NOT, an
+    unreadable slice becomes an explicit `not_evaluated` unit rather than disappearing - without a
+    census nothing else records that the unit existed.
+    """
+    handover = bundle / "handover" if (bundle / "handover").is_dir() else bundle
+    if not handover.is_dir():
+        return []
+    units: list[EngineUnit] = []
+    for path in sorted(handover.glob("*.json")):
+        if path.name == "migration-spec.json":
+            continue
+        try:
+            found = read_handover.load_workbooks(path)
+        except read_handover.HandoverError as exc:
+            if not known and handover.name == "handover":
+                units.append(
+                    EngineUnit(path.stem, path, bundle, {}, SCOPE_MODEL, f"this handover slice is unreadable: {exc}")
+                )
+            continue
+        for name, workbook, source in found:
+            if name in known:
+                continue
+            known.add(name)
+            units.append(EngineUnit(name, source, bundle, workbook, SCOPE_MODEL))
+    return units
+
+
 def _find_engine_units(root: Path) -> list[EngineUnit]:
-    """Every engine-bundle unit under a target - workbooks AND datasources.
+    """Every engine-bundle unit under a target - workbooks AND datasources, census-first.
 
     Both halves are needed. Measured on the real cold-run bundle: `handover/` held one workbook slice
     and `report.json` held the only genuinely live Snowflake source in the estate, as a DATASOURCE.
@@ -1375,23 +1677,22 @@ def _find_engine_units(root: Path) -> list[EngineUnit]:
     if root.is_file():
         if root.name == "migration-spec.json":
             return []
+        bundle = root.parent.parent if root.parent.name == "handover" else root.parent
+        census, is_census = _engine_census(bundle) if root.name == "report.json" else ([], False)
+        if is_census:
+            return census
         try:
             found = read_handover.load_workbooks(root)
         except read_handover.HandoverError:
             return []
-        bundle = root.parent.parent if root.parent.name == "handover" else root.parent
-        return [EngineUnit(name=name, source=src, bundle=bundle, workbook=wb) for name, wb, src in found]
+        return [EngineUnit(name, src, bundle, wb, SCOPE_MODEL) for name, wb, src in found]
     if (root / "migration-spec.json").is_file():
         return []
     units: list[EngineUnit] = []
     for bundle in _engine_bundle_roots(root):
-        try:
-            found = read_handover.load_workbooks(bundle)
-        except read_handover.HandoverError:
-            found = []
-        for name, workbook, source in found:
-            units.append(EngineUnit(name=name, source=source, bundle=bundle, workbook=workbook))
-        units.extend(engine_datasource_units(bundle))
+        census, _is_census = _engine_census(bundle)
+        units.extend(census)
+        units.extend(_slice_units(bundle, {unit.name for unit in census}))
     return units
 
 
