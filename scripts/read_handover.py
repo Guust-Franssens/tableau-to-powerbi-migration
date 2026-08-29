@@ -6,6 +6,9 @@ usage:   python scripts/read_handover.py <bundle-or-handover.json>            # 
          python scripts/read_handover.py <target> --category <category>       # full repair detail
          python scripts/read_handover.py <target> --name '<calc name>'        # one calc, in full
          python scripts/read_handover.py <target> --viz [--severity blocking] # report-side queue
+         python scripts/read_handover.py <target> --fidelity                  # per-visual evidence
+         python scripts/read_handover.py <target> --gate-evidence             # exit 0/1/3 on coverage
+         python scripts/read_handover.py <target> [--oracle <report.json>]    # layout drift by axis
          python scripts/read_handover.py <target> [--workbook <name>] [--json <file>]
 
 Why this exists
@@ -87,6 +90,32 @@ category's guidance - and nothing here validates the DAX you write from it. It a
 model or report on disk: ``check_blank_placeholders.py`` is the gate that catches a stub that
 survived into shipped TMDL, and ``check_field_bindings.py`` the one for PBIR references that
 resolve to nothing.
+
+Coverage vs findings: ``evidence`` (#371) and ``by_axis`` (#372)
+---------------------------------------------------------------
+Two engine signals were emitted for months with no consumer on this side. They answer *coverage*
+questions, which every other field here structurally cannot:
+
+**``viz_fidelity[].evidence``** (engine >= 2.335.0) is present in the handover and is read here.
+``status: rebuilt`` records only that the emitter completed without raising - the engine author is
+explicit that it "is a record that our code ran cleanly - it is not a statement that the emitted
+``visual.json`` renders". ``evidence`` separates those two claims: ``emitted`` (nothing inspected
+the artifact), ``emitted+linted`` (the shipped bytes were linted and no finding names it), and
+``lint_failed`` (a finding does). A row with no ``evidence`` key at all is reported as ``unknown``,
+never folded into ``emitted``. ``--gate-evidence`` turns that into three exit codes, because two
+would force "never examined" to share a code with either a pass or a blocker. ⚠️ ``emitted+linted``
+is **still not a render check** - it means the bytes passed a structural lint and nothing more.
+
+**``summary.placement.by_axis``** (engine >= 2.332.0) is NOT in the handover, and this is the
+measured finding rather than an assumption. It is produced by ``fidelity_oracle.py``, a **separate
+opt-in tool**, into **its own** report (``kind: "tableau-fabric-structural-fidelity"``);
+``migrate_estate.py`` never computes placement at all. Verified against engine 2.339.0: ``by_axis``
+occurs in **zero** JSON files across the whole local corpus, including a fresh 2.339.0 bundle's
+``handover/`` and its estate ``report.json`` (whose ``summary.placement`` is ``null``). So this
+reader finds an oracle report beside the bundle - by ``kind``, never by a filename convention
+nobody writes to - or takes one from ``--oracle``, and otherwise reports **NOT MEASURED**. Absence
+of the block is not absence of drift, and today NOT MEASURED is the honest answer for every bundle
+the deterministic pipeline produces on its own.
 """
 
 from __future__ import annotations
@@ -95,7 +124,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # One cohesive projection CLI; adding every engine handover signal here keeps drills consistent.
 # pylint: disable=too-many-lines
@@ -209,8 +238,78 @@ PBIP_WARNING_PATTERNS = [
 ]
 
 
+# `viz_fidelity[].evidence` (engine >= 2.335.0). Verified present in a real 2.339.0 slice:
+# `{"evidence": "emitted+linted", "status": "warned", "tier": "degraded", ...}`. It answers a
+# question `status` structurally cannot: `status: rebuilt` records that the EMITTER ran cleanly,
+# never that anything inspected the bytes it wrote. The engine is explicit about the fail-closed
+# rule -- when the lint did not run, every row stays `emitted`, because claiming `emitted+linted`
+# on the strength of "nothing looked and found nothing" is the defect, not the fix.
+EVIDENCE_EMITTED = "emitted"
+EVIDENCE_LINTED = "emitted+linted"
+EVIDENCE_LINT_FAILED = "lint_failed"
+# Not an engine value: our name for a row that carries no `evidence` key at all (a pre-2.335.0
+# bundle). It is deliberately NOT folded into `emitted` - "the emitter ran and nothing looked" and
+# "we cannot tell what happened" are different claims, and only one of them is the engine's.
+EVIDENCE_UNKNOWN = "unknown"
+
+# Loudest first: anything that is not `emitted+linted` outranks it, because the whole point is that
+# an unexamined visual must never sort or read like a verified one.
+EVIDENCE_ORDER = [EVIDENCE_LINT_FAILED, EVIDENCE_EMITTED, EVIDENCE_UNKNOWN, EVIDENCE_LINTED]
+
+EVIDENCE_LABEL = {
+    EVIDENCE_LINT_FAILED: "LINT FAILED - a PBIR lint finding names this visual",
+    EVIDENCE_EMITTED: "NEVER EXAMINED - emitter ran clean; nothing inspected the shipped bytes",
+    EVIDENCE_UNKNOWN: "NOT RECORDED - no evidence key (bundle predates engine 2.335.0)",
+    EVIDENCE_LINTED: "linted - shipped bytes were linted and no finding names it",
+}
+
+# The only value that supports a structural pass. `emitted+linted` is STILL not a render check.
+EVIDENCE_VERIFIED = EVIDENCE_LINTED
+
+FIDELITY_EVIDENCE_NONE = "none"
+FIDELITY_EVIDENCE_MISSING = "not_recorded"
+FIDELITY_EVIDENCE_PRESENT = "present"
+FIDELITY_EVIDENCE_INVALID = "invalid"
+
+# `summary.placement.by_axis` (engine >= 2.332.0). ⚠️ MEASURED, NOT INFERRED: this block is emitted
+# by `fidelity_oracle.py`, a SEPARATE opt-in tool, into ITS report - `migrate_estate.py` never
+# computes placement, so no handover slice and no estate `report.json` carries it. Verified against
+# engine 2.339.0: zero occurrences of `by_axis` in any JSON under `_runs/`. So the honest consumer
+# reads it from a fidelity-oracle report found beside the bundle (or named with `--oracle`), and
+# reports NOT MEASURED - never zero drift - when there is none.
+ORACLE_KIND = "tableau-fabric-structural-fidelity"
+ORACLE_SNIFF_BYTES = 4096
+
+LAYOUT_DRIFT_NOT_MEASURED = "not_measured"
+LAYOUT_DRIFT_AXIS_BLIND = "axis_blind"
+LAYOUT_DRIFT_EXACT = "pixel_exact"
+LAYOUT_DRIFT_PRESENT = "present"
+LAYOUT_DRIFT_INVALID = "invalid"
+
+# The engine's own vocabulary for the signed direction counts, kept verbatim so a reader can move
+# between our line and the oracle's markdown without re-learning which sign means which way.
+AXIS_DIRECTIONS = {"x": ("right", "left"), "y": ("down", "up")}
+
+# Exit codes. Matches the sibling gates in this folder (`check_connection_fidelity.py`,
+# `check_pbir_layout.py`, `check_empty_model.py`): 0 ok, 1 the defect this gate names, 2 usage,
+# 3 "could not verify". 3 exists because #366 shipped a SKIPPED result that read as a pass, which
+# is the same conflation #371 is about - a visual nothing examined is not a visual that passed.
+EXIT_OK = 0
+EXIT_EVIDENCE_BLOCKED = 1
+EXIT_USAGE = 2
+EXIT_NOT_VERIFIED = 3
+
+
 class HandoverError(RuntimeError):
     """A target that cannot be resolved to at least one workbook payload."""
+
+
+class OracleSource(NamedTuple):
+    """A fidelity-oracle report and where it was found, kept together so the numbers are always
+    citable. An empty instance means "no oracle report", which is a first-class answer here."""
+
+    payload: dict | None = None
+    path: Path | None = None
 
 
 # --------------------------------------------------------------------------------------------
@@ -272,6 +371,90 @@ def load_workbooks(target: Path) -> list[tuple[str, dict, Path]]:
         f"{target}: found no handover/*.json slices and no report.json. "
         "Point at a bundle directory, a handover slice, or an estate report.json."
     )
+
+
+def _sniff_oracle(path: Path) -> bool:
+    """Cheap prefix test before paying to parse a file that may be a 347 KB handover slice.
+
+    `kind` is the FIRST key the oracle writes (`_assemble_report` returns it first, and `json.dumps`
+    preserves insertion order), so the marker is at the very start of the file. Reading 4 KB to
+    reject a slice is the difference between scanning a bundle for free and re-parsing every
+    workbook in it.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(ORACLE_SNIFF_BYTES)
+    except OSError:
+        return False
+    return ORACLE_KIND.encode("utf-8") in head
+
+
+def _oracle_candidates(directory: Path) -> list[tuple[Path, dict]]:
+    """Every fidelity-oracle report directly inside ``directory``, identified by CONTENT.
+
+    By `kind`, never by filename: `fidelity_oracle.py --out` takes an arbitrary path, so there is
+    no filename convention to rely on and inventing one would only find reports we ourselves wrote.
+    """
+    if not directory.is_dir():
+        return []
+    out: list[tuple[Path, dict]] = []
+    for path in sorted(directory.glob("*.json")):
+        if not _sniff_oracle(path):
+            continue
+        try:
+            payload = _read_json(path)
+        except HandoverError:
+            continue
+        if isinstance(payload, dict) and payload.get("kind") == ORACLE_KIND:
+            out.append((path, payload))
+    return out
+
+
+def find_oracle_report(target: Path, source: Path, wb_name: str, explicit: Path | None = None) -> OracleSource:
+    """Locate the fidelity-oracle report carrying ``summary.placement.by_axis`` for one workbook.
+
+    Returns an :class:`OracleSource`, empty when there is none - which is the answer for every
+    bundle the deterministic pipeline produces today, because the oracle is a separate opt-in tool.
+    An explicit ``--oracle`` wins; otherwise the bundle root, a ``fidelity/`` subfolder and the
+    directory the slice itself came from are scanned, in that order.
+
+    When several reports are found, one whose filename names the workbook wins; a single unnamed
+    candidate is accepted; an ambiguous set is REFUSED (empty) rather than guessed, because
+    attributing another workbook's drift numbers to this one is worse than reporting nothing.
+    """
+    directories: list[Path] = []
+    if explicit is not None:
+        if explicit.is_file():
+            payload = _read_json(explicit)
+            if not (isinstance(payload, dict) and payload.get("kind") == ORACLE_KIND):
+                raise HandoverError(f"{explicit}: not a fidelity-oracle report (expected kind {ORACLE_KIND!r})")
+            return OracleSource(payload, explicit)
+        if not explicit.is_dir():
+            raise HandoverError(f"{explicit} does not exist")
+        directories.append(explicit)
+    else:
+        root = target if target.is_dir() else target.parent
+        directories += [root, root / "fidelity", source.parent]
+
+    seen: set[Path] = set()
+    found: list[tuple[Path, dict]] = []
+    for directory in directories:
+        resolved = directory.resolve() if directory.exists() else directory
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        found += _oracle_candidates(directory)
+
+    if not found:
+        return OracleSource()
+    named = [(p, d) for p, d in found if p.stem.lower() == wb_name.lower()]
+    if not named:
+        named = [(p, d) for p, d in found if wb_name.lower() in p.stem.lower()]
+    if len(named) == 1:
+        return OracleSource(named[0][1], named[0][0])
+    if not named and len(found) == 1:
+        return OracleSource(found[0][1], found[0][0])
+    return OracleSource()
 
 
 def select_workbook(found: list[tuple[str, dict, Path]], wanted: str | None) -> tuple[str, dict, Path]:
@@ -859,41 +1042,60 @@ def _pbip_warning_summary_line(wb: dict) -> str | None:
     return "        pbip warnings: none recorded (key present and empty)"
 
 
-def _report_section(wb: dict) -> list[str]:
+def _fidelity_tier_line(fidelity: list) -> str | None:
+    """The existing tier roll-up, extracted so `_report_section` stays under pylint's local cap."""
+    tiers: dict[str, int] = {}
+    for v in fidelity:
+        if isinstance(v, dict):
+            tiers[v.get("tier") or "?"] = tiers.get(v.get("tier") or "?", 0) + 1
+    if not tiers:
+        return None
+    return "        fidelity: " + " | ".join(f"{k} {n}" for k, n in sorted(tiers.items()))
+
+
+def _severity_line(items: list[dict]) -> str | None:
+    """The existing severity roll-up, extracted for the same reason as `_fidelity_tier_line`."""
+    by_sev = _severity_counts(items)
+    if not by_sev:
+        return None
+    parts = [f"{s} {by_sev[s]}" for s in SEVERITY_ORDER if s in by_sev]
+    parts += [f"{s} {n}" for s, n in sorted(by_sev.items()) if s not in SEVERITY_ORDER]
+    return "        severity: " + " | ".join(parts)
+
+
+def _report_section(wb: dict, oracle: OracleSource | None = None, terse: bool = False) -> list[str]:
+    oracle = oracle or OracleSource()
     items = report_items_of(wb)
     fidelity = wb.get("viz_fidelity") if isinstance(wb.get("viz_fidelity"), list) else []
-    emptied = _emptied_visuals(wb)
     measure_line = _measure_filter_summary_line(wb)
     pbip_line = _pbip_warning_summary_line(wb)
+    drift_lines = _layout_drift_lines(wb, oracle, terse)
 
     if not items and not fidelity and not measure_line and not pbip_line:
-        return ["REPORT: no remediation worklist in this handover.", ""]
+        return ["REPORT: no remediation worklist in this handover.", "", *drift_lines, ""]
 
-    out = []
     summary = worklist_of(wb).get("summary") if isinstance(worklist_of(wb).get("summary"), dict) else {}
-    flagged = summary.get("visuals_flagged", "?")
-    clean = summary.get("visuals_clean", "?")
-    out.append(f"REPORT: {len(items)} remediation item(s), {flagged} visual(s) flagged, {clean} clean")
+    emptied = _emptied_visuals(wb)
+    out = [
+        f"REPORT: {len(items)} remediation item(s), {summary.get('visuals_flagged', '?')} "
+        f"visual(s) flagged, {summary.get('visuals_clean', '?')} clean"
+    ]
 
-    by_sev = _severity_counts(items)
-    if by_sev:
-        parts = [f"{s} {by_sev[s]}" for s in SEVERITY_ORDER if s in by_sev]
-        parts += [f"{s} {n}" for s, n in sorted(by_sev.items()) if s not in SEVERITY_ORDER]
-        out.append("        severity: " + " | ".join(parts))
-
-    if fidelity:
-        tiers: dict[str, int] = {}
-        for v in fidelity:
-            if isinstance(v, dict):
-                tiers[v.get("tier") or "?"] = tiers.get(v.get("tier") or "?", 0) + 1
-        out.append("        fidelity: " + " | ".join(f"{k} {v}" for k, v in sorted(tiers.items())))
-
-    if emptied:
-        out.append(f"        !! {len(emptied)} visual(s) EMPTIED - every field binding was dropped")
-    if measure_line:
-        out.append(measure_line)
-    if pbip_line:
-        out.append(pbip_line)
+    # Evidence sits directly under the tier line, which is where a reader forms the belief "the
+    # visuals were checked". Tiers are a verdict about what the emitter INTENDED; evidence is
+    # whether anything then looked at what it wrote (#371).
+    candidates = [
+        _severity_line(items),
+        _fidelity_tier_line(fidelity) if fidelity else None,
+        _evidence_summary_line(wb, terse),
+        f"        !! {len(emptied)} visual(s) EMPTIED - every field binding was dropped" if emptied else None,
+        measure_line,
+        pbip_line,
+    ]
+    out += [line for line in candidates if line]
+    # Unconditional: "not measured" is the finding here, so it must print exactly when there is no
+    # data, which is precisely when a conditional line would stay silent (#372).
+    out += drift_lines
 
     out += ["", "        next step: --viz    (full worklist)   --viz --severity blocking", ""]
     return out
@@ -1014,8 +1216,296 @@ def _truncation_banner(
     return head + named + [tail_rule]
 
 
+# --------------------------------------------------------------------------------------------
+# Evidence (#371) and layout drift (#372) - two engine signals that had no consumer
+# --------------------------------------------------------------------------------------------
+
+
+def fidelity_evidence_status(wb: dict) -> tuple[str, dict[str, int]]:
+    """COVERAGE, not findings: for each visual, did the structural check actually RUN?
+
+    Returns ``(status, counts)`` where ``counts`` maps each ``evidence`` value to how many visuals
+    carry it. Mirrors `measure_filter_status`/`partitions_needs_review_status`, for the same reason:
+    an absent key is reported as ABSENT, never as a clean zero.
+
+    An unrecognised value (a future engine adds one) is counted under its own name and is therefore
+    NOT verified - only the literal `emitted+linted` is. Failing that way round is the point: a new
+    value must not inherit a pass from a consumer that has never heard of it.
+    """
+    if "viz_fidelity" not in wb:
+        return FIDELITY_EVIDENCE_NONE, {}
+    raw_rows = wb.get("viz_fidelity")
+    if not isinstance(raw_rows, list):
+        return FIDELITY_EVIDENCE_INVALID, {}
+    rows = [r for r in raw_rows if isinstance(r, dict)]
+    if not rows:
+        return FIDELITY_EVIDENCE_NONE, {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        raw = row.get("evidence")
+        value = raw.strip() if isinstance(raw, str) and raw.strip() else EVIDENCE_UNKNOWN
+        counts[value] = counts.get(value, 0) + 1
+    if set(counts) == {EVIDENCE_UNKNOWN}:
+        return FIDELITY_EVIDENCE_MISSING, counts
+    return FIDELITY_EVIDENCE_PRESENT, counts
+
+
+def _evidence_order(counts: dict[str, int]) -> list[str]:
+    """Known values loudest-first, then any value this consumer does not recognise."""
+    known = [v for v in EVIDENCE_ORDER if counts.get(v)]
+    return known + sorted(v for v in counts if v not in EVIDENCE_ORDER)
+
+
+def evidence_gate(wb: dict) -> tuple[int, str]:
+    """Exit code + verdict for `--gate-evidence`. THREE outcomes, never two.
+
+    * ``EXIT_EVIDENCE_BLOCKED`` - a lint finding names at least one visual.
+    * ``EXIT_NOT_VERIFIED``     - no finding, but coverage is incomplete or unknown: a visual left
+      at ``emitted``, a row with no ``evidence`` key, an unrecognised value, an unreadable shape, or
+      no ``viz_fidelity`` at all. This is its OWN state; it is never folded into the pass.
+    * ``EXIT_OK``               - every visual is ``emitted+linted``. Still not a render check.
+    """
+    status, counts = fidelity_evidence_status(wb)
+    if status == FIDELITY_EVIDENCE_INVALID:
+        return (
+            EXIT_NOT_VERIFIED,
+            "EVIDENCE: NOT VERIFIED - viz_fidelity is present but not a list; inspect raw handover",
+        )
+    if status == FIDELITY_EVIDENCE_NONE:
+        return EXIT_NOT_VERIFIED, "EVIDENCE: NOT VERIFIED - no viz_fidelity rows; nothing recorded a per-visual check"
+    if status == FIDELITY_EVIDENCE_MISSING:
+        return EXIT_NOT_VERIFIED, (
+            f"EVIDENCE: NOT VERIFIED - {sum(counts.values())} visual(s), none carries an `evidence` "
+            "key (bundle predates engine 2.335.0); coverage is unknown, not clean"
+        )
+    total = sum(counts.values())
+    verified = counts.get(EVIDENCE_VERIFIED, 0)
+    breakdown = " | ".join(f"{v} {counts[v]}" for v in _evidence_order(counts))
+    if counts.get(EVIDENCE_LINT_FAILED):
+        return EXIT_EVIDENCE_BLOCKED, (
+            f"EVIDENCE: BLOCKED - {counts[EVIDENCE_LINT_FAILED]} of {total} visual(s) are named by a "
+            f"PBIR lint finding ({breakdown})"
+        )
+    if verified != total:
+        return EXIT_NOT_VERIFIED, (
+            f"EVIDENCE: NOT VERIFIED - only {verified} of {total} visual(s) were examined "
+            f"({breakdown}); an unexamined visual is not a verified one"
+        )
+    return EXIT_OK, (
+        f"EVIDENCE: {total} of {total} visual(s) emitted+linted - structural coverage complete "
+        "(NOT a render check; the bytes were linted, not drawn)"
+    )
+
+
+def _evidence_absent_line(status: str, total: int, terse: bool) -> str | None:
+    """The two states where there is no distribution to report: unreadable, or never recorded."""
+    if status == FIDELITY_EVIDENCE_INVALID:
+        if terse:
+            return "        evidence: INVALID SHAPE"
+        return "        evidence: INVALID SHAPE (viz_fidelity present but not a list; inspect raw handover)"
+    if terse:
+        return f"        ?? evidence: NOT RECORDED on {total} visual(s)"
+    return (
+        f"        ?? evidence: NOT RECORDED on any of {total} visual(s) "
+        "(pre-2.335.0 engine) - coverage UNKNOWN, not clean"
+    )
+
+
+def _evidence_summary_line(wb: dict, terse: bool = False) -> str | None:
+    """One line for the default view. Loud unless every visual was actually examined.
+
+    ``terse`` drops the explanation, never the signal: a budget too tight for the prose is still
+    wide enough for the counts, and silently omitting the line is the failure this line prevents.
+    """
+    status, counts = fidelity_evidence_status(wb)
+    if status == FIDELITY_EVIDENCE_NONE:
+        return None
+    total = sum(counts.values())
+    if status in (FIDELITY_EVIDENCE_INVALID, FIDELITY_EVIDENCE_MISSING):
+        return _evidence_absent_line(status, total, terse)
+    verified = counts.get(EVIDENCE_VERIFIED, 0)
+    mark = "!!" if counts.get(EVIDENCE_LINT_FAILED) else ("??" if verified != total else "  ")
+    if terse:
+        return f"        {mark} evidence: {verified}/{total} examined"
+    breakdown = " | ".join(f"{v} {counts[v]}" for v in _evidence_order(counts))
+    return f"        {mark} evidence: {verified}/{total} examined - {breakdown}"
+
+
+def _evidence_legend(counts: dict[str, int]) -> list[str]:
+    """Spell out each value present, so `emitted` is never read as a synonym for "fine"."""
+    return [
+        f"    {v:<14} {counts[v]:>4}  {EVIDENCE_LABEL.get(v, 'UNRECOGNISED VALUE - not verified')}"
+        for v in _evidence_order(counts)
+    ]
+
+
+def placement_block_of(wb: dict, oracle: dict | None) -> dict | None:
+    """The oracle's ``summary.placement``, or an inlined copy should the engine ever emit one.
+
+    The workbook keys are checked FIRST and are forward-compatible only: no engine version emits
+    placement into a handover slice today (measured against 2.339.0). They cost two dict lookups and
+    mean this consumer keeps working if `migrate_estate.py` ever absorbs the oracle rollup.
+    """
+    for key in ("viz_placement", "placement"):
+        candidate = wb.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    if isinstance(oracle, dict):
+        summary = oracle.get("summary")
+        if isinstance(summary, dict) and isinstance(summary.get("placement"), dict):
+            return summary["placement"]
+    return None
+
+
+def layout_drift_status(wb: dict, oracle: dict | None = None) -> tuple[str, dict]:
+    """Per-axis layout drift, distinguishing "measured, no drift" from "never measured".
+
+    Five states, because collapsing any two of them recreates the axis-blind failure this block was
+    built to fix:
+
+    * ``LAYOUT_DRIFT_NOT_MEASURED`` - no placement rollup anywhere. Absence of the block is NOT
+      absence of drift, and today this is the answer for every deterministic-pipeline bundle.
+    * ``LAYOUT_DRIFT_AXIS_BLIND``   - a placement rollup with no usable ``by_axis`` (a pre-2.332.0
+      oracle report, or one with no zone->visual deltas). Per-axis drift is UNKNOWN.
+    * ``LAYOUT_DRIFT_INVALID``      - ``by_axis`` present but not an object of axis records.
+    * ``LAYOUT_DRIFT_EXACT``        - measured, every evaluated pair exact on every axis.
+    * ``LAYOUT_DRIFT_PRESENT``      - measured, with drift. ``payload["axes"]`` carries both axes and
+      ``payload["worst"]`` the ``(name, stats)`` pair to lead with.
+    """
+    placement = placement_block_of(wb, oracle)
+    if placement is None:
+        return LAYOUT_DRIFT_NOT_MEASURED, {}
+    by_axis = placement.get("by_axis")
+    if by_axis is None:
+        return LAYOUT_DRIFT_AXIS_BLIND, {"placement": placement}
+    if not isinstance(by_axis, dict):
+        return LAYOUT_DRIFT_INVALID, {"placement": placement}
+    axes = {name: stats for name, stats in by_axis.items() if isinstance(stats, dict)}
+    if not axes:
+        status = LAYOUT_DRIFT_AXIS_BLIND if not by_axis else LAYOUT_DRIFT_INVALID
+        return status, {"placement": placement}
+    payload = {"placement": placement, "axes": axes, "worst": _worst_axis(axes)}
+    if all(_num(s.get("exact")) == _num(s.get("evaluated")) for s in axes.values()):
+        return LAYOUT_DRIFT_EXACT, payload
+    return LAYOUT_DRIFT_PRESENT, payload
+
+
+def _num(value: Any) -> float | None:
+    """Numeric coercion that refuses bools, so a stray `true` cannot pose as a pixel count."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _worst_axis(axes: dict[str, dict]) -> tuple[str, dict] | None:
+    """The axis to lead with: largest worst-case absolute error, mean breaking the tie."""
+    scored = [(name, stats) for name, stats in axes.items() if _num(stats.get("worst_abs_px")) is not None]
+    if not scored:
+        return None
+    return max(
+        scored, key=lambda pair: (_num(pair[1].get("worst_abs_px")) or 0.0, _num(pair[1].get("mean_abs_px")) or 0.0)
+    )
+
+
+def _axis_phrase(name: str, stats: dict) -> str:
+    """One axis, WITH ITS SIGN. `+108px down` and `-56px up` are different defects; the absolute
+    value that collapses them is exactly what made `max_edge_px` unable to answer the question."""
+    positive, negative = AXIS_DIRECTIONS.get(name.lower(), ("+", "-"))
+    signed = _num(stats.get("mean_signed_px"))
+    signed_txt = f"{signed:+g}px" if signed is not None else "?px"
+    return (
+        f"{name.upper()} {stats.get('exact', '?')}/{stats.get('evaluated', '?')} exact, "
+        f"worst {stats.get('worst_abs_px', '?')}px, median {stats.get('median_abs_px', '?')}px, "
+        f"signed {signed_txt} ({stats.get('positive', '?')} {positive} / {stats.get('negative', '?')} {negative})"
+    )
+
+
+def _terse_drift_line(status: str, payload: dict) -> str:
+    """The compressed form, deliberately tiny. Never drops the signal - a budget too tight for the
+    prose is still wide enough for the verdict, and omitting the line is exactly the failure the
+    line exists to prevent. Bounded in bytes so the fallback cannot itself overrun the cap.
+    """
+    if status == LAYOUT_DRIFT_NOT_MEASURED:
+        return "        ?? drift: NOT MEASURED (--oracle)"
+    if status == LAYOUT_DRIFT_AXIS_BLIND:
+        return "        ?? drift: PER-AXIS UNKNOWN"
+    if status == LAYOUT_DRIFT_EXACT:
+        return "        drift: MEASURED, pixel-exact"
+    worst = payload.get("worst")
+    if not worst:
+        return "        !! drift: MEASURED, worst axis unknown"
+    signed = _num(worst[1].get("mean_signed_px"))
+    signed_txt = f"{signed:+g}" if signed is not None else "?"
+    return f"        !! drift: worst {worst[0].upper()} {worst[1].get('worst_abs_px', '?')}px {signed_txt}px"
+
+
+def _layout_drift_summary_line(wb: dict, oracle: dict | None = None, terse: bool = False) -> str:
+    """One line per workbook - the triage #372 asks for, ahead of anyone opening the report.
+
+    BOTH axes always appear together in the full form. The engine's own rollup test pins that rule
+    ("a consumer comparing axes must never get one of them; that reads as 'the other is fine'"), and
+    it applies just as hard one layer up.
+    """
+    status, payload = layout_drift_status(wb, oracle)
+    if status == LAYOUT_DRIFT_INVALID:
+        return "        layout drift: INVALID SHAPE (by_axis is not an object of axis records)"
+    if terse:
+        return _terse_drift_line(status, payload)
+    if status == LAYOUT_DRIFT_NOT_MEASURED:
+        return (
+            "        ?? layout drift: NOT MEASURED - no oracle placement rollup here "
+            "(run fidelity_oracle.py or pass --oracle); absence is not zero drift"
+        )
+    if status == LAYOUT_DRIFT_AXIS_BLIND:
+        placement = payload.get("placement") or {}
+        return (
+            "        ?? layout drift: PER-AXIS UNKNOWN - placement measured but carries no by_axis "
+            f"(pre-2.332.0); axis-blind worst edge {placement.get('worst_max_edge_px', '?')}px"
+        )
+    axes = payload["axes"]
+    worst = payload["worst"]
+    if status == LAYOUT_DRIFT_EXACT:
+        detail = " | ".join(
+            f"{n.upper()} {s.get('exact', '?')}/{s.get('evaluated', '?')}" for n, s in sorted(axes.items())
+        )
+        return f"        layout drift: MEASURED, pixel-exact on every axis ({detail})"
+    lead = _axis_phrase(*worst) if worst else "worst axis unknown"
+    rest = " | ".join(
+        f"{n.upper()} {s.get('exact', '?')}/{s.get('evaluated', '?')} exact, worst {s.get('worst_abs_px', '?')}px"
+        for n, s in sorted(axes.items())
+        if not worst or n != worst[0]
+    )
+    tail = f" | {rest}" if rest else ""
+    return f"        !! layout drift: MEASURED, worst {lead}{tail}"
+
+
+def _clip_tail(text: str, limit: int = 88) -> str:
+    """Clip from the LEFT, keeping the tail. A path clipped from the right loses its filename -
+    which is the only part that identifies which report the numbers came from."""
+    return text if len(text) <= limit else "..." + text[-(limit - 3) :]
+
+
+def _layout_drift_lines(wb: dict, oracle: OracleSource, terse: bool = False) -> list[str]:
+    """The drift verdict plus, when a number was measured, WHERE it came from.
+
+    Provenance is emitted here rather than printed alongside the render because ``--max-bytes`` is a
+    strict cap on everything a run prints: a line printed outside the budgeted body made the cap a
+    suggestion (measured - 1632 bytes emitted under a 1500-byte cap, with no truncation banner).
+
+    Under ``terse`` the citation collapses onto the verdict line and the filename is clipped, so the
+    pair stays inside a fixed byte ceiling however long the oracle's path happens to be.
+    """
+    verdict = _layout_drift_summary_line(wb, oracle.payload, terse)
+    if oracle.path is None:
+        return [verdict]
+    if terse:
+        return [f"{verdict} [{_clip_tail(oracle.path.name, 24)}]"]
+    return [verdict, f"           measured from: {_clip_tail(str(oracle.path))}"]
+
+
 def _fidelity_counts(wb: dict) -> list[str]:
-    """Tier counts only - cheap enough to always print, so `--viz` never hides that this exists."""
+    """Tier counts plus the evidence distribution - cheap enough to always print, so no view can
+    hide either that visual fidelity exists or that some of it was never examined."""
     rows = [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)]
     if not rows:
         return []
@@ -1028,6 +1518,11 @@ def _fidelity_counts(wb: dict) -> list[str]:
     ]
     if flagged:
         out.append(f"    {flagged} visual(s) recorded a fidelity reason - see --fidelity for each")
+    status, counts = fidelity_evidence_status(wb)
+    if status in (FIDELITY_EVIDENCE_PRESENT, FIDELITY_EVIDENCE_MISSING):
+        verified = counts.get(EVIDENCE_VERIFIED, 0)
+        out.append(f"--- EVIDENCE (engine >= 2.335.0): {verified}/{sum(counts.values())} visual(s) examined")
+        out += _evidence_legend(counts)
     return out + [""]
 
 
@@ -1049,8 +1544,13 @@ def _fidelity_groups(rows: list[dict]) -> list[tuple[str, list[dict]]]:
 
 
 def _fidelity_row(v: dict) -> str:
+    """Per-visual line. `evidence` sits beside `status` deliberately: `status: rebuilt` records that
+    the EMITTER ran, and the two are read together or the first is over-read (#371)."""
+    raw = v.get("evidence")
+    evidence = raw.strip() if isinstance(raw, str) and raw.strip() else EVIDENCE_UNKNOWN
+    mark = "  " if evidence == EVIDENCE_VERIFIED else "!!"
     return (
-        f"    {str(v.get('status') or '?'):<22} {v.get('worksheet') or '?'}"
+        f"    {mark} {str(v.get('status') or '?'):<22} {evidence:<14} {v.get('worksheet') or '?'}"
         f" ({v.get('visual_type') or '?'}, tier {v.get('tier') or '?'})"
     )
 
@@ -1225,18 +1725,29 @@ no target_table, no guidance. It is enough to REPORT a stub and structurally ins
 REPAIR one, so this tool always works from `requests[]`."""
 
 
-def render_default(wb_name: str, wb: dict, target: Path, max_bytes: int) -> str:
+def render_default(wb_name: str, wb: dict, target: Path, max_bytes: int, oracle: OracleSource | None = None) -> str:
     """The landing view: both queues at a glance, plus which list the detail came from.
 
     Budgeted too. The cascadable list is the one unbounded thing here - it names every stub that
     depends on another stub - so the fixed tail (the report section and the `needs_review` note) is
     costed first and the cascade list gets whatever is left.
+
+    TWO PASSES, because the tail grew. `_model_section` emits an unbudgeted head (the title, the
+    source line, the coverage line and the category table), so a tail that alone approaches the cap
+    can push the total over it - and at `MIN_MAX_BYTES` the added evidence and drift lines did
+    exactly that, firing the `HARD CAP` net this module treats as a budgeting DEFECT rather than a
+    pass. When the full assembly does not fit, the tail is rebuilt terse; the two new signals are
+    compressed, never dropped.
     """
-    reqs = requests_of(wb)
-    report = _report_section(wb)
-    tail_cost = sum(_blen(x) + 1 for x in report) + _blen(NEEDS_REVIEW_NOTE) + 1
-    out = _model_section(wb_name, wb, reqs, target, max_bytes - tail_cost)
-    return "\n".join(out + report + [NEEDS_REVIEW_NOTE])
+
+    def _assemble(terse: bool) -> str:
+        report = _report_section(wb, oracle, terse)
+        tail_cost = sum(_blen(x) + 1 for x in report) + _blen(NEEDS_REVIEW_NOTE) + 1
+        out = _model_section(wb_name, wb, requests_of(wb), target, max_bytes - tail_cost)
+        return "\n".join(out + report + [NEEDS_REVIEW_NOTE])
+
+    full = _assemble(False)
+    return full if _blen(full) <= max_bytes else _assemble(True)
 
 
 def _list_row(name: str, wb: dict) -> tuple[str, int, int, int, int, int, bool, int, bool, int, bool]:
@@ -1333,6 +1844,36 @@ def _partition_review_estate_lines(found: list[tuple[str, dict, Path]]) -> list[
     return out + [""]
 
 
+def _evidence_estate_lines(found: list[tuple[str, dict, Path]]) -> list[str]:
+    """Estate totals for `--list`: how much of the estate's visual surface was actually examined.
+
+    Named per workbook, not just totalled: "38 of 40 examined" estate-wide hides that all 2 gaps sit
+    in one report. Workbooks with nothing examined are listed first for the same reason.
+    """
+    counts: dict[str, int] = {}
+    unexamined: list[tuple[str, int, int]] = []
+    for name, wb, _ in found:
+        status, wb_counts = fidelity_evidence_status(wb)
+        if status in (FIDELITY_EVIDENCE_NONE, FIDELITY_EVIDENCE_INVALID):
+            continue
+        for value, n in wb_counts.items():
+            counts[value] = counts.get(value, 0) + n
+        total = sum(wb_counts.values())
+        verified = wb_counts.get(EVIDENCE_VERIFIED, 0)
+        if verified != total:
+            unexamined.append((name, verified, total))
+    if not counts:
+        return ["Visual evidence: NOT RECORDED anywhere in this estate (no viz_fidelity rows).", ""]
+    total = sum(counts.values())
+    out = [
+        f"Visual evidence: {counts.get(EVIDENCE_VERIFIED, 0)}/{total} visual(s) examined "
+        f"({' | '.join(f'{v} {counts[v]}' for v in _evidence_order(counts))})",
+    ]
+    for name, verified, wb_total in sorted(unexamined, key=lambda t: (t[1] - t[2], t[0].lower())):
+        out.append(f"    !! {_clip(name, 52):<52} {verified}/{wb_total} examined")
+    return out + [""]
+
+
 def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     """Every workbook in a bundle, ranked by urgency, with the size of both its queues.
 
@@ -1350,6 +1891,7 @@ def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     ]
     out += _pbip_warning_estate_lines(found)
     out += _partition_review_estate_lines(found)
+    out += _evidence_estate_lines(found)
     # Partition scaffolds rank FIRST: unlike a stub calc or a dropped visual binding, an unresolved
     # M partition means the table has ZERO rows -- and it carries a named manual completion step
     # the engine already wrote down (issue #326).
@@ -1359,12 +1901,31 @@ def render_list(found: list[tuple[str, dict, Path]], max_bytes: int) -> str:
     return "\n".join(out + _fit_lines([_list_line(r) for r in ranked], budget, more))
 
 
-def build_json(wb_name: str, wb: dict, category: str | None) -> dict:
+def _layout_drift_json(wb: dict, oracle: OracleSource) -> dict:
+    """Machine-readable drift. ``status`` is always present, so a consumer that never looks at the
+    numbers still cannot mistake "not measured" for "measured, no drift"."""
+    status, payload = layout_drift_status(wb, oracle.payload)
+    worst = payload.get("worst")
+    return {
+        "status": status,
+        "measured": status in (LAYOUT_DRIFT_EXACT, LAYOUT_DRIFT_PRESENT),
+        "by_axis": payload.get("axes"),
+        "worst_axis": worst[0] if worst else None,
+        "worst_axis_stats": worst[1] if worst else None,
+        "placement": payload.get("placement"),
+        "measured_from": str(oracle.path) if oracle.path is not None else None,
+    }
+
+
+def build_json(wb_name: str, wb: dict, category: str | None, oracle: OracleSource | None = None) -> dict:
     """Machine-readable form: guidance hoisted out of the requests, so it appears once."""
+    oracle = oracle or OracleSource()
     reqs = requests_of(wb)
     if category:
         reqs = [r for r in reqs if (r.get("category") or "uncategorised") == category]
     slim = [{k: v for k, v in r.items() if k != "category_guidance"} for r in reqs]
+    evidence_status, evidence_counts = fidelity_evidence_status(wb)
+    gate_code, gate_verdict = evidence_gate(wb)
     return {
         "workbook": wb_name,
         "guidance": guidance_by_category(requests_of(wb)),
@@ -1383,6 +1944,20 @@ def build_json(wb_name: str, wb: dict, category: str | None) -> dict:
         else PARTITION_REVIEW_MISSING,
         "partitions_needs_review_groups": _partition_review_groups(partitions_needs_review_status(wb)[1]),
         "viz_fidelity": [v for v in (wb.get("viz_fidelity") or []) if isinstance(v, dict)],
+        "viz_fidelity_evidence": {
+            "status": evidence_status,
+            "counts": evidence_counts,
+            "total": sum(evidence_counts.values()),
+            # Named explicitly rather than left for the consumer to derive: deriving it means
+            # deciding which values count as verified, and that decision is what #371 is about.
+            "verified": evidence_counts.get(EVIDENCE_VERIFIED, 0),
+            "never_examined": evidence_counts.get(EVIDENCE_EMITTED, 0),
+            "lint_failed": evidence_counts.get(EVIDENCE_LINT_FAILED, 0),
+            "unknown": evidence_counts.get(EVIDENCE_UNKNOWN, 0),
+            "gate_exit_code": gate_code,
+            "gate_verdict": gate_verdict,
+        },
+        "layout_drift": _layout_drift_json(wb, oracle),
     }
 
 
@@ -1411,6 +1986,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "carries deferral reasons that appear in no remediation item)",
     )
     p.add_argument("--severity", help="with --viz: blocking | high | medium | low (no effect on other views)")
+    p.add_argument(
+        "--oracle",
+        type=Path,
+        metavar="PATH",
+        help="fidelity-oracle report (or a directory holding one) carrying summary.placement.by_axis. "
+        "The layout-drift measurement lives in fidelity_oracle.py's report, NOT in the handover, so "
+        "without one this reports NOT MEASURED. Auto-detected by kind in the bundle root, "
+        "<bundle>/fidelity/ and beside the slice",
+    )
+    p.add_argument(
+        "--gate-evidence",
+        action="store_true",
+        help="exit by viz_fidelity[].evidence instead of always 0: "
+        f"{EXIT_OK} every visual emitted+linted, {EXIT_EVIDENCE_BLOCKED} a lint finding names one, "
+        f"{EXIT_NOT_VERIFIED} coverage incomplete or unknown (an unexamined visual is NOT a pass)",
+    )
     p.add_argument("--list", action="store_true", help="list workbooks in the target and exit")
     p.add_argument("--json", type=Path, metavar="FILE", help="also write a machine-readable form")
     p.add_argument(
@@ -1440,19 +2031,31 @@ def _force_utf8_stdout() -> None:
                 pass
 
 
-def _render(args: argparse.Namespace, wb_name: str, wb: dict, source: Path, budget: int) -> str:
-    """Pick the view. Every one of these is capped; `--name` is handled by the caller."""
+def _render(
+    args: argparse.Namespace, selected: tuple[str, dict, Path], budget: int, oracle: OracleSource | None = None
+) -> str:
+    """Pick the view. Every one of these is capped; `--name` is handled by the caller.
+
+    ``selected`` is `select_workbook`'s own ``(name, payload, source)`` triple, kept whole rather
+    than splatted into three parameters.
+    """
+    wb_name, wb, source = selected
     if args.viz:
         return render_viz(wb_name, wb, args.severity, args.category, budget)
     if args.category:
         return render_category(wb_name, requests_of(wb), args.category, budget)
     if args.fidelity:
         return render_fidelity(wb_name, wb, budget)
-    return render_default(wb_name, wb, source, budget)
+    return render_default(wb_name, wb, source, budget, oracle)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Exit 0 on a rendered queue, 2 on an unresolvable target or a cap too small to honour."""
+    """Exit 0 on a rendered queue, 2 on an unresolvable target or a cap too small to honour.
+
+    With ``--gate-evidence`` the exit code instead reports coverage: 0 / 1 / 3 per `evidence_gate`.
+    Opt-in on purpose - every existing caller of this reader keeps getting 0 on a rendered queue,
+    and nothing here starts failing a pipeline because a reader learned to have an opinion.
+    """
     _force_utf8_stdout()
     args = parse_args(argv)
     if args.max_bytes < MIN_MAX_BYTES:
@@ -1463,7 +2066,7 @@ def main(argv: list[str] | None = None) -> int:
             "reporting that the cap held is worse than this error.",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_USAGE
 
     # `print` appends a newline and that newline is output too, so a renderer gets one byte less
     # than the caller asked for. `--json` prints a confirmation, which is output as well.
@@ -1474,22 +2077,30 @@ def main(argv: list[str] | None = None) -> int:
         found = load_workbooks(args.target)
         if args.list:
             print(_capped(render_list(found, budget), budget))
-            return 0
-        wb_name, wb, source = select_workbook(found, args.workbook)
+            return EXIT_OK
+        selected = select_workbook(found, args.workbook)
+        wb_name, wb, source = selected
+        oracle = find_oracle_report(args.target, source, wb_name, args.oracle)
     except HandoverError as exc:
         print(f"read_handover: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
 
     if args.name:
         print(render_named(wb_name, requests_of(wb), args.name, budget))
     else:
-        print(_capped(_render(args, wb_name, wb, source, budget), budget))
+        print(_capped(_render(args, selected, budget, oracle), budget))
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps(build_json(wb_name, wb, args.category), indent=2) + "\n", encoding="utf-8")
+        payload = build_json(wb_name, wb, args.category, oracle)
+        args.json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         print(json_notice)
-    return 0
+
+    if args.gate_evidence:
+        code, verdict = evidence_gate(wb)
+        print(verdict, file=sys.stderr)
+        return code
+    return EXIT_OK
 
 
 if __name__ == "__main__":
