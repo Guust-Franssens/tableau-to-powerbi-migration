@@ -12,22 +12,43 @@ build/
 # (Learned the hard way: a workshop plan and a prerequisites email were committed and pushed before
 # anyone noticed the repo was public.)
 #
-# `**/` not `/migrations/`: these three were root-anchored at DEPTH 1 (`/migrations/customer-*/`),
-# but the user trees are two levels deep (`migrations/workbooks/<slug>/`,
-# `migrations/datasources/<slug>/`), so prefixing a slug - the documented opt-out for a migration
-# that must stay local - matched NOTHING and tracked the whole unit, `fabric/**` (TMDL partitions
-# with server/database names, M queries, PBIR) and `migration-spec.json` included. Measured before
-# the fix: `migrations/customer-foo/...` IGNORED, `migrations/workbooks/customer-foo/...` NOT
-# IGNORED (issue #378). The identical trap is written up four lines below for `migration-brief.md`;
-# it was fixed there and not generalised to its own neighbours. `**/` matches at every depth, so it
-# subsumes the old depth-1 rules rather than sitting beside them.
+# TWO anchored rules per prefix, covering the two SLUG positions - and nothing else.
 #
-# The trailing `/` is load-bearing: these ignore DIRECTORIES only. Dropping it would also swallow
-# tracked files whose NAME starts with a prefix - `docs/customer-text-exposure.md` is exactly that.
-# Pinned by tests/test_gitignore_privacy_prefixes.py.
-**/workshop-*/
-**/engagement-*/
-**/customer-*/
+# Depth-1 alone was the original bug (#378): the trees AGENTS.md instructs are two levels deep
+# (`migrations/workbooks/<slug>/`, `migrations/datasources/<slug>/`), so prefixing a slug - the
+# documented opt-out for a migration that must stay local - matched NOTHING and tracked the whole
+# unit, `fabric/**` (TMDL partitions with server/database names, M queries, PBIR) and
+# `migration-spec.json` included. Measured: `migrations/customer-foo/...` IGNORED,
+# `migrations/workbooks/customer-foo/...` NOT IGNORED.
+#
+# `**/<prefix>-*/` fixes that and OVERSHOOTS, which is why it is not used here. `**/` matches at
+# every depth, including inside a deliverable that is tracked on purpose. Measured on the first
+# attempt at this fix: an ORDINARY, unprefixed slug whose Fabric artifact is named after the source
+# workbook silently lost the subtree -
+#   migrations/workbooks/shipping-kpis/fabric/customer-insights.SemanticModel/... -> IGNORED
+# and a Tableau workbook called "Customer Insights" produces exactly that name. Silent, because an
+# ignored subtree never enters the index, so no sweep over tracked files can ever see it.
+#
+# `*` cannot span `/`, so `/migrations/*/<prefix>-*/` reaches the slug position and stops there.
+# The tree segment is a WILDCARD rather than an enumerated `workbooks|datasources`: a fixed shape
+# that silently stops matching when the layout gains a level is the exact failure this file has now
+# had three times (#378 here, and the `_harvest` / `_sweep` prefix globs below, both citing #125).
+# A third tree is covered on the day it is created, not on the day someone remembers this file.
+#
+# The trailing `/` is load-bearing too: these match DIRECTORIES only, so a FILE whose name starts
+# with a prefix stays tracked - `migrations/workbooks/customer-notes.md` is not swallowed by
+# `/migrations/*/customer-*`. That the hazard is real is on the record one directory over:
+# `docs/customer-text-exposure.md` IS a tracked `customer-*` file, and the earlier unanchored
+# `**/customer-*` draft of this rule matched it (measured, exit 0). The anchor now keeps `docs/` out
+# of reach, so the slash is what protects the migration trees themselves.
+#
+# All of the above is pinned behaviourally by tests/test_gitignore_privacy_prefixes.py.
+/migrations/workshop-*/
+/migrations/*/workshop-*/
+/migrations/engagement-*/
+/migrations/*/engagement-*/
+/migrations/customer-*/
+/migrations/*/customer-*/
 # `**/` not `/migrations/*/`: the depth-1 rule did NOT cover the path AGENTS.md actually instructs -
 # `migrations/workbooks/<slug>/migration-brief.md` is two levels deep, and `git check-ignore` on that
 # exact documented path returned NOT IGNORED. A brief names the customer, their scope, their people

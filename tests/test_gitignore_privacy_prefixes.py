@@ -12,6 +12,13 @@ The same class of bug had already been found, written up and fixed for `migratio
 lines below in the same file, and was not generalised to its own neighbours. That is why this suite
 exists: it pins the behaviour rather than the prose.
 
+The first attempt at the fix used `**/<prefix>-*/`, which matches at EVERY depth and so reached
+inside deliverables that are tracked on purpose: an ordinary, unprefixed slug whose Fabric artifact
+is named after the source workbook - `fabric/customer-insights.SemanticModel/`, from a Tableau
+workbook called "Customer Insights" - silently lost the subtree. `test_nested_fabric_artifact_*`
+below pins that, and it is the test that could not be written as a sweep over tracked files: an
+ignored subtree never enters the index, so `git ls-files` can never offer it as input.
+
 Everything here is judged by `git check-ignore`'s EXIT CODE (0 = ignored, 1 = not ignored). That
 command prints nothing under `-q`, so a truthiness test on its stdout silently reads every path as
 "not ignored" - a mistake already made once against this very file.
@@ -107,25 +114,89 @@ def test_unprefixed_slug_stays_tracked(tree: str, payload: str) -> None:
     )
 
 
+#: Fabric artifacts are named after the SOURCE WORKBOOK, so a prefix word can legitimately appear
+#: deep inside a deliverable that is tracked on purpose. A Tableau workbook called "Customer
+#: Insights" produces `customer-insights.SemanticModel`; these are not contrived names.
+NESTED_ARTIFACTS = (
+    "fabric/customer-insights.SemanticModel/definition/model.tmdl",
+    "fabric/workshop-summary.Report/definition/report.json",
+    "fabric/engagement-metrics.SemanticModel/definition/tables/Sales.tmdl",
+    # The prefix word can also appear below the artifact root.
+    "fabric/Acme.Report/definition/pages/customer-overview/page.json",
+)
+
+
+@pytest.mark.parametrize("tree", USER_TREES)
+@pytest.mark.parametrize("artifact", NESTED_ARTIFACTS)
+def test_nested_fabric_artifact_named_after_the_workbook_stays_tracked(tree: str, artifact: str) -> None:
+    """The privacy prefixes are reserved in the SLUG position only - not at arbitrary depth.
+
+    An unanchored `**/customer-*/` also matches inside a deliverable, so an ordinary, unprefixed
+    migration whose Fabric artifact happens to be named after a "Customer ..." workbook silently
+    lost that subtree. The failure is invisible to `test_no_tracked_file_is_matched_by_an_exclude_
+    rule`: an ignored subtree never enters the index, so `git ls-files` can never offer it as
+    input. Only a constructed path can catch it, which is what this test is.
+    """
+    path = f"{tree}/shipping-kpis/{artifact}"
+    assert not _is_ignored(path), (
+        f"{path} is ignored - an ordinary slug's deliverable must stay tracked. "
+        f"The prefixes are reserved for the slug position, not every depth. "
+        f"Matched: {_matching_rule(path)}"
+    )
+
+
+@pytest.mark.parametrize("prefix", PRIVACY_PREFIXES)
+def test_prefix_rules_do_not_reach_below_the_slug_position(prefix: str) -> None:
+    """The complement of the test above, stated as the rule shape rather than as example names.
+
+    `*` cannot span `/`, so `/migrations/*/<prefix>-*/` stops at the slug. Anything deeper than the
+    slug is deliverable territory. Guarding both directions is what makes a revert to `**/` fail
+    here rather than merely change behaviour quietly.
+    """
+    slug_position = f"migrations/workbooks/{prefix}acme/fabric/x.tmdl"
+    below_the_slug = f"migrations/workbooks/ordinary/fabric/{prefix}thing.SemanticModel/x.tmdl"
+    assert _is_ignored(slug_position), f"PRIVACY LEAK: {slug_position} is NOT ignored"
+    assert not _is_ignored(below_the_slug), (
+        f"{below_the_slug} is ignored - the rule reaches past the slug position. "
+        f"Matched: {_matching_rule(below_the_slug)}"
+    )
+
+
 def test_prefix_rules_match_directories_only() -> None:
     """The trailing `/` is load-bearing: a FILE whose name starts with a prefix stays tracked.
 
-    `docs/customer-text-exposure.md` is a real committed doc. Dropping the trailing slash from
-    `**/customer-*/` would start matching it (and any future `customer-*.md`), which is how a
-    privacy fix turns into a silent un-tracking of toolkit content.
+    Two independent cases, and they are no longer the same case:
+
+    * `migrations/workbooks/customer-notes.md` is what the ANCHORED rules would swallow if the
+      slash were dropped, and is therefore the live guard.
+    * `docs/customer-text-exposure.md` is a real committed doc and is out of the anchored rules'
+      reach, but it is the measured evidence that the hazard is not theoretical - the earlier
+      unanchored `**/customer-*` draft matched it (exit 0). Kept as a standing check that no future
+      widening puts `docs/` back in range.
     """
     tracked_doc = "docs/customer-text-exposure.md"
     assert (REPO_ROOT / tracked_doc).is_file(), f"{tracked_doc} moved - re-pick a tracked customer-* FILE"
     assert not _is_ignored(tracked_doc), f"{tracked_doc} is ignored. Matched: {_matching_rule(tracked_doc)}"
-    assert not _is_ignored("migrations/workbooks/customer-notes.md")
+    assert not _is_ignored("migrations/workbooks/customer-notes.md"), (
+        "a FILE named customer-* inside a migration tree became ignored - the rules are "
+        "directory-only by design. Matched: "
+        f"{_matching_rule('migrations/workbooks/customer-notes.md')}"
+    )
 
 
 def test_no_tracked_file_is_matched_by_an_exclude_rule() -> None:
-    """Nothing already committed may become ignored - the regression this whole change risks.
+    """Nothing already committed may become ignored - one half of the regression risk.
 
     Sweeps every tracked path through `check-ignore --no-index` in one batch. NUL-separated so a
     path with a space or a newline cannot corrupt the comparison. Exit 1 means "no path matched",
     which is the passing state.
+
+    ⚠️ Read its scope honestly: this gate protects what is ALREADY TRACKED and is structurally
+    blind to the opposite failure - a rule broad enough to stop an artifact from EVER being
+    tracked. Such a subtree never enters the index, so `git ls-files` can never offer it here. That
+    is exactly how the unanchored `**/` draft shipped a green sweep while silently suppressing
+    `fabric/customer-insights.SemanticModel/`. The constructed-path tests above are the other half;
+    neither is sufficient alone.
     """
     tracked = subprocess.run(
         ["git", "ls-files", "-z"],
