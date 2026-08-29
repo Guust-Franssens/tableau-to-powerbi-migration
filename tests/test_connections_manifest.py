@@ -8,6 +8,8 @@ silent - a leaked value in a document nobody re-reads.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,12 +19,159 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import connections_manifest as cm  # noqa: E402  # pylint: disable=wrong-import-position
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _spec(sources: list[dict], tmp_path: Path) -> Path:
     """Write a minimal parser-contract spec the bundle loader accepts."""
     spec = tmp_path / "migration-spec.json"
     spec.write_text(json.dumps({"data_sources": sources}), encoding="utf-8")
     return spec
+
+
+def _git_repo(tmp_path: Path, ignore_text: bytes | None = None) -> Path:
+    """Create a git work tree carrying this repo's real ignore rules by default."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True, text=True, check=True)
+    if ignore_text is None:
+        ignore_text = (REPO_ROOT / ".gitignore").read_bytes()
+        assert b"/_connections_manifest" in ignore_text, "connections manifest ignore rule missing"
+    (repo / ".gitignore").write_bytes(ignore_text)
+    return repo
+
+
+def _repo_spec(repo: Path) -> Path:
+    """Write a minimal manifest input inside an isolated git repo."""
+    spec = repo / "migration-spec.json"
+    spec.write_text(
+        json.dumps({"data_sources": [{"name": "S", "connection": {"class": "postgres", "server": "db"}}]}),
+        encoding="utf-8",
+    )
+    return spec
+
+
+# --------------------------------------------------------------------------- output safety
+
+
+def test_default_output_location_is_gitignored_by_convention():
+    """The no-argument path must be safe before the script writes customer server/database names."""
+    assert cm.DEFAULT_OUT.name == "_connections_manifest"
+    assert cm.unignored_output_paths(cm.DEFAULT_OUT) == []
+
+
+def test_unignored_in_repo_output_is_refused_before_any_manifest_file_is_written(tmp_path):
+    """The SES near-miss shape (`ses-prep/`) must fail closed, not merely warn."""
+    repo = _git_repo(tmp_path)
+    out = repo / "ses-prep"
+    assert cm.main(["--bundle", str(_repo_spec(repo)), "--out", str(out)]) == 2
+    assert not (out / "connections.md").exists()
+    assert not (out / "connections.json").exists()
+
+
+def test_ignored_in_repo_output_writes_the_manifest(tmp_path):
+    """A deliberate ignored target is allowed, so the guard is not a blanket in-repo ban."""
+    repo = _git_repo(tmp_path)
+    out = repo / "_connections_manifest"
+    assert cm.main(["--bundle", str(_repo_spec(repo)), "--out", str(out)]) == 0
+    assert (out / "connections.md").is_file()
+    assert (out / "connections.json").is_file()
+
+
+def test_directory_only_ignore_rule_is_checked_against_artifacts_not_the_missing_out_dir(tmp_path):
+    """The refusal suggests adding an ignore rule; a normal directory rule must be enough."""
+    repo = _git_repo(tmp_path, ignore_text=b"/safe-connections/\n")
+    out = repo / "safe-connections"
+    assert cm.unignored_output_paths(out) == []
+    assert cm.main(["--bundle", str(_repo_spec(repo)), "--out", str(out)]) == 0
+    assert (out / "connections.md").is_file()
+
+
+def test_literal_tilde_output_is_refused_before_the_raw_relative_path_can_leak(tmp_path, monkeypatch):
+    """Quoted `~/manifest` is a literal repo-relative path on Windows unless the guard checks it."""
+    repo = _git_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    assert cm.main(["--bundle", str(_repo_spec(repo)), "--out", "~/manifest"]) == 2
+    assert not (repo / "~" / "manifest" / "connections.md").exists()
+    assert not (repo / "~" / "manifest" / "connections.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NTFS junction regression")
+def test_junction_output_is_checked_from_the_calling_worktree_root(tmp_path, monkeypatch):
+    """A junction child runs git outside the repo unless the guard also anchors at the caller cwd."""
+    repo = _git_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = repo / "linkdir"
+    mklink = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if mklink.returncode != 0:
+        pytest.skip(f"could not create junction: {mklink.stderr or mklink.stdout}")
+
+    monkeypatch.chdir(repo)
+    assert cm.main(["--bundle", str(_repo_spec(repo)), "--out=linkdir\\manifest2"]) == 2
+    assert not (outside / "manifest2" / "connections.md").exists()
+
+
+def test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it(tmp_path):
+    """Appending a slash can make git report an empty matched pattern for an unignored path."""
+    repo = _git_repo(tmp_path)
+    stamp = subprocess.run(
+        ["git", "check-ignore", "-q", "--", f"{repo / 'definitely-not-ignored'}/"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if stamp.returncode != 0:
+        pytest.skip("this git no longer reports every trailing-slash path as ignored")
+    assert cm.refuse_unignored_output(repo / "ses-prep") is True
+
+
+def test_an_unanswerable_git_is_treated_as_unsafe(tmp_path, monkeypatch):
+    """A git failure while checking an in-repo target must fail closed, not silently proceed."""
+    repo = _git_repo(tmp_path)
+
+    def fake_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
+        if args[:1] == ["rev-parse"]:
+            return subprocess.CompletedProcess(args, 0, stdout="true\n", stderr="")
+        return subprocess.CompletedProcess(args, 128, stdout="", stderr="fatal: no answer")
+
+    monkeypatch.setattr(cm, "_git", fake_git)
+    with pytest.raises(cm.OutputPathNotIgnoredError):
+        cm.unignored_output_paths(repo / "ses-prep")
+    assert cm.refuse_unignored_output(repo / "ses-prep") is True
+
+
+def test_a_missing_git_binary_does_not_silently_disable_the_guard(tmp_path, monkeypatch):
+    """If a .git checkout is in scope but git cannot run, the safe answer is refusal."""
+    repo = _git_repo(tmp_path)
+    monkeypatch.setattr(cm, "_git", lambda _args, _cwd: None)
+    with pytest.raises(cm.OutputPathNotIgnoredError):
+        cm.unignored_output_paths(repo / "ses-prep")
+    assert cm.refuse_unignored_output(repo / "ses-prep") is True
+
+
+def test_guard_proceeds_outside_any_git_work_tree(tmp_path):
+    """A real out-of-checkout target is still allowed."""
+    if (
+        subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        == "true"
+    ):
+        pytest.skip("pytest tmp_path is itself inside a git work tree on this machine")
+    assert cm.unignored_output_paths(tmp_path / "anything-at-all") == []
+    assert cm.refuse_unignored_output(tmp_path / "anything-at-all") is False
 
 
 # --------------------------------------------------------------------------- no secrets, ever

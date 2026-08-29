@@ -1018,7 +1018,7 @@ Run in order. Each line says what it proves — and §5.2 says what none of them
 | 9 | the estate identity survived | `Get-Content <bundle>\deploy-estate-id.txt` | non-empty, and stored with the bundle |
 | 10 | the engine version is recorded | `.engine` in `<bundle>\engine-output-receipt.json` (§1.2) | present, with `canonical: true` |
 | 11 | no model would load zero rows | `<bundle>\empty-model-check.json` | `"status": "OK"`, or a unit you deliberately withheld with `--skip` / `--skip-empty-models` (§2 step 5) |
-| 12 | connections the customer must make | `python scripts\connections_manifest.py --bundle <bundle> --out <dir>` | `connections.md` delivered |
+| 12 | connections the customer must make | `python scripts\connections_manifest.py --bundle <bundle>` (default ignored `_connections_manifest/`; any `--out` must be ignored or outside the checkout) | exit `0`: `connections.md` delivered; exit `2`: refused unsafe output path |
 
 ❌ **Correction: check 10 no longer looks for `ENGINE-VERSION.txt`.** That file was a manual
 workaround, deleted with §1.2 — the previous edition's check therefore **failed on a correct

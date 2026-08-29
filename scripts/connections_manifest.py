@@ -1,8 +1,9 @@
 """
 purpose: tell the customer WHICH data sources they must connect after a migration, and what breaks
-         until they do - as a deliverable, not as something discovered one failed refresh at a time.
-usage:   python scripts/connections_manifest.py --bundle <dir> --out <dir>
-         python scripts/connections_manifest.py --bundle <dir> --out <dir> --format json
+         until they do - as a customer-infrastructure deliverable that must live in a git-ignored
+         output directory.
+usage:   python scripts/connections_manifest.py --bundle <dir>
+         python scripts/connections_manifest.py --bundle <dir> --out <ignored-dir> --format json
 
 Why this exists
 ---------------
@@ -18,12 +19,14 @@ assembles it:
   * ``preflight_source_credentials.classify_source`` - live vs flat-file, fail-safe by design
   * the engine's handover slices - which workbook binds to which source (the blast radius)
 
-Two refusals, each from a way this question is normally answered wrongly:
+Three refusals, each from a way this question is normally answered wrongly:
 
-1. **It never emits a secret.** Host, database and account name are configuration; passwords, keys
+1. **It refuses unignored in-repo output.** The manifest intentionally names real customer servers
+   and databases, so writing to `ses-prep/` or any other unignored checkout path is a hard stop.
+2. **It never emits a secret.** Host, database and account name are configuration; passwords, keys
    and tokens are not. The manifest is meant to be safe to email, and a test proves no
    credential-shaped value reaches it.
-2. **It never calls an extract "connected".** A model built from a materialised ``.hyper`` has no
+3. **It never calls an extract "connected".** A model built from a materialised ``.hyper`` has no
    upstream connection at all - it is a SNAPSHOT, frozen at extract time, that will never refresh.
    Customers consistently read those as broken connections and go looking for a credential that does
    not exist. They are listed separately, and labelled.
@@ -39,6 +42,7 @@ import argparse
 import json
 import logging
 import re
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -51,6 +55,112 @@ from migration_bundle import load_bundle  # noqa: E402  # pylint: disable=wrong-
 from preflight_source_credentials import classify_source  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("connections_manifest")
+DEFAULT_OUT = REPO_ROOT / "_connections_manifest"
+OUTPUT_ARTIFACTS = ("connections.md", "connections.json")
+
+
+class OutputPathNotIgnoredError(RuntimeError):
+    """The output is in a checkout, but git cannot prove the manifest artifacts are ignored."""
+
+
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
+    """Run git in `cwd`. Returns None when git itself could not be run at all."""
+    try:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _existing_ancestor(path: Path) -> Path | None:
+    """Nearest existing directory at or above `path` - git needs a real directory to run in."""
+    return next((p for p in (path, *path.parents) if p.is_dir()), None)
+
+
+def unignored_output_paths(out: Path, anchor: Path | None = None) -> list[Path]:
+    """Which manifest artifacts under `out` git would offer to commit.
+
+    Empty list means safe to write. This probes the files inside the output directory, not the
+    directory itself: directory-only ignore patterns do not match a not-yet-created directory, and
+    adding a trailing slash makes `git check-ignore` lie on some Windows git builds.
+
+    The caller chooses which path form and anchor to probe. `main` checks both the lexical path git
+    would see from the current checkout and the resolved path it writes to, because `~` expansion can
+    otherwise make the guard and writer reason about different places.
+    """
+    out = out.absolute()
+    anchor = anchor or _existing_ancestor(out)
+    if anchor is None:  # pragma: no cover - a drive/filesystem root always exists
+        return []
+
+    inside = _git(["rev-parse", "--is-inside-work-tree"], anchor)
+    if inside is None:
+        if any((parent / ".git").exists() for parent in (anchor, *anchor.parents)):
+            raise OutputPathNotIgnoredError(
+                f"cannot run git, but {out} is inside a .git checkout, so it cannot be proven ignored"
+            )
+        return []
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return []
+
+    unignored: list[Path] = []
+    for artifact in OUTPUT_ARTIFACTS:
+        target = out / artifact
+        probe = _git(["check-ignore", "-q", "--", str(target)], anchor)
+        if probe is None or probe.returncode not in (0, 1):
+            detail = "git could not be run" if probe is None else (probe.stderr.strip() or f"exit {probe.returncode}")
+            raise OutputPathNotIgnoredError(f"could not ask git whether {target} is ignored: {detail}")
+        if probe.returncode == 1:
+            unignored.append(target)
+    return unignored
+
+
+def refuse_unignored_output(out: Path, anchor: Path | None = None) -> bool:
+    """True when the run must stop before writing customer infrastructure names."""
+    try:
+        unignored = unignored_output_paths(out, anchor=anchor)
+    except OutputPathNotIgnoredError as exc:
+        message = str(exc)
+    else:
+        if not unignored:
+            return False
+        message = (
+            f"git does not ignore {', '.join(str(p) for p in unignored)}. This manifest names real "
+            "customer servers and databases, and this repo is PUBLIC, so a `git add -A` would stage "
+            "customer infrastructure metadata (issue #322). Fix: use the ignored default "
+            f"`--out {DEFAULT_OUT.name}`, point --out outside the checkout, or add a .gitignore rule."
+        )
+    LOG.error("REFUSING to write connections manifest into %s: %s", out, message)
+    return True
+
+
+def _current_worktree_root() -> Path | None:
+    """Current checkout root, if the operator invoked the script from inside one."""
+    cwd = Path.cwd().absolute()
+    root = _git(["rev-parse", "--show-toplevel"], cwd)
+    if root is None or root.returncode != 0:
+        return None
+    return Path(root.stdout.strip()).absolute()
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    """Compatibility wrapper for lexical containment checks."""
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _output_checks(out: Path) -> list[tuple[Path, Path | None]]:
+    """Path forms and anchors that must agree before customer infrastructure names are written."""
+    lexical = out.absolute()
+    resolved = out.expanduser().resolve()
+    checks: list[tuple[Path, Path | None]] = [(lexical, None), (resolved, None)]
+    current_root = _current_worktree_root()
+    if current_root is not None and _is_relative_to(lexical, current_root):
+        checks.append((lexical, current_root))
+    return list(dict.fromkeys(checks))
+
 
 # Config the customer's platform team needs in order to create a connection. Deliberately an
 # ALLOW-list: anything not named here is dropped rather than passed through, so a future connection
@@ -486,29 +596,35 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="estate bundle dir or migration-spec.json")
-    parser.add_argument("--out", type=Path, help="write connections.md / connections.json here")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_OUT,
+        help=f"write connections.md / connections.json here; must be git-ignored (default: {DEFAULT_OUT})",
+    )
     parser.add_argument("--format", choices=("md", "json", "both"), default="both", help="what to emit")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     manifest = build(args.bundle)
 
-    if args.out:
-        args.out.mkdir(parents=True, exist_ok=True)
-        if args.format in ("md", "both"):
-            (args.out / "connections.md").write_text(render(manifest), encoding="utf-8")
-        if args.format in ("json", "both"):
-            (args.out / "connections.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        LOG.info(
-            "%d source(s): %d need a connection, %d snapshot(s), %d to review -> %s",
-            manifest["total"],
-            manifest["needs_credential"],
-            manifest["snapshots"],
-            manifest["needs_review"],
-            args.out,
-        )
-    else:
-        print(render(manifest) if args.format == "md" else json.dumps(manifest, indent=2))
+    output_checks = _output_checks(args.out)
+    if any(refuse_unignored_output(out, anchor=anchor) for out, anchor in output_checks):
+        return 2
+    args.out = args.out.expanduser().resolve()
+    args.out.mkdir(parents=True, exist_ok=True)
+    if args.format in ("md", "both"):
+        (args.out / "connections.md").write_text(render(manifest), encoding="utf-8")
+    if args.format in ("json", "both"):
+        (args.out / "connections.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    LOG.info(
+        "%d source(s): %d need a connection, %d snapshot(s), %d to review -> %s",
+        manifest["total"],
+        manifest["needs_credential"],
+        manifest["snapshots"],
+        manifest["needs_review"],
+        args.out,
+    )
     return 0
 
 
