@@ -133,6 +133,7 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 import argparse
+import collections
 import json
 import re
 import sys
@@ -272,7 +273,7 @@ class Model:
         comment - `// prior source was Snowflake.Databases("s","d")` - made a fully file-backed source
         report CONNECTED, which is a false PASS in the exact direction this gate exists to prevent.
         """
-        return bool(re.search(rf"\b{re.escape(token)}\.[A-Za-z]", _strip_m_comments(self.m_text)))
+        return bool(re.search(rf"\b{re.escape(token)}\.[A-Za-z]", _strip_m_noise(self.m_text)))
 
     def file_tables(self, only: set[str] | None = None) -> list[str]:
         """Distinct table names whose partitions are file-backed, for finding evidence.
@@ -338,25 +339,152 @@ def _table_names(data_source: dict[str, Any]) -> list[str]:
     return names
 
 
-def partition_connectors(body: str) -> frozenset[str]:
-    """The connector tokens ONE partition's own M actually calls, comments stripped.
+def _strip_m_noise(text: str) -> str:
+    """Remove M comments AND string literals, preserving length so structure survives.
 
-    Per-partition rather than per-model, because "rows arrive" and "this connector is named" must be
-    the SAME partition before either can support a pass. Blind review, HIGH 2: they were separate
-    model-wide facts, so a live `Sql.Database` partition certified a Snowflake source whose only
-    partition was an empty `#table` stub - two sources reported connected, exit 0.
+    String literals matter as much as comments now. Blind review round 18: a partition carrying
+    `Note = "Snowflake.Databases(""fake"")"` was reported as a connected Snowflake source, because
+    only comments were stripped. Doubled quotes are M's escape, and blanking the whole literal handles
+    them without needing to parse the escape.
     """
-    text = _strip_m_comments(body)
+    out = []
+    i, n, in_string = 0, len(text), False
+    while i < n:
+        char = text[i]
+        if in_string:
+            if char == '"':
+                if i + 1 < n and text[i + 1] == '"':
+                    out.append("  ")
+                    i += 2
+                    continue
+                in_string = False
+                out.append(" ")
+            else:
+                out.append(" " if char != "\n" else "\n")
+            i += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(" ")
+            i += 1
+            continue
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            while i < n and not text.startswith("*/", i):
+                out.append("\n" if text[i] == "\n" else " ")
+                i += 1
+            out.append("  ")
+            i += 2
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+_LET_BLOCK = re.compile(r"\blet\b(?P<body>.*?)\bin\b\s*(?P<final>#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_.]*)", re.DOTALL)
+_BINDING = re.compile(r"^\s*(?P<name>#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<expr>.*)$", re.DOTALL)
+_CONNECTOR_CALL = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\.[A-Za-z]+\s*\(")
+_NAVIGATION_STEP = re.compile(r"^\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*\{.*\}\s*\[[^\]]*\]\s*$", re.DOTALL)
+# `Value.NativeQuery(<handle>, "SELECT ...")` is the engine's custom-SQL step, and its FIRST argument
+# is the connection handle - so rows provably derive from whatever that handle traces back to. It is
+# admitted as a chain step because it is exactly how a Tableau custom-SQL relation lands, which is the
+# shape of the incident this gate was built for (#328). Only the first-argument position counts: a
+# connector named anywhere else in the call does not make the chain.
+_NATIVE_QUERY_STEP = re.compile(r"^\s*Value\.NativeQuery\s*\(\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*,", re.DOTALL)
+
+
+def _split_bindings(body: str) -> list[str]:
+    """Split a `let` body on TOP-LEVEL commas only - brackets, braces and parens all nest."""
+    parts, depth, start = [], 0, 0
+    for index, char in enumerate(body):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(body[start:index])
+            start = index + 1
+    parts.append(body[start:])
+    return [p for p in parts if p.strip()]
+
+
+def partition_provenance(body: str) -> frozenset[str]:
+    """The connector token that PROVABLY supplies this partition's rows, or nothing.
+
+    ATTRIBUTION IS NOT PROVENANCE. Round 18's finding, and the reason this exists: knowing which
+    TABLE belongs to a source (which `ds_details.tables` does answer) never established which
+    EXPRESSION supplies that table's rows. A lexical token match said "connected" for a partition
+    whose rows came from an inline `#table` literal beside an unused string, and for one whose rows
+    came from `Sql.Database` beside an unused lazy `Snowflake.Databases` binding.
+
+    This is reachability, NOT an M interpreter. It walks backwards from the `in` expression through
+    `name = expr` bindings and requires the chain to be the engine's own canonical shape:
+
+        let  Source = <Token>.<Func>(...),        <- the root, and the only connector call allowed
+             Db     = Source{[...]}[Data],        <- zero or more pure navigation steps, or
+             Data   = Value.NativeQuery(Db, ...)  <- a custom-SQL step over the same handle
+        in   Data
+
+    Measured across BOTH real bundles (280 partitions, canonical engine 2.339.0): every one of the 49
+    live-connector partitions matches it - 41 Snowflake and 3 Databricks as 4-step chains, 3 Sql and 2
+    PostgreSQL as 2-step. So this recognises a known generator's output rather than inferring, which
+    is the distinction that makes a pass defensible here. `Value.NativeQuery` does not appear in
+    either bundle (neither migrated a custom-SQL relation live) but is admitted on the same reasoning:
+    its first argument IS the connection handle, and it is how a Tableau custom-SQL table lands - the
+    exact shape of the incident this gate was built for.
+
+    Anything else - a hand-edited partition, an extra binding in the chain, a branch, a missing link -
+    returns nothing, and the caller reports NOT_CHECKED. Unreachable bindings are ignored by
+    construction: they are never visited, so an unused connector call cannot vote.
+    """
+    match = _LET_BLOCK.search(_strip_m_noise(body))
+    if not match:
+        return frozenset()
+    bindings: dict[str, str] = {}
+    for chunk in _split_bindings(match.group("body")):
+        found = _BINDING.match(chunk)
+        if found:
+            bindings[found.group("name").strip('#"')] = found.group("expr")
+    current = match.group("final").strip('#"')
+    for _step in range(len(bindings) + 1):
+        expr = bindings.get(current)
+        if expr is None:
+            return frozenset()
+        root = _CONNECTOR_CALL.match(expr)
+        if root and root.group(1) in CONNECTOR_TOKENS:
+            return frozenset({root.group(1)})
+        # A call that is NOT a known connector falls through to the step patterns rather than ending
+        # the walk: `Value.NativeQuery(...)` matches the root shape too, and returning here made every
+        # custom-SQL partition unprovable - including the committed `mixed-live-and-flat-file` fixture,
+        # which is the one artifact in this repo that shows the incident's own shape.
+        nav = _NAVIGATION_STEP.match(expr) or _NATIVE_QUERY_STEP.match(expr)
+        if not nav:
+            return frozenset()
+        current = nav.group(1).strip('#"')
+    return frozenset()
+
+
+def partition_connectors(body: str) -> frozenset[str]:
+    """Connector tokens this partition's M MENTIONS, comments and string literals removed.
+
+    LEXICAL and deliberately over-detecting: it feeds only `connector_present`, which can move a
+    verdict to NOT_CHECKED and never to a pass. The pass side uses `partition_provenance`.
+    """
+    text = _strip_m_noise(body)
     return frozenset(token for token in CONNECTOR_TOKENS if re.search(rf"\b{re.escape(token)}\.[A-Za-z]", text))
 
 
 def _partition_connects(part: dict[str, Any], token: str) -> bool:
-    """Whether THIS partition both carries rows from a connection and calls THIS connector.
+    """Whether THIS partition carries rows and PROVABLY draws them through THIS connector.
 
-    A partition with no recorded connector set fails closed. The only producer is `load_model`, which
-    always records one; anything else is a hand-built object that has not proven what it claims.
+    Keyed on proven provenance, not on a token appearing in the text. A partition with no recorded
+    provenance fails closed; the only producer is `load_model`, which always records one.
     """
-    return part["category"] in CONNECTED_CATEGORIES and token in (part.get("connectors") or frozenset())
+    return part["category"] in CONNECTED_CATEGORIES and token in (part.get("provenance") or frozenset())
 
 
 def load_model(model_dir: Path) -> Model:
@@ -369,11 +497,15 @@ def load_model(model_dir: Path) -> Model:
         m_chunks.append(text)
         for block in _partition_blocks(text):
             verdict = classify_partition(block, model_dir, params)
+            body = str(block.get("body") or "")
             partitions.append(
                 {
                     "table": tmdl.stem,
                     "category": str(verdict.get("category", "unrecognized")),
-                    "connectors": partition_connectors(str(block.get("body") or "")),
+                    "connectors": partition_connectors(body),
+                    "provenance": partition_provenance(body)
+                    if str(block.get("kind", "")).lower() == "m"
+                    else frozenset(),
                 }
             )
     return Model(name=model_dir.name, path=str(model_dir), partitions=tuple(partitions), m_text="\n".join(m_chunks))
@@ -556,12 +688,6 @@ class Coverage:
     def complete(self) -> bool:
         """True when every declared table was found in the emitted model."""
         return not self.unmatched
-
-
-def _strip_m_comments(text: str) -> str:
-    """Remove M line and block comments so a connector NAME in prose cannot read as a connection."""
-    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
-    return re.sub(r"//[^\n]*", " ", text)
 
 
 def _normalise_table(name: str) -> str:
@@ -1647,21 +1773,38 @@ def _engine_bundle_roots(root: Path) -> list[Path]:
     return ordered
 
 
+def _census_defect(payload: dict[str, Any]) -> str | None:
+    """Why this census cannot be trusted to enumerate the bundle's units, or None if it can.
+
+    Round 18: a census was accepted whenever EITHER collection was a list, so `workbooks: "malformed"`
+    beside a valid `datasources: []` reported `COVERAGE: 1 of 1`, exit 0 - a wrong-typed collection
+    silently contributing zero units. Once a file is identified as an engine census, BOTH collections
+    must be present and list-typed, and every entry must be an object. Anything else is a census we
+    cannot count from, which is `not_evaluated` - never a smaller denominator.
+    """
+    for key in ("workbooks", "datasources"):
+        if key not in payload:
+            return f"the census has no `{key}` collection, so the units it declares cannot be enumerated"
+        if not isinstance(payload[key], list):
+            return f"the census's `{key}` is {type(payload[key]).__name__}, not a list - it cannot be enumerated"
+        bad = [i for i, entry in enumerate(payload[key]) if not isinstance(entry, dict)]
+        if bad:
+            return f"the census's `{key}` has {len(bad)} non-object entry/entries at index {bad[:5]} - it is malformed"
+    return None
+
+
 def _engine_census(bundle: Path) -> tuple[list[EngineUnit], bool]:
     """`(units, is_census)` from a bundle's `report.json` - workbooks AND datasources.
 
     `report.json` is the AUTHORITY, and handover slices are copies of it (`run_estate.slice_handovers`
-    writes one per `report["workbooks"]` entry). Blind review, HIGH 1: resolving units through slices
-    let a missing, stale or malformed slice delete a declared unit from the numerator AND the
-    denominator, so a bundle whose downgraded workbook had no slice reported `COVERAGE: 1 of 1`,
-    exit 0. A unit that vanishes must never be indistinguishable from a unit that was checked - which
-    is the same defect this gate exists to prevent, one level up.
+    writes one per `report["workbooks"]` entry). Blind review: resolving units through slices let a
+    missing, stale or malformed slice delete a declared unit from the numerator AND the denominator.
+    A unit that vanishes must never be indistinguishable from a unit that was checked.
 
-    An UNREADABLE `report.json` is its own unit, not silence. Round 17 finding 1: a corrupt census
-    fell through to the slice loader, which knows nothing about `datasources[]`, so every datasource
-    unit disappeared with no signal at all. Guarded by CONTENT, not by filename - every PBIR report
-    definition in this repo is also called `report.json`, and one parses fine while carrying neither
-    `workbooks` nor `datasources`, so it is silently not-a-census.
+    An UNREADABLE or STRUCTURALLY MALFORMED census is its own unit, not silence. Guarded by CONTENT,
+    not by filename - every PBIR report definition in this repo is also called `report.json`, and one
+    carries NEITHER collection, so it is silently not-a-census. Carrying EITHER makes it a census, and
+    then `_census_defect` requires it to be a well-formed one.
     """
     report = bundle / "report.json"
     if not report.is_file():
@@ -1669,30 +1812,63 @@ def _engine_census(bundle: Path) -> tuple[list[EngineUnit], bool]:
     try:
         payload = json.loads(report.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        broken = EngineUnit(
-            report.stem,
-            report,
-            bundle,
-            {},
-            SCOPE_MODEL,
-            f"this bundle's report.json is the unit CENSUS and it is unreadable ({exc}), so how many "
-            "units this bundle declares is UNKNOWN - every datasource unit lives only in that file",
-        )
-        return [broken], True
+        return [_census_failure(report, bundle, f"it is unreadable ({exc})")], True
     if not isinstance(payload, dict):
         return [], False
-    workbooks = payload.get("workbooks")
-    datasources = payload.get("datasources")
-    if not isinstance(workbooks, list) and not isinstance(datasources, list):
+    if "workbooks" not in payload and "datasources" not in payload:
         return [], False
-    units = []
-    for detail in workbooks if isinstance(workbooks, list) else []:
-        if isinstance(detail, dict):
-            units.append(EngineUnit(str(detail.get("name") or report.stem), report, bundle, detail, SCOPE_MODEL))
-    for detail in datasources if isinstance(datasources, list) else []:
-        if isinstance(detail, dict):
-            units.append(EngineUnit(str(detail.get("name") or report.stem), report, bundle, detail, SCOPE_TABLE))
-    return units, True
+    defect = _census_defect(payload)
+    if defect:
+        return [_census_failure(report, bundle, defect)], True
+
+    units: list[EngineUnit] = []
+    for scope, key in ((SCOPE_MODEL, "workbooks"), (SCOPE_TABLE, "datasources")):
+        for detail in payload[key]:
+            units.append(EngineUnit(str(detail.get("name") or report.stem), report, bundle, detail, scope))
+    return _flag_duplicate_names(units), True
+
+
+def _census_failure(report: Path, bundle: Path, why: str) -> EngineUnit:
+    """One unit standing for a census that cannot be enumerated."""
+    return EngineUnit(
+        report.stem,
+        report,
+        bundle,
+        {},
+        SCOPE_MODEL,
+        f"this bundle's report.json is the unit CENSUS and {why}, so how many units this bundle "
+        "declares is UNKNOWN - every datasource unit lives only in that file",
+    )
+
+
+def _flag_duplicate_names(units: list[EngineUnit]) -> list[EngineUnit]:
+    """Replace every member of a name collision with one `not_evaluated` unit.
+
+    Round 18: two records sharing a name were silently deduplicated, so a flat-only entry could hide a
+    live one behind the same identity. Which of the two is real is not knowable here, so neither is
+    judged and the collision is reported.
+    """
+    counts = collections.Counter(unit.name for unit in units)
+    out, emitted = [], set()
+    for unit in units:
+        if counts[unit.name] == 1:
+            out.append(unit)
+            continue
+        if unit.name in emitted:
+            continue
+        emitted.add(unit.name)
+        out.append(
+            EngineUnit(
+                unit.name,
+                unit.source,
+                unit.bundle,
+                {},
+                unit.scope,
+                f"{counts[unit.name]} units share the name {unit.name!r} and they do not agree - which "
+                "one this is cannot be established, so neither is judged. De-duplicate the bundle",
+            )
+        )
+    return out
 
 
 def _slice_units(bundle: Path, known: set[str]) -> list[EngineUnit]:
@@ -1702,7 +1878,10 @@ def _slice_units(bundle: Path, known: set[str]) -> list[EngineUnit]:
     not VALID JSON becomes an explicit `not_evaluated` unit: it was written as a unit record and can
     no longer be read, which is different from a stray file that happens to live in the folder. That
     distinction is made on parse failure vs missing keys, so a `notes.json` is ignored while a
-    truncated slice is surfaced - round 17 finding 1 again, at the slice level.
+    truncated slice is surfaced.
+
+    Two slices claiming one name go through the same collision rule as the census: reported, never
+    silently deduplicated.
     """
     handover = bundle / "handover" if (bundle / "handover").is_dir() else bundle
     if not handover.is_dir():
@@ -1726,9 +1905,8 @@ def _slice_units(bundle: Path, known: set[str]) -> list[EngineUnit]:
         for name, workbook, source in found:
             if name in known:
                 continue
-            known.add(name)
             units.append(EngineUnit(name, source, bundle, workbook, SCOPE_MODEL))
-    return units
+    return _flag_duplicate_names(units)
 
 
 def _find_engine_units(root: Path) -> list[EngineUnit]:
@@ -1745,9 +1923,13 @@ def _find_engine_units(root: Path) -> list[EngineUnit]:
         if root.name == "migration-spec.json":
             return []
         bundle = root.parent.parent if root.parent.name == "handover" else root.parent
-        census, is_census = _engine_census(bundle) if root.name == "report.json" else ([], False)
+        # A single file is still a view of ONE bundle, so it answers with that bundle's census when
+        # there is one. Round 18: pointing at a slice reported `0 of 1` for a bundle that reported
+        # `1 of 2` from its directory - three entry points, three different coverage numbers for the
+        # same estate. A file argument narrows what you point AT, never what the estate contains.
+        census, is_census = _engine_census(bundle)
         if is_census:
-            return census
+            return census + _slice_units(bundle, {unit.name for unit in census})
         try:
             found = read_handover.load_workbooks(root)
         except read_handover.HandoverError:

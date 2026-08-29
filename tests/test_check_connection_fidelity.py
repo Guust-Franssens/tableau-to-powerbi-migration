@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import itertools
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -108,16 +109,44 @@ def _write_model(unit: Path, tables: dict[str, str], model_name: str = "Unit") -
 def _model(name: str, parts: tuple[tuple[str, str], ...], m_text: str) -> ccf.Model:
     """A Model from (table, category) pairs - the shape load_model produces.
 
-    Every partition carries the connectors derived from the shared `m_text`, which is what a
-    single-source model looks like. Tests that need partitions with DIFFERENT connectors - the shape
-    behind blind review's HIGH 2 - build the partition dicts directly with explicit `connectors`.
+    Every partition carries the lexical connectors AND the PROVEN provenance derived from the shared
+    `m_text`, which is what a single-source model looks like. Tests that need partitions differing in
+    either - the shapes behind the connector-borrow and provenance findings - build the partition
+    dicts directly with explicit `connectors` / `provenance`.
 
     Defined up here rather than beside its first heavy user because EVERY hand-built Model must go
-    through it: `_partition_connects` fails closed on a partition with no recorded connector set, so
-    a raw `ccf.Model(...)` silently becomes "nothing is connected" and tests stop testing.
+    through it: `_partition_connects` fails closed on a partition with no recorded provenance, so a
+    raw `ccf.Model(...)` silently becomes "nothing is connected" and tests stop testing.
     """
     connectors = ccf.partition_connectors(m_text)
-    return ccf.Model(name, name, tuple({"table": t, "category": c, "connectors": connectors} for t, c in parts), m_text)
+    provenance = ccf.partition_provenance(m_text)
+    return ccf.Model(
+        name,
+        name,
+        tuple({"table": t, "category": c, "connectors": connectors, "provenance": provenance} for t, c in parts),
+        m_text,
+    )
+
+
+def _chain(token_call: str, steps: int = 1) -> str:
+    """A canonical generated M chain: one connector call, then `steps` navigation hops.
+
+    Hand-written connector FRAGMENTS no longer earn a pass - `partition_provenance` requires the whole
+    generated shape, because attribution never proved which expression supplies a table's rows.
+    """
+    lines = ["let", f"    Source = {token_call},"]
+    prev = "Source"
+    for i in range(steps):
+        name = "Data" if i == steps - 1 else f"Nav{i}"
+        lines.append(f'    {name} = {prev}{{[Name = "T{i}", Kind = "Table"]}}[Data],')
+        prev = name
+    lines[-1] = lines[-1].rstrip(",")
+    lines += ["in", f"    {prev}"]
+    return "\n".join(lines)
+
+
+_SF_M = _chain('Snowflake.Databases("s", "d")')
+_SQL_M = _chain('Sql.Database("s", "d")')
 
 
 def _connection(connection_class: str, mode: str, target: str | None) -> dict:
@@ -454,9 +483,9 @@ def test_mutation_row1_ignore_connector_survives_is_caught(tmp_path: Path, monke
     """
     connected = _build_unit(tmp_path / "u", [_live_source("ds.sf", "snowflake", tables=["S"])], {"S": "snowflake"})
     assert _run(connected)["status"] == ccf.STATUS_OK  # baseline
-    monkeypatch.setattr(ccf, "partition_connectors", lambda body: frozenset())
+    monkeypatch.setattr(ccf, "partition_provenance", lambda body: frozenset())
     loaded = ccf.load_model(connected / "Unit.SemanticModel")
-    assert all(not part["connectors"] for part in loaded.partitions)  # landed
+    assert all(not part["provenance"] for part in loaded.partitions)  # landed
     assert _run(connected)["status"] != ccf.STATUS_OK  # the row-1 test would fail
 
 
@@ -509,7 +538,7 @@ def test_a_partial_downgrade_is_not_checked_never_connected() -> None:
     returned CONNECTED and hid every downgraded table.
     """
     source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
-    model = _model("m", (("A", "live"), ("B", "file_ok")), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("A", "live"), ("B", "file_ok")), _SF_M)
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
     assert "PARTIAL" in verdict.detail
@@ -526,7 +555,7 @@ def test_a_connector_named_only_in_a_comment_does_not_count_as_connected() -> No
 def test_a_genuinely_connected_source_still_passes() -> None:
     """The negative case beside the positive one: the fix must not make everything NOT_CHECKED."""
     source = _live_source("ds.sf", "snowflake", tables=["A", "B"])
-    model = _model("m", (("A", "live"), ("B", "live")), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("A", "live"), ("B", "live")), _SF_M)
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_CONNECTED
 
@@ -538,7 +567,7 @@ def test_a_file_table_belonging_to_ANOTHER_source_does_not_taint_this_one() -> N
     model as a preserved live one, and must not drag it to NOT_CHECKED.
     """
     source = _live_source("ds.sf", "snowflake", tables=["A"])
-    model = _model("m", (("A", "live"), ("ZZ_OTHER", "file_ok")), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("A", "live"), ("ZZ_OTHER", "file_ok")), _SF_M)
     verdict = ccf._judge_source(source, "live_source", "snowflake", "extract", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_CONNECTED
 
@@ -558,7 +587,7 @@ def _two_source_unit(declared_b: str) -> tuple[list[dict], ccf.UnitContext]:
         _live_source("ds.a", "snowflake", tables=["ORDERS"]),
         _live_source("ds.b", "snowflake", tables=[declared_b] if declared_b else []),
     ]
-    model = _model("m", (("ORDERS", "live"), ("FLIGHTS", "file_ok")), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("ORDERS", "live"), ("FLIGHTS", "file_ok")), _SF_M)
     return sources, ccf.UnitContext((model,), (), ())
 
 
@@ -628,7 +657,7 @@ def _qualified_collision_unit():
         _live_source("ds.sales", "snowflake", tables=["SALES.ORDERS"]),
         _live_source("ds.hr", "snowflake", tables=["HR.ORDERS"]),
     ]
-    model = _model("m", (("SALES.ORDERS", "live"), ("HR_ORDERS_EXPORT", "file_ok")), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("SALES.ORDERS", "live"), ("HR_ORDERS_EXPORT", "file_ok")), _SF_M)
     return sources, ccf.UnitContext((model,), (), ())
 
 
@@ -658,7 +687,7 @@ def test_an_unattributable_source_keeps_the_unit_off_a_clean_pass() -> None:
 def test_csv_filenames_are_not_collapsed_to_their_extension() -> None:
     """`tree.csv` and `orders.csv` share the leaf `csv` - leaf matching would have merged every one."""
     source = _live_source("ds.t", "snowflake", tables=["tree.csv"])
-    model = _model("m", (("tree.csv", "file_ok"), ("orders.csv", "live")), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("tree.csv", "file_ok"), ("orders.csv", "live")), _SF_M)
     verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_DOWNGRADED
 
@@ -666,15 +695,24 @@ def test_csv_filenames_are_not_collapsed_to_their_extension() -> None:
 def test_a_source_with_no_declared_tables_cannot_borrow_a_sibling_connector() -> None:
     """No declared tables means nothing to scope by - not "every table belongs to me"."""
     source = _live_source("ds.empty", "snowflake", tables=[])
-    model = _model("m", (("UNRELATED", "live"),), 'Snowflake.Databases("s","d")')
+    model = _model("m", (("UNRELATED", "live"),), _SF_M)
     verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict == ccf.SOURCE_NOT_CHECKED
 
 
 # --- blind review round 4: duplicate table names made the verdict order-dependent ------------------
 
-_CONN_M = 'Snowflake.Databases("acme-fixture.snowflakecomputing.com", "WH")'
-_COMMENTED_M = f"// Source = {_CONN_M}"
+# The engine's own canonical shape: ONE connector call, then pure navigation to the `in`
+# expression. A bare `Snowflake.Databases(...)` fragment no longer earns a pass, because
+# provenance requires the chain - attribution never proved which expression supplies the rows.
+_CONN_M = (
+    "let\n"
+    '    Source = Snowflake.Databases("acme-fixture.snowflakecomputing.com", "WH"),\n'
+    '    Data = Source{[Name = "ORDERS", Kind = "Table"]}[Data]\n'
+    "in\n"
+    "    Data"
+)
+_COMMENTED_M = "\n".join("// " + line for line in _CONN_M.splitlines())
 
 
 def _judge(
@@ -810,10 +848,10 @@ def test_a_source_scoped_declaration_still_stands_on_incomplete_coverage() -> No
 
 
 def _functions_touching_a_pass(source: str) -> dict[str, list[str]]:
-    """Every function that so much as MENTIONS a pass constant, and which ones.
+    """Every function that can REACH a pass constant, directly or through a call it makes.
 
-    Deliberately over-approximating, at function granularity rather than return-expression
-    granularity. Blind review round 13 broke the previous version with three lines:
+    Deliberately over-approximating, at function granularity. Blind review round 13 broke a
+    return-expression scan with three lines:
 
         def _sneaky_pass():
             verdict = SOURCE_CONNECTED
@@ -822,30 +860,60 @@ def _functions_touching_a_pass(source: str) -> dict[str, list[str]]:
     `return verdict` names no constant, so scanning the return expression missed a brand-new
     pass-producing path while the gate stayed green - the gate's own failure mode 3. An AST name scan
     cannot soundly prove closure for arbitrary control flow, so this stops trying to be exact and
-    becomes conservative instead: touching a pass constant at all puts a function on the list. False
-    positives (a function that merely COMPARES against one) cost an audit entry, which is the right
-    price; false negatives cost a silent pass path, which is what we are here to prevent.
+    becomes conservative instead: touching a pass constant at all puts a function on the list.
+
+    ⚠️ AND IT FOLLOWS CALLS, to a fixed point. Round 18: a function that named no pass constant itself
+    but CALLED `_connected_verdict` produced an indirect pass with the surface unchanged - measured,
+    140 passed. A guard that only sees direct mentions cannot catch the regression it exists to catch,
+    and "route the pass through a helper" is the most natural way for one to reappear.
     """
     tree = ast.parse(source)
-    touching: dict[str, list[str]] = {}
-    for function in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
-        used = {n.id for n in ast.walk(function) if isinstance(n, ast.Name)} & _PASS_NAMES
-        if used:
-            touching[function.name] = sorted(used)
-    return touching
+    functions = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    direct = {
+        fn.name: sorted({n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} & _PASS_NAMES) for fn in functions
+    }
+    calls = {
+        fn.name: {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        for fn in functions
+    }
+    reaching = {name for name, used in direct.items() if used}
+    changed = True
+    while changed:
+        changed = False
+        for name, callees in calls.items():
+            if name not in reaching and callees & reaching:
+                reaching.add(name)
+                changed = True
+    return {name: direct.get(name) or ["(via call)"] for name in sorted(reaching)}
 
 
 _AUDITED_PASS_SURFACE = frozenset(
     {
         "_connected_verdict",
         "_declared_verdict",
+        "_engine_skip",
         "_finalize_unit",
-        "merge",
-        "main",
+        "_judge_engine_models",
+        "_judge_source",
+        "_live_verdicts",
+        "_scan_engine_datasource",
+        "_telemetry_refusal",
         "_unit_result",
+        "main",
+        "merge",
         "render",
+        "scan",
+        "scan_engine_unit",
+        "scan_unit",
     }
 )
+
+# ⚠️ THE LOAD-BEARING FACT ABOUT THIS SET IS WHAT IS **NOT** IN IT.
+# `_model_scope_verdict` is absent, and the surface is now computed over the CALL GRAPH, so its
+# absence means no engine workbook verdict can reach a pass constant by any route - directly, or by
+# delegating to `_connected_verdict`. That is the round-17 scope cut, proven mechanically instead of
+# asserted in prose. If `_model_scope_verdict` ever appears here, the cut has been undone.
+_MUST_NOT_REACH_A_PASS = frozenset({"_model_scope_verdict", "_model_coverage", "_unexplained_file_note"})
 
 # Constructs a name scan cannot see through. The module uses NONE of them, so the gate bans them
 # rather than trying to analyse them - see `_closure_violations`.
@@ -900,6 +968,9 @@ def _closure_violations(source: str) -> list[str]:
     bad = []
     if touching != set(_AUDITED_PASS_SURFACE):
         bad.append(f"pass surface changed: {sorted(touching ^ set(_AUDITED_PASS_SURFACE))}")
+    leaked = touching & _MUST_NOT_REACH_A_PASS
+    if leaked:
+        bad.append(f"MODEL-SCOPE FUNCTION CAN REACH A PASS: {sorted(leaked)}")
     bad.extend(_reflective_bypasses(source))
     return bad
 
@@ -954,8 +1025,19 @@ def test_the_set_of_pass_producing_paths_is_closed() -> None:
         "PASS_ALIAS = STATUS_OK\ndef _sneaky_alias():\n    return PASS_ALIAS\n",
         "import importlib\ndef _sneaky_importlib():\n    return importlib.import_module(__name__).STATUS_OK\n",
         "PASS_ANN: int = STATUS_OK\ndef _sneaky_annotated():\n    return PASS_ANN\n",
+        "def _model_scope_verdict(a, b, c, d):\n    return _connected_verdict(a, c)\n",
     ],
-    ids=["direct", "variable", "dict", "default-arg", "getattr", "module-alias", "importlib", "annotated-alias"],
+    ids=[
+        "direct",
+        "variable",
+        "dict",
+        "default-arg",
+        "getattr",
+        "module-alias",
+        "importlib",
+        "annotated-alias",
+        "indirect-call",
+    ],
 )
 def test_the_closure_gate_catches_every_shape_of_new_pass_path(sneak: str) -> None:
     """The contract must fail on a new pass path however it is spelled.
@@ -1281,15 +1363,26 @@ def test_decision_space_holds_every_invariant() -> None:
     assert _violations() == []
 
 
+def _lexical_provenance(body):
+    """The pre-provenance rule: any connector token in the raw text counts as a connection.
+
+    This is what I2 now mutates against. Disabling comment stripping alone no longer reaches the pass
+    path - `partition_provenance` needs a whole `let` chain, and a commented-out one has no parseable
+    bindings - so the old mutation left I2 VACUOUS rather than firing. The property I2 asserts is
+    unchanged; only the way it is broken had to move to where the decision actually lives.
+    """
+    return frozenset(t for t in ccf.CONNECTOR_TOKENS if re.search(rf"\b{t}\.[A-Za-z]", body))
+
+
 def test_enumeration_is_falsifiable_via_comment_stripping() -> None:
     """Proof the harness can go red: a connector named only inside an M comment must not count."""
-    original = ccf._strip_m_comments
+    original = ccf.partition_provenance
     try:
-        ccf._strip_m_comments = lambda text: text  # mutation: stop stripping comments
-        assert ccf.Model("m", "m", (), _COMMENTED_M).has_connector("Snowflake"), "mutation did not land"
+        ccf.partition_provenance = _lexical_provenance  # mutation: lexical, unstripped
+        assert _lexical_provenance(_COMMENTED_M) == frozenset({"Snowflake"}), "mutation did not land"
         assert _violations(), "harness reported clean under a mutation that should break it"
     finally:
-        ccf._strip_m_comments = original
+        ccf.partition_provenance = original
     assert _violations() == []
 
 
@@ -1537,7 +1630,7 @@ def _mutations():
 
     return [
         ("I1", drop_file_parts),
-        ("I2", lambda: swap(ccf, "_strip_m_comments", lambda text: text)),
+        ("I2", lambda: swap(ccf, "partition_provenance", _lexical_provenance)),
         ("I3", lambda: swap(ccf, "CLASS_TO_CONNECTOR", {**ccf.CLASS_TO_CONNECTOR, "mysteryengine": "Snowflake"})),
         ("I4", loose_connectivity),
         ("I5", lambda: swap(ccf, "DECISION_STAGES", frozenset({*ccf.DECISION_STAGES, "parse"}))),
@@ -1711,25 +1804,23 @@ def test_engine_workbook_unit_is_genuinely_evaluated(tmp_path: Path) -> None:
 def test_a_model_scope_PASS_is_not_reachable(tmp_path: Path) -> None:
     """The cut, asserted as an invariant over the whole model-scope input space.
 
-    Every combination of connector presence, file-backed rows, declared counts, recorded decisions and
-    flat-file siblings must land on DOWNGRADED or NOT_CHECKED. If a pass ever becomes reachable here
-    again, this is the test that says so - and it does not care HOW it was reached.
+    ⚠️ EVERY MAPPED CLASS, not just Snowflake. Round 18: this covered one class, so an indirect
+    Databricks-only pass would have gone unseen. The guard for a property must range over the same
+    space the property claims.
     """
     kinds = ("snowflake", "snowflake_stub", "csv_missing", "csv_present", "sqlserver")
+    classes = sorted({cls for cls in ccf.CLASS_TO_CONNECTOR})
     declarations = ([], [{"target": "pbip/Wb/Wb.SemanticModel/definition/tables/T1.tmdl"}])
-    counts = (1, 2, None)
     seen = set()
-    for kind, decls, count in itertools.product(kinds, declarations, counts):
-        row = _embedded("snowflake", tables=count or 1)
-        if count is None:
-            row.pop("table_count")
-        bundle = tmp_path / f"b-{kind}-{len(decls)}-{count}"
-        _build_engine_bundle(bundle, "Wb", {"T1": kind}, [row], declarations=decls)
+    for index, (cls, kind, decls) in enumerate(itertools.product(classes, kinds, declarations)):
+        bundle = tmp_path / f"b{index}"
+        _build_engine_bundle(bundle, "Wb", {"T1": kind}, [_embedded(cls, tables=1)], declarations=decls)
         for source in ccf.scan(bundle)["units"][0]["sources"]:
             seen.add(source["verdict"])
     assert seen <= {ccf.SOURCE_DOWNGRADED, ccf.SOURCE_NOT_CHECKED}, f"a model-scope pass is reachable: {seen}"
     assert ccf.SOURCE_DOWNGRADED in seen, "the space must still reach a FINDING or it proves nothing"
     assert ccf.SOURCE_NOT_CHECKED in seen
+    assert len(classes) >= 15, f"only {len(classes)} classes enumerated - the map shrank unexpectedly"
 
 
 def test_engine_workbook_live_source_shipped_as_a_flat_file_is_a_finding(tmp_path: Path) -> None:
@@ -2539,7 +2630,9 @@ def test_HIGH1_a_stale_slice_cannot_shadow_the_report_census(tmp_path: Path) -> 
     bundle = tmp_path / "b"
     _build_engine_bundle(bundle, "Broken", {"T": "csv_missing"}, [_embedded("snowflake", tables=1)])
     detail = json.loads((bundle / "handover" / "Broken.json").read_text(encoding="utf-8"))["workbook"]
-    (bundle / "report.json").write_text(json.dumps({"tool": "migrate_estate", "workbooks": [detail]}), encoding="utf-8")
+    (bundle / "report.json").write_text(
+        json.dumps({"tool": "migrate_estate", "workbooks": [detail], "datasources": []}), encoding="utf-8"
+    )
     (bundle / "handover" / "Broken.json").write_text("{ this is not json", encoding="utf-8")
     assert ccf.scan(bundle)["status"] == ccf.STATUS_DOWNGRADED
 
@@ -2586,10 +2679,20 @@ def test_HIGH2_the_same_borrow_is_closed_at_TABLE_scope_too(tmp_path: Path) -> N
         "m",
         "m",
         (
-            {"table": "MINE", "category": "remote_import", "connectors": frozenset({"Sql"})},
-            {"table": "THEIRS", "category": "live", "connectors": frozenset({"Snowflake"})},
+            {
+                "table": "MINE",
+                "category": "remote_import",
+                "connectors": frozenset({"Sql"}),
+                "provenance": frozenset({"Sql"}),
+            },
+            {
+                "table": "THEIRS",
+                "category": "live",
+                "connectors": frozenset({"Snowflake"}),
+                "provenance": frozenset({"Snowflake"}),
+            },
         ),
-        'Sql.Database("s","d")\nSnowflake.Databases("s","d")',
+        _SQL_M + "\n" + _SF_M,
     )
     verdict = ccf._judge_source(source, "live_source", "snowflake", "live", ccf.UnitContext((model,), (), ()))
     assert verdict.verdict != ccf.SOURCE_CONNECTED
@@ -2732,3 +2835,298 @@ def test_azure_sqldb_maps_to_the_sql_connector() -> None:
         "pbip_folder": "pbip/x/x.pbip",
     }
     assert ccf.engine_datasource_sources(source)[0]["connection"]["powerbi_target"] == "live_source"
+
+
+# --- round 18: attribution is not provenance -------------------------------------------------------
+#
+# The lexical defect was path-INDEPENDENT, and the round-17 cut removed the wrong half. Knowing which
+# TABLE belongs to a source (which `ds_details.tables` genuinely answers) never established which
+# EXPRESSION supplies that table's rows. Both attacks below exited 0 on the SCOPE_TABLE path that
+# survived the cut.
+#
+# The fix is not an M interpreter: `partition_provenance` walks backwards from the `in` expression
+# through `name = expr` bindings and requires the engine's own canonical shape. Measured over both
+# real bundles - 280 partitions, 49 of them live - every generated live partition matches, so the
+# shape gate cost the estate NOTHING: still 7 of 7 datasource units connected.
+
+
+def _attack_unit(tmp_path: Path, body: str) -> Path:
+    """A parser unit whose single declared table has a hand-crafted partition body."""
+    unit = tmp_path / "u"
+    (unit / "Unit.SemanticModel" / "definition" / "tables").mkdir(parents=True, exist_ok=True)
+    (unit / "Unit.SemanticModel" / "definition" / "tables" / "T.tmdl").write_text(
+        f"table T\n\tpartition T = m\n{body}", encoding="utf-8"
+    )
+    (unit / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [_live_source("ds.sf", "snowflake", tables=["T"])]}), encoding="utf-8"
+    )
+    return unit
+
+
+_INLINE_ROWS_WITH_LITERAL = (
+    "\t\tmode: import\n\t\tsource =\n\t\t\tlet\n"
+    '\t\t\t    Note = "Snowflake.Databases(""fake"")",\n'
+    "\t\t\t    Data = #table(type table [A = Int64.Type], {{1}})\n"
+    "\t\t\tin\n\t\t\t    Data\n"
+)
+_UNUSED_LAZY_BINDING = (
+    "\t\tmode: import\n\t\tsource =\n\t\t\tlet\n"
+    '\t\t\t    Unused = Snowflake.Databases("a", "b"),\n'
+    '\t\t\t    Source = Sql.Database("srv", "db"),\n'
+    '\t\t\t    Data = Source{[Schema = "dbo", Item = "T"]}[Data]\n'
+    "\t\t\tin\n\t\t\t    Data\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [("inline-rows-with-connector-string", _INLINE_ROWS_WITH_LITERAL), ("unused-lazy-binding", _UNUSED_LAZY_BINDING)],
+)
+def test_a_lexical_connector_match_is_not_a_pass_at_TABLE_scope(tmp_path: Path, label: str, body: str) -> None:
+    """Both round-18 reproductions, on the path the round-17 cut deliberately KEPT.
+
+    `inline-rows-with-connector-string`: the rows are an inline `#table` literal and the only
+    Snowflake text is a string literal. `unused-lazy-binding`: the rows come from `Sql.Database` while
+    an unused `Snowflake.Databases` binding sits beside them. Both exited 0 before provenance.
+    """
+    unit = _attack_unit(tmp_path, body)
+    report = _run(unit)
+    assert report["connected_sources"] == 0, label
+    assert report["status"] != ccf.STATUS_OK
+    assert _cli(unit).returncode != ccf.EXIT_OK
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [("inline-rows-with-connector-string", _INLINE_ROWS_WITH_LITERAL), ("unused-lazy-binding", _UNUSED_LAZY_BINDING)],
+)
+def test_a_lexical_connector_match_is_not_a_pass_at_MODEL_scope(tmp_path: Path, label: str, body: str) -> None:
+    """The same two bodies on the engine workbook path, where no pass is reachable at all."""
+    bundle = tmp_path / "b"
+    project = bundle / "pbip" / "Wb"
+    (project / "Wb.SemanticModel" / "definition" / "tables").mkdir(parents=True, exist_ok=True)
+    (project / "Wb.SemanticModel" / "definition" / "tables" / "T.tmdl").write_text(
+        f"table T\n\tpartition T = m\n{body}", encoding="utf-8"
+    )
+    (bundle / "report.json").write_text(
+        json.dumps(
+            {
+                "tool": "migrate_estate",
+                "workbooks": [
+                    {
+                        "name": "Wb",
+                        "pbip_folder": "pbip/Wb/Wb.pbip",
+                        "embedded_datasources": [_embedded("snowflake", tables=1)],
+                    }
+                ],
+                "datasources": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert ccf.scan(bundle)["connected_sources"] == 0, label
+
+
+def test_the_canonical_generated_shapes_still_earn_a_pass() -> None:
+    """The other half of the trade: every real generated live shape must still be provable.
+
+    Verbatim from the two real bundles (canonical engine 2.339.0). If the shape gate stopped
+    recognising these, the datasource half would collapse to NOT_CHECKED and the gate would be
+    honest-but-useless - so this is the test that says the cost was zero.
+    """
+    shapes = {
+        "Snowflake": 'let\n Source = Snowflake.Databases(#"Server", #"Warehouse"),\n'
+        ' Db = Source{[Name="MERIDIAN", Kind="Database"]}[Data],\n'
+        ' Schema = Db{[Name="SALES", Kind="Schema"]}[Data],\n'
+        ' Data = Schema{[Name="DIM_CUSTOMER", Kind="Table"]}[Data]\nin\n Data',
+        "Sql": 'let\n Source = Sql.Database(#"Server", #"Database"),\n'
+        ' Data = Source{[Schema="dbo", Item="TestData"]}[Data]\nin\n Data',
+        "PostgreSQL": 'let\n Source = PostgreSQL.Database(#"Server", #"Database"),\n'
+        ' Data = Source{[Schema="public", Item="xy"]}[Data]\nin\n Data',
+        "Databricks": 'let\n Source = Databricks.Catalogs(#"Server_databricks", #"HttpPath_databricks"),\n'
+        ' Db = Source{[Name="samples", Kind="Database"]}[Data],\n'
+        ' Schema = Db{[Name="nyctaxi", Kind="Schema"]}[Data],\n'
+        ' Data = Schema{[Name="trips", Kind="Table"]}[Data]\nin\n Data',
+    }
+    for token, body in shapes.items():
+        assert ccf.partition_provenance(body) == frozenset({token}), token
+
+
+def test_a_custom_sql_native_query_chain_is_provable() -> None:
+    """`Value.NativeQuery(<handle>, ...)` derives rows from the handle, so it is a chain step.
+
+    This is how a Tableau custom-SQL relation lands - the shape of the incident that motivated the
+    gate (#328) - and the committed `mixed-live-and-flat-file` fixture is exactly it. An earlier draft
+    returned nothing here because `Value.NativeQuery` matched the ROOT connector-call pattern and
+    ended the walk; the committed fixture caught it.
+    """
+    body = (
+        'let\n Source = Snowflake.Databases("acme", "WH"),\n'
+        ' Catalog = Source{[Name = "SCORECARD", Kind = "Database"]}[Data],\n'
+        ' Result = Value.NativeQuery(Catalog, "SELECT a, b FROM t", null, [EnableFolding = true])\nin\n Result'
+    )
+    assert ccf.partition_provenance(body) == frozenset({"Snowflake"})
+    # ...but only from the FIRST argument position: a connector named elsewhere proves nothing.
+    sneaky = (
+        'let\n Source = Csv.Document(File.Contents("x.csv")),\n'
+        ' Result = Value.NativeQuery(Source, "Snowflake.Databases", null)\nin\n Result'
+    )
+    assert ccf.partition_provenance(sneaky) == frozenset()
+
+
+# --- round 18 HIGH 2: a malformed census must not shrink the denominator ---------------------------
+
+
+@pytest.mark.parametrize(
+    "census",
+    [
+        {"workbooks": "malformed", "datasources": []},
+        {"workbooks": ["malformed entry"], "datasources": []},
+        {"workbooks": [], "datasources": {"not": "a list"}},
+        {"workbooks": []},
+    ],
+    ids=["wrong-typed-workbooks", "non-object-entry", "wrong-typed-datasources", "missing-datasources"],
+)
+def test_a_structurally_malformed_census_is_not_evaluated(tmp_path: Path, census: dict) -> None:
+    """Invalid JSON was surfaced; malformed STRUCTURE was still accepted and quietly contributed zero.
+
+    `workbooks: "malformed"` beside a valid `datasources: []` reported `COVERAGE: 1 of 1`, exit 0.
+    Once a file is identified as a census, both collections must be present, list-typed, and hold
+    objects - anything else is a census we cannot count from.
+    """
+    bundle = tmp_path / "b"
+    (bundle / "pbip").mkdir(parents=True, exist_ok=True)
+    (bundle / "report.json").write_text(json.dumps({"tool": "migrate_estate", **census}), encoding="utf-8")
+    report = ccf.scan(bundle)
+    assert report["status"] != ccf.STATUS_OK
+    assert report["units"][0]["reason"] == ccf.REASON_NOT_EVALUATED
+    assert "CENSUS" in report["units"][0]["detail"]
+    assert _cli(bundle).returncode != ccf.EXIT_OK
+
+
+def test_two_units_sharing_a_name_are_reported_not_deduplicated(tmp_path: Path) -> None:
+    """A flat-only record and a live record under one name must not silently collapse.
+
+    Which of the two the unit IS cannot be established, so neither is judged - and saying
+    "[nothing to check]" while a live declaration exists under the same name is the worst of both.
+    """
+    bundle = tmp_path / "b"
+    project = bundle / "pbip" / "Same"
+    project.mkdir(parents=True, exist_ok=True)
+    _write_model(project, {"T": "csv_missing"}, model_name="Same")
+    (bundle / "handover").mkdir(parents=True, exist_ok=True)
+    for slice_name, row in (("A", _embedded("excel-direct", tables=1)), ("B", _embedded("snowflake", tables=1))):
+        (bundle / "handover" / f"{slice_name}.json").write_text(
+            json.dumps(
+                {
+                    "estate": {},
+                    "workbook": {
+                        "name": "SameUnit",
+                        "pbip_folder": "pbip/Same/Same.pbip",
+                        "embedded_datasources": [row],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    report = ccf.scan(bundle)
+    unit = next(u for u in report["units"] if u["unit"] == "SameUnit")
+    assert unit["reason"] == ccf.REASON_NOT_EVALUATED
+    assert "share the name" in unit["detail"]
+    assert report["units_nothing_to_check"] == 0
+
+
+def test_every_entry_point_reports_the_same_coverage(tmp_path: Path) -> None:
+    """Bundle dir, `report.json` and a direct slice must agree about what the estate contains.
+
+    Round 18: they gave `1 of 2`, `1 of 2` and `0 of 1`. A file argument narrows what you point AT,
+    never what the estate declares, so a slice now reconciles against its sibling census.
+    """
+    bundle = tmp_path / "b"
+    slice_path = _build_engine_bundle(
+        bundle,
+        "Wb",
+        {"FLIGHTS": "csv_missing"},
+        [_embedded("snowflake", tables=1)],
+    )
+    detail = json.loads(slice_path.read_text(encoding="utf-8"))["workbook"]
+    (bundle / "report.json").write_text(
+        json.dumps(
+            {
+                "tool": "migrate_estate",
+                "workbooks": [detail],
+                "datasources": [
+                    {
+                        "name": "ds",
+                        "connector": "snowflake",
+                        "tables": ["FLIGHTS"],
+                        "pbip_folder": "pbip/Wb/Wb.pbip",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    coverage = {
+        target.name: (ccf.scan(target)["units_scanned"], ccf.scan(target)["units_checked"])
+        for target in (bundle, bundle / "report.json", slice_path)
+    }
+    assert len(set(coverage.values())) == 1, coverage
+
+
+def test_a_benign_string_literal_cannot_corrupt_the_chain_parse() -> None:
+    """String-literal stripping earns its keep HERE, not on the attack it looks like it guards.
+
+    The inline-rows attack is already closed by the canonical-shape requirement, so mutating literal
+    handling did not move that verdict - the mutation SURVIVED and the claim was unearned. What
+    stripping actually protects is the binding split: an unbalanced brace or a comma inside a literal
+    would corrupt the depth counter and break a perfectly good generated chain, turning a real pass
+    into a silent refusal. That is a robustness property, not a safety one, and this is where it lives.
+    """
+    body = (
+        "let\n"
+        '    Note = "a } b , c",\n'
+        '    Source = Snowflake.Databases("srv", "wh"),\n'
+        '    Data = Source{[Name = "T", Kind = "Table"]}[Data]\n'
+        "in\n"
+        "    Data"
+    )
+    assert ccf.partition_provenance(body) == frozenset({"Snowflake"})
+
+
+def test_a_non_canonical_chain_cannot_earn_a_pass() -> None:
+    """Only the generator's own shape counts; a bare reference chain is not evidence of provenance.
+
+    Recognising a known generator's output is defensible. Following ANY identifier reference would be
+    inference again - it would accept a hand-edited partition whose rows are computed by something the
+    gate never looked at.
+    """
+    bare_reference = (
+        'let\n    Source = Snowflake.Databases("srv", "wh"),\n    Alias = Source,\n    Data = Alias\nin\n    Data'
+    )
+    assert ccf.partition_provenance(bare_reference) == frozenset()
+    transformed = (
+        "let\n"
+        '    Source = Snowflake.Databases("srv", "wh"),\n'
+        '    Data = Table.SelectRows(Source{[Name = "T"]}[Data], each true)\n'
+        "in\n"
+        "    Data"
+    )
+    assert ccf.partition_provenance(transformed) == frozenset()
+
+
+def test_only_the_first_argument_of_a_native_query_is_the_handle() -> None:
+    """A connector reachable through a LATER argument is not the source of the rows.
+
+    `Value.NativeQuery(Src, Cat)` executes against `Src`. If a looser rule picked up `Cat`, a
+    CSV-backed partition would be certified by a Snowflake handle it merely mentions.
+    """
+    body = (
+        "let\n"
+        '    Cat = Snowflake.Databases("srv", "wh"),\n'
+        '    Src = Csv.Document(File.Contents("x.csv")),\n'
+        "    Data = Value.NativeQuery(Src, Cat)\n"
+        "in\n"
+        "    Data"
+    )
+    assert ccf.partition_provenance(body) == frozenset()
