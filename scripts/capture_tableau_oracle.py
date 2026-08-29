@@ -310,7 +310,9 @@ class TableauSession:
             time.sleep(backoff_delay(attempt))
         raise RuntimeError(f"GET {path} exhausted {self.retry.max_attempts} attempts")
 
-    def export(self, path: str) -> tuple[bytes, float, dict[str, Any]]:
+    # One recovery ladder, and it now holds the raw body and its redacted copy side by side so
+    # classification and reporting cannot be confused for each other.
+    def export(self, path: str) -> tuple[bytes, float, dict[str, Any]]:  # pylint: disable=too-many-locals
         """GET a content-export endpoint, recovering from session loss and transient failures.
 
         Returns ``(body, elapsed_sec, stats)`` where ``stats`` records how much recovery was needed --
@@ -330,9 +332,18 @@ class TableauSession:
             elapsed = time.perf_counter() - started
             if status == 200:
                 return payload, elapsed, {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
-            text = self._redact_response(payload.decode("utf-8", "replace"))
-            kind, detail = classify_export_error(status, text)
-
+            raw = payload.decode("utf-8", "replace")
+            text = self._redact_response(raw)
+            # CLASSIFY the raw body, REPORT the redacted one. `_redact_response` is handed the PAT
+            # NAME, which is human-chosen: a short one rewrites Tableau's own error codes, and a
+            # `401002` mangled into `4[REDACTED]1[REDACTED][REDACTED]2` is read as a permanent
+            # source-credential failure instead of the recoverable session loss it is, so the view
+            # is abandoned and never re-authenticated. Redaction must never mutate syntax that
+            # control flow depends on. `detail` still comes from the redacted copy because
+            # `classify_export_error` truncates, and slicing an unredacted body can leave a secret's
+            # tail in the retained window.
+            kind = classify_export_error(status, raw)[0]
+            detail = classify_export_error(status, text)[1]
             if kind == "session_lost" and reauths < MAX_REAUTH_PER_VIEW:
                 # Re-auth is a SEPARATE recovery path from transient retry, and is deliberately NOT
                 # gated by the admission deadline. It is bounded instead by MAX_REAUTH_PER_VIEW (and

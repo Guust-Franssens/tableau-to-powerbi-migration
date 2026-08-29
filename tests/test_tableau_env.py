@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import warnings
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 import pytest
@@ -380,10 +381,83 @@ def test_redact_ignores_an_unset_secret_without_complaining():
         assert te.redact("no secret here", "") == "no secret here"
 
 
-def test_redact_warns_and_skips_a_whitespace_only_secret():
-    """The one value that genuinely cannot be redacted: it matches between every character."""
-    with pytest.warns(UserWarning, match="whitespace-only"):
-        assert te.redact("a error about ab", "   ") == "a error about ab"
+def test_redact_removes_a_single_space_password():
+    """MEDIUM 5: whitespace was skipped on a false premise, and `resolve_env` really does keep it.
+
+    Only an EMPTY pattern matches between every character; " " matches spaces. The provisioner
+    treats a one-space value as truthy and embeds it, so skipping it published it.
+    """
+    env = te.resolve_env(None, environ={"TABLEAU_SF_PASSWORD": " "})
+    assert env["TABLEAU_SF_PASSWORD"] == " ", "precondition: a single-space password survives resolve_env"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert te.redact('password=" "', " ") == 'password="[REDACTED]"'
+
+
+def test_redact_removes_the_xml_escaped_form_the_tableau_client_puts_on_the_wire():
+    """HIGH 1: the provisioner's secret reaches Tableau through ElementTree, not as a literal.
+
+    `ElementTree.tostring` defaults to us-ascii, so a reflected request body carries `&#228;` where
+    the configured value has a non-ASCII character, and `& < > "` are escaped too. Synthetic value.
+    """
+    password = 'SYNTH-\u00e4-P&ss<1"x'
+    element = ElementTree.Element("connectionCredentials", {"name": "svc", "password": password})
+    wire = ElementTree.tostring(element).decode("ascii")
+    assert password not in wire, "precondition: the serializer really does re-encode the value"
+
+    reflected = f"ServerResponseError 400006: echo {wire}"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact(reflected, password)
+
+    encoded = wire[wire.index('password="') + 10 : wire.rindex('"')]
+    assert encoded not in out, "the XML-escaped form of the password survived"
+    assert password not in out
+    assert "400006" in out
+
+
+def test_a_secret_in_the_auth_header_name_does_not_disable_the_session_header_rule():
+    """HIGH 2: redacting literals first rewrote `X-Tableau-Auth`, so the header regex stopped
+    matching and the session token -- which this call site does not separately know -- survived."""
+    text = "HTTP 401 X-Tableau-Auth: SYNTHETIC_SESSION_TOKEN_123"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact(text, "Tableau")
+    assert "SYNTHETIC_SESSION_TOKEN_123" not in out, "the session token survived"
+    assert "Tableau" not in out
+
+
+def test_redact_merges_overlapping_matches_so_no_tail_of_a_longer_secret_survives():
+    """MEDIUM 3: longest-first only orders alternatives at the SAME start position. A short secret
+    straddling a delimiter matched earlier and left all but one character of the long one visible."""
+    long_secret = "SYNTHETIC-LONG-SECRET-12345"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact("password=" + long_secret, "=S", long_secret)
+    assert long_secret not in out
+    for cut in range(len(long_secret) - 3):
+        assert long_secret[cut:] not in out, f"a {len(long_secret) - cut}-char tail survived"
+
+
+@pytest.mark.parametrize("secret", ["[REDACTED]", "ED", "REDACT", "E"])
+def test_redact_picks_a_marker_that_cannot_re_emit_the_secret(secret):
+    """MEDIUM 4: the marker is the output. A secret contained in it is republished by every
+    replacement -- `redact("credential=[REDACTED]", "[REDACTED]")` returned its input unchanged."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact(f"credential={secret} and again {secret}", secret)
+    assert secret not in out
+
+
+def test_redact_leaves_no_supplied_secret_in_the_output_when_one_is_part_of_the_marker():
+    """This test used to assert only that the marker was not recursively corrupted, and passed while
+    its own second secret, `ED`, survived inside every `[REDACTED]` it had just written."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = te.redact('{"secret":"SECRETVALUE","pw":"ED"}', "SECRETVALUE", "ED")
+    assert "SECRETVALUE" not in out
+    assert "ED" not in out, "a supplied secret survived inside the marker"
+    assert out.count("[HIDDEN]") == 2
 
 
 @pytest.mark.parametrize("password", ["Tr0ub4d", "hunter2", "s3cr3t", "abcd", "ab", "a"])
@@ -433,30 +507,6 @@ def test_redact_does_not_warn_for_a_normal_length_secret():
         assert te.redact("tok=abcdefghij", "abcdefghij") == "tok=[REDACTED]"
 
 
-def test_redact_leaves_no_tail_of_a_longer_secret_when_a_shorter_one_shares_its_head():
-    """Sequential replacement let "abc" eat the head of "abcdef" and leave "def" in the output.
-
-    Only reachable once short values are redacted at all, so removing the floor is what makes the
-    single longest-first pass load-bearing rather than tidy.
-    """
-    text = '{"password":"abcdef","user":"abc"}'
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        out = te.redact(text, "abc", "abcdef")
-    assert "def" not in out
-    assert "abcdef" not in out
-
-
-def test_redact_does_not_match_inside_a_marker_it_just_inserted():
-    """A 2-char secret matching the marker produced `[R[REDACTED]ACT[REDACTED]]` when done in two
-    passes - garbling the evidence that redaction happened at all."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        out = te.redact('{"secret":"SECRETVALUE","pw":"ED"}', "SECRETVALUE", "ED")
-    assert "SECRETVALUE" not in out
-    assert out == '{"secret":"[REDACTED]","pw":"[REDACTED]"}'
-
-
 def test_redact_is_independent_of_the_order_secrets_are_passed_in():
     text = '{"a":"abcdef","b":"abc","c":"abcdefghijkl"}'
     with warnings.catch_warnings():
@@ -483,6 +533,39 @@ def test_a_short_warehouse_password_does_not_reach_the_provisioner_manifest(tmp_
     assert "Tr0ub4d" not in note
     assert "Tr0ub4d" not in json.dumps({"notes": [note]}), "the warehouse password reached manifest.json"
     assert "400006" in note, "redaction must not destroy the diagnostic"
+
+
+def test_a_short_pat_name_does_not_reclassify_a_recoverable_session_loss(monkeypatch):
+    """MEDIUM 6: a FUNCTIONAL regression, not a leak.
+
+    `capture_tableau_oracle` feeds `redact` the human-chosen PAT NAME. Once short values are
+    redacted, a two-character name rewrites Tableau's `401002` inside the response body. Classifying
+    the REDACTED text turns a recoverable session loss into a permanent `source_credential` verdict,
+    so the view is abandoned and never re-authenticated. Classification must read the raw body.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import capture_tableau_oracle as oracle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    body = b'{"error":{"code":"401002","summary":"Invalid authentication credentials"}}'
+    creds = oracle.SiteCredentials(
+        base="https://x", site="s", pat_name="00", pat_secret="LONG_PAT_SECRET_1234567890", version="3.19"
+    )
+    session = oracle.TableauSession(creds)
+    session.token = "SYNTHETIC_SESSION_TOKEN"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        scrubbed = session._redact_response(body.decode())  # pylint: disable=protected-access
+        assert "401002" not in scrubbed, "precondition: a 2-char PAT name really does mangle the code"
+        assert oracle.classify_export_error(401, scrubbed)[0] != "session_lost"
+
+        monkeypatch.setattr(session, "_request", lambda *a, **k: (401, body, {}))
+        monkeypatch.setattr(session, "sign_in", lambda: setattr(session, "token", "NEW_TOKEN"))
+        with pytest.raises(oracle.ExportFailed) as caught:
+            session.export("/views/luid/image")
+
+    assert session.reauth_count >= 1, "a recoverable session loss was misfiled and never re-authenticated"
+    assert "LONG_PAT_SECRET_1234567890" not in str(caught.value.detail)
 
 
 def test_redact_tolerates_a_secret_that_is_absent():
