@@ -1,0 +1,420 @@
+{
+  "estate": {
+    "tool": "migrate_estate",
+    "generated_at": "2026-08-29T16:57:35Z",
+    "source": {
+      "kind": "LocalFilesSource",
+      "root": "_runs\\coldrun\\input"
+    },
+    "pending_gates": [
+      {
+        "count": 4,
+        "gate": "second_compiler",
+        "offer": "OFFER the LLM-assisted second compiler for 4 stubbed calculation(s) before declaring the migration done -- present them and run only on an explicit GO. The per-calc work order (formula, resolved fields, target table, category) is repair-queue.json. If declined, the deterministic result ships as-is (each stub keeps its preserved TableauFormula and a TranslationStubReason annotation naming why it stubbed).",
+        "runbook": "resources/second-compiler.md",
+        "skill_step": 3,
+        "trigger": "summary.needs_review_total",
+        "work_order": "repair-queue.json"
+      },
+      {
+        "count": 3,
+        "gate": "dashboard_audit",
+        "offer": "OFFER the LLM-assisted Tier-3 dashboard audit for 3 warned visual(s) before declaring the migration done -- present them and run only on an explicit GO. If declined, the deterministic rebuild ships as-is (every faithfully-bound visual intact). OFFER THE FORMATTING TOUCH-UP IN THE SAME BREATH -- the two are independent, so the user may take either, both or neither: \"Do you want the adjudication report, as well as a formatting touch-up?\"",
+        "runbook": "resources/dashboard-audit.md",
+        "skill_step": 5,
+        "trigger": "summary.visuals_warned"
+      },
+      {
+        "count": 1,
+        "gate": "layout_polish",
+        "offer": "OFFER the Tier-3 FORMATTING TOUCH-UP alongside the adjudication report -- run only on an explicit GO. It normalises each page's control bands (uniform card size, aligned rows, even gutters, no band drawn over the content below) against the source layout, and keeps a page's new geometry ONLY when the measured defect count falls. Geometry only: no binding, no number, nothing but position rects. Run: py -3.11 \"$SKILL\\scripts\\polish_layout.py\" \"<...>.Report\" (add --dry-run to measure first).",
+        "runbook": "resources/dashboard-audit.md",
+        "skill_step": 5,
+        "trigger": "summary.workbooks_pbip_built"
+      }
+    ],
+    "definition_of_done_status": "failed"
+  },
+  "workbook": {
+    "binding_signal": {
+      "connection_class": "sqlproxy",
+      "kind": "published",
+      "note": "published datasource 'Meridian Sales (Live Snowflake)' with no view-local calc dependencies -- candidate to rebind to the migrated published model (pending estate catalog match)",
+      "primary_datasource": "Meridian Sales (Live Snowflake)",
+      "published_ds_name": "Meridian Sales (Live Snowflake)",
+      "recommendation": "candidate_rebind_to_published",
+      "secondary_datasources": [],
+      "secondary_published_datasources": [],
+      "view_local_calcs": []
+    },
+    "bound_datasource": "Meridian Sales (Live Snowflake)",
+    "bound_model": "Meridian Sales (Live Snowflake)",
+    "bound_via": "published_catalog_match:Meridian Sales (Live Snowflake)",
+    "column_prune": null,
+    "column_rebind": {
+      "count": 3
+    },
+    "date_rebind": {
+      "active_keys": [
+        "ORDER_DATE"
+      ],
+      "date_table": "Date"
+    },
+    "embedded_datasources": [
+      {
+        "caption": "Meridian Sales (Live Snowflake)",
+        "connection_class": "sqlproxy",
+        "connections": [],
+        "label": "Meridian Sales (Live Snowflake)",
+        "named_connection_count": 1,
+        "table_count": 1
+      }
+    ],
+    "field_rebind": {
+      "count": 28,
+      "model_table": "FACT_ORDERS"
+    },
+    "measure_rebind": {
+      "count": 3
+    },
+    "model_facts": {
+      "column_count": 14,
+      "connector": "Snowflake.Databases",
+      "storage_mode": "DirectQuery",
+      "table_count": 4
+    },
+    "model_translation_handoff": {
+      "needs_review": [
+        {
+          "blocked_by": [],
+          "category": "unresolved_reference",
+          "fallback_reason": "cross-table terms (fields span multiple tables)",
+          "has_suggestion": false,
+          "name": "Regional Revenue (FIXED)",
+          "role": "measure"
+        },
+        {
+          "blocked_by": [],
+          "category": "unsupported_other",
+          "fallback_reason": "unsupported function ISMEMBEROF",
+          "has_suggestion": false,
+          "name": "Is My Region",
+          "role": "dimension"
+        }
+      ],
+      "partial_fidelity": [],
+      "requests": [
+        {
+          "blocked_by": [],
+          "category": "unresolved_reference",
+          "category_guidance": "A referenced field, dimension, or calc could not be bound (unresolved/ambiguous name, terms spanning multiple tables, or an unsupported field type). Resolve the binding yourself: choose the correct 'Table'[Column] qualifier or the relationship path, and if it points at another stubbed calc, author that calc's DAX first. Then write the faithful expression using the resolved model identifiers and validate it (check_candidate_dax, plus the reconciliation oracle when data is landed). Resolving the reference does not re-invoke Tier 0 -- once it binds, YOU author the DAX.",
+          "fallback_reason": "cross-table terms (fields span multiple tables)",
+          "fields": [
+            {
+              "caption": "DIM_CUSTOMER_REGION",
+              "column": "REGION",
+              "kind": "field",
+              "table": "DIM_CUSTOMER",
+              "type": "string"
+            },
+            {
+              "caption": "FACT_ORDERS_TOTAL_PRICE",
+              "column": "TOTAL_PRICE",
+              "kind": "field",
+              "table": "FACT_ORDERS",
+              "type": "double"
+            }
+          ],
+          "formula": "{ FIXED [DIM_CUSTOMER_REGION] : SUM([FACT_ORDERS_TOTAL_PRICE]) }",
+          "has_suggestion": false,
+          "name": "Regional Revenue (FIXED)",
+          "role": "measure",
+          "target_table": "_Measures"
+        },
+        {
+          "blocked_by": [],
+          "category": "unsupported_other",
+          "category_guidance": "Not matched to a specific category. A faithful DAX form may still exist (for example CORR/COVAR/COVARP via a VAR/RETURN closed form, or an aggregate the deterministic tier has not yet wired). Assess the formula, author a candidate at the right grain, and validate (oracle when data is landed) before proposing it; otherwise keep the stub.",
+          "fallback_reason": "unsupported function ISMEMBEROF",
+          "fields": [
+            {
+              "caption": "DIM_CUSTOMER_REGION",
+              "column": "REGION",
+              "kind": "field",
+              "table": "DIM_CUSTOMER",
+              "type": "string"
+            }
+          ],
+          "formula": "ISMEMBEROF('Meridian - EMEA') AND [DIM_CUSTOMER_REGION] = 'EUROPE'",
+          "has_suggestion": false,
+          "name": "Is My Region",
+          "role": "dimension",
+          "target_table": "FACT_ORDERS"
+        }
+      ],
+      "summary": {
+        "assisted_approved": 0,
+        "assisted_suggested": 0,
+        "blocked_by_unmigrated_calc": 0,
+        "categories": {
+          "unresolved_reference": 1,
+          "unsupported_other": 1
+        },
+        "coverage_pct": 60.0,
+        "live": 3,
+        "needs_review": 2,
+        "partial_fidelity": 0,
+        "stub": 2,
+        "total": 5,
+        "translated": 3
+      },
+      "triage": {
+        "cascadable": [],
+        "irreducible": {
+          "lod": [
+            {
+              "category": "unresolved_reference",
+              "name": "Regional Revenue (FIXED)",
+              "role": "measure"
+            }
+          ],
+          "other": [
+            {
+              "category": "unsupported_other",
+              "name": "Is My Region",
+              "role": "dimension"
+            }
+          ]
+        },
+        "summary": {
+          "cascadable": 0,
+          "irreducible": 2,
+          "shapes": {
+            "lod": 1,
+            "other": 1
+          }
+        }
+      }
+    },
+    "name": "Meridian Revenue by Region",
+    "note": null,
+    "openability_selfcheck": {
+      "checks": {
+        "bare_column_references_qualified": true,
+        "compatibility_level_current": true,
+        "dax_functions_exist": true,
+        "dax_references_resolve": true,
+        "local_source_paths": true,
+        "m_parameters_defined": true,
+        "measure_value_path_not_blank": true,
+        "no_duplicate_columns": true,
+        "relationship_columns_exist": true,
+        "tmdl_wellformed": true,
+        "typed_columns_declared": true,
+        "unambiguous_relationship_paths": true,
+        "wrapper_keeps_base_format_string": true
+      },
+      "issues": [],
+      "not_evaluated": [
+        {
+          "check": "endpoints_distinct",
+          "reason": "the source declares a single upstream, so endpoints cannot collapse onto each other"
+        }
+      ],
+      "ok": true,
+      "reference_case_mismatches": []
+    },
+    "output_folder": "reports/Meridian Revenue by Region.Report",
+    "pbip_entity_binding_mismatches": [
+      {
+        "column": "Region",
+        "entity": "FACT_ORDERS",
+        "owned_by": [
+          "dim_customer"
+        ],
+        "part": "definition/pages/page-ws-Revenuebb7d27f78/visuals/v-RevenuebyRegio864a62f6/visual.json"
+      },
+      {
+        "column": "Calendar_Year",
+        "entity": "FACT_ORDERS",
+        "owned_by": [
+          "dim_date"
+        ],
+        "part": "definition/pages/page-ws-RevenueTfd9cb617/visuals/v-RevenueTrend1626f5ae/visual.json"
+      }
+    ],
+    "pbip_folder": "pbip/Meridian Revenue by Region/Meridian Revenue by Region.pbip",
+    "pbip_page_count": 3,
+    "pbip_ref_drops": [
+      {
+        "dropped": [
+          "Y:column 'Regional_Revenue__FIXED'"
+        ],
+        "emptied": true,
+        "visual": "v-RegionalSharea1c2c884"
+      }
+    ],
+    "pbip_status": "built",
+    "pbip_warnings": [
+      "manual attention required: table 'DIM_CUSTOMER' landed with NO relationship to any other table -- a measure broken down by its columns returns the whole table's GRAND TOTAL identically for every member, and no structural gate can see that. The source declared no join for it, so none was invented.",
+      "manual attention required: table 'DIM_DATE' landed with NO relationship to any other table -- a measure broken down by its columns returns the whole table's GRAND TOTAL identically for every member, and no structural gate can see that. The source declared no join for it, so none was invented.",
+      "manual attention required: visual 'v-RegionalSharea1c2c884' dropped 1 reference(s) the model did not emit: Y:column 'Regional_Revenue__FIXED' (visual emptied)",
+      "manual attention required: binding 'FACT_ORDERS'[Region] names a table that does not own that column -- it lives on dim_customer. Power BI reports Missing_References once real data lands; while the partition is a stub it renders empty either way",
+      "manual attention required: binding 'FACT_ORDERS'[Calendar_Year] names a table that does not own that column -- it lives on dim_date. Power BI reports Missing_References once real data lands; while the partition is a stub it renders empty either way",
+      "manual attention required: 2 visual field reference(s) name a model object that does not exist -- those visuals render EMPTY and report no error; first: PBIR_VISUAL_REF_MISSING: definition/pages/page-ws-RevenueTfd9cb617/visuals/v-RevenueTrend1626f5ae/visual.json binds column 'Calendar_Year' on table 'FACT_ORDERS', which the model does not contain -- the visual renders EMPTY and validation reports no error"
+    ],
+    "remediation_worklist": {
+      "items": [
+        {
+          "category": "field_binding",
+          "id": "wl-0002",
+          "page": "page-ws-Regional05286155",
+          "page_display": "Regional Share",
+          "reason": "field 'Regional Revenue (FIXED)' bound by caption fallback (no datasource metadata); verify it matches model table/column names",
+          "remediation": "Bind the field to the matching model table/column; verify the caption maps to a real column name.",
+          "scope": "worksheet",
+          "severity": "high",
+          "source": "warning",
+          "visual": "v-RegionalSharea1c2c884",
+          "visual_type": "clusteredColumnChart",
+          "worksheet": "Regional Share"
+        },
+        {
+          "category": "field_binding",
+          "id": "wl-0003",
+          "page": "page-ws-Regional05286155",
+          "page_display": "Regional Share",
+          "reason": "field 'Nation' bound by caption fallback (no datasource metadata); verify it matches model table/column names",
+          "remediation": "Bind the field to the matching model table/column; verify the caption maps to a real column name.",
+          "scope": "worksheet",
+          "severity": "high",
+          "source": "warning",
+          "visual": "v-RegionalSharea1c2c884",
+          "visual_type": "clusteredColumnChart",
+          "worksheet": "Regional Share"
+        },
+        {
+          "category": "field_binding",
+          "id": "wl-0001",
+          "page": "page-ws-RevenueTfd9cb617",
+          "page_display": "Revenue Trend",
+          "reason": "field 'Calendar Year' bound by caption fallback (no datasource metadata); verify it matches model table/column names",
+          "remediation": "Bind the field to the matching model table/column; verify the caption maps to a real column name.",
+          "scope": "worksheet",
+          "severity": "high",
+          "source": "warning",
+          "visual": "v-RevenueTrend1626f5ae",
+          "visual_type": "lineChart",
+          "worksheet": "Revenue Trend"
+        },
+        {
+          "category": "field_binding",
+          "id": "wl-0000",
+          "page": "page-ws-Revenuebb7d27f78",
+          "page_display": "Revenue by Region",
+          "reason": "field 'Region' bound by caption fallback (no datasource metadata); verify it matches model table/column names",
+          "remediation": "Bind the field to the matching model table/column; verify the caption maps to a real column name.",
+          "scope": "worksheet",
+          "severity": "high",
+          "source": "warning",
+          "visual": "v-RevenuebyRegio864a62f6",
+          "visual_type": "clusteredColumnChart",
+          "worksheet": "Revenue by Region"
+        }
+      ],
+      "kind": "tableau-fabric-remediation-worklist",
+      "summary": {
+        "by_category": {
+          "field_binding": 4
+        },
+        "by_severity": {
+          "high": 4
+        },
+        "items_total": 4,
+        "unattached_items": 0,
+        "visuals_clean": 0,
+        "visuals_flagged": 3,
+        "visuals_total": 3
+      },
+      "version": 1,
+      "visuals": [
+        {
+          "confidence": "high",
+          "item_ids": [
+            "wl-0000"
+          ],
+          "page": "page-ws-Revenuebb7d27f78",
+          "page_display": "Revenue by Region",
+          "status": "needs_attention",
+          "visual": "v-RevenuebyRegio864a62f6",
+          "visual_type": "clusteredColumnChart",
+          "worksheet": "Revenue by Region"
+        },
+        {
+          "confidence": "high",
+          "item_ids": [
+            "wl-0001"
+          ],
+          "page": "page-ws-RevenueTfd9cb617",
+          "page_display": "Revenue Trend",
+          "status": "needs_attention",
+          "visual": "v-RevenueTrend1626f5ae",
+          "visual_type": "lineChart",
+          "worksheet": "Revenue Trend"
+        },
+        {
+          "confidence": "high",
+          "item_ids": [
+            "wl-0002",
+            "wl-0003"
+          ],
+          "page": "page-ws-Regional05286155",
+          "page_display": "Regional Share",
+          "status": "needs_attention",
+          "visual": "v-RegionalSharea1c2c884",
+          "visual_type": "clusteredColumnChart",
+          "worksheet": "Regional Share"
+        }
+      ]
+    },
+    "source_id": "_runs\\coldrun\\input\\Meridian Revenue by Region.twb",
+    "viz_dangling_bindings": {
+      "count": 2,
+      "problems": [
+        "PBIR_VISUAL_REF_MISSING: definition/pages/page-ws-RevenueTfd9cb617/visuals/v-RevenueTrend1626f5ae/visual.json binds column 'Calendar_Year' on table 'FACT_ORDERS', which the model does not contain -- the visual renders EMPTY and validation reports no error",
+        "PBIR_VISUAL_REF_MISSING: definition/pages/page-ws-Revenuebb7d27f78/visuals/v-RevenuebyRegio864a62f6/visual.json binds column 'Region' on table 'FACT_ORDERS', which the model does not contain -- the visual renders EMPTY and validation reports no error"
+      ]
+    },
+    "viz_fidelity": [
+      {
+        "evidence": "emitted+linted",
+        "reason": "manual attention required: field 'Region' bound by caption fallback (no datasource metadata); verify it matches model table/column names",
+        "status": "warned",
+        "tier": "degraded",
+        "visual_type": "column",
+        "worksheet": "Revenue by Region"
+      },
+      {
+        "evidence": "emitted+linted",
+        "reason": "manual attention required: field 'Calendar Year' bound by caption fallback (no datasource metadata); verify it matches model table/column names",
+        "status": "warned",
+        "tier": "degraded",
+        "visual_type": "line",
+        "worksheet": "Revenue Trend"
+      },
+      {
+        "additional_reasons": [
+          "manual attention required: field 'Nation' bound by caption fallback (no datasource metadata); verify it matches model table/column names"
+        ],
+        "evidence": "emitted+linted",
+        "reason": "manual attention required: field 'Regional Revenue (FIXED)' bound by caption fallback (no datasource metadata); verify it matches model table/column names",
+        "status": "warned",
+        "tier": "degraded",
+        "visual_type": "column",
+        "worksheet": "Regional Share"
+      }
+    ],
+    "viz_implicit_row_count": 0,
+    "viz_status": "built"
+  }
+}
