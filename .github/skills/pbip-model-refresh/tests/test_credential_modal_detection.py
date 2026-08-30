@@ -317,6 +317,7 @@ def test_zero_windows_dead_reports_process_gone_not_no_dialog() -> None:
     assert state.process_gone == harvested_desktop_gone_reason()
 
 
+@pytest.mark.timing
 def test_direct_refresh_returns_credential_missing_fast_at_t0(monkeypatch) -> None:
     """A t=0 credential modal must not wait for the XMLA deadline."""
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: modal_state())
@@ -330,6 +331,7 @@ def test_direct_refresh_returns_credential_missing_fast_at_t0(monkeypatch) -> No
     assert elapsed < 0.5, f"t=0 modal path waited {elapsed:.3f}s instead of returning immediately"
 
 
+@pytest.mark.timing
 def test_direct_refresh_returns_blocked_by_dialog_fast_at_t0(monkeypatch) -> None:
     """Unreadable blocking dialog must stop immediately instead of waiting for XMLA."""
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: blocking_state())
@@ -343,6 +345,7 @@ def test_direct_refresh_returns_blocked_by_dialog_fast_at_t0(monkeypatch) -> Non
     assert elapsed < 0.5
 
 
+@pytest.mark.timing
 def test_direct_refresh_raises_desktop_gone_fast_at_t0(monkeypatch) -> None:
     """#158: a Desktop already dead at t=0 must bail immediately, never start the XMLA wait.
 
@@ -363,6 +366,7 @@ def test_direct_refresh_raises_desktop_gone_fast_at_t0(monkeypatch) -> None:
     assert elapsed < 0.5, f"t=0 process-gone path waited {elapsed:.3f}s instead of returning immediately"
 
 
+@pytest.mark.timing
 def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
     """A credential dialog appearing after XMLA starts is caught on the next poll."""
     calls = {"count": 0}
@@ -722,6 +726,7 @@ def test_refresh_and_save_wires_desktop_gone_to_exit_2(monkeypatch, capsys) -> N
     assert reason in out
 
 
+@pytest.mark.timing
 def test_refresh_main_returns_credential_missing_fast_at_t0(monkeypatch, tmp_path: Path, capsys) -> None:
     """refresh_pbip_model.main stops before port discovery, identity checks, refresh, or row counts."""
     model_folder(tmp_path, "MyMigration")
@@ -827,6 +832,7 @@ def test_refresh_main_latches_unknown_from_its_own_precheck(monkeypatch, tmp_pat
     assert reason in out
 
 
+@pytest.mark.timing
 def test_probe_query_returns_credential_missing_fast_at_t0(monkeypatch, capsys) -> None:
     """probe_desktop_query.main stops before port discovery or DAX when the modal is already open."""
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda _pid: modal_state())
@@ -1466,6 +1472,7 @@ $script:form.Add_Shown({ Set-Content -LiteralPath $ReadyFile -Value 'ready' -Enc
 """
 
 
+@pytest.mark.serial
 def test_an_owned_wpf_credential_modal_titled_refresh_is_a_hard_stop(tmp_path: Path) -> None:
     """Live regression for the review defect: the whole script, against a real owned WPF modal.
 
@@ -1921,6 +1928,7 @@ def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: li
         app.wait(timeout=30)
 
 
+@pytest.mark.serial
 def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_path: Path) -> None:
     """Exploit 1. `Name` + `ValuePattern` alone miss a read-only RichTextBox's content entirely."""
     done = _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY)
@@ -1929,6 +1937,7 @@ def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_p
     assert done.returncode == 1
 
 
+@pytest.mark.serial
 def test_credential_text_beyond_the_element_cap_never_reads_as_clean(tmp_path: Path) -> None:
     """Exploit 2. Truncation must not be indistinguishable from a complete, clean read.
 
@@ -1941,6 +1950,7 @@ def test_credential_text_beyond_the_element_cap_never_reads_as_clean(tmp_path: P
     assert "CREDENTIAL_PRESENT" not in done.stdout
 
 
+@pytest.mark.serial
 def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(tmp_path: Path) -> None:
     """The same window with the shipped cap: read in full, and convicted."""
     done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PAST_THE_ELEMENT_CAP)
@@ -1949,6 +1959,7 @@ def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(
     assert done.returncode == 1
 
 
+@pytest.mark.serial
 def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path) -> None:
     """Exploit 3. The prose join must skip interactive elements, or `Cancel` breaks the sentence."""
     done = _run_probe_against_wpf_modal(tmp_path, _MODAL_INTERPOSED_SPLIT)
@@ -1957,6 +1968,7 @@ def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path
     assert done.returncode == 1
 
 
+@pytest.mark.serial
 def test_a_wedged_uia_provider_still_produces_a_verdict(tmp_path: Path) -> None:
     """The MEDIUM finding: an uncapped UIA walk let a 1s probe run 15s+ and emit nothing at all.
 
@@ -2209,6 +2221,7 @@ $script:timer.Add_Tick({
 """
 
 
+@pytest.mark.serial
 def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: Path) -> None:
     """Round 3's High, end to end: a fully-harvested mixed window must not clear.
 

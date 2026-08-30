@@ -421,6 +421,7 @@ def test_declare_wrapper_records_a_composed_path_fix_script(tmp_path):
     assert any("fix_post_engine.py" in note for note in notes)
 
 
+@pytest.mark.timing
 def test_declare_wrapper_concurrent_writers_keep_both_declarations(tmp_path):
     """Two wrapper processes released by one barrier must not erase each other's declaration."""
     first = Path("M.SemanticModel") / "definition" / "tables" / "Orders.tmdl"
