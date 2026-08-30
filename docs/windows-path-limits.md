@@ -16,6 +16,21 @@ python scripts/check_path_ceiling.py <bundle> [--json report.json] [--min-root-b
 
 Exit `0` clean · `1` findings · `2` usage · `3` could not evaluate.
 
+`--json` is a **machine-readable contract**: the artifact is written **before** anything is printed,
+so a console that cannot encode a path — a Windows cp1252 terminal meeting a filename with a
+combining character — degrades the *display* instead of destroying the *output*. Before that ordering
+was fixed, such a run exited 1 with **no file written at all**, and exit 1 is also the "findings"
+code, so a consumer could not tell a crash from a real finding.
+
+Degrading is **local to each write** (`text.encode(..., "backslashreplace")` at the point of output).
+The check never calls `sys.stdout.reconfigure()`: that fixed the crash but permanently mutated the
+**caller's shared stream** — measured, a clean `--quiet` run returned 0 and left an unrelated
+caller's later output escaped — and it also could not help a restricted stream that has no
+`reconfigure` at all, which still raised and exited 1. Note that
+`codecs.getwriter("cp1252")(...)` exposes **no `.encoding` attribute**, so a rewrite keyed off
+`stream.encoding` silently does nothing for exactly the stream that needs it; escaping falls back to
+pure ASCII, which every codec accepts.
+
 ---
 
 ## 1. Three consumers, three different answers, one machine

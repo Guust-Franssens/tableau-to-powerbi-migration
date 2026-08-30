@@ -21,16 +21,28 @@ damaging change anyone could make to this file.
 
 from __future__ import annotations
 
+import codecs
+import io
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = REPO_ROOT / "scripts" / "check_path_ceiling.py"
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
+
+# `e` + COMBINING ACUTE ACCENT. A perfectly ordinary filename that cp1252 cannot encode, so it
+# reproduces the console hazard WITHOUT being an invalid or unrepresentable name on any filesystem
+# under test. Deliberately used only in a fixture's LEAF name - never in a directory the test itself
+# has to print - so the test cannot become the thing it is testing.
+COMBINING_NAME = "cafe\u0301.json"
 
 
 def _tree(root: Path, *, filename: str = "visual.json", subdir: str = "visuals") -> Path:
@@ -556,6 +568,192 @@ def test_json_report_is_written_and_machine_readable(tmp_path, capsys):
     assert payload["counted"]["over_ceiling"] == 1
     assert payload["file_ceiling"] == len(str(target)) - 1
     assert "host_long_paths_enabled" in payload
+    capsys.readouterr()
+
+
+# --------------------------------------------------------------------------------------------
+# `--json` is a MACHINE-READABLE CONTRACT and must not depend on the console's codec.
+#
+# Measured before the fix: on a Windows cp1252 console, a tree containing a legal filename with a
+# combining character made `print(render(report))` raise UnicodeEncodeError. The run exited 1 - which
+# is also the "findings" code, so a consumer could not even tell a crash from a real finding - and
+# because the artifact was written AFTER printing, `--json out.json` produced NO FILE AT ALL.
+# --------------------------------------------------------------------------------------------
+
+
+def _make_combining_fixture(root: Path) -> Path | None:
+    """Create `<root>/visuals/cafe<combining-acute>.json`, or None if this filesystem refuses it."""
+    directory = root / "visuals"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / COMBINING_NAME
+    try:
+        target.write_text("{}", encoding="utf-8")
+    except (OSError, UnicodeError):  # pragma: no cover - only on an ASCII-locale filesystem
+        return None
+    # A filesystem may normalise the name (HFS+ does). Only proceed if it round-trips unchanged.
+    return target if target.exists() and COMBINING_NAME in os.listdir(directory) else None
+
+
+def test_json_is_written_before_the_console_is_touched(tmp_path):
+    """The ordering fix, proven without needing a hostile console.
+
+    If rendering runs first, an exception from it destroys the requested artifact. Making `render`
+    raise is a deterministic stand-in for `UnicodeEncodeError` and works identically on every OS.
+    """
+    _tree(tmp_path)
+    out = tmp_path / "reports" / "path-ceiling.json"
+
+    def boom(_report):
+        raise RuntimeError("console exploded")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cpc, "render", boom)
+        with pytest.raises(RuntimeError):
+            cpc.main([str(tmp_path), "--json", str(out)])
+
+    assert out.exists(), "the JSON contract must survive a rendering failure"
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == cpc.STATUS_OK
+
+
+def test_cp1252_console_still_produces_json_and_the_expected_exit_code(tmp_path):
+    """End-to-end, in a real subprocess with a cp1252 stdout - the shape that actually broke.
+
+    Runs on Windows AND Linux: the codec is available on every platform, and the fixture name is
+    valid on both. It is skipped only if the filesystem genuinely will not store the name, which is
+    reported rather than silently passing.
+    """
+    if _make_combining_fixture(tmp_path) is None:
+        pytest.skip("filesystem will not store a combining-character filename unchanged")
+    out = tmp_path / "out.json"
+
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    env.pop("PYTHONUTF8", None)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(tmp_path), "--json", str(out)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == cpc.EXIT_OK, f"expected a clean verdict, got {result.returncode}:\n{result.stderr}"
+    assert "UnicodeEncodeError" not in result.stderr
+    assert out.exists(), "`--json` produced no artifact on a console that cannot encode the path"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == cpc.STATUS_OK
+    assert payload["counted"]["files"] >= 1
+
+
+def test_cp1252_console_preserves_a_finding_exit_code(tmp_path):
+    """The degraded console must not change the verdict, only how it is spelled."""
+    if _make_combining_fixture(tmp_path) is None:
+        pytest.skip("filesystem will not store a combining-character filename unchanged")
+    out = tmp_path / "out.json"
+
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    env.pop("PYTHONUTF8", None)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(tmp_path), "--ceiling", "10", "--json", str(out)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == cpc.EXIT_OVER_CEILING, result.stderr
+    assert out.exists()
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == cpc.STATUS_OVER_CEILING
+
+
+def test_stdout_errors_is_unchanged_after_main(tmp_path, capsys):
+    """The caller's stream is SHARED. Fixing our own output must not reconfigure it.
+
+    Measured on the first attempt at this fix: a clean `--quiet` run returned 0 and left
+    `sys.stdout.errors` switched from `surrogateescape` to `backslashreplace`, silently escaping an
+    unrelated caller's later output. `--quiet` and a non-TTY are checked too, because the mutation
+    happened there as well.
+    """
+    _tree(tmp_path)
+    before = sys.stdout.errors
+    assert cpc.main([str(tmp_path)]) == cpc.EXIT_OK
+    assert sys.stdout.errors == before
+    assert cpc.main([str(tmp_path), "--quiet"]) == cpc.EXIT_OK
+    assert sys.stdout.errors == before
+    capsys.readouterr()
+
+
+def _strict_cp1252_stream() -> tuple[object, io.BytesIO]:
+    """A stream that REALLY refuses non-cp1252 text and has no `reconfigure`.
+
+    `io.StringIO` is the obvious stand-in and it is worthless here: it accepts every `str`, so it can
+    only ever prove the happy path. Measured, `codecs.getwriter("cp1252")(...)` exposes no
+    `.encoding` attribute either, so it also catches a fix that keys off `stream.encoding`.
+    """
+    buffer = io.BytesIO()
+    return codecs.getwriter("cp1252")(buffer), buffer
+
+
+@pytest.mark.parametrize(
+    ("ceiling", "expected"),
+    [(None, 0), ("10", 1)],
+    ids=["clean-verdict", "finding-verdict"],
+)
+def test_strict_unreconfigurable_stream_preserves_the_exit_code(tmp_path, monkeypatch, ceiling, expected):
+    """Both verdicts must survive a console that cannot encode the path.
+
+    Before the fix this raised `UnicodeEncodeError` and the process exited 1 - which is also the
+    findings code, so a consumer could not tell a crash from a real over-ceiling result.
+    """
+    if _make_combining_fixture(tmp_path) is None:
+        pytest.skip("filesystem will not store a combining-character filename unchanged")
+    out = tmp_path / "out.json"
+    stream, buffer = _strict_cp1252_stream()
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    argv = [str(tmp_path), "--json", str(out)] + (["--ceiling", ceiling] if ceiling else [])
+    assert cpc.main(argv) == expected
+
+    assert out.exists()
+    written = buffer.getvalue().decode("cp1252")
+    assert "cafe" in written, "the report must still be printed, merely escaped"
+    assert "\\u0301" in written
+
+
+def test_stream_without_an_encoding_attribute_still_prints(tmp_path, monkeypatch, capsys):
+    """A stream that accepts everything (StringIO) must keep working - the no-op path."""
+    _tree(tmp_path)
+    sink = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", sink)
+    assert cpc.main([str(tmp_path)]) == cpc.EXIT_OK
+    assert "OK:" in sink.getvalue()
+    capsys.readouterr()
+
+
+def test_console_safe_escapes_to_ascii_when_the_stream_hides_its_encoding():
+    stream, _ = _strict_cp1252_stream()
+    assert not hasattr(stream, "encoding"), "this test exists because the attribute is absent"
+    escaped = cpc._console_safe("cafe\u0301", stream)  # pylint: disable=protected-access
+    assert escaped == "cafe\\u0301"
+    escaped.encode("cp1252")  # must not raise
+
+
+def test_console_safe_uses_the_stream_encoding_when_it_is_declared(tmp_path):
+    with open(tmp_path / "c.txt", "w", encoding="cp1252") as handle:
+        escaped = cpc._console_safe("caf\u00e9 \u0301", handle)  # pylint: disable=protected-access
+    assert "caf\u00e9" in escaped, "cp1252 CAN encode e-acute; only the unencodable part degrades"
+    assert "\\u0301" in escaped
+
+
+def test_usage_error_on_an_unencodable_path_does_not_crash(tmp_path, monkeypatch, capsys):
+    """The `not a directory` message carries caller-supplied paths and used a raw print too."""
+    stream, buffer = _strict_cp1252_stream()
+    monkeypatch.setattr(sys, "stderr", stream)
+    assert cpc.main([str(tmp_path / "cafe\u0301")]) == 2
+    assert "cafe" in buffer.getvalue().decode("cp1252")
     capsys.readouterr()
 
 

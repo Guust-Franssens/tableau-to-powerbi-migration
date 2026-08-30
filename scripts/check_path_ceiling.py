@@ -519,6 +519,44 @@ def render(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _console_safe(text: str, stream: object) -> str:
+    """Rewrite `text` so `stream` can accept it. Never mutates the stream.
+
+    Measured: `codecs.getwriter("cp1252")(...)` exposes **no** `.encoding` attribute, so a rewrite
+    that keys off `stream.encoding` silently does nothing for exactly the stream that needs it.
+    When the stream will not say what it accepts, escaping to pure ASCII is the only answer that
+    every codec accepts.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if isinstance(encoding, str):
+        try:
+            return text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+        except LookupError:  # pragma: no cover - an encoding name Python does not know
+            pass
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def _emit(text: str, stream) -> None:
+    """Print one line, degrading only the characters this stream cannot encode.
+
+    Lossiness is LOCAL to this write. An earlier revision called
+    `sys.stdout.reconfigure(errors="backslashreplace")`, which fixed the crash but permanently
+    mutated the caller's shared stream - measured, a clean `--quiet` run returned 0 and left an
+    unrelated caller's later output escaped. As a library that is a side effect nobody asked for.
+
+    Nor can the fix depend on `reconfigure` existing: a restricted stream that lacks it (a
+    `codecs.StreamWriter`) still raised `UnicodeEncodeError` and exited 1 - indistinguishable from a
+    finding, which is the very ambiguity this code exists to remove.
+
+    The happy path is untouched, so a UTF-8 terminal still prints paths verbatim; only a stream that
+    actually refuses the text sees escapes.
+    """
+    try:
+        print(text, file=stream)
+    except UnicodeEncodeError:
+        print(_console_safe(text, stream), file=stream)
+
+
 def _nonneg(raw: str) -> int:
     value = int(raw)
     if value < 0:
@@ -568,7 +606,7 @@ def main(argv: list[str] | None = None) -> int:
 
     missing = [str(t) for t in args.targets if not t.is_dir()]
     if missing:
-        print(f"ERROR: not a directory: {', '.join(missing)}", file=sys.stderr)
+        _emit(f"ERROR: not a directory: {', '.join(missing)}", sys.stderr)
         return EXIT_USAGE
 
     reports = [
@@ -583,13 +621,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         for target in args.targets
     ]
-    for report in reports:
-        print(render(report) if not args.quiet else f"{report['status']}: {report['root']}")
 
+    # The machine-readable artifact is written BEFORE anything is printed. Console rendering can
+    # fail on a path this terminal cannot encode (a legal filename carrying a combining character
+    # is not representable in cp1252), and an ordering that printed first destroyed the very output
+    # an automated consumer asked for: measured, `--json out.json` on such a tree exited 1 with NO
+    # file written. `--json` is a contract; it must not depend on the console's codec.
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         payload = reports[0] if len(reports) == 1 else {"version": REPORT_VERSION, "roots": reports}
         args.json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    for report in reports:
+        _emit(render(report) if not args.quiet else f"{report['status']}: {report['root']}", sys.stdout)
 
     if args.warn_only:
         return EXIT_OK
