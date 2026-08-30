@@ -30,14 +30,19 @@ strictly LESS evidence than the arbiter (Win32 child-HWND text only; no UI Autom
   from, so matching here stays per-element. The recall this costs routes to ``unrecognized`` /
   ``unreadable`` (exit 3, loud), and the arbiter - which HAS the control-type signal - is the
   escalation path.
-* **No enabled-owner exoneration.** The arbiter uses modality one way: an ENABLED owner proves a
-  window blocks nothing. That is a SUPPRESSION path, it needs Win32 owner/enabled state this module
-  does not harvest, and it cannot be verified here without a live Desktop. Omitting it only ever
-  costs one more exit 3.
 * **No ``benign-unverified`` kind.** The arbiter needs it because a UIA harvest can be truncated while
   still returning text. Here a text read that throws fails the WHOLE enumeration
   (``Win32EnumerationError`` -> ``unknown_reason``), so a partial read cannot reach the classifier in
   the first place.
+
+⚠️ **Blocking is decided from MODALITY, never from class, size or name (#400 review round 3).** An
+earlier pass answered *"is this window blocking a human?"* with three correlates in turn - a
+``>= 100x100`` size test, a ``WindowsForms10.Window.8`` class prefix, and an
+``Internet Explorer_Hidden`` name allowlist - and native Win32 experiments defeated all three, each
+time by collapsing a real blocker into the healthy state. Win32 answers the question directly: a modal
+disables its owner. So :func:`main_frame`, :func:`is_proven_non_blocking` and :func:`renders_nothing`
+decide from ``GetWindow(GW_OWNER)`` and ``IsWindowEnabled(owner)``, and the arbiter's one-way
+enabled-owner exoneration is now ported here rather than skipped.
 """
 
 from __future__ import annotations
@@ -70,8 +75,23 @@ CONNECTOR_SOURCE_RE = re.compile(
 
 @dataclass(frozen=True)
 class DesktopWindow:
-    """Visible top-level Power BI Desktop window plus descendant Win32 text."""
+    """Visible top-level Power BI Desktop window plus descendant Win32 text and its MODALITY facts.
 
+    ``owner_hwnd`` / ``owner_enabled`` carry the only evidence that actually answers *"is this window
+    blocking a human?"* (#400 review round 3). They are THREE-valued on purpose:
+
+    * ``owner_enabled is True``  - the owner is enabled, which PROVES this window blocks nothing. A
+      modal disables its owner; an enabled owner is therefore a positive exoneration.
+    * ``owner_enabled is False`` - the owner is disabled. This does NOT convict: Power BI's own refresh
+      dialog disables the owner too. It only means the exoneration does not apply.
+    * ``owner_enabled is None``  - no owner, so the test did not apply. Not the same as passing it.
+
+    Nine fields, waived rather than split: this is one Win32 window record and every field is read
+    straight from the API. Grouping the modality pair behind a nested object would put an indirection
+    between a reader and the two values three review rounds turned on.
+    """
+
+    # pylint: disable=too-many-instance-attributes
     title: str
     class_name: str
     width: int
@@ -79,6 +99,8 @@ class DesktopWindow:
     texts: tuple[str, ...] = ()
     minimized: bool = False
     hwnd: int = 0
+    owner_hwnd: int = 0
+    owner_enabled: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -215,15 +237,8 @@ ProcessLivenessCheck = Callable[[int], bool]
 
 DESKTOP_MAIN_CLASS_PREFIX = "WindowsForms10.Window.8"
 
-# Windows a Power BI Desktop process owns that are NOT dialogs, excluded by NAME rather than by size
-# (issue #376 review, finding 3). `Internet Explorer_Hidden` is the WebOC host every healthy instance
-# owns; the corpus has always carried it at 0x0.
-#
-# ⚠️ This list is the ONLY sanctioned way to stop classifying a visible non-main window. Adding to it
-# is a positive claim - "this window is identified, and it displays nothing a human must act on" - and
-# needs evidence in the commit that adds it. Do NOT re-introduce a geometry threshold: an arbitrary
-# size is not evidence of harmlessness, which is the whole of issue #376.
-HELPER_WINDOW_CLASSES = frozenset({"Internet Explorer_Hidden"})
+# `GetWindow(hwnd, GW_OWNER)`. The owner of a top-level window - the window a modal disables.
+GW_OWNER = 4
 
 # Classifier vocabulary, shared verbatim with the PowerShell arbiter's `Get-DialogClassification` so a
 # reader moving between the two detectors meets one set of words, not two.
@@ -444,46 +459,95 @@ def _finding(kind: str, window: DesktopWindow, evidence: str) -> DialogFinding:
     return DialogFinding(kind=kind, verdict=DIALOG_KIND_VERDICTS[kind], window=window, evidence=evidence)
 
 
-def is_desktop_main_window(window: DesktopWindow) -> bool:
-    """Is ``window`` the Power BI Desktop MAIN window (not a dialog)?
+def main_frame(windows: Iterable[DesktopWindow]) -> DesktopWindow | None:
+    """The application FRAME - the window dialogs block - by ownership evidence, never by class.
 
-    Identified by the Win32 class prefix, which is what every other main-window test in this module
-    already uses. It is deliberately the ONLY thing excluded from the credential prepass and from
-    classification: every other window, whatever its class and whatever its size, is still read.
+    ⚠️ **A class prefix is not an identity (#400 review round 3, finding 2).**
+    ``WindowsForms10.Window.8`` names a WinForms *family*, not one HWND: a native experiment showed an
+    owner **and its owned `FixedDialog`** both reporting the exact class
+    ``WindowsForms10.Window.8.app.0.2b2196a_r3_ad1``. Treating that prefix as "the main window" removed
+    a real credential dialog from both the prepass and classification - the detector returned nothing
+    at all for an owned dialog reading ``Enter your credentials``.
+
+    Two sources of evidence, in order:
+
+    1. **Direct ownership.** If an enumerated window names another enumerated window as its owner, the
+       owner is the frame. This is the strongest signal available and it is exactly the relationship
+       that matters: the frame is the thing a modal disables.
+    2. **The process main-handle convention.** Otherwise the first VISIBLE UNOWNED window, which is how
+       Win32/.NET derive ``Process.MainWindowHandle``. Reached only when no window is owned - i.e. when
+       there are no dialogs at all - so the choice cannot hide one.
     """
-    return window.class_name.startswith(DESKTOP_MAIN_CLASS_PREFIX)
+    by_hwnd = {window.hwnd: window for window in windows if window.hwnd}
+    for window in windows:
+        owner = by_hwnd.get(window.owner_hwnd) if window.owner_hwnd else None
+        if owner is not None:
+            return owner
+    for window in windows:
+        if not window.owner_hwnd:
+            return window
+    return None
 
 
-def dialog_candidates(windows: Iterable[DesktopWindow]) -> list[DesktopWindow]:
-    """Every visible window worth CLASSIFYING - which is every one that is not positively excluded.
+def is_proven_non_blocking(window: DesktopWindow) -> bool:
+    """Does POSITIVE evidence show ``window`` blocks nothing?
 
-    ⚠️ **There is no size threshold here any more (#376 review, finding 3).** It used to require
-    >= 100x100, and the review measured the consequence: a visible 80x60 owned window with no readable
-    text returned ``modal=None, dialog=None, unknown_reason=None`` - byte-identical to a healthy
-    Desktop. The all-window credential prepass only rescued windows whose text matched the credential
-    regex, so a small unreadable, caption-only or differently-worded prompt still vanished. That is the
-    ORIGINAL defect of issue #376, surviving inside its own fix: an arbitrary geometry threshold is not
-    evidence of harmlessness.
-
-    Two exclusions remain, and each is a positive claim rather than a threshold:
-
-    * the **main window** (:func:`is_desktop_main_window`) - it is the application, not a dialog;
-    * **zero-area** windows and named :data:`HELPER_WINDOW_CLASSES` - a window with no width or no
-      height rasterises nothing, so it cannot be showing a human anything to act on, and the named
-      helpers are identified Desktop infrastructure (``Internet Explorer_Hidden``).
-
-    ⚠️ Known cost, stated rather than hidden: if a real Desktop turns out to own OTHER visible,
-    non-zero-area, non-main windows, they will now be classified - most likely ``unreadable``, i.e.
-    exit 3. Unobserved in this corpus (no Desktop was available). The fix for that is to identify the
-    window and add it to :data:`HELPER_WINDOW_CLASSES` **with evidence**, never to restore a size test.
+    Modality is a ONE-WAY test. An ENABLED owner proves this window is not blocking it, because a modal
+    disables its owner. The converse does not hold - Power BI's refresh dialog also disables the owner -
+    so a disabled owner never convicts, and ``None`` (no owner) means the test did not apply, which is
+    not the same as passing it.
     """
+    return window.owner_enabled is True
+
+
+def renders_nothing(window: DesktopWindow) -> bool:
+    """Is ``window`` incapable of showing a human anything, on TWO independent grounds?
+
+    Zero area alone is NOT sufficient and must never be used alone (#400 review round 3, finding 3): a
+    native experiment built a real ``WS_VISIBLE`` **owned 0x0** window and disabled its owner -
+    ``owned-visible=True owner-win32-enabled=False rect=0x0`` - which is a genuinely blocking shape. On
+    the unbounded query-poll path suppressing it leaves the worker blocked while every poll reports no
+    finding: a false clear that is also a hang.
+
+    So this requires BOTH: no owner to disable, AND no pixels to display. A window with neither
+    mechanism cannot block anyone.
+    """
+    return not window.owner_hwnd and (window.width <= 0 or window.height <= 0)
+
+
+def dialog_candidates(
+    windows: Iterable[DesktopWindow],
+    *,
+    frame: DesktopWindow | None = None,
+) -> list[DesktopWindow]:
+    """Every visible window worth CLASSIFYING - which is every one not POSITIVELY proven harmless.
+
+    ⚠️ **Three proxies died here across two review rounds. Do not add a fourth.** Size (>= 100x100),
+    class prefix, and a helper-class NAME allowlist were each an attempt to answer *"is this window
+    blocking a human?"* by looking at something else, and each one collapsed a real blocker into the
+    healthy state:
+
+    | proxy | what it hid |
+    |---|---|
+    | ``>= 100x100`` | a visible 80x60 unreadable owned dialog |
+    | ``WindowsForms10.Window.8`` prefix | an owned ``FixedDialog`` sharing its owner's exact class |
+    | ``Internet Explorer_Hidden`` name | the AAD sign-in host, whatever it displayed |
+
+    Win32 answers the question directly, so ask it directly. The three exclusions below are the only
+    ones, and each is a POSITIVE claim rather than a correlate:
+
+    * the identified :func:`main_frame` - it is the application, and the thing dialogs block;
+    * :func:`is_proven_non_blocking` - an enabled owner proves this window blocks nothing;
+    * :func:`renders_nothing` - unowned AND zero-area: no owner to disable and no pixels to show.
+
+    Nothing is excluded for its size, its class, or its name.
+    """
+    windows = list(windows)
+    frame = frame if frame is not None else main_frame(windows)
     return [
         window
         for window in windows
-        if not is_desktop_main_window(window)
-        and window.class_name not in HELPER_WINDOW_CLASSES
-        and window.width > 0
-        and window.height > 0
+        if window is not frame and not is_proven_non_blocking(window) and not renders_nothing(window)
     ]
 
 
@@ -491,6 +555,7 @@ def dialog_verdict(
     windows: Iterable[DesktopWindow],
     *,
     operation_in_flight: bool = False,
+    frame: DesktopWindow | None = None,
 ) -> DialogFinding | None:
     """Fold per-window classifications into ONE finding, or ``None`` when nothing needs reporting.
 
@@ -500,7 +565,7 @@ def dialog_verdict(
     report had to unpick by hand.
     """
     found: dict[str, DialogFinding] = {}
-    for window in dialog_candidates(windows):
+    for window in dialog_candidates(windows, frame=frame):
         finding = classify_dialog(window)
         if finding.kind == DIALOG_KIND_CREDENTIAL:
             return finding
@@ -514,24 +579,31 @@ def dialog_verdict(
     return None
 
 
-def match_credential_modal(windows: Iterable[DesktopWindow]) -> CredentialModal | None:
-    """First credential-signature match across every DIALOG - any class, any size.
+def match_credential_modal(
+    windows: Iterable[DesktopWindow],
+    *,
+    frame: DesktopWindow | None = None,
+) -> CredentialModal | None:
+    """First credential-signature match across every window EXCEPT the application frame.
 
-    Not restricted to :func:`dialog_candidates`' classification set (issue #376): it used to be, and
-    the 100x100 filter therefore gated the HARD STOP as well as the classification, so a credential
-    prompt in a smaller window returned no finding at all - a silent false negative on the one verdict
-    that matters most.
+    Not restricted to :func:`dialog_candidates` (issue #376): it used to be, and the 100x100 filter
+    therefore gated the HARD STOP as well as the classification, so a credential prompt in a smaller
+    window returned no finding at all - a silent false negative on the one verdict that matters most.
+    It reads windows classification skips, too: an owned zero-area window, or one whose owner is
+    enabled, can still be carrying credential text.
 
-    ⚠️ The MAIN window is excluded (#376 review, finding 4). An unrestricted scan read the Desktop
-    caption and its child text, so a report legitimately named ``Account Key``,
+    ⚠️ The application frame is excluded (#376 review, finding 4). An unrestricted scan read the
+    Desktop caption and its child text, so a report legitimately named ``Account Key``,
     ``Personal Access Token`` or ``Databricks Client Credentials`` produced ``CREDENTIAL_MISSING`` at
-    exit 1 - measured with a main window titled ``Account Key - Power BI Desktop``, on both consumers.
-    Only the main window is excluded: every real dialog is still scanned at every size and in every
-    class, so an unusual modal class stays detectable.
+    exit 1. The frame is identified by :func:`main_frame` - by OWNERSHIP, never by class - because a
+    class-prefix test also excluded a real owned credential dialog that shared its owner's class
+    (#400 review round 3, finding 2).
     """
+    windows = list(windows)
+    frame = frame if frame is not None else main_frame(windows)
     signature = credential_signature()
     for window in windows:
-        if is_desktop_main_window(window):
+        if window is frame:
             continue
         for text in normalize_texts(window.texts):
             if signature.search(text):
@@ -556,6 +628,10 @@ def _configure_user32(user32) -> None:
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.IsWindowEnabled.argtypes = [wintypes.HWND]
+    user32.IsWindowEnabled.restype = wintypes.BOOL
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.IsIconic.restype = wintypes.BOOL
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
@@ -634,6 +710,11 @@ def _enumerate_pid_windows_with_count(pid: int) -> tuple[list[DesktopWindow], in
             user32.GetWindowRect(hwnd_int, ctypes.byref(rect))
             title = _window_text(user32, hwnd_int)
             texts = tuple(text for text in (title, *_child_texts(user32, hwnd_int)) if text)
+            # The modality facts. `GW_OWNER` is the window a modal disables, and its enabled state is
+            # the only direct evidence of whether this window is blocking anyone (#400 review round 3).
+            # Deliberately three-valued: no owner means the test did not apply, which is NOT "passed".
+            owner_hwnd = _hwnd_value(user32.GetWindow(hwnd_int, GW_OWNER))
+            owner_enabled = bool(user32.IsWindowEnabled(owner_hwnd)) if owner_hwnd else None
             windows.append(
                 DesktopWindow(
                     title=title,
@@ -643,6 +724,8 @@ def _enumerate_pid_windows_with_count(pid: int) -> tuple[list[DesktopWindow], in
                     texts=texts,
                     minimized=bool(user32.IsIconic(hwnd_int)),
                     hwnd=hwnd_int,
+                    owner_hwnd=owner_hwnd,
+                    owner_enabled=owner_enabled,
                 )
             )
         except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
@@ -684,16 +767,14 @@ def inspect_credential_modal(
         windows = tuple(enumerate_windows(pid))
     except Win32EnumerationError as exc:
         return CredentialDetection(unknown_reason=f"window enumeration failed: {exc}")
-    modal = match_credential_modal(windows)
+    frame = main_frame(windows)
+    modal = match_credential_modal(windows, frame=frame)
     if modal is not None:
         return CredentialDetection(modal=modal, windows=windows)
-    finding = dialog_verdict(windows, operation_in_flight=operation_in_flight)
+    finding = dialog_verdict(windows, operation_in_flight=operation_in_flight, frame=frame)
     if finding is not None:
         return CredentialDetection(dialog=finding, windows=windows)
-    minimized = [
-        window for window in windows if window.minimized and window.class_name.startswith(DESKTOP_MAIN_CLASS_PREFIX)
-    ]
-    if minimized:
+    if frame is not None and frame.minimized:
         return CredentialDetection(
             unknown_reason=(
                 "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"

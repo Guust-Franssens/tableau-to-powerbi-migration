@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+import ctypes
 import inspect
 import json
 import os
@@ -15,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from ctypes import wintypes
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,7 @@ from _credential_modal import (
     CredentialDetection,
     CredentialModal,
     CredentialUnknownError,
+    DESKTOP_MAIN_CLASS_PREFIX,
     DesktopGoneError,
     DesktopUnreadyError,
     DialogFinding,
@@ -138,6 +141,58 @@ class _FakeProgressMonitor:
         return "fake"
 
 
+MAIN_HWND = 0x10001
+DIALOG_HWND = 0x20002
+
+
+def main_window(
+    title: str = "sample-superstore",
+    texts: tuple[str, ...] = ("Report",),
+    *,
+    minimized: bool = False,
+    width: int = 2011,
+    height: int = 1298,
+) -> DesktopWindow:
+    """The Power BI Desktop application FRAME: unowned, and the window a modal would disable."""
+    return DesktopWindow(
+        title,
+        DESKTOP_MAIN_CLASS_PREFIX + ".app.0.33c0d9d",
+        width,
+        height,
+        texts,
+        minimized=minimized,
+        hwnd=MAIN_HWND,
+    )
+
+
+def owned_dialog(
+    texts: tuple[str, ...] = (),
+    *,
+    title: str = "",
+    class_name: str = "WindowsForms10.Window.20008.app.0.33c0d9d",
+    width: int = 702,
+    height: int = 355,
+    owner_enabled: bool | None = False,
+    hwnd: int = DIALOG_HWND,
+) -> DesktopWindow:
+    """A dialog OWNED by :func:`main_window`.
+
+    ``owner_enabled=False`` by default - the owner is disabled, which is what a modal does. That does
+    not convict the window (Power BI's own refresh dialog disables the owner too); it only means the
+    one-way enabled-owner exoneration does not apply, so the window has to be classified on its text.
+    """
+    return DesktopWindow(
+        title,
+        class_name,
+        width,
+        height,
+        texts,
+        hwnd=hwnd,
+        owner_hwnd=MAIN_HWND,
+        owner_enabled=owner_enabled,
+    )
+
+
 def modal() -> CredentialModal:
     """A credential dialog matching the measured incident window."""
     return CredentialModal(
@@ -153,7 +208,7 @@ def modal_state() -> CredentialDetection:
 
 def unreadable_dialog_window() -> DesktopWindow:
     """The live SQL credential-dialog shape: visible, owned, empty title, NO readable text at all."""
-    return DesktopWindow("", "WindowsForms10.Window.20008", 702, 355, ())
+    return owned_dialog()
 
 
 def progress_dialog_window() -> DesktopWindow:
@@ -162,13 +217,7 @@ def progress_dialog_window() -> DesktopWindow:
     This is the shape the size-only rule reported as a hard stop (issue #376) - >= 100x100, non-main
     class, and therefore indistinguishable from a sign-in prompt to a detector that never read it.
     """
-    return DesktopWindow(
-        "Refresh",
-        "WindowsForms10.Window.20008.app.0.33c0d9d",
-        702,
-        355,
-        ("Refresh", "Evaluating...", "Cancel"),
-    )
+    return owned_dialog(("Refresh", "Evaluating...", "Cancel"), title="Refresh")
 
 
 def dialog_finding(window: DesktopWindow | None = None) -> DialogFinding:
@@ -183,32 +232,22 @@ def dialog_state(window: DesktopWindow | None = None) -> CredentialDetection:
 
 def minimized_main_windows() -> list[DesktopWindow]:
     """The measured minimized-owner shape: a small, iconic Desktop main window and nothing else."""
-    return [
-        DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 159, 27, ("Report",), minimized=True),
-    ]
+    return [main_window(title="Report", minimized=True, width=159, height=27)]
 
 
 def restored_main_windows() -> list[DesktopWindow]:
     """The same owner restored: full-size, not iconic, and - measured - the dialog does NOT return."""
-    return [
-        DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 2011, 1298, ("Report",)),
-    ]
+    return [main_window(title="Report")]
 
 
 def visible_unreadable_dialog_windows() -> list[DesktopWindow]:
     """A visible owned dialog (empty title, unreadable) alongside the healthy main window."""
-    return [
-        DesktopWindow("", "WindowsForms10.Window.20008.app.0.1a2b3c", 702, 355, ()),
-        DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 2011, 1298, ("Report",)),
-    ]
+    return [owned_dialog(), main_window(title="Report")]
 
 
 def visible_progress_dialog_windows() -> list[DesktopWindow]:
     """Power BI's own Refresh progress dialog alongside the healthy main window (issue #376)."""
-    return [
-        progress_dialog_window(),
-        DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 2011, 1298, ("Report",)),
-    ]
+    return [progress_dialog_window(), main_window(title="Report")]
 
 
 def harvested_minimized_reason() -> str:
@@ -289,11 +328,11 @@ def test_win32_fixture_finds_owned_dialog_and_keeps_instances_separate() -> None
     """Faithful fixture: owned empty-title dialog on PID A, no dialog on concurrent PID B."""
     windows_by_pid = {
         111: [
-            DesktopWindow("", "WindowsForms10.Window.20008.app.0.33c0d9d", 702, 355, ("Enter your credentials",)),
-            DesktopWindow("sample-superstore", "WindowsForms10.Window.8.app.0.33c0d9d", 2011, 1298, ("Report",)),
+            owned_dialog(("Enter your credentials",)),
+            main_window(),
             DesktopWindow("", "Internet Explorer_Hidden", 0, 0, ()),
         ],
-        222: [DesktopWindow("cached-model", "WindowsForms10.Window.8.app.0.33c0d9d", 2011, 1298, ("Report",))],
+        222: [main_window(title="cached-model")],
     }
     hit = inspect_credential_modal(111, lambda pid: windows_by_pid[pid]).modal
     miss = inspect_credential_modal(222, lambda pid: windows_by_pid[pid])
@@ -311,11 +350,11 @@ def test_unreadable_owned_dialog_reports_unreadable_not_no_modal() -> None:
     """
     windows_by_pid = {
         58104: [
-            DesktopWindow("", "WindowsForms10.Window.20008.app.0.33c0d9d", 702, 355, ()),
-            DesktopWindow("sample-superstore", "WindowsForms10.Window.8.app.0.33c0d9d", 2011, 1298, ("sample",)),
+            owned_dialog(),
+            main_window(texts=("sample",)),
             DesktopWindow("", "Internet Explorer_Hidden", 0, 0, ()),
         ],
-        46256: [DesktopWindow("cached", "WindowsForms10.Window.8.app.0.33c0d9d", 2011, 1298, ("cached",))],
+        46256: [main_window(title="cached", texts=("cached",))],
     }
     blocked = inspect_credential_modal(58104, lambda pid: windows_by_pid[pid])
     healthy = inspect_credential_modal(46256, lambda pid: windows_by_pid[pid])
@@ -329,12 +368,18 @@ def test_unreadable_owned_dialog_reports_unreadable_not_no_modal() -> None:
     assert healthy.dialog is None
 
 
-def test_zero_size_helper_window_does_not_block() -> None:
-    """Internet Explorer_Hidden 0x0 is present on healthy instances and must be ignored."""
+def test_an_unowned_zero_area_helper_window_does_not_block() -> None:
+    """A window with NO owner and NO pixels blocks nothing - on two independent grounds, not on size.
+
+    `Internet Explorer_Hidden` at 0x0 rides along on healthy instances. It is excluded because it has
+    no owner to disable AND nothing to display, never because of its name or its geometry: the same
+    class at 900x700, and the same 0x0 shape with an owner, are both classified (see the round-3
+    tests below).
+    """
     state = inspect_credential_modal(
         111,
         lambda _pid: [
-            DesktopWindow("cached", "WindowsForms10.Window.8.app.0.33c0d9d", 2011, 1298, ("cached",)),
+            main_window(title="cached", texts=("cached",)),
             DesktopWindow("", "Internet Explorer_Hidden", 0, 0, ()),
         ],
     )
@@ -354,19 +399,7 @@ def test_real_win32_enumeration_callback_runs_against_this_process() -> None:
 
 def test_minimized_owner_reports_unknown_not_no_dialog() -> None:
     """When the owner is minimized, Windows hides owned dialogs; absence is indeterminate."""
-    state = inspect_credential_modal(
-        111,
-        lambda _pid: [
-            DesktopWindow(
-                "sample-superstore",
-                "WindowsForms10.Window.8.app.0.33c0d9d",
-                2011,
-                1298,
-                ("Report",),
-                minimized=True,
-            )
-        ],
-    )
+    state = inspect_credential_modal(111, lambda _pid: [main_window(minimized=True)])
 
     assert state.modal is None
     assert state.unknown_reason is not None
@@ -1363,10 +1396,9 @@ def test_the_credential_scan_is_not_gated_by_the_size_filter() -> None:
     a smaller window produced NO finding at all - not even a dialog one. `Test-CredentialModal` in the
     PowerShell arbiter has always scanned every window; the two now agree.
     """
-    small = DesktopWindow("", "WindowsForms10.Window.20008.app.0.x", 80, 60, ("Enter your credentials",))
-    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
+    small = owned_dialog(("Enter your credentials",), width=80, height=60)
 
-    state = inspect_credential_modal(111, lambda _pid: [small, main])
+    state = inspect_credential_modal(111, lambda _pid: [small, main_window()])
 
     assert state.modal is not None, "a credential prompt below the size filter must still be a hard stop"
     assert state.modal.window.width == 80
@@ -1400,7 +1432,8 @@ def test_a_window_we_could_not_account_for_outranks_a_progress_dialog() -> None:
     """
     windows = [
         progress_dialog_window(),
-        DesktopWindow("", "WindowsForms10.Window.20008.app.0.y", 702, 355, ()),
+        owned_dialog(hwnd=0x30003),
+        main_window(),
     ]
 
     finding = _credential_modal.dialog_verdict(windows)
@@ -1478,12 +1511,10 @@ def test_short_prompt_beside_progress_text_is_never_dismissed(prompt: str) -> No
     ``credential_modal_signature.regex``, so the all-window prepass does not rescue them either -
     which is exactly why an unexplained element must veto rather than be excused.
     """
-    window = DesktopWindow(
-        "Refresh", "WindowsForms10.Window.20008.app.0.x", 702, 355, ("Refresh", "Evaluating...", prompt)
-    )
+    window = owned_dialog(("Refresh", "Evaluating...", prompt), title="Refresh")
 
     finding = classify_dialog(window)
-    in_flight = _credential_modal.dialog_verdict([window], operation_in_flight=True)
+    in_flight = _credential_modal.dialog_verdict([main_window(), window], operation_in_flight=True)
 
     assert finding.kind == "mixed-content", f"{prompt!r} was accounted for by nothing and must veto"
     assert finding.verdict == "DIALOG_UNRECOGNIZED"
@@ -1513,45 +1544,263 @@ def test_only_enumerated_chrome_is_excused_beside_progress_text() -> None:
         (80, 60, ("Refresh",), "benign-title-only"),
         (40, 20, ("Continue?", "Yes"), "unrecognized"),
         (1, 1, (), "unreadable"),
+        # Round 3, finding 3: a real native `WS_VISIBLE` OWNED 0x0 window with a DISABLED owner is a
+        # genuinely blocking shape. Zero area alone must never suppress.
+        (0, 0, (), "unreadable"),
+        (0, 700, ("Password:",), "unrecognized"),
     ],
 )
 def test_a_small_dialog_is_still_classified(width: int, height: int, texts, kind: str) -> None:
-    """Finding 3 (HIGH): the original defect, surviving inside its own fix.
+    """Findings 3 (round 2) and 3 (round 3): geometry is not evidence, at any magnitude.
 
-    ``dialog_candidates`` still rejected everything under 100x100, and the all-window credential
-    prepass only rescued text matching the credential regex. Measured on the PR-#400 build: a visible
-    80x60 non-main unreadable window beside a normal main window returned
-    ``modal=None, dialog=None, unknown_reason=None`` - byte-identical to a healthy Desktop.
+    Round 2 measured a visible 80x60 unreadable owned window returning
+    ``modal=None, dialog=None, unknown_reason=None`` - byte-identical to a healthy Desktop. Round 3
+    then built a real ``WS_VISIBLE`` owned **0x0** window with ``CreateWindowEx`` and disabled its
+    owner (``owned-visible=True owner-win32-enabled=False rect=0x0``) and showed the follow-up fix
+    still suppressed it - which on the unbounded query-poll path is a false clear that is also a hang.
 
-    An arbitrary geometry threshold is not evidence of harmlessness. That sentence is the whole issue.
+    An arbitrary geometry threshold is not evidence of harmlessness, and neither is zero.
     """
-    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
-    dialog = DesktopWindow(texts[0] if texts else "", "WindowsForms10.Window.20008.app.0.x", width, height, texts)
+    dialog = owned_dialog(texts, title=texts[0] if texts else "", width=width, height=height)
 
-    state = inspect_credential_modal(111, lambda _pid: [dialog, main])
+    state = inspect_credential_modal(111, lambda _pid: [dialog, main_window()])
 
-    assert state.dialog is not None, "a small dialog must not vanish into the healthy state"
+    assert state.dialog is not None, "an owned dialog must not vanish into the healthy state"
     assert state.dialog.kind == kind
     assert state.dialog.window.width == width
 
 
-def test_only_named_helpers_and_zero_area_windows_are_excluded() -> None:
-    """The exclusions that replaced the size test are positive claims, and are the ONLY ones.
+def test_an_owned_dialog_sharing_its_owners_class_is_still_a_credential_wall() -> None:
+    """Round 3, finding 2: a class PREFIX names a WinForms family, not one HWND.
 
-    Zero area rasterises nothing, so such a window cannot be showing a human anything; the named
-    helpers are identified Desktop infrastructure. Everything else is classified whatever its size.
+    A native WinForms experiment showed an owner and its owned ``FixedDialog`` both reporting the exact
+    class ``WindowsForms10.Window.8.app.0.2b2196a_r3_ad1``. The previous ``is_desktop_main_window``
+    predicate treated any such window as the application, so this shape returned **no modal, no dialog
+    finding, no unknown state** - a real credential dialog removed from the prepass AND from
+    classification by the very fix that was meant to stop a report title fabricating one.
     """
-    assert not hasattr(_credential_modal, "MIN_DIALOG_WIDTH"), "a size threshold must not come back"
-    assert not hasattr(_credential_modal, "MIN_DIALOG_HEIGHT"), "a size threshold must not come back"
+    shared_class = "WindowsForms10.Window.8.app.0.2b2196a_r3_ad1"
+    frame = DesktopWindow("sample - Power BI Desktop", shared_class, 2011, 1298, ("sample",), hwnd=MAIN_HWND)
+    dialog = owned_dialog(("Enter your credentials",), class_name=shared_class)
 
-    zero_area = DesktopWindow("", "Internet Explorer_Hidden", 0, 0, ())
-    named_helper = DesktopWindow("", "Internet Explorer_Hidden", 400, 300, ())
-    flat = DesktopWindow("", "WindowsForms10.Window.20008.app.0.x", 900, 0, ())
-    real = DesktopWindow("", "WindowsForms10.Window.20008.app.0.x", 12, 12, ())
+    state = inspect_credential_modal(111, lambda _pid: [frame, dialog])
 
-    kept = _credential_modal.dialog_candidates([zero_area, named_helper, flat, real])
+    assert state.modal is not None, "an owned dialog sharing its owner's class is still a dialog"
+    assert state.modal.window is dialog
+    assert state.modal.window.class_name == shared_class
 
-    assert kept == [real], f"expected only the real 12x12 dialog to be classified; got {kept}"
+
+def test_an_owned_dialog_sharing_its_owners_class_is_classified_when_unreadable() -> None:
+    """The same shape without a signature match must still surface, not disappear."""
+    shared_class = "WindowsForms10.Window.8.app.0.2b2196a_r3_ad1"
+    frame = DesktopWindow("sample", shared_class, 2011, 1298, ("sample",), hwnd=MAIN_HWND)
+    dialog = owned_dialog(class_name=shared_class)
+
+    state = inspect_credential_modal(111, lambda _pid: [frame, dialog])
+
+    assert state.modal is None
+    assert state.dialog is not None
+    assert state.dialog.verdict == "DIALOG_UNREADABLE"
+
+
+@pytest.mark.parametrize(
+    ("texts", "verdict"),
+    [
+        ((), "DIALOG_UNREADABLE"),
+        (("Password:",), "DIALOG_UNRECOGNIZED"),
+        (("Sign in",), "DIALOG_UNRECOGNIZED"),
+        (("Continue?",), "DIALOG_UNRECOGNIZED"),
+    ],
+)
+def test_the_aad_host_is_classified_by_modality_not_by_its_name(texts, verdict: str) -> None:
+    """Round 3, finding 1: a NAME allowlist hid the AAD sign-in host whatever it displayed.
+
+    ``Internet Explorer_Hidden`` was excluded from classification unconditionally, so keeping it in the
+    credential prepass only ever rescued EXACT signature matches. Measured on the round-2 build: a
+    visible 900x700 host reading ``Password:`` / ``Sign in`` / ``Continue?`` - or nothing at all -
+    returned ``modal=None, dialog=None, unknown=None``.
+
+    There is no name allowlist any more. This window is classified because it is OWNED and its owner is
+    not proven enabled, which is what "blocking" means; its class is not consulted at all.
+    """
+    host = owned_dialog(texts, class_name="Internet Explorer_Hidden", width=900, height=700)
+
+    state = inspect_credential_modal(111, lambda _pid: [main_window(), host])
+
+    assert state.dialog is not None, "the AAD host must never collapse into the healthy state"
+    assert state.dialog.verdict == verdict
+
+
+def test_an_enabled_owner_is_the_only_thing_that_exonerates_a_dialog() -> None:
+    """Modality is a ONE-WAY test, and it is the only suppression mechanism left.
+
+    An ENABLED owner proves this window is blocking nothing, because a modal disables its owner. A
+    DISABLED owner proves nothing either way - Power BI's refresh dialog disables the owner too - and
+    ``None`` (no owner) means the test did not apply, which is not the same as passing it.
+    """
+    exonerated = owned_dialog(owner_enabled=True)
+    disabled_owner = owned_dialog(owner_enabled=False)
+    no_owner_test = DesktopWindow("", "Cls", 702, 355, (), hwnd=0x40004, owner_hwnd=MAIN_HWND, owner_enabled=None)
+
+    assert _credential_modal.is_proven_non_blocking(exonerated)
+    assert not _credential_modal.is_proven_non_blocking(disabled_owner)
+    assert not _credential_modal.is_proven_non_blocking(no_owner_test)
+
+    kept = _credential_modal.dialog_candidates([main_window(), exonerated, disabled_owner, no_owner_test])
+
+    assert exonerated not in kept, "an enabled owner is positive proof this window blocks nothing"
+    assert disabled_owner in kept
+    assert no_owner_test in kept, "'the test did not apply' is not 'the test passed'"
+
+
+def test_no_proxy_for_blocking_survives_in_the_candidate_rule() -> None:
+    """Anti-regression: size, class prefix and a name allowlist each hid a real blocker. None returns.
+
+    Three review rounds killed three correlates. This asserts the module has no surface for a fourth,
+    and that the only exclusions left are the modality ones.
+    """
+    for gone in ("MIN_DIALOG_WIDTH", "MIN_DIALOG_HEIGHT", "HELPER_WINDOW_CLASSES", "is_desktop_main_window"):
+        assert not hasattr(_credential_modal, gone), f"{gone} is a proxy for blocking and must stay deleted"
+
+    source = inspect.getsource(_credential_modal.dialog_candidates)
+    assert "class_name" not in source, "candidacy must not consult a window's class"
+    assert "width" not in source, "candidacy must not consult a window's size"
+
+
+def test_the_frame_is_identified_by_ownership_before_any_convention() -> None:
+    """`main_frame` prefers DIRECT ownership evidence, and only then the main-handle convention.
+
+    Ownership names the frame outright when a dialog is up, which is the case where getting it wrong
+    removes a real blocker. The first-visible-unowned convention is a fallback reached only when no
+    window is owned - i.e. when there are no dialogs to hide.
+
+    The decoy matters: with another UNOWNED window enumerated ahead of the frame, the convention alone
+    picks the decoy and the real frame is then classified as a dialog on every healthy poll. Only the
+    ownership branch gets this right, so the decoy is what makes this test able to fail.
+    """
+    frame = main_window()
+    dialog = owned_dialog(("Enter your credentials",))
+    decoy = DesktopWindow("decoy", "Cls", 300, 200, ("decoy",), hwnd=0x60006)
+
+    # Ownership evidence wins even when the dialog is enumerated FIRST (Z-order puts a modal on top)
+    # and even when an unrelated unowned window precedes the frame.
+    assert _credential_modal.main_frame([dialog, decoy, frame]) is frame
+    assert _credential_modal.main_frame([decoy, frame, dialog]) is frame
+    # With nothing owned, the convention applies: the first visible unowned window.
+    lone = DesktopWindow("only", "Cls", 800, 600, ("only",), hwnd=0x50005)
+    assert _credential_modal.main_frame([lone]) is lone
+    assert _credential_modal.main_frame([]) is None
+
+
+def test_an_unowned_window_that_renders_pixels_is_still_classified() -> None:
+    """`renders_nothing` needs BOTH conjuncts: no owner AND no pixels. Neither alone suppresses.
+
+    An unowned 900x700 window displays something to a human even though it disables nobody, so it is
+    accounted for like any other window. Dropping the area conjunct would silently exclude every
+    unowned window - including the AAD host in its unowned form.
+    """
+    frame = main_window()
+    unowned_visible = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Password:",), hwnd=0x70007)
+
+    assert not _credential_modal.renders_nothing(unowned_visible)
+
+    state = inspect_credential_modal(111, lambda _pid: [frame, unowned_visible])
+
+    assert state.dialog is not None, "an unowned window with pixels must not vanish into healthy"
+    assert state.dialog.verdict == "DIALOG_UNRECOGNIZED"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
+def test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state() -> None:
+    """The modality facts must come from Win32, not from a dataclass default (#400 review round 3).
+
+    Every other test here feeds synthesised windows, so none of them can tell whether
+    ``GetWindow(GW_OWNER)`` and ``IsWindowEnabled(owner)`` are actually wired into the harvest - a
+    mutation that hard-codes ``owner_hwnd = 0`` or ``owner_enabled = True`` passes all of them. This
+    builds the reviewer's own reproduction natively: a real ``WS_VISIBLE`` **owned 0x0** popup whose
+    owner is disabled, which is a genuinely blocking shape, and asserts the harvest sees it and the
+    candidate rule keeps it.
+    """
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    wndproc_type = ctypes.WINFUNCTYPE(ctypes.c_longlong, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+    class _WndClass(ctypes.Structure):
+        """Minimal ``WNDCLASSW``."""
+
+        _fields_ = [
+            ("style", wintypes.UINT),
+            ("lpfnWndProc", wndproc_type),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", wintypes.HANDLE),
+            ("hbrBackground", wintypes.HBRUSH),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+        ]
+
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.DefWindowProcW.restype = ctypes.c_longlong
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+    ]  # fmt: skip
+    # Signatures set explicitly for the same reason `_configure_user32` does it in production: a
+    # default ctypes restype is a 32-bit `c_int`, so an untyped `GetModuleHandleW` TRUNCATES the
+    # 64-bit HINSTANCE and `RegisterClassW` then faults on the garbage. That access violation showed
+    # up as a `faulthandler` dump on every run of this test while it still reported a pass.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    user32.RegisterClassW.argtypes = [ctypes.POINTER(_WndClass)]
+    user32.RegisterClassW.restype = wintypes.ATOM
+    user32.EnableWindow.argtypes = [wintypes.HWND, wintypes.BOOL]
+    user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+    user32.DestroyWindow.argtypes = [wintypes.HWND]
+
+    # `DefWindowProcW` is used DIRECTLY as the window procedure, cast to the callback type rather than
+    # wrapped in a Python lambda. Windows calls a wndproc synchronously from inside `CreateWindowEx`
+    # and `DestroyWindow`; keeping Python off the message path removes both the marshalling risk and
+    # the need for a message pump.
+    klass = _WndClass()
+    klass.lpfnWndProc = ctypes.cast(user32.DefWindowProcW, wndproc_type)
+    klass.hInstance = kernel32.GetModuleHandleW(None)
+    klass.lpszClassName = f"T2PModalityProbe{os.getpid()}"
+    assert user32.RegisterClassW(ctypes.byref(klass)), f"RegisterClassW failed: {ctypes.get_last_error()}"
+
+    ws_overlappedwindow, ws_visible, ws_popup = 0x00CF0000, 0x10000000, 0x80000000
+    frame_hwnd = user32.CreateWindowExW(
+        0, klass.lpszClassName, "t2p frame", ws_overlappedwindow | ws_visible,
+        10, 10, 400, 300, None, None, klass.hInstance, None,
+    )  # fmt: skip
+    owned_hwnd = user32.CreateWindowExW(
+        0, klass.lpszClassName, "", ws_popup | ws_visible, 0, 0, 0, 0, frame_hwnd, None, klass.hInstance, None
+    )
+    try:
+        assert frame_hwnd and owned_hwnd, "could not create the native probe windows"
+        user32.EnableWindow(frame_hwnd, False)
+        time.sleep(0.2)
+
+        harvested, _visited = _enumerate_pid_windows_with_count(os.getpid())
+        by_hwnd = {window.hwnd: window for window in harvested}
+        frame = by_hwnd.get(frame_hwnd)
+        owned = by_hwnd.get(owned_hwnd)
+
+        assert frame is not None and owned is not None, "the harvest missed the native probe windows"
+        assert frame.owner_hwnd == 0, "the frame is unowned"
+        assert owned.owner_hwnd == frame_hwnd, "ownership must come from GetWindow(GW_OWNER)"
+        assert owned.owner_enabled is False, "owner_enabled must come from IsWindowEnabled(owner)"
+        assert (owned.width, owned.height) == (0, 0), "the probe window really is 0x0"
+        assert not _credential_modal.renders_nothing(owned), "it HAS an owner, so zero area cannot suppress"
+        assert not _credential_modal.is_proven_non_blocking(owned), "a disabled owner is not an exoneration"
+        assert owned in _credential_modal.dialog_candidates(harvested, frame=frame)
+    finally:
+        user32.DestroyWindow(owned_hwnd)
+        user32.DestroyWindow(frame_hwnd)
+        user32.UnregisterClassW(klass.lpszClassName, klass.hInstance)
 
 
 @pytest.mark.parametrize(
@@ -1579,33 +1828,32 @@ def test_a_report_title_cannot_fabricate_a_credential_prompt(report_name: str, c
 
 
 def test_an_unusual_modal_class_is_still_scanned_for_the_credential_signature() -> None:
-    """The other half of finding 4: excluding the main window must not narrow real dialog coverage."""
-    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
-    odd = DesktopWindow("", "HwndWrapper[PBIDesktop.exe;;guid]", 30, 20, ("Enter your credentials",))
+    """The other half of finding 4: excluding the frame must not narrow real dialog coverage."""
+    odd = owned_dialog(("Enter your credentials",), class_name="HwndWrapper[PBIDesktop.exe;;guid]", width=30, height=20)
 
-    state = inspect_credential_modal(111, lambda _pid: [odd, main])
+    state = inspect_credential_modal(111, lambda _pid: [main_window(), odd])
 
     assert state.modal is not None
     assert state.modal.window.class_name.startswith("HwndWrapper")
 
 
 def test_the_credential_prepass_reads_windows_that_classification_skips() -> None:
-    """The prepass is narrowed by the MAIN window and by nothing else - not even the helper list.
+    """An exoneration says "not blocking" - it does NOT say "carries no credential text".
 
-    ``Internet Explorer_Hidden`` is the WebOC host, and Power BI's AAD sign-in renders in a web view,
-    so credential text really can appear there. Excluding it from CLASSIFICATION is a claim about what
-    can be a dialog; excluding it from the HARD-STOP scan would be a claim about what can hold a
-    prompt, and that one is false. Recall on the credential path is the thing we never trade away.
+    ``is_proven_non_blocking`` removes a window from CLASSIFICATION, because an enabled owner proves it
+    is blocking nobody. The credential prepass still reads it: recall on the hard-stop path is the one
+    thing this module never trades away, and a sign-in prompt whose owner happens to be enabled is
+    still a sign-in prompt a human has to deal with.
     """
-    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
-    web_view = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Enter your credentials",))
+    exonerated = owned_dialog(("Enter your credentials",), owner_enabled=True)
+    frame = main_window()
 
-    assert web_view not in _credential_modal.dialog_candidates([web_view, main]), "helper: not classified"
+    assert exonerated not in _credential_modal.dialog_candidates([frame, exonerated]), "not classified"
 
-    state = inspect_credential_modal(111, lambda _pid: [web_view, main])
+    state = inspect_credential_modal(111, lambda _pid: [frame, exonerated])
 
-    assert state.modal is not None, "a helper window is still scanned for the credential signature"
-    assert state.modal.window.class_name == "Internet Explorer_Hidden"
+    assert state.modal is not None, "an exonerated window is still scanned for the credential signature"
+    assert state.modal.window is exonerated
 
 
 @pytest.mark.parametrize("progress_enabled", [False, True])

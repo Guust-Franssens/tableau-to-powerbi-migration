@@ -119,9 +119,15 @@ the same verdicts as the arbiter, with only `CREDENTIAL_MISSING` at exit 1 and e
 exit 3. Two consequences worth knowing:
 
 - The same fix closed a **silent false negative** nobody had noticed: the 100x100 filter was gating the
-  credential scan too, so a credential prompt in a *smaller* window produced **no finding at all**. It
-  now scans every window at any size (the **main** window excepted — a report legitimately named
-  `Account Key` is not a prompt), and no size test decides classification either.
+  credential scan too, so a credential prompt in a *smaller* window produced **no finding at all**. No
+  geometry, class or name test decides anything any more — see the next bullet.
+- **Blocking is decided from MODALITY: a modal disables its owner.** `GetWindow(GW_OWNER)` and
+  `IsWindowEnabled(owner)` are harvested, and only three things are excluded from classification: the
+  frame (identified by *ownership*, falling back to the `MainWindowHandle` convention), a window whose
+  **owner is enabled** (positive one-way proof it blocks nothing), and one that is **unowned AND
+  zero-area**. Native Win32 experiments defeated the three proxies this replaced — a class prefix (an
+  owner and its owned `FixedDialog` share the exact class), a name allowlist (the AAD host), and zero
+  area alone (a real `WS_VISIBLE` owned 0x0 window with a disabled owner).
 - Dismissal needs a **positive** claim. A dialog is only dismissed when every content element is
   recognised progress status or enumerated chrome (`benign_chrome_signature.regex`). There is **no
   length amnesty**: blind review measured `Refresh` + `Evaluating...` + *"Please enter your password"*

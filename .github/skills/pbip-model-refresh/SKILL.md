@@ -346,8 +346,43 @@ stay byte-identical.
 > make its positive claim actually positive. "Short", "big enough", "we read something", "the caption
 > looked fine" are all the same mistake wearing different clothes.
 
-> ⚠️ **The PowerShell arbiter still has finding 5's hole — measured, filed as #406, deliberately NOT
-> fixed here.** `probe_desktop_credential.ps1` keeps `$MinPromptWords = 5`, and driving its shipped
+> ⚠️ **Round 3 killed three PROXIES at once — blocking is now decided from MODALITY. Read this before
+> adding any exclusion.** The round-2 fix replaced one unsound proxy (size) with three more — a class
+> prefix, zero area, and a helper-class name allowlist — and the reviewer defeated **all three** with
+> native Win32 experiments. They are the same mistake: answering *"is this window blocking a human?"*
+> by looking at something else.
+>
+> | proxy | native repro that defeated it | now |
+> |---|---|---|
+> | `Internet Explorer_Hidden` **name** allowlist | a visible **900×700** host reading `Password:` / `Sign in` / `Continue?` — or nothing at all — returned `modal=None, dialog=None, unknown=None`. Keeping it in the *prepass* only ever rescued **exact signature matches**. | no name is consulted anywhere |
+> | `WindowsForms10.Window.8` **class prefix** | that prefix names a WinForms **family**, not one HWND: an owner **and its owned `FixedDialog`** both reported the exact class `WindowsForms10.Window.8.app.0.2b2196a_r3_ad1`. A real credential dialog was removed from the prepass *and* from classification. | the frame is identified by **ownership** |
+> | **zero area** | a real `WS_VISIBLE` **owned 0×0** window built with `CreateWindowEx`, owner disabled: `owned-visible=True owner-win32-enabled=False rect=0x0`. Genuinely blocking, and on the unbounded query-poll path suppressing it is a false clear **that is also a hang**. | zero area suppresses only **conjoined with unowned** |
+>
+> **Win32 answers the question directly, so it is asked directly: a modal disables its owner.**
+> `DesktopWindow` now carries `owner_hwnd` (`GetWindow(GW_OWNER)`) and a **three-valued**
+> `owner_enabled` (`IsWindowEnabled(owner)`), and exactly three things are excluded from
+> classification, each a positive claim:
+>
+> | exclusion | the claim it makes |
+> |---|---|
+> | `main_frame(...)` | it is the application, and the thing dialogs block. Identified by **direct ownership** first (an owned window names its owner), falling back to the `MainWindowHandle` convention — first visible unowned window — only when nothing is owned, i.e. when there are no dialogs to hide. |
+> | `is_proven_non_blocking(...)` | an **enabled owner** proves this window blocks nothing. One-way: a *disabled* owner never convicts (Power BI's own refresh dialog disables it too) and `None` — no owner — means the test **did not apply**, which is not the same as passing it. |
+> | `renders_nothing(...)` | **unowned AND zero-area**: no owner to disable *and* no pixels to display. Both conjuncts are required; either alone is one of the dead proxies. |
+>
+> The arbiter's one-way enabled-owner exoneration is therefore **ported**, not skipped — that
+> divergence note in the module docstring is gone.
+>
+> ✅ **Proven against real windows, not just dataclasses.**
+> `test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state` builds the reviewer's own
+> reproduction with `CreateWindowEx` in the test process and asserts the production harvest reads
+> `owner_hwnd`/`owner_enabled` from Win32 — every synthesised-window test passes a mutation that
+> hard-codes those fields, so only a native one can see it. ⚠️ Set ctypes **argtypes/restype**
+> explicitly if you extend it: an untyped `GetModuleHandleW` truncates the 64-bit `HINSTANCE` and
+> `RegisterClassW` then faults — a `faulthandler` access-violation dump on a test that still reported
+> a pass. That is the same rule `_configure_user32` states in production.
+
+> ⚠️ **The PowerShell arbiter still has the length-amnesty hole — measured, filed as #406, deliberately
+> NOT fixed here.** `probe_desktop_credential.ps1` keeps `$MinPromptWords = 5`, and driving its shipped
 > classifiers through the test harness shows the identical result: `Refresh` + `Evaluating` +
 > `Please enter your password` → `benign` → `REFRESH_IN_PROGRESS`, and **suppressed to `$null`** under
 > `-RefreshInFlight`; `Password:` likewise. It was left alone on purpose, following the precedent that
