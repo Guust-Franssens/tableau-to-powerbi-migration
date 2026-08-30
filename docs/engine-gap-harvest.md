@@ -173,24 +173,41 @@ unexplained. **562 of 574 retained `queryRef` leaves had more than one dot on so
 prefix, aggregation wrappers (`Sum(...)`) unwrapped and required to be unchanged, property suffix
 required to be unchanged — and only then is a replaced invalid entity called a rebind.
 
+⚠️ **And the unwrap must not be anchored at the end of the string.** Power BI appends a
+disambiguation suffix to a duplicated query reference — `Sum(Orders.csv.Sales) 2` — so requiring the
+closing paren to terminate the value left three estate leaves unparsed and retained as unexplained:
+
+```
+Sum(Orders.csv_5AF5F66F4EC84139B3533FCBFC0437BE.Sales) 2   ->   Sum(Orders.csv.Sales) 2
+```
+
+The tell was that their sibling `Entity` leaves were *already* `BINDING_RESOLUTION`. The suffix is
+captured and **compared**, not stripped: a change of suffix changes *which duplicate* is referenced,
+which is not a binding being resolved.
+
 **The three measurements, in order, on the same corpus.** The middle column is the number this
 document previously published; publishing it is how it got checked.
 
 | retained `MODEL_OBJECT_NAMES` leaf | whole-file rule | first-dot per-leaf | table-resolved per-leaf |
 |---|---:|---:|---:|
-| `queryRef` | — | 574 | **100** |
+| `queryRef` | — | 574 | **97** |
 | `nativeQueryRef` | — | 99 | 99 |
 | `Property` | — | 78 | 78 |
 | `Entity` (both tables valid) | — | 9 | 9 |
 | **files carrying an unexplained name change** | **27** | **270** | **87** |
 
 So the first correction was right in direction and wrong in size: of the 243-file swing, **183 files
-were false positives** and 60 were real. 474 leaves moved back to `BINDING_RESOLUTION`; the reviewer
-independently counted 477 by a slightly different criterion (unchanged prefix + unchanged
-property/aggregation suffix), and the three-leaf gap is the difference between the two definitions,
-not a disagreement about the corpus.
+were false positives** and 60 were real. **477 leaves** moved back to `BINDING_RESOLUTION`.
 
-What is left in the 100 is the true positive the refinement exists to keep: `Orders.Order_Date` →
+> That 477 was itself contested and adjudicated. A first pass implemented the table-resolved rule
+> without the disambiguation suffix and reclassified **474**; the reviewer counted 477. The gap was
+> *not* definitional — it was exactly the three `Sum(...) 2` leaves above, and the reviewer was
+> right. ⚠️ **Fixing them does not move the 87**: all three live in files that also carry a retained
+> `nativeQueryRef` change, so those files stay flagged either way. A leaf-level correction and a
+> file-level headline are different denominators, and conflating them is how a real defect gets
+> waved away as immaterial.
+
+What is left in the 97 is the true positive the refinement exists to keep: `Orders.Order_Date` →
 `Date.Year`, a projection that moves to a different table **and** a different column. That is a
 model-shape change, not a binding being resolved.
 
@@ -310,6 +327,29 @@ So the harvest now **reconciles every adjudicated path** after the pairs are pro
 
 That last row is the point: it is a structural guard, not an enumeration of the cases anyone thought
 of. `unpaired_drift_records` and `unreconciled_drift` are both in the JSON and the console output.
+
+### The prose may not claim what the JSON denies
+
+⚠️ **An empty `tier_edits` list has two completely different meanings**, and the markdown printed the
+reassuring one for both. Measured: deleting `input_manifest.json` from a differing fixture gave
+`status: incomplete`, `attribution.usable: false` and **two unattributed differences** — and the
+report still said *"**None.** Every differing byte in this bundle is still hash-identical to what the
+engine itself recorded."* The machine-readable output was honest; the sentence a human reads was not.
+
+That claim is now emitted only when **all three** hold:
+
+1. attribution is usable,
+2. every differing path is attributed `engine_internal`, and
+3. the engine's own baseline is intact (`baseline_drift` and `baseline_tampered` both empty).
+
+Otherwise the section says **Undetermined — this is NOT a clean result**, gives the
+attributed/unattributed counts, and lists `incomplete_reasons` verbatim.
+
+> Condition 3 was **not** in the review; it fell out of writing the test for the first two. A
+> rewritten `reports/` tree makes the two sides agree, so `differing_files` is 0 and
+> `engine_internal` is 0 — conditions 1 and 2 both pass, and the report cheerfully asserted that
+> every differing byte matched the engine on a bundle whose status was `untrustworthy`. Same class,
+> one layer down: **an empty count reading as a clean result.**
 
 ---
 

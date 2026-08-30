@@ -1215,6 +1215,18 @@ DOTTED_TABLES = {"Date", "HumanResources.csv", "Orders", "Orders.csv", "Customer
         # `Orders` and `Orders.csv` are BOTH tables: the longest prefix is the right split, and the
         # shortest would resolve `Orders.csv.Sales` to entity `Orders` + property `csv.Sales`.
         ("Extract.Sales", "Orders.csv.Sales", hgs.SHAPE_BINDING, "longest matching table wins"),
+        # ⚠️ Power BI appends a disambiguation suffix to a duplicated query reference. Requiring the
+        # closing paren to END the string missed exactly three estate leaves - the whole 474-vs-477
+        # gap - because `) 2` never unwrapped and the rebind inside it stayed invisible.
+        (
+            "Sum(Orders.csv_5AF5F66F.Sales) 2",
+            "Sum(Orders.csv.Sales) 2",
+            hgs.SHAPE_BINDING,
+            "aggregation with a disambiguation suffix",
+        ),
+        # ...but the suffix is COMPARED, not stripped: changing it changes which duplicate is meant.
+        ("Sum(Orders.csv_AB.Sales) 2", "Sum(Orders.csv.Sales) 3", hgs.SHAPE_MODEL_NAMES, "suffix changed"),
+        ("Sum(Orders.csv_AB.Sales)", "Sum(Orders.csv.Sales) 2", hgs.SHAPE_MODEL_NAMES, "suffix gained"),
     ],
 )
 def test_query_ref_resolves_against_real_table_names_not_the_first_dot(before, after, expected, why):
@@ -1395,3 +1407,68 @@ def test_an_unreadable_declaration_ledger_makes_the_harvest_incomplete_not_untru
     assert report["attribution"]["unavailable_reason"] == "unreadable_declarations"
     assert report["status"] == heg.STATUS_INCOMPLETE
     assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-4 review: the human-facing report may not claim what the machine-readable one denies.
+# ---------------------------------------------------------------------------------------------
+
+CLEAN_CLAIM = "**None.** Every differing byte in this bundle is still hash-identical"
+
+
+def test_markdown_does_not_claim_cleanliness_when_attribution_is_unavailable(tmp_path):
+    """⚠️ An empty `tier_edits` list has two meanings; the prose used to print the reassuring one.
+
+    Measured (blind review round 4): deleting `input_manifest.json` from a differing fixture gave
+    `status=incomplete`, `attribution.usable=false` and TWO unattributed differences - and the
+    markdown still asserted that every differing byte matched the engine's own record. The JSON said
+    `incomplete`; the prose a human actually reads said the opposite.
+    """
+    bundle = _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
+    (bundle / "input_manifest.json").unlink()
+
+    report = heg.harvest(bundle)
+    markdown = hgr.render_markdown(report)
+
+    assert report["attribution"]["usable"] is False
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] > 0
+    assert CLEAN_CLAIM not in markdown
+    assert "**Undetermined - this is NOT a clean result.**" in markdown
+    assert "Why this run is not complete:" in markdown
+    for reason in report["incomplete_reasons"]:
+        assert reason in markdown
+
+
+def test_markdown_is_undetermined_when_only_some_paths_are_unattributed(tmp_path):
+    """Attribution can be USABLE and still not cover every compared path (a `.pbi` sidecar)."""
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / "pbip" / "WB" / "WB.Report" / ".pbi" / "localSettings.json", {"version": "1.0"})
+
+    report = heg.harvest(bundle)
+    markdown = hgr.render_markdown(report)
+
+    assert report["attribution"]["usable"] is True
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+    assert CLEAN_CLAIM not in markdown
+    assert "**Undetermined - this is NOT a clean result.**" in markdown
+
+
+def test_markdown_still_states_none_when_the_run_is_fully_attributed(tmp_path):
+    """The claim must remain reachable, or "undetermined" carries no information."""
+    report = heg.harvest(_bundle(tmp_path, entity_baseline="Extract", entity_working="Orders"))
+    markdown = hgr.render_markdown(report)
+
+    assert report["provenance"][heg.PROV_ENGINE] == report["provenance"]["differing_files"]
+    assert CLEAN_CLAIM in markdown
+    assert "**Undetermined" not in markdown
+
+
+def test_markdown_does_not_claim_cleanliness_when_the_baseline_drifted(tmp_path):
+    bundle = _differing_bundle(tmp_path)
+    _mutate_baseline_rewritten(bundle)
+
+    report = heg.harvest(bundle)
+    markdown = hgr.render_markdown(report)
+
+    assert report["status"] == heg.STATUS_UNTRUSTWORTHY
+    assert CLEAN_CLAIM not in markdown

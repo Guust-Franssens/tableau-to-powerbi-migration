@@ -33,8 +33,12 @@ from typing import Any, NamedTuple
 _TABLE_DECL = re.compile(r"^\s*table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 
 # `Sum(Orders.csv.Sales)` - the engine wraps aggregated projections, and a rebind inside the wrapper
-# is invisible to a bare table-prefix test.
-_AGGREGATION = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\((.*)\)$")
+# is invisible to a bare table-prefix test. ⚠️ The trailing group is NOT decoration: Power BI appends
+# a disambiguation suffix to a duplicated query reference (`Sum(Orders.csv.Sales) 2`), and requiring
+# the closing paren to END the string missed exactly three estate leaves - the 474-vs-477 gap the
+# third review adjudicated. It is captured and compared rather than stripped, because a change in the
+# suffix is a change to WHICH duplicate is referenced, not a binding being resolved.
+_AGGREGATION = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\((.*)\)(.*)$")
 
 # Leaves whose value IS a model object name. Everything else under a query is query SHAPE.
 _NAME_LEAVES = frozenset({"Entity", "Property", "queryRef", "nativeQueryRef"})
@@ -191,27 +195,29 @@ def _split_on_known_table(value: str, tables: set[str]) -> tuple[str, str] | Non
     return (best, value[len(best) + 1 :]) if best else None
 
 
-def _unwrap_aggregation(value: str) -> tuple[str, str]:
-    """`Sum(Orders.csv.Sales)` -> (`Sum`, `Orders.csv.Sales`); anything else -> (``, value).
+def _unwrap_aggregation(value: str) -> tuple[str, str, str]:
+    """`Sum(Orders.csv.Sales) 2` -> (`Sum`, `Orders.csv.Sales`, ` 2`); anything else -> (``, value, ``).
 
-    The engine emits aggregated projections wrapped this way, so a rebind inside the wrapper is
-    invisible to a bare table-prefix test.
+    Three parts, not two. The engine wraps aggregated projections, so a rebind inside the wrapper is
+    invisible to a bare table-prefix test - and Power BI then appends a disambiguation suffix to a
+    duplicated reference, which an unwrap anchored at the end of the string cannot see past.
     """
     match = _AGGREGATION.match(value)
-    return (match.group(1), match.group(2)) if match else ("", value)
+    return (match.group(1), match.group(2), match.group(3)) if match else ("", value, "")
 
 
 def _query_ref_shape(before: str, after: str, tables: set[str]) -> str:
     """`BINDING_RESOLUTION` for a `queryRef` only when JUST the entity was replaced, invalid->valid.
 
-    Everything must line up: the same aggregation wrapper, an after-value that resolves against a
-    real table in the bound model, an unchanged property, and a before-entity that is NOT a table.
-    A projection that moves to a different table AND a different column (`Orders.Order_Date` ->
-    `Date.Year`, 97 of 574 on the estate) is a model-shape change and stays `MODEL_OBJECT_NAMES`.
+    Everything must line up: the same aggregation wrapper, the same disambiguation suffix, an
+    after-value that resolves against a real table in the bound model, an unchanged property, and a
+    before-entity that is NOT a table. A projection that moves to a different table AND a different
+    column (`Orders.Order_Date` -> `Date.Year`, 97 of 574 on the estate) is a model-shape change and
+    stays `MODEL_OBJECT_NAMES`.
     """
-    before_wrapper, before_inner = _unwrap_aggregation(before)
-    after_wrapper, after_inner = _unwrap_aggregation(after)
-    if before_wrapper != after_wrapper:
+    before_wrapper, before_inner, before_suffix = _unwrap_aggregation(before)
+    after_wrapper, after_inner, after_suffix = _unwrap_aggregation(after)
+    if before_wrapper != after_wrapper or before_suffix != after_suffix:
         return SHAPE_MODEL_NAMES
     resolved = _split_on_known_table(after_inner, tables)
     if resolved is None:

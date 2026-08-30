@@ -162,6 +162,67 @@ def render(report: dict[str, Any], top: int = DEFAULT_TOP) -> str:
     return "\n".join(lines)
 
 
+def _tier_edits_determined(report: dict[str, Any]) -> bool:
+    """Whether "no tier edits" is a FINDING rather than an absence of evidence.
+
+    ⚠️ An empty `tier_edits` list has two completely different meanings and the markdown used to
+    print the reassuring one for both. Measured (blind review round 4 of PR #399): deleting
+    `input_manifest.json` from a differing fixture gave `status=incomplete`,
+    `attribution.usable=false` and **two unattributed differences** - and the report still said
+    *"Every differing byte in this bundle is still hash-identical to what the engine itself
+    recorded."* The JSON said `incomplete`; the prose a human actually reads said the opposite, which
+    is the same defect class as findings 1-4 of the previous round, moved into the human-facing view.
+
+    So the claim is made only when attribution is usable, every differing path was positively
+    attributed to the engine, AND the engine's own baseline is intact. Anything else is undetermined.
+
+    ⚠️ That last clause was NOT in the review; it came out of writing the test for the first two. A
+    rewritten `reports/` tree makes the two sides agree, so `differing_files` is 0, `engine_internal`
+    is 0, and the first two clauses both pass - the markdown happily asserted that every differing
+    byte matched the engine on a bundle whose status was `untrustworthy`. Same class again, one layer
+    down: an empty count reading as a clean result.
+    """
+    provenance = report["provenance"]
+    if report["baseline_drift"] or report["baseline_tampered"]:
+        return False
+    return bool(report["attribution"]["usable"]) and provenance["engine_internal"] == provenance["differing_files"]
+
+
+def _tier_edit_section(report: dict[str, Any], top: int) -> list[str]:
+    """The section that answers issue #274 - or explains why this run cannot."""
+    lines = ["", "## Tier edits (the engine-gap evidence)", ""]
+    if report["tier_edits"]:
+        lines += ["| unit | layer | file | shapes | declared by |", "|---|---|---|---|---|"]
+        for record in report["tier_edits"][:top]:
+            lines.append(
+                f"| {record['unit']} | {record['layer']} | `{record['path']}` |"
+                f" {', '.join(record['shapes'])} | {record['declared_by'] or '**undeclared**'} |"
+            )
+        return lines
+    if _tier_edits_determined(report):
+        lines.append(
+            "**None.** Every differing byte in this bundle is still hash-identical to what the engine"
+            " itself recorded, so nothing here shows work a human or agent had to do. A bundle with no"
+            " fix pass cannot answer issue #274's question, and this report does not pretend it can."
+        )
+        return lines
+    provenance = report["provenance"]
+    lines.append(
+        "**Undetermined - this is NOT a clean result.** No tier edit is listed, but that is an absence"
+        " of evidence rather than evidence of absence: this run could not attribute"
+        f" {provenance['unattributed']} of {provenance['differing_files']} differing path(s), so"
+        " nothing here supports the claim that the engine wrote every byte."
+    )
+    if report["baseline_drift"] or report["baseline_tampered"]:
+        lines.append(
+            "\nThe engine's own baseline drifted, so the comparison this section rests on is not a"
+            " comparison against what the engine emitted. See the baseline-drift section below."
+        )
+    lines += ["", "Why this run is not complete:", ""]
+    lines += [f"- {reason}" for reason in report["incomplete_reasons"] or ["the engine baseline itself drifted"]]
+    return lines
+
+
 def _markdown_shape_table(report: dict[str, Any], top: int) -> list[str]:
     lines = ["| shape | files | artifacts | share of differing files |", "|---|---:|---:|---:|"]
     for row in report["shapes"][:top]:
@@ -220,23 +281,7 @@ def render_markdown(report: dict[str, Any], top: int = DEFAULT_TOP) -> str:
         "",
     ]
     lines += _markdown_shape_table(report, top)
-    if report["tier_edits"]:
-        lines += ["", "## Tier edits (the engine-gap evidence)", ""]
-        lines += ["| unit | layer | file | shapes | declared by |", "|---|---|---|---|---|"]
-        for record in report["tier_edits"][:top]:
-            lines.append(
-                f"| {record['unit']} | {record['layer']} | `{record['path']}` |"
-                f" {', '.join(record['shapes'])} | {record['declared_by'] or '**undeclared**'} |"
-            )
-    else:
-        lines += [
-            "",
-            "## Tier edits (the engine-gap evidence)",
-            "",
-            "**None.** Every differing byte in this bundle is still hash-identical to what the engine"
-            " itself recorded, so nothing here shows work a human or agent had to do. A bundle with no"
-            " fix pass cannot answer issue #274's question, and this report does not pretend it can.",
-        ]
+    lines += _tier_edit_section(report, top)
     if report["baseline_drift"]:
         lines += ["", "## Engine baseline drift (why this report is untrustworthy)", ""]
         lines += ["| kind | path | declared by |", "|---|---|---|"]
