@@ -12,30 +12,44 @@ Every bundle this toolkit produces is a SHIPPED artifact, and Power BI Desktop r
 whose deepest path crosses a limit it enforces ITSELF. Issue #235 measured 93 files already over 260
 characters in bundles on this machine; the 52-unit estate run of 2026-08-29 has 183.
 
-The mechanism, and why `LongPathsEnabled` is a red herring for Desktop
-----------------------------------------------------------------------
-Desktop's failure is NOT an OS error it inherited. It is its own managed guard, named in the crash
-report a failing open produced:
+The mechanism — measured from the assembly, not inferred from the error text
+---------------------------------------------------------------------------
+⚠️ An earlier revision of this module claimed Desktop refuses 260/248 through
+`PBIProjectUtils.EnsureNotLong`. **That was wrong**, and the correction is worth keeping because it
+is the same mistake in miniature that produced issue #235: reading intent off an error message
+instead of measuring the thing.
 
-    Microsoft.PowerBI.Packaging.Project.PBIProjectUtils.EnsureNotLong(String path, Boolean isFolder)
-      at Microsoft.PowerBI.Client.Windows.Services.DiskProjectFilesReader.<GetAsync>d__2.MoveNext()
+`Microsoft.PowerBI.Packaging.dll` 2.157.828.0 was loaded and the method invoked directly:
 
-surfaced as `FilePathTooLongError`, wrapped in `Error Reading StorageSection: ReportDocument`:
+    PBIProjectUtils.EnsureNotLong(string path, bool isFolder)
 
-    The specified path, file name, or both are too long. The fully qualified file name must be
-    less than 260 characters, and the directory name must be less than 248 characters.
+    FILE 258 ALLOWED   259 ALLOWED   260 ALLOWED   261 THREW PathTooLongException
+    DIR  246 ALLOWED   247 ALLOWED   248 ALLOWED   249 THREW PathTooLongException
 
-`EnsureNotLong` is a length comparison in Desktop's own code, executed before any filesystem call.
-So the Windows opt-in
+**It compares with `>`, so 260 and 248 are ALLOWED.** Its message - *"must be less than 260 ... less
+than 248"* - describes intent, not the comparison it performs. Two consequences:
 
+* The end-to-end refusal observed at file 260 / dir 248 (below) did **not** come from this guard.
+  ⚠️ INFERRED, not measured: the most consistent explanation is the .NET/Win32 `MAX_PATH` limit
+  applying because `PBIDesktop.exe` carries no `longPathAware` manifest entry (see the manifest
+  evidence below) - which is the ORIGINAL framing, before `EnsureNotLong` was over-read into it.
+* `EnsureNotLong` is nonetheless real and does fire: the crash report that first named it came from
+  a 268-character path, and 268 > 260.
+
+So Desktop has at least two independent length guards and the effective limit is the STRICTER of
+them. The ceilings below are the conservative, end-to-end-validated pair - deliberately one character
+tighter than the assembly's own inclusive limits.
+
+Why `LongPathsEnabled` still cannot rescue it
+---------------------------------------------
     HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem  ->  LongPathsEnabled = 1   (default is 0)
 
-**cannot help, and does not**: every measurement below was taken on a machine with that value set to
-1, and Desktop refused anyway. This is materially worse than the issue's original worst case. It is
-not "customers on stock Windows are at risk" - it is **every consumer on every machine, including
-ours**, regardless of registry configuration. The registry setting only ever governed whether our
-*generator* could WRITE these paths (Python 3.6+ declares `longPathAware`, so here it can), which is
-precisely why the defect was invisible: we could produce artifacts we could never open.
+Every measurement below was taken on a machine with that value set to 1, and Desktop refused anyway.
+It is not "customers on stock Windows are at risk" - it is **every consumer on every machine,
+including ours**, regardless of registry configuration. The registry setting only ever governed
+whether our *generator* could WRITE these paths (Python 3.6+ declares `longPathAware`, so here it
+can), which is precisely why the defect was invisible: we could produce artifacts we could never
+open.
 
 The measurements (2026-08-29, this worktree, LongPathsEnabled = 1 throughout)
 -----------------------------------------------------------------------------
@@ -70,10 +84,15 @@ The measurements (2026-08-29, this worktree, LongPathsEnabled = 1 throughout)
    deepest directory exactly 12 characters below the deepest file, and 260 - 248 is also 12. F259
    proves 259/247 are legal; S260 proves 260/248 are not.
 
-Hence the two ceilings this module enforces - measured, not inferred:
+Hence the two ceilings this module enforces - conservative by one character, and validated
+end-to-end rather than derived from any single guard:
 
-    FILE_CEILING = 259    legal at 259, refused at 260  ("must be less than 260 characters")
-    DIR_CEILING  = 247    legal at 247, refused at 248  ("directory name must be less than 248")
+    FILE_CEILING = 259    a PBIP whose deepest file is 259 OPENED; at 260 it was REFUSED
+    DIR_CEILING  = 247    the same pair's deepest directory was 247 / 248
+
+⚠️ These are ONE TIGHTER than `EnsureNotLong`'s own inclusive limits (260 / 248, measured above).
+That is deliberate: the observed end-to-end refusal at 260/248 comes from a different guard, so the
+gate follows the OBSERVED boundary, not any one implementation's comparison.
 
 ⚠️ Because the S260 fixture crosses BOTH boundaries at once (file 260 AND directory 248), that single
 A/B cannot attribute which of the two guards fired. F259 opening proves both 259 and 247 are legal,
@@ -185,10 +204,11 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-# Both pinned by live A/B against Power BI Desktop 2.157.828.0 (see the module docstring): a PBIP
-# whose deepest file was 259 chars / deepest directory 247 OPENED and answered the Desktop Bridge;
-# one character longer on each (260 / 248) was REFUSED. Desktop's own `EnsureNotLong` guard states
-# the rule as "less than 260" / "less than 248", so these are the longest legal values.
+# Conservative by one character, and validated END-TO-END rather than taken from any single guard.
+# A PBIP whose deepest file was 259 / deepest directory 247 opened and answered the Desktop Bridge;
+# one character longer on each was refused. Measured separately, Desktop's own
+# `PBIProjectUtils.EnsureNotLong` compares with `>` and ALLOWS 260 / 248 - so the observed refusal
+# comes from a different guard, and the gate follows the observation, not that method.
 FILE_CEILING = 259
 DIR_CEILING = 247
 
@@ -291,9 +311,23 @@ def read_long_paths_enabled() -> int | None:
         return None
 
 
-def _tail_length(full: str, root: str) -> int:
-    """Length the path contributes on top of its root, including the leading separator."""
-    return len(full) - len(root)
+def _utf16_len(value: str) -> int:
+    """Length in UTF-16 code units - the unit Power BI Desktop actually counts.
+
+    Python's `len()` counts CODE POINTS; .NET's `String.Length` counts UTF-16 CODE UNITS, so every
+    non-BMP character (emoji, astral planes) is 1 here and 2 there. Measured: a real path whose
+    `len()` is 259 but whose UTF-16 length is 261 passed this check and is refused by Desktop.
+
+    Raises UnicodeEncodeError for a string that cannot be represented in UTF-16 at all - notably a
+    lone surrogate, which is exactly what `os.walk` hands back for an undecodable POSIX filename
+    under `surrogateescape`. Callers must treat that as UNKNOWN, never as clean.
+    """
+    return len(value.encode("utf-16-le", "strict")) // 2
+
+
+def _safe_repr(value: str) -> str:
+    """A JSON/console-safe rendering of a path that may carry lone surrogates."""
+    return value.encode("utf-8", "backslashreplace").decode("ascii", "replace")
 
 
 def collect(root: Path) -> tuple[list[dict], list[dict]]:
@@ -306,30 +340,30 @@ def collect(root: Path) -> tuple[list[dict], list[dict]]:
     measured: list[dict] = []
     unknown: list[dict] = []
 
+    try:
+        root_units = _utf16_len(root_str)
+    except UnicodeEncodeError as exc:
+        return [], [{"path": _safe_repr(root_str), "reason": f"root is not representable in UTF-16: {exc}"}]
+
     def on_error(exc: OSError) -> None:
         unknown.append(
             {
-                "path": str(getattr(exc, "filename", "") or root_str),
+                "path": _safe_repr(str(getattr(exc, "filename", "") or root_str)),
                 "reason": f"{type(exc).__name__}: {exc.strerror or exc}",
             }
         )
 
     for dirpath, dirnames, filenames in os.walk(root_str, onerror=on_error):
         for name, kind in [(d, KIND_DIR) for d in dirnames] + [(f, KIND_FILE) for f in filenames]:
+            full = os.path.join(dirpath, name)
             try:
-                full = os.path.join(dirpath, name)
-                length = len(full)
-            except (ValueError, UnicodeError) as exc:  # pragma: no cover - defensive
-                unknown.append({"path": f"{dirpath}<undecodable>", "reason": f"{type(exc).__name__}: {exc}"})
+                length = _utf16_len(full)
+            except (UnicodeEncodeError, ValueError) as exc:
+                # An undecodable POSIX filename, or any name UTF-16 cannot represent. Unmeasurable
+                # is NOT clean - this is the failure shape this repo keeps re-introducing.
+                unknown.append({"path": _safe_repr(full), "reason": f"{type(exc).__name__}: {exc}"})
                 continue
-            measured.append(
-                {
-                    "path": full,
-                    "kind": kind,
-                    "length": length,
-                    "tail": _tail_length(full, root_str),
-                }
-            )
+            measured.append({"path": full, "kind": kind, "length": length, "tail": length - root_units})
     return measured, unknown
 
 
@@ -352,9 +386,13 @@ def scan(root: Path, limits: Limits = DEFAULT_LIMITS) -> dict:
 
     longest = max(measured, key=lambda r: r["length"], default=None)
     longest_tail = max((r["tail"] for r in measured), default=0)
-    # The portable number: how long an install root this tree can still tolerate. Uses the FILE
-    # ceiling because the longest tail in a PBIP tree is always a file.
-    root_budget = limits.file_ceiling - longest_tail if measured else None
+    # The portable number: how long an install root this tree can still tolerate. It is the MINIMUM
+    # remaining budget across every path, judged against each path's OWN ceiling - not
+    # `file_ceiling - longest_tail`. A short filename (`page.json`, `.platform`) makes the stricter
+    # DIRECTORY rule decisive, which is the ordinary PBIR shape, not a contrived one: a blank page
+    # directory can be the binding constraint while the longest tail belongs to a file.
+    root_budget = min((_ceiling_for(r, limits) - r["tail"] for r in measured), default=None)
+    binding = min(measured, key=lambda r: _ceiling_for(r, limits) - r["tail"], default=None) if measured else None
 
     if over:
         status = STATUS_OVER_CEILING
@@ -390,6 +428,9 @@ def scan(root: Path, limits: Limits = DEFAULT_LIMITS) -> dict:
         "longest": None if longest is None else {k: longest[k] for k in ("path", "kind", "length", "tail")},
         "longest_tail": longest_tail if measured else None,
         "root_budget": root_budget,
+        "root_budget_binding": (
+            None if binding is None else {k: binding[k] for k in ("path", "kind", "length", "tail")}
+        ),
         "shipping_root_budget_advisory": SHIPPING_ROOT_BUDGET_ADVISORY,
         "root_budget_is_tight": root_budget is not None and root_budget < SHIPPING_ROOT_BUDGET_ADVISORY,
         "worst_offenders": [{k: r[k] for k in ("path", "kind", "length", "ceiling")} for r in over[:WORST_N]],
@@ -431,9 +472,9 @@ def render(report: dict) -> str:
         f"{report['status'].upper()}: {report['root']}",
         _registry_line(report),
         _git_line(report),
-        f"  ceilings              : file <= {report['file_ceiling']} (Desktop refuses"
+        f"  ceilings              : file <= {report['file_ceiling']} (observed refusal at"
         f" {report['file_ceiling'] + 1}), directory <= {report['dir_ceiling']} (refuses"
-        f" {report['dir_ceiling'] + 1}) - measured, see module docstring",
+        f" {report['dir_ceiling'] + 1}) - UTF-16 code units, see module docstring",
         f"  measured              : {counted['measured']} paths"
         f" ({counted['files']} files, {counted['directories']} directories)",
     ]
@@ -441,10 +482,15 @@ def render(report: dict) -> str:
     if longest:
         lines.append(f"  longest path          : {longest['length']} chars - {longest['path']}")
     if report["root_budget"] is not None:
+        binding = report["root_budget_binding"] or {}
         lines.append(
-            f"  longest tail          : {report['longest_tail']} chars"
-            f"  ->  root budget {report['root_budget']} chars"
+            f"  longest tail          : {report['longest_tail']} units"
+            f"  ->  root budget {report['root_budget']} units"
             " (longest install root this bundle tolerates)"
+        )
+        lines.append(
+            f"      binding path      : [{binding.get('kind')}] tail {binding.get('tail')}"
+            f" vs its own ceiling - {binding.get('path')}"
         )
     if report["root_budget_is_tight"]:
         lines.append(

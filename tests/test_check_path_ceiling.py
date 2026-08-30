@@ -22,6 +22,7 @@ damaging change anyone could make to this file.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -153,7 +154,84 @@ def test_both_ceilings_are_reported_separately_and_unambiguously(tmp_path):
     _tree(tmp_path)
     text = cpc.render(cpc.scan(tmp_path))
     assert "file <= 259" in text and "directory <= 247" in text
-    assert "refuses 260" in text and "refuses 248" in text
+    assert "observed refusal at 260" in text and "refuses 248" in text
+
+
+# --------------------------------------------------------------------------------------------
+# HIGH 1 - Desktop counts UTF-16 code units; Python's len() counts code points. Every non-BMP
+# character is 1 here and 2 there, so a code-point measurement lets an over-long path through.
+# --------------------------------------------------------------------------------------------
+
+ASTRAL = "\U0001f600"  # one code point, TWO UTF-16 code units
+
+
+def test_lengths_are_measured_in_utf16_code_units_not_code_points(tmp_path):
+    target = _tree(tmp_path, filename=f"v{ASTRAL}{ASTRAL}.json")
+    records, _ = cpc.collect(tmp_path)
+    record = next(r for r in records if r["path"] == str(target))
+    assert record["length"] == len(str(target)) + 2, "two astral chars cost two EXTRA UTF-16 units"
+    assert record["length"] == len(str(target).encode("utf-16-le")) // 2
+
+
+def test_astral_path_over_the_utf16_ceiling_is_a_finding_even_though_len_says_it_fits(tmp_path):
+    target = _tree(tmp_path, filename=f"v{ASTRAL}.json")
+    code_points = len(str(target))
+    # A ceiling exactly at the code-point length: clean under the old measurement, over under UTF-16.
+    report = cpc.scan(tmp_path, cpc.Limits(file_ceiling=code_points, dir_ceiling=10_000))
+    assert report["status"] == cpc.STATUS_OVER_CEILING
+    assert report["counted"]["over_ceiling"] == 1
+    assert report["worst_offenders"][0]["length"] == code_points + 1
+
+
+def test_utf16_helper_matches_dotnet_string_length_semantics():
+    assert cpc._utf16_len("abc") == 3  # pylint: disable=protected-access
+    assert cpc._utf16_len(ASTRAL) == 2  # pylint: disable=protected-access
+    assert cpc._utf16_len("e\u0301") == 2  # pylint: disable=protected-access  # combining mark
+
+
+# --------------------------------------------------------------------------------------------
+# HIGH 1 (second half) - a name UTF-16 cannot represent must be UNKNOWN, never clean. `os.walk`
+# hands back lone surrogates for undecodable POSIX filenames under surrogateescape.
+# --------------------------------------------------------------------------------------------
+
+
+def test_surrogate_name_is_unknown_never_clean(tmp_path, monkeypatch):
+    real_walk = cpc.os.walk
+
+    def walk_with_surrogate(top, onerror=None, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, onerror=onerror, **kwargs):
+            yield dirpath, dirnames, filenames + ["bad\udcff.json"]
+
+    _tree(tmp_path)
+    monkeypatch.setattr(cpc.os, "walk", walk_with_surrogate)
+    report = cpc.scan(tmp_path)
+    assert report["status"] == cpc.STATUS_UNKNOWN_PATHS
+    assert report["counted"]["unknown"] >= 1
+    assert any("bad" in u["path"] for u in report["unknown_paths"])
+
+
+def test_unknown_paths_survive_json_serialisation(tmp_path, monkeypatch):
+    """A lone surrogate in the report must not blow up `--json`; it is escaped, not carried raw."""
+    real_walk = cpc.os.walk
+
+    def walk_with_surrogate(top, onerror=None, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, onerror=onerror, **kwargs):
+            yield dirpath, dirnames, filenames + ["bad\udcff.json"]
+
+    _tree(tmp_path)
+    monkeypatch.setattr(cpc.os, "walk", walk_with_surrogate)
+    payload = json.dumps(cpc.scan(tmp_path))
+    assert "\\udcff" in payload or "\\xff" in payload
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows filenames cannot hold undecodable bytes")
+def test_real_undecodable_posix_filename_is_unknown(tmp_path):
+    (tmp_path / "visuals").mkdir()
+    with open(os.path.join(bytes(tmp_path / "visuals"), b"bad\xff.json"), "wb") as handle:
+        handle.write(b"{}")
+    report = cpc.scan(tmp_path)
+    assert report["status"] == cpc.STATUS_UNKNOWN_PATHS
+    assert report["counted"]["unknown"] >= 1
 
 
 # --------------------------------------------------------------------------------------------
@@ -345,12 +423,44 @@ def test_empty_target_cannot_be_judged_clean(tmp_path):
 # --------------------------------------------------------------------------------------------
 
 
-def test_root_budget_is_the_ceiling_minus_the_longest_tail(tmp_path):
+def test_root_budget_is_the_minimum_across_both_ceilings(tmp_path):
     target = _tree(tmp_path)
-    tail = len(str(target)) - len(str(tmp_path))
+    records, _ = cpc.collect(tmp_path)
+    expected = min((cpc.DIR_CEILING if r["kind"] == cpc.KIND_DIR else cpc.FILE_CEILING) - r["tail"] for r in records)
     report = cpc.scan(tmp_path)
-    assert report["longest_tail"] == tail
-    assert report["root_budget"] == cpc.FILE_CEILING - tail
+    assert report["root_budget"] == expected
+    assert report["longest_tail"] == cpc._utf16_len(str(target)) - cpc._utf16_len(  # pylint: disable=protected-access
+        str(tmp_path)
+    )
+
+
+def test_a_short_filename_makes_the_directory_rule_decide_the_budget(tmp_path):
+    """HIGH 2 - the PBIR shape, not a contrived one: a blank page holds only `page.json`.
+
+    `file_ceiling - longest_tail` overstates the budget by exactly 2 here, because the file tail is
+    10 longer than its directory's while the ceilings differ by 12. At the overstated root length the
+    page DIRECTORY would breach DIR_CEILING and the bundle would not open.
+    """
+    target = _tree(tmp_path, subdir="pages", filename="page.json")
+    directory = target.parent
+    file_tail = cpc._utf16_len(str(target)) - cpc._utf16_len(str(tmp_path))  # pylint: disable=protected-access
+    dir_tail = cpc._utf16_len(str(directory)) - cpc._utf16_len(str(tmp_path))  # pylint: disable=protected-access
+
+    report = cpc.scan(tmp_path)
+    file_only_budget = cpc.FILE_CEILING - file_tail
+    actual = cpc.DIR_CEILING - dir_tail
+    assert actual == file_only_budget - 2
+    assert report["root_budget"] == actual, "the stricter directory rule must win"
+    assert report["root_budget_binding"]["kind"] == cpc.KIND_DIR
+
+
+def test_min_root_budget_gate_uses_the_binding_ceiling_not_the_file_one(tmp_path, capsys):
+    target = _tree(tmp_path, subdir="pages", filename="page.json")
+    file_tail = cpc._utf16_len(str(target)) - cpc._utf16_len(str(tmp_path))  # pylint: disable=protected-access
+    overstated = cpc.FILE_CEILING - file_tail
+    # A file-only budget would call `overstated` achievable; the directory rule says it is not.
+    assert cpc.main([str(tmp_path), "--min-root-budget", str(overstated)]) == 1
+    capsys.readouterr()
 
 
 def test_tail_is_independent_of_where_the_tree_sits(tmp_path):

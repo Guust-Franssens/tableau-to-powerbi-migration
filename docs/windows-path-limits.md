@@ -26,43 +26,75 @@ This is why *"it works here"* was never evidence. All measured on the same host,
 | consumer | tolerates a 287-char path? | fixable by config? | evidence |
 |---|---|---|---|
 | **Python 3.6+** (our generator) | **yes** | — | writes the whole estate bundle in silence |
-| **Power BI Desktop** | **NO** | **no — nothing helps** | `PBIProjectUtils.EnsureNotLong`; refused at file 260 / dir 248 |
+| **Power BI Desktop** | **NO** | **no — nothing helps** | end-to-end A/B: opens at file 259 / dir 247, refused at 260 / 248 |
 | **git** (`core.longpaths` unset) | **NO** | yes — `core.longpaths=true` | 0 of 179 files staged, `fatal`, exit 128 |
 
-The two opt-ins involved:
+### Desktop's `EnsureNotLong` is real — but it is **not** what refuses 260/248
+
+⚠️ **An earlier revision of this page got this wrong**, and the correction is worth keeping because
+it is issue #235 in miniature: reading intent off an error message instead of measuring the thing.
+
+`Microsoft.PowerBI.Packaging.dll` 2.157.828.0 was loaded and the method invoked directly:
+
+```
+PBIProjectUtils.EnsureNotLong(string path, bool isFolder)
+
+FILE 258 ALLOWED   259 ALLOWED   260 ALLOWED   261 THREW PathTooLongException
+DIR  246 ALLOWED   247 ALLOWED   248 ALLOWED   249 THREW PathTooLongException
+```
+
+**It compares with `>`, so 260 and 248 are ALLOWED.** Its message —
+
+> The specified path, file name, or both are too long. The fully qualified file name must be less
+> than **260** characters, and the directory name must be less than **248** characters.
+
+— describes *intent*, not the comparison it performs. Two consequences:
+
+* The end-to-end refusal observed at **file 260 / dir 248** (§5) did **not** come from this guard.
+  **⚠️ Inferred, not measured:** the most consistent explanation is the .NET/Win32 `MAX_PATH` limit
+  applying because `PBIDesktop.exe` carries no `longPathAware` manifest entry (§3) — which is the
+  *original* framing, before `EnsureNotLong` was over-read into it.
+* `EnsureNotLong` is nonetheless real and does fire: the crash report that first named it came from a
+  **268**-character path, and 268 > 260.
+
+So Desktop has **at least two independent length guards**, and the effective limit is the stricter of
+them. `FILE_CEILING = 259` / `DIR_CEILING = 247` are therefore **one character tighter** than the
+assembly's own inclusive limits — deliberately, because the gate follows the *observed* end-to-end
+boundary rather than any single implementation's comparison.
+
+### Why `LongPathsEnabled` still cannot rescue it
 
 ```
 HKLM\SYSTEM\CurrentControlSet\Control\FileSystem  ->  LongPathsEnabled = 1   (Windows default: 0)
 git config core.longpaths                         ->  unset                  (git default: false)
 ```
 
+Every Desktop measurement here ran with `LongPathsEnabled = 1` and Desktop refused anyway. So the
+severity is **not** *"customers on stock Windows are at risk."* It is **every consumer on every
+machine, including ours.** The registry setting only ever governed whether our *generator* could
+**write** these paths — Python declares `longPathAware`, so here it can. That asymmetry *is* the
+defect: **we produce artifacts we cannot open.**
+
 **One being set and the other not is exactly how this stayed invisible**, which is why
-`check_path_ceiling.py` now prints both — and states plainly that neither makes the artifact
-portable.
-
-### Desktop's guard is managed code, so no setting reaches it
-
-```
-Microsoft.PowerBI.Packaging.Project.PBIProjectUtils.EnsureNotLong(String path, Boolean isFolder)
-  at Microsoft.PowerBI.Client.Windows.Services.DiskProjectFilesReader.<GetAsync>d__2.MoveNext()
-```
-
-surfaced as `FilePathTooLongError`, wrapped in `Error Reading StorageSection: ReportDocument`:
-
-> The specified path, file name, or both are too long. The fully qualified file name must be less
-> than **260** characters, and the directory name must be less than **248** characters.
-
-`EnsureNotLong` is a length comparison executed **before any filesystem call**. Every Desktop
-measurement below ran with `LongPathsEnabled = 1` and Desktop refused anyway.
-
-So the severity is **not** *"customers on stock Windows are at risk."* It is **every consumer on
-every machine, including ours.** The registry setting only ever governed whether our *generator*
-could **write** these paths — Python declares `longPathAware`, so here it can. That asymmetry *is*
-the defect: **we produce artifacts we cannot open.**
+`check_path_ceiling.py` prints both — and states plainly that neither makes the artifact portable.
 
 > ⚠️ The earlier reasoning in #234 — *"282 is an archive budget, not a filesystem limit; we run at 269
 > on disk today without trouble"* — was wrong twice over. "Without trouble" was not a property of the
 > artifact, and it was not even a property of this machine.
+
+### Lengths are counted in UTF-16 code units, not code points
+
+.NET's `String.Length` counts **UTF-16 code units**; Python's `len()` counts **code points**. Every
+non-BMP character (emoji, astral planes) is **1 for Python and 2 for Desktop**, so a code-point
+measurement lets an over-long path through:
+
+```
+a real path:  python len() = 259     UTF-16 units = 261     -> Desktop refuses
+```
+
+`check_path_ceiling.py` measures `len(s.encode("utf-16-le")) // 2` for both absolute lengths and
+tails. A name UTF-16 cannot represent at all — a lone surrogate, which is what `os.walk` returns for
+an undecodable POSIX filename under `surrogateescape` — is reported **`unknown`**, never clean.
 
 ---
 
@@ -155,7 +187,9 @@ A program can bypass `MAX_PATH` by prefixing `\\?\` itself:
 | `cmd.exe`, `powershell.exe`, `notepad.exe` | present | yes |
 
 That is why #235's earlier probe found *every* consumer succeeding at 460 characters. So the manifest
-was treated as a **hypothesis**; `EnsureNotLong` is the mechanism, and §4/§5 are the proof.
+was treated as a **hypothesis** — and it is now the *leading* explanation for the observed 260
+refusal, since §1 shows `EnsureNotLong` allows 260. §4/§5 are the end-to-end proof that something
+refuses it.
 
 ---
 
@@ -264,11 +298,26 @@ it somewhere else. So the check answers **both** questions:
 | question | measure | status |
 |---|---|---|
 | *Can this be used **where it is**?* | absolute path lengths vs 259 / 247 | **blocking (exit 1)** |
-| *Can this be **shipped**?* | longest **tail**, and `root_budget = 259 − tail` | advisory + opt-in gate |
+| *Can this be **shipped**?* | the **minimum** remaining budget across every path, each judged against **its own** ceiling | advisory + opt-in gate |
 
 **Why absolute stays blocking:** it is not hypothetical. At its current location the estate bundle
 breaks git *today* (exit 128, or a silent partial commit) and Desktop refuses it. "Where it sits" is a
 real place where real tools run — this repo's own build root is 90 characters.
+
+⚠️ **The root budget is a minimum across both ceilings, not `259 − longest_tail`.** A short filename
+makes the stricter **directory** rule decisive, and that is the ordinary PBIR shape rather than a
+contrived one — a blank page directory holds only `page.json`:
+
+```
+dir  tail 40  ->  247 - 40 = 207     <- the real budget
+file tail 50  ->  259 - 50 = 209     <- what a file-only calculation would report
+```
+
+At a 208-character install root that page directory becomes 248 and breaches `DIR_CEILING`, so a
+file-only budget would pass a bundle that cannot open. The check reports the **binding path** on every
+run so the constraint is attributable, not just a number. (On the estate bundle the binding path is a
+`visuals\<id>` **directory** at tail 185 — `247 − 185 = 62` — which happens to equal `259 − 197`
+because `\visual.json` is exactly 12 characters and the two ceilings also differ by 12.)
 
 **Why the portable number is now always printed:** a bundle at a *short* root can pass the absolute
 check and still be unshippable. Note the arithmetic — a clean tree always has
@@ -299,16 +348,22 @@ Pass `--ceiling 282` to test that budget.
 
 ## 8. What is still unverified
 
-* **Which of Desktop's two guards fires.** The PBIR layout cannot produce a tree whose deepest
-  directory breaks 247 while every file stays within 259, so the ceilings were pinned together.
+* **Which guard actually refuses 260/248.** `EnsureNotLong` allows both (§1, measured against the
+  assembly), so the observed refusal comes from something else — most plausibly the .NET/Win32
+  `MAX_PATH` limit applying because `PBIDesktop.exe` is not `longPathAware`. **That attribution is
+  inferred, not measured.** The *boundary* is measured end-to-end; only its cause is not.
+* **Neither ceiling is independently established.** The PBIR layout cannot produce a tree whose
+  deepest directory breaks 247 while every file stays within 259, so the pair was pinned together.
+  247 is conservative: `EnsureNotLong` tolerates directories up to 248, and git up to 260.
 * **The classic per-machine installer.** Everything was measured against **2.157.828.0, the MSIX /
-  Microsoft Store package** (`...\Power BI Desktop Store App\...`). `EnsureNotLong` is managed code
-  shared by both, so a difference would be surprising — but surprising is not measured, and MSIX is
-  already flagged elsewhere in our docs as unresolved.
-* **Whether Desktop fails identically with `LongPathsEnabled = 0`.** It cannot be *better* — the guard
-  never consults the registry — but it was not measured.
-* **The exact `EnsureNotLong` comparison operator.** Established behaviourally; source not read.
+  Microsoft Store package** (`...\Power BI Desktop Store App\...`). The managed code is shared, so a
+  difference would be surprising — but surprising is not measured, and MSIX is already flagged
+  elsewhere in our docs as unresolved.
+* **Whether Desktop fails identically with `LongPathsEnabled = 0`.** It cannot be *better* — every
+  measurement here was taken with the opt-in ON and Desktop refused anyway — but it was not measured.
 * **Whether the archive/ship step has a lower budget of its own.** 282 remains one anecdote.
+* **The warning count in the git repro.** This run counted 74 `Filename too long` warnings; an
+  independent reviewer counted 73 on the same shape. Immaterial to the verdict, but not reconciled.
 
 ---
 
