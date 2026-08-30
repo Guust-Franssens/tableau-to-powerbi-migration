@@ -120,10 +120,18 @@ exit 3. Two consequences worth knowing:
 
 - The same fix closed a **silent false negative** nobody had noticed: the 100x100 filter was gating the
   credential scan too, so a credential prompt in a *smaller* window produced **no finding at all**. It
-  now scans every window at any size, matching `Test-CredentialModal`.
-- `scripts/_verdict_lines.py` does not know the new tokens, so `probe_live_source` classifies them
-  **`ERROR`** — "the probe itself could not run". The gate stays armed; nothing asserts a sign-in wall
-  that was never observed. Verified end-to-end rather than assumed.
+  now scans every window at any size (the **main** window excepted — a report legitimately named
+  `Account Key` is not a prompt), and no size test decides classification either.
+- Dismissal needs a **positive** claim. A dialog is only dismissed when every content element is
+  recognised progress status or enumerated chrome (`benign_chrome_signature.regex`). There is **no
+  length amnesty**: blind review measured `Refresh` + `Evaluating...` + *"Please enter your password"*
+  classifying `benign` and being suppressed outright under the old five-word rule.
+  ⚠️ `probe_desktop_credential.ps1` still carries that rule (`$MinPromptWords = 5`) and reproduces the
+  same suppression — measured, filed as #406 rather than fixed in passing.
+- `probe_live_source` recognises the dialog tokens **structurally** and maps them to **`ERROR`** —
+  "the probe itself could not run". The gate stays armed; nothing asserts a sign-in wall that was never
+  observed. Without that structural step the transcript fell through to an unanchored keyword scan, and
+  `DIALOG_NEEDS_HUMAN` quoting `Authentication required` came back out as `NO_CREDENTIAL`.
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and

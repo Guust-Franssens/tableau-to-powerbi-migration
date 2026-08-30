@@ -59,6 +59,7 @@ from _lock import _process_alive
 
 SIGNATURE_PATH = Path(__file__).resolve().with_name("credential_modal_signature.regex")
 BENIGN_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_dialog_signature.regex")
+BENIGN_CHROME_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_chrome_signature.regex")
 BLOCKING_SIGNATURE_PATH = Path(__file__).resolve().with_name("blocking_prompt_signature.regex")
 CONNECTOR_SOURCE_RE = re.compile(
     r"\b(?P<kind>Sql\.Database|Snowflake\.Databases|Databricks\.[A-Za-z]+|Odbc\.DataSource|Web\.Contents)\s*\("
@@ -213,14 +214,16 @@ WindowEnumerator = Callable[[int], Iterable[DesktopWindow]]
 ProcessLivenessCheck = Callable[[int], bool]
 
 DESKTOP_MAIN_CLASS_PREFIX = "WindowsForms10.Window.8"
-MIN_DIALOG_WIDTH = 100
-MIN_DIALOG_HEIGHT = 100
 
-# A content element with at least this many words is PROSE - something written to be read by a human.
-# If it is not itself a recognised progress status, the window is not provably a progress dialog
-# however much progress text sits beside it. Mirrors `$MinPromptWords` in probe_desktop_credential.ps1.
-# The cost of it firing wrongly is one more exit 3, which is loud and recoverable.
-MIN_PROMPT_WORDS = 5
+# Windows a Power BI Desktop process owns that are NOT dialogs, excluded by NAME rather than by size
+# (issue #376 review, finding 3). `Internet Explorer_Hidden` is the WebOC host every healthy instance
+# owns; the corpus has always carried it at 0x0.
+#
+# ⚠️ This list is the ONLY sanctioned way to stop classifying a visible non-main window. Adding to it
+# is a positive claim - "this window is identified, and it displays nothing a human must act on" - and
+# needs evidence in the commit that adds it. Do NOT re-introduce a geometry threshold: an arbitrary
+# size is not evidence of harmlessness, which is the whole of issue #376.
+HELPER_WINDOW_CLASSES = frozenset({"Internet Explorer_Hidden"})
 
 # Classifier vocabulary, shared verbatim with the PowerShell arbiter's `Get-DialogClassification` so a
 # reader moving between the two detectors meets one set of words, not two.
@@ -293,11 +296,32 @@ def credential_signature() -> re.Pattern[str]:
 def benign_dialog_signature() -> re.Pattern[str]:
     """Compile the shared progress-dialog ("Power BI is working") signature.
 
-    ⚠️ This is the ONLY file that can cause a dialog to be dismissed, so a broad pattern in it is the
-    one way to hide a genuine blocker. Its alternatives are whole-element and anchored on purpose:
-    ``\\bLoading data\\b`` once matched inside *"Loading data requires authentication"*.
+    ⚠️ This file and :func:`benign_chrome_signature` are the ONLY two that can cause a dialog to be
+    dismissed, so a broad pattern in either is the one way to hide a genuine blocker. Its alternatives
+    are whole-element and anchored on purpose: ``\\bLoading data\\b`` once matched inside
+    *"Loading data requires authentication"*.
     """
     return _compile_signature(BENIGN_SIGNATURE_PATH)
+
+
+def benign_chrome_signature() -> re.Pattern[str]:
+    """Compile the enumerated allowlist of window chrome that cannot be a prompt (#376 review, 5).
+
+    This exists because the rule it replaced was a **length heuristic**, and length is not evidence.
+    ``MIN_PROMPT_WORDS = 5`` accepted any unmatched element under five words, so
+    ``Refresh`` + ``Evaluating...`` + ``Please enter your password`` classified ``benign`` and was
+    SUPPRESSED in flight - a real prompt swallowed in silence, on the very code path added to stop
+    that happening. Measured in review; ``Password:`` (two words) did it too.
+
+    The replacement is a **positive claim about specific strings**, not about their size: each
+    alternative is a whole-element, anchored control label that carries no prompt at all, so a window
+    whose only unexplained content is one of these still shows a human nothing to act on. Anything
+    else - a table name, a status phrase nobody recognised, a four-word prompt - VETOES dismissal and
+    lands in the exit-3 indeterminate band, which is exactly what that band is for.
+
+    Keep it tiny. Every alternative added here is a string that can never again veto a dismissal.
+    """
+    return _compile_signature(BENIGN_CHROME_SIGNATURE_PATH)
 
 
 def blocking_prompt_signature() -> re.Pattern[str]:
@@ -366,18 +390,25 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
     ``credential``        the credential signature matched a text element -> hard stop.
     ``needs-human``       a KNOWN human-blocking prompt that is not a sign-in prompt. Tested BEFORE
                           benign so a progress element in the same window cannot erase it.
-    ``mixed-content``     progress text AND unaccounted prose in the same window. A first-match-wins
-                          loop would let one benign element erase everything after it, which is how
-                          ``Evaluating`` beside *"Permission is required to run this native database
-                          query"* cleared the arbiter at exit 0.
-    ``benign``            every content element is either recognised progress status or too short to be
-                          a human-directed prompt, AND at least one IS progress status. The one
-                          dismissible kind.
+    ``mixed-content``     progress text AND content nobody could account for, in the same window. A
+                          first-match-wins loop would let one benign element erase everything after
+                          it, which is how ``Evaluating`` beside *"Permission is required to run this
+                          native database query"* cleared the arbiter at exit 0.
+    ``benign``            EVERY content element is either recognised progress status or enumerated
+                          chrome, and at least one IS progress status. The one dismissible kind.
     ``benign-title-only`` the CAPTION matched the benign signature and no content did. A caption is not
                           content, so this joins the unreadable band.
     ``unreadable``        no readable text at all.
     ``unrecognized``      readable text that matched no signature: we looked, and it is not a sign-in
                           prompt. Distinct from ``unreadable`` on purpose - absent is not empty.
+
+    ⚠️ **There is no length amnesty, and there must never be one again (#376 review, finding 5).**
+    This used to accept any unmatched element of fewer than ``MIN_PROMPT_WORDS`` words, which meant
+    ``benign`` did not mean *positively benign*: ``Please enter your password`` (4 words) and
+    ``Password:`` (2) both classified ``benign`` beside ``Evaluating...``, and ``dialog_verdict`` then
+    SUPPRESSED them in flight. That is the same defect class this module was written to remove,
+    reintroduced on the new code path - and in that shape strictly worse than the bug it replaced,
+    because the repo's rule is that a credential modal is never worked around.
     """
     title, all_texts, content = dialog_text_set(window)
     signature_hit = _match_dialog_signatures(window, all_texts)
@@ -385,6 +416,7 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
         return signature_hit
 
     benign = benign_dialog_signature()
+    chrome = benign_chrome_signature()
     benign_hit: str | None = None
     unaccounted: str | None = None
     for text in content:
@@ -392,7 +424,9 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
             if benign_hit is None:
                 benign_hit = text
             continue
-        if unaccounted is None and len(text.split()) >= MIN_PROMPT_WORDS:
+        if chrome.search(text):
+            continue
+        if unaccounted is None:
             unaccounted = text
     if benign_hit is not None:
         if unaccounted is not None:
@@ -410,19 +444,46 @@ def _finding(kind: str, window: DesktopWindow, evidence: str) -> DialogFinding:
     return DialogFinding(kind=kind, verdict=DIALOG_KIND_VERDICTS[kind], window=window, evidence=evidence)
 
 
-def dialog_candidates(windows: Iterable[DesktopWindow]) -> list[DesktopWindow]:
-    """Windows big enough, and of the right class, to be worth CLASSIFYING.
+def is_desktop_main_window(window: DesktopWindow) -> bool:
+    """Is ``window`` the Power BI Desktop MAIN window (not a dialog)?
 
-    Size selects what to LOOK AT; it is not itself evidence of anything (issue #376). The old
-    ``blocking_dialog_candidates`` returned the first window past this filter as a blocking dialog,
-    which is why a Refresh progress dialog read as a credential wall at exit 1.
+    Identified by the Win32 class prefix, which is what every other main-window test in this module
+    already uses. It is deliberately the ONLY thing excluded from the credential prepass and from
+    classification: every other window, whatever its class and whatever its size, is still read.
+    """
+    return window.class_name.startswith(DESKTOP_MAIN_CLASS_PREFIX)
+
+
+def dialog_candidates(windows: Iterable[DesktopWindow]) -> list[DesktopWindow]:
+    """Every visible window worth CLASSIFYING - which is every one that is not positively excluded.
+
+    ⚠️ **There is no size threshold here any more (#376 review, finding 3).** It used to require
+    >= 100x100, and the review measured the consequence: a visible 80x60 owned window with no readable
+    text returned ``modal=None, dialog=None, unknown_reason=None`` - byte-identical to a healthy
+    Desktop. The all-window credential prepass only rescued windows whose text matched the credential
+    regex, so a small unreadable, caption-only or differently-worded prompt still vanished. That is the
+    ORIGINAL defect of issue #376, surviving inside its own fix: an arbitrary geometry threshold is not
+    evidence of harmlessness.
+
+    Two exclusions remain, and each is a positive claim rather than a threshold:
+
+    * the **main window** (:func:`is_desktop_main_window`) - it is the application, not a dialog;
+    * **zero-area** windows and named :data:`HELPER_WINDOW_CLASSES` - a window with no width or no
+      height rasterises nothing, so it cannot be showing a human anything to act on, and the named
+      helpers are identified Desktop infrastructure (``Internet Explorer_Hidden``).
+
+    ⚠️ Known cost, stated rather than hidden: if a real Desktop turns out to own OTHER visible,
+    non-zero-area, non-main windows, they will now be classified - most likely ``unreadable``, i.e.
+    exit 3. Unobserved in this corpus (no Desktop was available). The fix for that is to identify the
+    window and add it to :data:`HELPER_WINDOW_CLASSES` **with evidence**, never to restore a size test.
     """
     return [
         window
         for window in windows
-        if not window.class_name.startswith(DESKTOP_MAIN_CLASS_PREFIX)
-        and window.width >= MIN_DIALOG_WIDTH
-        and window.height >= MIN_DIALOG_HEIGHT
+        if not is_desktop_main_window(window)
+        and window.class_name not in HELPER_WINDOW_CLASSES
+        and window.width > 0
+        and window.height > 0
     ]
 
 
@@ -454,16 +515,24 @@ def dialog_verdict(
 
 
 def match_credential_modal(windows: Iterable[DesktopWindow]) -> CredentialModal | None:
-    """First credential-signature match across EVERY window - any class, any size.
+    """First credential-signature match across every DIALOG - any class, any size.
 
-    Deliberately NOT restricted to :func:`dialog_candidates` (issue #376). It used to be, and that
-    made the 100x100 filter gate the hard stop as well as the classification: a credential prompt in a
-    smaller window returned NO FINDING AT ALL, i.e. a silent false negative on the one verdict that
-    matters most. ``Test-CredentialModal`` in the arbiter has always scanned every window; this now
-    matches it.
+    Not restricted to :func:`dialog_candidates`' classification set (issue #376): it used to be, and
+    the 100x100 filter therefore gated the HARD STOP as well as the classification, so a credential
+    prompt in a smaller window returned no finding at all - a silent false negative on the one verdict
+    that matters most.
+
+    ⚠️ The MAIN window is excluded (#376 review, finding 4). An unrestricted scan read the Desktop
+    caption and its child text, so a report legitimately named ``Account Key``,
+    ``Personal Access Token`` or ``Databricks Client Credentials`` produced ``CREDENTIAL_MISSING`` at
+    exit 1 - measured with a main window titled ``Account Key - Power BI Desktop``, on both consumers.
+    Only the main window is excluded: every real dialog is still scanned at every size and in every
+    class, so an unusual modal class stays detectable.
     """
     signature = credential_signature()
     for window in windows:
+        if is_desktop_main_window(window):
+            continue
         for text in normalize_texts(window.texts):
             if signature.search(text):
                 return CredentialModal(matched_text=text, window=window)
@@ -854,17 +923,49 @@ def print_dialog_observed_notice(pid: int, finding: DialogFinding) -> None:
     )
 
 
-def _raise_detection(pid: int, state: CredentialDetection, source_hint: str | None) -> None:
+def raise_terminal_detection(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
     """Raise for the two observations that end a bounded wait IMMEDIATELY.
 
     Only a matched credential signature and a confirmed-dead process qualify. A :class:`DialogFinding`
-    deliberately does NOT (issue #376): it is latched by :func:`join_with_credential_poll` and surfaced
-    at the deadline, so a dialog we could not read cannot cut short a refresh that was going to succeed.
+    deliberately does NOT (issue #376): it is latched by the caller and surfaced at the deadline via
+    :func:`raise_latched_verdict`, so a dialog we could not read cannot cut short a refresh that was
+    going to succeed.
+
+    Public because ``refresh_pbip_model`` has a SECOND wait loop - the progress-monitor branch - which
+    must behave identically. It used to call the t=0 helper instead, so a proven-benign progress dialog
+    belonging to the current refresh aborted that refresh (#376 review, finding 1).
     """
     if state.modal is not None:
         raise CredentialMissingError(pid, state.modal, source_hint)
     if state.process_gone is not None:
         raise DesktopGoneError(pid, state.process_gone)
+
+
+def raise_latched_verdict(
+    pid: int,
+    *,
+    desktop_unready: str | None = None,
+    dialog: DialogFinding | None = None,
+    unknown: str | None = None,
+) -> None:
+    """Raise whichever latched observation a bounded wait ended with, in precedence order.
+
+    Local Desktop failure first (nothing was learned about the source at all), then a dialog we could
+    not account for, then the indeterminate credential state. Shared by both wait loops so they cannot
+    disagree - the progress-monitor branch used to compute its latches and then DISCARD them, ending
+    on a bare ``TimeoutError`` that the parent blames on a slow source.
+    """
+    if desktop_unready is not None:
+        raise DesktopUnreadyError(pid, desktop_unready)
+    if dialog is not None:
+        raise DialogFoundError(pid, dialog)
+    if unknown is not None:
+        raise CredentialUnknownError(pid, unknown)
+
+
+def _raise_detection(pid: int, state: CredentialDetection, source_hint: str | None) -> None:
+    """Backwards-compatible alias for :func:`raise_terminal_detection`."""
+    raise_terminal_detection(pid, state, source_hint)
 
 
 # pylint: disable=too-many-arguments
@@ -955,15 +1056,12 @@ def join_with_credential_poll(
     if worker.is_alive():
         state = detector(pid)
         _raise_detection(pid, state, source_hint)
-        latched_desktop_unready = latched_desktop_unready or state.desktop_unready
-        if latched_desktop_unready is not None:
-            raise DesktopUnreadyError(pid, latched_desktop_unready)
-        latched_dialog = latched_dialog or state.dialog
-        if latched_dialog is not None:
-            raise DialogFoundError(pid, latched_dialog)
-        latched_unknown = latched_unknown or state.unknown_reason
-        if latched_unknown is not None:
-            raise CredentialUnknownError(pid, latched_unknown)
+        raise_latched_verdict(
+            pid,
+            desktop_unready=latched_desktop_unready or state.desktop_unready,
+            dialog=latched_dialog or state.dialog,
+            unknown=latched_unknown or state.unknown_reason,
+        )
         return False
     return True
 

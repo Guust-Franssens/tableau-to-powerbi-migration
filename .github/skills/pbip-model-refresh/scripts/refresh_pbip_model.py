@@ -153,9 +153,12 @@ from _credential_modal import (
     dialog_guidance,
     inspect_credential_modal,
     join_with_credential_poll,
+    print_dialog_observed_notice,
     print_indeterminate_state_notice,
     print_refresh_banner,
     print_refresh_unknown_banner,
+    raise_latched_verdict,
+    raise_terminal_detection,
     source_hint_from_model,
 )
 
@@ -212,11 +215,26 @@ GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
 CREDENTIAL_PROBE = Path(__file__).resolve().parent / "probe_desktop_credential.ps1"
 
 
-def _credential_state(pid: int) -> CredentialDetection:
-    """Return the credential-modal inspection state for ``pid``."""
+def _credential_state(pid: int, *, in_flight: bool = False) -> CredentialDetection:
+    """Return the credential-modal inspection state for ``pid``.
+
+    ``in_flight`` is set for every poll that runs AFTER this process started the refresh it is waiting
+    on: there a positively-read progress dialog is our own, and aborting on it aborts a healthy run.
+    Only ``benign`` is affected; everything else still surfaces.
+    """
     if os.name != "nt":
         return CredentialDetection()
-    return inspect_credential_modal(pid)
+    return inspect_credential_modal(pid, operation_in_flight=in_flight)
+
+
+def _in_flight_credential_state(pid: int) -> CredentialDetection:
+    """Single-argument in-flight detector for the two wait loops (#376 review, finding 1).
+
+    Deliberately looks ``_credential_state`` up through the module global on every call, so a test that
+    monkeypatches ``_credential_state`` still takes effect through this indirection - and so production
+    and the tests exercise one function rather than two.
+    """
+    return _credential_state(pid, in_flight=True)
 
 
 def _raise_if_blocked(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
@@ -343,7 +361,15 @@ def _join_refresh_worker(
     total_timeout: float,
     progress_monitor: RefreshProgressMonitor | None,
 ) -> bool:
-    """Wait for the refresh thread, with credential polling and optional progress liveness."""
+    """Wait for the refresh thread, with credential polling and optional progress liveness.
+
+    Both branches use the IN-FLIGHT detector and latch non-terminal findings until the deadline
+    (#376 review, finding 1). They used not to: the no-trace branch overrode
+    ``join_with_credential_poll``'s correct default with the t=0 ``_credential_state``, and the
+    progress branch called the t=0 raise helper - so Power BI's own progress dialog aborted the very
+    refresh it was reporting on. Measured: ``DialogFoundError(REFRESH_IN_PROGRESS)`` on the first poll,
+    with no ``in_flight`` argument reaching the detector at all.
+    """
     if progress_monitor is None:
         if desktop_pid is None:
             worker.join(total_timeout)
@@ -355,7 +381,7 @@ def _join_refresh_worker(
             heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
             poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
             source_hint=source_hint,
-            detector=_credential_state,
+            detector=_in_flight_credential_state,
             initial_state=initial_state,
         )
 
@@ -363,6 +389,7 @@ def _join_refresh_worker(
     next_heartbeat = REFRESH_HEARTBEAT_SECONDS
     latched_unknown = initial_state.unknown_reason if initial_state else None
     latched_desktop_unready = initial_state.desktop_unready if initial_state else None
+    latched_dialog = initial_state.dialog if initial_state else None
     while worker.is_alive():
         elapsed = time.monotonic() - started
         absolute_remaining = max(0.0, total_timeout - elapsed)
@@ -377,8 +404,11 @@ def _join_refresh_worker(
         )
         worker.join(max(0.01, wait_for))
         if desktop_pid is not None:
-            state = _credential_state(desktop_pid)
-            _raise_if_blocked(desktop_pid, state, source_hint)
+            state = _in_flight_credential_state(desktop_pid)
+            raise_terminal_detection(desktop_pid, state, source_hint)
+            if state.dialog is not None and latched_dialog is None:
+                latched_dialog = state.dialog
+                print_dialog_observed_notice(desktop_pid, state.dialog)
             if state.desktop_unready and latched_desktop_unready is None:
                 latched_desktop_unready = state.desktop_unready
             if state.unknown_reason and latched_unknown is None:
@@ -389,6 +419,16 @@ def _join_refresh_worker(
             progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
             next_heartbeat += REFRESH_HEARTBEAT_SECONDS
     if worker.is_alive():
+        # The latches used to be computed here and DISCARDED, so this branch always degraded to the
+        # caller's bare TimeoutError - which the parent classifier blames on a slow source. Raise them
+        # exactly as `join_with_credential_poll` does, from the same shared helper.
+        if desktop_pid is not None:
+            raise_latched_verdict(
+                desktop_pid,
+                desktop_unready=latched_desktop_unready,
+                dialog=latched_dialog,
+                unknown=latched_unknown,
+            )
         return False
     return True
 
@@ -572,7 +612,18 @@ def refresh(
         )
         if worker.is_alive():
             if desktop_pid is not None:
-                _raise_if_blocked(desktop_pid, _credential_state(desktop_pid), source_hint)
+                # The FINAL check, and it is in-flight too (#376 review, finding 1): by here the
+                # refresh is ours, so a proven-benign progress dialog is ours and must not decide the
+                # verdict. A finding we could NOT account for still does - via the latch helper, not
+                # the t=0 raise helper, which would have converted our own progress dialog into a stop.
+                state = _in_flight_credential_state(desktop_pid)
+                raise_terminal_detection(desktop_pid, state, source_hint)
+                raise_latched_verdict(
+                    desktop_pid,
+                    desktop_unready=state.desktop_unready,
+                    dialog=state.dialog,
+                    unknown=state.unknown_reason,
+                )
             raise TimeoutError(
                 f"refresh did not return within {total_timeout}s "
                 f"(XMLA CommandTimeout was {command_timeout}s and did not fire, which is the signature of a "

@@ -81,6 +81,63 @@ def parked_fixture(monkeypatch):
     released.set()
 
 
+class _ParkedAdomd:
+    """ADOMD stand-in whose command never returns, driven as a whole connection factory result.
+
+    Distinct from the ``parked`` fixture: the finding-1 tests need to control the release event and to
+    run with a fake progress monitor, so they wire the seams themselves.
+    """
+
+    CommandText = ""
+    CommandTimeout = 0
+
+    def __init__(self, released: threading.Event) -> None:
+        self.released = released
+
+    def Open(self) -> None:
+        """Match the ADOMD API surface."""
+
+    def CreateCommand(self):
+        """This object is its own command."""
+        return self
+
+    def ExecuteNonQuery(self) -> None:
+        """Block until the test releases it, so only the deadline can end the wait."""
+        self.released.wait(timeout=600)
+
+    def Close(self) -> None:
+        """Match the ADOMD API surface."""
+
+
+class _FakeProgressMonitor:
+    """Minimal ``RefreshProgressMonitor`` stand-in so the progress-monitor wait branch is reachable.
+
+    That branch needs an AMO trace, which needs pythonnet and a live server; without this the branch is
+    untestable off Windows and its own copy of the poll loop went unexercised - which is how it kept a
+    t=0 raise helper and discarded its latches (#400 review, finding 1).
+    """
+
+    def mark_refresh_started(self) -> None:
+        """No-op."""
+
+    def print_liveness_warning_if_due(self) -> None:
+        """No-op."""
+
+    def seconds_until_liveness_warning(self) -> float:
+        """Never due, so the poll interval is what drives the loop."""
+        return 999.0
+
+    def print_evidence_heartbeat(self, elapsed: float, total: float) -> None:
+        """No-op."""
+
+    def close(self) -> None:
+        """No-op."""
+
+    def summary(self) -> str:
+        """Match the monitor's reporting surface."""
+        return "fake"
+
+
 def modal() -> CredentialModal:
     """A credential dialog matching the measured incident window."""
     return CredentialModal(
@@ -419,7 +476,7 @@ def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda pid: CredentialDetection(modal=late_modal(pid)),
+        lambda pid, **_kw: CredentialDetection(modal=late_modal(pid)),
     )
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
 
@@ -434,7 +491,7 @@ def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
 
 def test_refresh_banner_is_flushed_and_heartbeat_reports_elapsed_total(monkeypatch, parked, capsys) -> None:
     """The warning arrives before the wait, then emits elapsed/total countdowns."""
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: CredentialDetection())
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kw: CredentialDetection())
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
     printed: list[dict[str, object]] = []
@@ -467,7 +524,7 @@ def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, ca
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda _pid: CredentialDetection(unknown_reason=reason),
+        lambda _pid, **_kw: CredentialDetection(unknown_reason=reason),
     )
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
@@ -487,7 +544,7 @@ def test_refresh_latches_unknown_seen_only_by_initial_precheck(monkeypatch, park
     reason = harvested_minimized_reason()
     states = iter([CredentialDetection(unknown_reason=reason)])
 
-    def initial_unknown_then_healthy(_pid: int) -> CredentialDetection:
+    def initial_unknown_then_healthy(_pid: int, **_kw) -> CredentialDetection:
         return next(states, CredentialDetection())
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", initial_unknown_then_healthy)
@@ -514,7 +571,7 @@ def test_refresh_latches_desktop_unready_seen_only_by_initial_precheck(monkeypat
     reason = harvested_zero_window_alive_reason()
     states = iter([CredentialDetection(desktop_unready=reason)])
 
-    def initial_unready_then_healthy(_pid: int) -> CredentialDetection:
+    def initial_unready_then_healthy(_pid: int, **_kw) -> CredentialDetection:
         return next(states, CredentialDetection())
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", initial_unready_then_healthy)
@@ -1389,6 +1446,326 @@ def test_every_finding_kind_has_operator_guidance() -> None:
     documented = set(_credential_modal.DIALOG_KIND_GUIDANCE)
 
     assert reportable <= documented, f"kinds with no guidance: {sorted(reportable - documented)}"
+
+
+# --------------------------------------------------------------------------------------------------
+# Blind-review findings on PR #400. Each one is a case where "we could not establish it" was still
+# collapsing into the clean bucket - the same defect class issue #376 exists to remove, found again on
+# the code that removed it. Every test below fails on the PR-#400 build and passes on this one.
+# --------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Please enter your password",  # 4 words - under the old MIN_PROMPT_WORDS amnesty
+        "Password:",  # 2 words
+        "Sign in",
+        "Enter password",
+    ],
+)
+def test_short_prompt_beside_progress_text_is_never_dismissed(prompt: str) -> None:
+    """Finding 5 (HIGH, safety regression): a length heuristic is not evidence of harmlessness.
+
+    ``MIN_PROMPT_WORDS = 5`` accepted every unmatched element under five words, so a real prompt
+    sitting beside ``Evaluating...`` classified ``benign`` - and ``dialog_verdict`` then SUPPRESSED it
+    entirely while our own operation was in flight. Measured on the PR-#400 build:
+    ``inspect_credential_modal(..., operation_in_flight=True)`` returned ``dialog=None``, i.e. the same
+    state as a healthy Desktop, for a window reading *"Please enter your password"*.
+
+    In that shape the fix was worse than the bug: the repo's standing rule is that a credential modal
+    is never worked around, and this path defeated it silently. None of these strings matches
+    ``credential_modal_signature.regex``, so the all-window prepass does not rescue them either -
+    which is exactly why an unexplained element must veto rather than be excused.
+    """
+    window = DesktopWindow(
+        "Refresh", "WindowsForms10.Window.20008.app.0.x", 702, 355, ("Refresh", "Evaluating...", prompt)
+    )
+
+    finding = classify_dialog(window)
+    in_flight = _credential_modal.dialog_verdict([window], operation_in_flight=True)
+
+    assert finding.kind == "mixed-content", f"{prompt!r} was accounted for by nothing and must veto"
+    assert finding.verdict == "DIALOG_UNRECOGNIZED"
+    assert finding.evidence == prompt
+    assert in_flight is not None, f"{prompt!r} was SUPPRESSED in flight - a prompt swallowed in silence"
+
+
+def test_only_enumerated_chrome_is_excused_beside_progress_text() -> None:
+    """The positive half of finding 5: dismissal needs a POSITIVE claim, not a short string.
+
+    ``Cancel``/``OK``/``Close`` are whole-element, anchored control labels that carry no prompt, so a
+    window whose only unexplained content is one of them still shows a human nothing to act on. A table
+    name does NOT get that excuse - it is short, but shortness was never the property that mattered.
+    """
+    chrome = DesktopWindow("Refresh", "Cls", 702, 355, ("Refresh", "Evaluating...", "Cancel", "OK"))
+    table_name = DesktopWindow("Refresh", "Cls", 702, 355, ("Refresh", "Evaluating...", "Orders"))
+
+    assert classify_dialog(chrome).kind == "benign", "the benign path must stay reachable"
+    assert classify_dialog(table_name).kind == "mixed-content"
+    assert classify_dialog(table_name).verdict == "DIALOG_UNRECOGNIZED"
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "texts", "kind"),
+    [
+        (80, 60, (), "unreadable"),
+        (80, 60, ("Refresh",), "benign-title-only"),
+        (40, 20, ("Continue?", "Yes"), "unrecognized"),
+        (1, 1, (), "unreadable"),
+    ],
+)
+def test_a_small_dialog_is_still_classified(width: int, height: int, texts, kind: str) -> None:
+    """Finding 3 (HIGH): the original defect, surviving inside its own fix.
+
+    ``dialog_candidates`` still rejected everything under 100x100, and the all-window credential
+    prepass only rescued text matching the credential regex. Measured on the PR-#400 build: a visible
+    80x60 non-main unreadable window beside a normal main window returned
+    ``modal=None, dialog=None, unknown_reason=None`` - byte-identical to a healthy Desktop.
+
+    An arbitrary geometry threshold is not evidence of harmlessness. That sentence is the whole issue.
+    """
+    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
+    dialog = DesktopWindow(texts[0] if texts else "", "WindowsForms10.Window.20008.app.0.x", width, height, texts)
+
+    state = inspect_credential_modal(111, lambda _pid: [dialog, main])
+
+    assert state.dialog is not None, "a small dialog must not vanish into the healthy state"
+    assert state.dialog.kind == kind
+    assert state.dialog.window.width == width
+
+
+def test_only_named_helpers_and_zero_area_windows_are_excluded() -> None:
+    """The exclusions that replaced the size test are positive claims, and are the ONLY ones.
+
+    Zero area rasterises nothing, so such a window cannot be showing a human anything; the named
+    helpers are identified Desktop infrastructure. Everything else is classified whatever its size.
+    """
+    assert not hasattr(_credential_modal, "MIN_DIALOG_WIDTH"), "a size threshold must not come back"
+    assert not hasattr(_credential_modal, "MIN_DIALOG_HEIGHT"), "a size threshold must not come back"
+
+    zero_area = DesktopWindow("", "Internet Explorer_Hidden", 0, 0, ())
+    named_helper = DesktopWindow("", "Internet Explorer_Hidden", 400, 300, ())
+    flat = DesktopWindow("", "WindowsForms10.Window.20008.app.0.x", 900, 0, ())
+    real = DesktopWindow("", "WindowsForms10.Window.20008.app.0.x", 12, 12, ())
+
+    kept = _credential_modal.dialog_candidates([zero_area, named_helper, flat, real])
+
+    assert kept == [real], f"expected only the real 12x12 dialog to be classified; got {kept}"
+
+
+@pytest.mark.parametrize(
+    "report_name",
+    ["Account Key", "Personal Access Token", "Databricks Client Credentials"],
+)
+def test_a_report_title_cannot_fabricate_a_credential_prompt(report_name: str, capsys) -> None:
+    """Finding 4 (MEDIUM): the all-window prepass read the Desktop MAIN window too.
+
+    Measured on the PR-#400 build with a production-shaped main window titled
+    ``Account Key - Power BI Desktop``: both consumers emitted the exit-1 hard stop. A report is
+    allowed to be called that. Only the identified main window is excluded - every real dialog is
+    still scanned at every size and in every class, so an unusual modal class stays detectable.
+    """
+    title = f"{report_name} - Power BI Desktop"
+    main = DesktopWindow(title, "WindowsForms10.Window.8.app.0.x", 2011, 1298, (title,))
+
+    state = inspect_credential_modal(111, lambda _pid: [main])
+    verdict = probe_desktop_query._credential_verdict(111, state)
+
+    assert state.modal is None, f"a report named {report_name!r} is not a credential prompt"
+    assert state.dialog is None
+    assert verdict is None, "the probe must continue"
+    assert capsys.readouterr().out == ""
+
+
+def test_an_unusual_modal_class_is_still_scanned_for_the_credential_signature() -> None:
+    """The other half of finding 4: excluding the main window must not narrow real dialog coverage."""
+    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
+    odd = DesktopWindow("", "HwndWrapper[PBIDesktop.exe;;guid]", 30, 20, ("Enter your credentials",))
+
+    state = inspect_credential_modal(111, lambda _pid: [odd, main])
+
+    assert state.modal is not None
+    assert state.modal.window.class_name.startswith("HwndWrapper")
+
+
+def test_the_credential_prepass_reads_windows_that_classification_skips() -> None:
+    """The prepass is narrowed by the MAIN window and by nothing else - not even the helper list.
+
+    ``Internet Explorer_Hidden`` is the WebOC host, and Power BI's AAD sign-in renders in a web view,
+    so credential text really can appear there. Excluding it from CLASSIFICATION is a claim about what
+    can be a dialog; excluding it from the HARD-STOP scan would be a claim about what can hold a
+    prompt, and that one is false. Recall on the credential path is the thing we never trade away.
+    """
+    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
+    web_view = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Enter your credentials",))
+
+    assert web_view not in _credential_modal.dialog_candidates([web_view, main]), "helper: not classified"
+
+    state = inspect_credential_modal(111, lambda _pid: [web_view, main])
+
+    assert state.modal is not None, "a helper window is still scanned for the credential signature"
+    assert state.modal.window.class_name == "Internet Explorer_Hidden"
+
+
+@pytest.mark.parametrize("progress_enabled", [False, True])
+def test_a_dialog_we_could_not_read_does_not_abort_a_refresh_that_completes(monkeypatch, progress_enabled) -> None:
+    """Latch, do not raise: an unreadable dialog must not kill a refresh that was going to succeed.
+
+    Both wait branches have to behave this way, and the progress-monitor branch did not - it called the
+    t=0 raise helper, so any mid-flight finding ended the run on its first poll (#400 review, finding
+    1). The behavioural statement is the assertion: the worker finishes, so the refresh succeeds.
+    """
+    windows = visible_unreadable_dialog_windows()
+    calls = {"n": 0}
+    finished = threading.Event()
+
+    def state(pid: int, **kwargs) -> CredentialDetection:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return CredentialDetection()
+        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=bool(kwargs.get("in_flight")))
+
+    class _SlowThenDone:
+        """A connection whose command returns after a couple of polls."""
+
+        CommandText = ""
+        CommandTimeout = 0
+
+        def Open(self) -> None:
+            """Match the ADOMD API surface."""
+
+        def CreateCommand(self):
+            """This object is its own command."""
+            return self
+
+        def ExecuteNonQuery(self) -> None:
+            """Return once the poll loop has had a chance to observe the dialog."""
+            time.sleep(0.15)
+            finished.set()
+
+        def Close(self) -> None:
+            """Match the ADOMD API surface."""
+
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _SlowThenDone())
+    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_k: _FakeProgressMonitor())
+
+    ok, _message = refresh(
+        port=1234,
+        tables=["Orders"],
+        timeout_sec=30,
+        desktop_pid=111,
+        progress_enabled=progress_enabled,
+        absolute_timeout_sec=30.0,
+    )
+
+    assert finished.is_set(), "the worker never ran, so this proves nothing about aborting it"
+    assert ok is True, "an unreadable dialog aborted a refresh that completed"
+    assert calls["n"] >= 2, "the poll never observed the dialog, so the latch was not exercised"
+
+
+@pytest.mark.parametrize("progress_enabled", [False, True])
+def test_a_latched_dialog_surfaces_at_the_deadline_in_both_wait_branches(monkeypatch, progress_enabled) -> None:
+    """The other half of the latch: what is latched must be RAISED, not quietly dropped.
+
+    The dialog here appears mid-refresh and is GONE again before the deadline - the #154 shape. A
+    fresh end-of-run check cannot see it, so only a real latch can report it; without one the run ends
+    on a bare ``TimeoutError``, which the parent classifier blames on a slow source.
+
+    Keeping the dialog on screen throughout is what made the missing latch invisible: ``refresh()``'s
+    own final check re-observed it and raised anyway. A defence-in-depth path masking a missing latch
+    is exactly the shape that makes a test pass for the wrong reason.
+    """
+    released = threading.Event()
+    calls = {"n": 0}
+    healthy = [DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 2011, 1298, ("Report",))]
+
+    def state(pid: int, **kwargs) -> CredentialDetection:
+        calls["n"] += 1
+        # 1 = the t=0 pre-check, 2-3 = the dialog is up, 4+ = it has gone again.
+        windows = visible_unreadable_dialog_windows() if calls["n"] in (2, 3) else healthy
+        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=bool(kwargs.get("in_flight")))
+
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _ParkedAdomd(released))
+    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_k: _FakeProgressMonitor())
+
+    try:
+        with pytest.raises(DialogFoundError) as excinfo:
+            refresh(
+                port=1234,
+                tables=["Orders"],
+                timeout_sec=1,
+                desktop_pid=111,
+                progress_enabled=progress_enabled,
+                absolute_timeout_sec=1.0,
+            )
+    finally:
+        released.set()
+
+    assert excinfo.value.finding.verdict == "DIALOG_UNREADABLE"
+    assert calls["n"] >= 5, "the dialog must have been gone for several polls before the deadline"
+
+
+@pytest.mark.parametrize("progress_enabled", [False, True])
+def test_the_production_refresh_path_polls_with_the_in_flight_detector(monkeypatch, progress_enabled: bool) -> None:
+    """Finding 1 (HIGH): production overrode the very default the other test was checking.
+
+    ``_join_refresh_worker`` passed ``detector=_credential_state`` (the t=0 form) in the no-trace
+    branch and called the t=0 ``_raise_if_blocked`` in the progress-monitor branch, so Power BI's own
+    progress dialog stopped the refresh it belonged to. Measured on the PR-#400 build, BOTH branches:
+    ``DialogFoundError(REFRESH_IN_PROGRESS)`` on the first poll, with the detector receiving no
+    ``in_flight`` argument at all.
+
+    This drives the REAL ``refresh()`` through both branches and asserts on production's CALL SITE -
+    the argument the detector actually receives - not on a helper's default. A mutation that reverts
+    the call site fails here; a mutation that only changes the helper's signature is caught by
+    ``test_poll_loop_default_detector_is_the_in_flight_one``. Both are needed.
+    """
+    seen: list[object] = []
+    calls = {"n": 0}
+    windows = visible_progress_dialog_windows()
+    released = threading.Event()
+
+    def state(pid: int, **kwargs) -> CredentialDetection:
+        calls["n"] += 1
+        seen.append(kwargs.get("in_flight", "<not passed>"))
+        if calls["n"] == 1:
+            return CredentialDetection()
+        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=bool(kwargs.get("in_flight")))
+
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _ParkedAdomd(released))
+    monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-1")
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_k: _FakeProgressMonitor())
+
+    try:
+        with pytest.raises(TimeoutError):
+            refresh(
+                port=1234,
+                tables=["Orders"],
+                timeout_sec=1,
+                desktop_pid=111,
+                progress_enabled=progress_enabled,
+                absolute_timeout_sec=1.0,
+            )
+    finally:
+        released.set()
+
+    polls = seen[1:]
+    assert polls, "the refresh never polled, so this test proved nothing"
+    assert all(flag is True for flag in polls), (
+        f"production must poll with in_flight=True after t=0; detector saw {polls}"
+    )
+    assert seen[0] is False or seen[0] == "<not passed>", "the t=0 check must NOT be in-flight"
 
 
 # ==================================================================================================

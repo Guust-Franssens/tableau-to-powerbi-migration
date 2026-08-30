@@ -318,10 +318,52 @@ stay byte-identical.
 > in `probe_desktop_query`'s poll it is **acted on**, because that loop has no deadline of its own and
 > a latched dialog behind a wedged query would wait for ever.
 >
-> **Downstream, honestly:** `scripts/_verdict_lines.py` does not recognise the new tokens, so
-> `probe_live_source` classifies them **`ERROR`** ("the probe itself could not run") — `rc != 0`, the
-> gate stays armed, and nothing claims a credential wall we never observed. That is the intended
-> outcome and it was verified end-to-end, not assumed.
+> **Downstream, honestly:** `probe_live_source` now recognises the dialog tokens **structurally**
+> (`scripts/_verdict_lines.py`'s `DIALOG_VERDICT_RE` → `classify_child_verdict`) and maps them to
+> **`ERROR`** — *"the probe itself could not run"*. `rc != 0`, the gate stays armed, and nothing claims
+> a credential wall we never observed.
+>
+> ⚠️ **That structural step is load-bearing, not tidiness.** Blind review of PR #400 measured what
+> happened without it: the parent fell through to `CREDENTIAL_MARKERS`, an **unanchored scan of the
+> whole transcript**, so `DIALOG_NEEDS_HUMAN` quoting its own evidence excerpt `Authentication
+> required` — an alternative that genuinely lives in `blocking_prompt_signature.regex` — was relabelled
+> `NO_CREDENTIAL`. The parent contradicted the child on a single word and fired *"a human must sign in;
+> terminate the run"*. Adding the tokens to the **credential-stop** family instead would have been the
+> other wrong answer: it asserts the very wall the child says it did not see.
+
+> ⚠️ **Blind review of PR #400 found the same defect class INSIDE the fix, four more times. Read this
+> before touching the classifier — three of the four were "we could not establish it" quietly becoming
+> "clean" again.**
+>
+> | # | what collapsed into the clean bucket | fix |
+> |---|---|---|
+> | 5 | **A length heuristic stood in for evidence.** `MIN_PROMPT_WORDS = 5` excused every unmatched element under five words, so `Refresh` + `Evaluating...` + **`Please enter your password`** classified `benign` and was **suppressed entirely** in flight. `Password:` (two words) too. Neither matches `credential_modal_signature.regex`, so the prepass did not rescue them. **In that shape the fix was worse than the bug** — the repo's rule is that a credential modal is never worked around. | The amnesty is **gone**. Any content element that is not recognised progress status vetoes dismissal, unless it is in the **enumerated** `benign_chrome_signature.regex` (`Cancel`/`OK`/`Close`) — a positive claim about specific strings that carry no prompt, not a claim about their size. |
+> | 3 | **A geometry threshold stood in for harmlessness — the original defect, surviving inside its own fix.** `dialog_candidates` still rejected everything under 100x100, and the all-window credential prepass only rescued *known-signature* text. Measured: a visible **80x60** unreadable owned window beside a normal main window returned `modal=None, dialog=None, unknown_reason=None` — byte-identical to a healthy Desktop. | **No size test at all.** Every visible non-main window is classified. Two exclusions remain and both are positive claims: **zero-area** windows (they rasterise nothing, so they show a human nothing) and the named `HELPER_WINDOW_CLASSES`. |
+> | 4 | **A report title fabricated a hard stop.** The all-window prepass read the Desktop **main** window, caption and children, so a report legitimately named `Account Key` / `Personal Access Token` / `Databricks Client Credentials` produced `CREDENTIAL_MISSING` at exit 1. | The **identified main window** is excluded from the prepass — and only it. Every real dialog is still scanned at every size and in every class, so an unusual modal class stays detectable. ⚠️ Helper windows are excluded from *classification* but **not** from the prepass: Power BI's AAD sign-in renders in the `Internet Explorer_Hidden` web view, so credential text really can appear there. |
+> | 1 | **Production bypassed the semantics the tests were checking.** `_join_refresh_worker` overrode `join_with_credential_poll`'s in-flight default with the t=0 `_credential_state`, the progress-monitor branch called the t=0 **raise** helper, and the final timeout check repeated it — so a proven-benign progress dialog **stopped the refresh it belonged to**. Measured in both branches: `DialogFoundError(REFRESH_IN_PROGRESS)` on the first poll, with the detector receiving **no `in_flight` argument at all**. The existing test asserted the *helper's* default identity, which production overrode: a test passing for the wrong reason. | Both wait branches and the final check use `_in_flight_credential_state`, and the progress branch latches through the shared `raise_latched_verdict` instead of raising at t=0 semantics. Its latches used to be computed and **discarded**, so it always degraded to a bare `TimeoutError`. The test now asserts on **production's call site** — the argument the detector actually receives. |
+>
+> **The through-line, and the rule that comes out of it:** a fix that adds a *suppression* path has to
+> make its positive claim actually positive. "Short", "big enough", "we read something", "the caption
+> looked fine" are all the same mistake wearing different clothes.
+
+> ⚠️ **The PowerShell arbiter still has finding 5's hole — measured, filed as #406, deliberately NOT
+> fixed here.** `probe_desktop_credential.ps1` keeps `$MinPromptWords = 5`, and driving its shipped
+> classifiers through the test harness shows the identical result: `Refresh` + `Evaluating` +
+> `Please enter your password` → `benign` → `REFRESH_IN_PROGRESS`, and **suppressed to `$null`** under
+> `-RefreshInFlight`; `Password:` likewise. It was left alone on purpose, following the precedent that
+> created issue #376 itself: #367's author found this defect in the Python half, declared it out of
+> scope, and filed it rather than silently widening the diff. Removing the amnesty there also reverses
+> a reviewed decision — `test_short_data_labels_beside_progress_text_do_not_block_suppression` exists
+> to keep `CREDENTIAL_PRESENT` reachable while Desktop shows its own refresh dialog — so it needs its
+> own issue and its own review, not a drive-by.
+>
+> **Reachability, stated rather than hidden.** Removing the amnesty costs the Python detector its
+> `benign` path whenever a dialog exposes a table name as child text (`Orders` is not progress status
+> and not chrome, so it vetoes). That is the sanctioned trade: `benign` is used only to avoid aborting
+> **our own** in-flight operation, so losing it costs extra **exit 3**s, never a silent clear.
+> ⚠️ Unobserved in this corpus whether Power BI's real refresh dialog exposes table names as child
+> HWNDs — no Desktop was available. If it does, expect `DIALOG_UNRECOGNIZED` where you hoped for
+> `REFRESH_IN_PROGRESS`; that is loud and recoverable, and it is the direction this bundle errs in.
 
 > ⚠️ **Do not wait blindly for `NO_BRIDGE` / `not_connected` — bound the bridge wait, then prove the
 > executable by PID.** Field report, 2026-08-18, two machines: a box with two Desktop versions
