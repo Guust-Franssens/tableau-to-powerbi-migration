@@ -440,6 +440,15 @@ v1 duplicated `report.json`. **Deleted** (now pointers — copies drift on every
 · `calcs_untranslated` → `$.summary.needs_review_total` · `duplicate_datasource_candidates` →
 `$.workbooks[0].consolidated_datasources` · binary landing → `$.workbooks[0].flatfile_data`.
 
+⚠️ **`openable_outputs` is the engine's *claim*, not a verified open** — it is the launch list of
+paths it emitted, and nothing in it was handed to a parser. The same caution applies, harder, to
+`workbooks[].openability_selfcheck.ok`: a static scan of model TMDL *text*, blind to the report and
+to data, which shipped `ok: true` on **30 of 44** workbooks the same `report.json` recorded defects
+for (measured on `_runs/estate-2.339.0-20260829`). Only `TmdlSerializer.DeserializeDatabaseFromFolder`
+— `scripts/tmdl_oracle.py`, via `check_datamodel.py` / `check_unit.py --scope data-model` — proves a
+model opens. Full breakdown, including which of the `checks` omissions are vacuous and which are
+genuine: `.github/skills/powerbi-semantic-model-gotchas/SKILL.md` §8.
+
 **Kept / added — each verified absent upstream:**
 
 | field | why | without it |
@@ -486,11 +495,20 @@ path**).*
    model bindings would make the handoff self-sufficient.
 5. 🟠 **The M layer has no gate** — `check_candidate_dax` rejects `[parameters]` only in returned DAX,
    never in emitted M. Run the same scan over emitted M; add `#"Name"` resolution to
-   `openability_selfcheck`.
-6. 🟠 **No rebase seam** — absolute paths are correct but unrelocatable; a `SourceFolder` parameter
+   `openability_selfcheck`. ✅ **Landed**: `m_parameters_defined` is present on 44/44 workbooks at
+   2.339.0 and is the one check that failed anywhere in that run.
+6. 🟠 **`openability_selfcheck` loses `not_evaluated` on the post-wrap re-check.**
+   `migrate_estate._recheck_openability_after_wrap` rebuilds the payload with only
+   `ok`/`checks`/`issues`/`rechecked_after_row_predicate_wrap`, dropping `not_evaluated` and
+   `reference_case_mismatches` — so the tri-state discipline the engine documents fails on precisely
+   the payload whose check set was recomputed. Measured 2.339.0: 1 of 44, and it is the payload with
+   `rechecked_after_row_predicate_wrap: true`. **Filed** as
+   [`tableau-fabric-skills#183`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/183) — a
+   regression from the fix for upstream #177 that retracts the disclosure upstream #141 added.
+7. 🟠 **No rebase seam** — absolute paths are correct but unrelocatable; a `SourceFolder` parameter
    fixes it upstream for everyone.
-7. 🟡 **Contradictory counters** — `workbooks_viz_warned = 0` vs `visuals_warned = 56`.
-8. 🟡 **`--approved-dax` keyed by bare calc name**, case-insensitive, estate-wide → collision risk.
+8. 🟡 **Contradictory counters** — `workbooks_viz_warned = 0` vs `visuals_warned = 56`.
+9. 🟡 **`--approved-dax` keyed by bare calc name**, case-insensitive, estate-wide → collision risk.
 
 ---
 

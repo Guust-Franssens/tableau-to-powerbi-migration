@@ -137,9 +137,9 @@ reasoning or self-report of success.
 
 Refuse to do a meaningful pass without these — flag it back rather than guessing:
 
-1. **`handover/<workbook>.json`** — the deterministic tier's own account of what it built and what it
-   deferred (`viz_fidelity[]`, `model_translation_handoff`, `openability_selfcheck`, the estate's
-   `pending_gates`). Pass 0 classifies every row of it, and two other agents wait on that
+1. **`handover/<workbook>.json`** — the deterministic tier's own **claims** about what it built and
+   what it deferred (`viz_fidelity[]`, `model_translation_handoff`, `openability_selfcheck`, the
+   estate's `pending_gates`). Pass 0 classifies every row of it, and two other agents wait on that
    classification. Without it you are reviewing the artifact with no record of what its builder
    *believed* it was doing — which is exactly where the `status: "rebuilt"` blind spot hides.
 2. **`migration-spec.json`** — ground truth for what's *supposed* to exist (worksheet list, mark
@@ -208,7 +208,12 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
    | `accepted-limitation` | real, and correctly **not** reproduced | nobody — goes to `limitations_encountered` |
    | `false-claim` | the engine's own description of what it did is wrong | route back with evidence |
 
-   Two things make this load-bearing rather than bookkeeping:
+   What makes this load-bearing rather than bookkeeping:
+   - **`openability_selfcheck.ok` is a claim too — the narrowest in the file. Adjudicate it; never
+     cite it.** It is a static scan of the *model's* TMDL text: blind to the report, blind to data,
+     and blind to every check its `checks` map omits (absent = **not evaluated**, never passed). It
+     shipped `ok: true` on **30 of 44** workbooks the same `report.json` recorded defects for
+     (2.339.0). Only the TMDL oracle proves a model opens — `check_unit.py --scope data-model`.
    - **Adjudicate each engine claim against the Tableau source/reference, never against the shipped
      visual alone.** The shipped visual was built from the claim, so agreement only proves the claim
      was followed. For a `false-claim`, cite the `.twb` shelves/encodings, migration-spec, or
@@ -327,12 +332,9 @@ question.
   discrepancy from a screenshot alone, sanity-check with a second capture method or a direct DAX/data
   check — don't let a capture-tooling quirk become a false bug report.
 - **Tableau Public's canvas-rendered viz body defeats text-based Playwright locators.** `getByText`/
-  `getByRole` time out silently against in-viz labels (marks, tab names) because the content isn't
-  real DOM. Use `page.screenshot()` at a fixed known viewport and click by pixel coordinate instead.
-  Also required: dismiss the OneTrust cookie-consent overlay first
-  (`#onetrust-reject-all-handler, #onetrust-accept-btn-handler`), and use
-  `waitUntil: "domcontentloaded"` plus explicit `waitForTimeout` calls — Tableau Public pages never
-  reach `networkidle` due to continuous background telemetry.
+  `getByRole` time out silently against in-viz labels because the content isn't real DOM, and the page
+  never reaches `networkidle`. Don't re-derive the recipe: `scripts/capture_tableau_reference.py`
+  implements it, and `docs/reference-capture.md` records it.
 - **Never grade a report you just helped build in the same conversation thread.** If your context
   already contains the build rationale, you're not providing independent review — ask the orchestrator
   to invoke you statelessly with only the ground-truth artifacts listed above.
