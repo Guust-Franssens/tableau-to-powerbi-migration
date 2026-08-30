@@ -2928,11 +2928,14 @@ def test_a_lexical_connector_match_is_not_a_pass_at_MODEL_scope(tmp_path: Path, 
 
 
 def test_the_canonical_generated_shapes_still_earn_a_pass() -> None:
-    """The other half of the trade: every real generated live shape must still be provable.
+    """Four FROZEN 2.339.0 strings, verbatim from the two real bundles, against the matcher.
 
-    Verbatim from the two real bundles (canonical engine 2.339.0). If the shape gate stopped
-    recognising these, the datasource half would collapse to NOT_CHECKED and the gate would be
-    honest-but-useless - so this is the test that says the cost was zero.
+    ⚠️ WHAT THIS PINS, precisely: it catches a MATCHER regression - a tightening that stops
+    recognising output the generator really produces. It does NOT invoke the generator, so an external
+    generator shape change CANNOT make it fail. That drift fails closed (an unrecognised shape becomes
+    NOT_CHECKED, never a pass), which is why it is safe, but the guarantee is "we still recognise what
+    2.339.0 emitted", not "we still recognise what the engine emits". Re-survey after an engine
+    upgrade; `scripts/README.md` records the survey command's result, not a live check.
     """
     shapes = {
         "Snowflake": 'let\n Source = Snowflake.Databases(#"Server", #"Warehouse"),\n'
@@ -3121,12 +3124,143 @@ def test_only_the_first_argument_of_a_native_query_is_the_handle() -> None:
     `Value.NativeQuery(Src, Cat)` executes against `Src`. If a looser rule picked up `Cat`, a
     CSV-backed partition would be certified by a Snowflake handle it merely mentions.
     """
+    # A `Sql.Database` root deliberately: the round-19 handle rule would refuse a Snowflake root here
+    # anyway, and a test that passes for two reasons cannot pin either. Only the first-argument rule
+    # refuses this one.
     body = (
         "let\n"
-        '    Cat = Snowflake.Databases("srv", "wh"),\n'
+        '    Cat = Sql.Database("srv", "db"),\n'
         '    Src = Csv.Document(File.Contents("x.csv")),\n'
         "    Data = Value.NativeQuery(Src, Cat)\n"
         "in\n"
         "    Data"
     )
     assert ccf.partition_provenance(body) == frozenset()
+
+
+# --- round 19: the walker accepted a SUPERSET of the canonical form --------------------------------
+#
+# Both findings were structural permissiveness where the survey says strictness is free: none of the
+# 8 canonical shapes contains a nested `let`, a leading branch, or a native query at all. Tightening
+# to the surveyed shapes cost ZERO passes - estate still 7 of 7 connected, cold run still 1.
+
+_SF_ROOT = 'Snowflake.Databases("srv", "wh")'
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        (
+            "leading-branch-returns-inline-rows",
+            "if true then #table(type table [A = Int64.Type], {{1}}) else\n"
+            f"let\n    Source = {_SF_ROOT},\n"
+            '    Data = Source{[Name="T"]}[Data]\nin\n    Data',
+        ),
+        (
+            "nested-unused-let",
+            f"let\n    Source = {_SF_ROOT},\n"
+            '    Ignored = let X = 0, Data = Source{[Name="T"]}[Data] in Data,\n'
+            "    Result = #table(type table [A = Int64.Type], {{1}})\nin\n    Result",
+        ),
+        (
+            "trailing-junk-after-the-in-expression",
+            f'let\n    Source = {_SF_ROOT},\n    Data = Source{{[Name="T"]}}[Data]\nin\n    Data\nmeta [x = 1]',
+        ),
+    ],
+)
+def test_the_let_must_be_the_WHOLE_source_expression(label: str, body: str) -> None:
+    """Searching for a `let ... in` ANYWHERE let dead code supply the provenance.
+
+    `if true then #table(...) else let Source = Snowflake... in Data` returns INLINE rows while the
+    walker certified the unreachable Snowflake chain, exit 0. A nested `let` did the same by ending
+    the walk at the inner `in`. Nested `let` is now rejected rather than parsed - no canonical shape
+    has one, so the conservative rule is also the free one.
+    """
+    assert ccf.partition_provenance(body) == frozenset(), label
+
+
+def test_any_nested_let_is_refused_even_when_the_outer_chain_is_valid() -> None:
+    """The nested-`let` ban is conservative on purpose, and this is the case that proves it fires.
+
+    Here the OUTER chain is genuinely canonical and the nested `let` is unreachable, so a parser could
+    accept it - and the greedy whole-expression match alone does. It is refused anyway: no surveyed
+    canonical shape contains a nested `let`, and "reject rather than parse" is the rule that removes a
+    whole class of scope-tracking bugs instead of another instance of one.
+    """
+    body = (
+        "let\n"
+        "    Ignored = let X = 0 in X,\n"
+        f"    Source = {_SF_ROOT},\n"
+        '    Data = Source{[Name = "T", Kind = "Table"]}[Data]\n'
+        "in\n"
+        "    Data"
+    )
+    assert ccf.partition_provenance(body) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        (
+            "native-query-on-a-snowflake-root-collection",
+            f'let\n    Source = {_SF_ROOT},\n    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
+        ),
+        (
+            "native-query-on-a-databricks-root-collection",
+            'let\n    Source = Databricks.Catalogs("srv", "path"),\n'
+            '    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
+        ),
+        (
+            "two-chained-native-queries",
+            f"let\n    Source = {_SF_ROOT},\n"
+            '    Cat = Source{[Name="D", Kind="Database"]}[Data],\n'
+            '    Inner = Value.NativeQuery(Cat, "SELECT 1"),\n'
+            '    Data = Value.NativeQuery(Inner, "SELECT 2")\nin\n    Data',
+        ),
+    ],
+)
+def test_a_native_query_needs_a_usable_connector_handle(label: str, body: str) -> None:
+    """`Snowflake.Databases` returns a COLLECTION, so a native query on the root cannot work.
+
+    This repo's own `storage_mode.py` records that Snowflake native queries are unsupported against
+    the root collection and need the drilled database handle - so the gate was certifying a shape we
+    document as broken. Chaining a native query onto another's result is not a generator shape either.
+    """
+    assert ccf.partition_provenance(body) == frozenset(), label
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    [
+        (
+            "drilled-snowflake-handle",
+            f"let\n    Source = {_SF_ROOT},\n"
+            '    Cat = Source{[Name="D", Kind="Database"]}[Data],\n'
+            '    Data = Value.NativeQuery(Cat, "SELECT 1", null, [EnableFolding = true])\nin\n    Data',
+            "Snowflake",
+        ),
+        (
+            "sql-root-is-already-a-database-handle",
+            'let\n    Source = Sql.Database("srv", "db"),\n'
+            '    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data',
+            "Sql",
+        ),
+    ],
+)
+def test_a_native_query_on_a_usable_handle_still_proves_provenance(label: str, body: str, expected: str) -> None:
+    """The negative beside the positive: the handle rule must not refuse the shapes that DO work.
+
+    `Sql.Database(server, db)` already IS a database handle, so a native query sits on it directly;
+    `Snowflake.Databases` needs one drill first. Refusing both would have taken custom SQL - the
+    incident's own shape - off the checkable list entirely.
+    """
+    assert ccf.partition_provenance(body) == frozenset({expected}), label
+
+
+def test_the_direct_database_root_list_fails_closed_for_unknown_connectors() -> None:
+    """An unmeasured connector defaults to "drill required", which is the safe direction."""
+    assert "Snowflake.Databases" not in ccf.DIRECT_DATABASE_ROOTS
+    assert "Databricks.Catalogs" not in ccf.DIRECT_DATABASE_ROOTS
+    assert "Sql.Database" in ccf.DIRECT_DATABASE_ROOTS
+    body = 'let\n Source = Teradata.Database("srv"),\n Data = Value.NativeQuery(Source, "SELECT 1")\nin\n Data'
+    assert ccf.partition_provenance(body) == frozenset({"Teradata"})

@@ -385,9 +385,11 @@ def _strip_m_noise(text: str) -> str:
     return "".join(out)
 
 
-_LET_BLOCK = re.compile(r"\blet\b(?P<body>.*?)\bin\b\s*(?P<final>#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_.]*)", re.DOTALL)
+_WHOLE_LET = re.compile(r"^let\b(?P<body>.*)\bin\b\s*(?P<final>#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*$", re.DOTALL)
+_SOURCE_ASSIGN = re.compile(r"(?ms)^[ \t]*source[ \t]*=[ \t]*")
+_NESTED_LET = re.compile(r"\b(?:let|in)\b")
 _BINDING = re.compile(r"^\s*(?P<name>#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<expr>.*)$", re.DOTALL)
-_CONNECTOR_CALL = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\.[A-Za-z]+\s*\(")
+_CONNECTOR_CALL = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\.([A-Za-z]+)\s*\(")
 _NAVIGATION_STEP = re.compile(r"^\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*\{.*\}\s*\[[^\]]*\]\s*$", re.DOTALL)
 # `Value.NativeQuery(<handle>, "SELECT ...")` is the engine's custom-SQL step, and its FIRST argument
 # is the connection handle - so rows provably derive from whatever that handle traces back to. It is
@@ -395,6 +397,24 @@ _NAVIGATION_STEP = re.compile(r"^\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*\{.*
 # shape of the incident this gate was built for (#328). Only the first-argument position counts: a
 # connector named anywhere else in the call does not make the chain.
 _NATIVE_QUERY_STEP = re.compile(r"^\s*Value\.NativeQuery\s*\(\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*,", re.DOTALL)
+
+# Connector roots that already return a DATABASE handle, so a native query may sit directly on them.
+# Everything else - notably `Snowflake.Databases` and `Databricks.Catalogs` - returns a COLLECTION of
+# databases, and a native query against that root is documented as NONFUNCTIONAL by this repo's own
+# `storage_mode.py`: it needs the drilled database handle. Certifying a shape we document as broken is
+# worse than refusing it, so an unmeasured connector defaults to "drill required" - fail closed.
+DIRECT_DATABASE_ROOTS = frozenset(
+    {
+        "Sql.Database",
+        "PostgreSQL.Database",
+        "MySQL.Database",
+        "Oracle.Database",
+        "Teradata.Database",
+        "AmazonRedshift.Database",
+        "Odbc.DataSource",
+        "Odbc.Query",
+    }
+)
 
 
 def _split_bindings(body: str) -> list[str]:
@@ -412,6 +432,29 @@ def _split_bindings(body: str) -> list[str]:
     return [p for p in parts if p.strip()]
 
 
+def _canonical_let(body: str) -> tuple[dict[str, str], str] | None:
+    """`(bindings, final identifier)` when the WHOLE source expression is one top-level `let`.
+
+    Round 19: this used to be a `search` for a `let ... in` ANYWHERE in the text, which let dead code
+    supply the provenance - a leading `if ... then #table(...) else let Source = Snowflake...` returned
+    inline rows while the walker certified the unreachable chain. It is now a full match on the
+    complete expression, and any nested `let`/`in` is rejected outright rather than parsed, because no
+    surveyed canonical shape contains one.
+    """
+    stripped = _strip_m_noise(body)
+    assignment = _SOURCE_ASSIGN.search(stripped)
+    expression = (stripped[assignment.end() :] if assignment else stripped).strip()
+    match = _WHOLE_LET.match(expression)
+    if not match or _NESTED_LET.search(match.group("body")):
+        return None
+    bindings: dict[str, str] = {}
+    for chunk in _split_bindings(match.group("body")):
+        found = _BINDING.match(chunk)
+        if found:
+            bindings[found.group("name").strip('#"')] = found.group("expr")
+    return bindings, match.group("final").strip('#"')
+
+
 def partition_provenance(body: str) -> frozenset[str]:
     """The connector token that PROVABLY supplies this partition's rows, or nothing.
 
@@ -421,51 +464,80 @@ def partition_provenance(body: str) -> frozenset[str]:
     whose rows came from an inline `#table` literal beside an unused string, and for one whose rows
     came from `Sql.Database` beside an unused lazy `Snowflake.Databases` binding.
 
-    This is reachability, NOT an M interpreter. It walks backwards from the `in` expression through
-    `name = expr` bindings and requires the chain to be the engine's own canonical shape:
+    This is reachability, NOT an M interpreter. It requires the COMPLETE source expression to be one
+    top-level `let ... in <identifier>` and then walks backwards from that identifier through
+    `name = expr` bindings, demanding the engine's own canonical shape:
 
         let  Source = <Token>.<Func>(...),        <- the root, and the only connector call allowed
-             Db     = Source{[...]}[Data],        <- zero or more pure navigation steps, or
-             Data   = Value.NativeQuery(Db, ...)  <- a custom-SQL step over the same handle
+             Db     = Source{[...]}[Data],        <- zero or more pure navigation steps, and
+             Data   = Value.NativeQuery(Db, ...)  <- AT MOST ONE custom-SQL step over that handle
         in   Data
 
+    WHOLE-EXPRESSION, and that word is load-bearing. Round 19: searching for a `let ... in` ANYWHERE
+    let an unreachable branch supply the provenance - `if true then #table(...) else let Source =
+    Snowflake.Databases(...) ... in Data` returned inline rows while the walker certified the dead
+    Snowflake chain, exit 0. A NESTED `let` did the same by ending the walk at the inner `in`. Nested
+    `let` is now rejected outright rather than parsed, because NONE of the 8 surveyed canonical shapes
+    contains one - strictness is free here, and that is exactly when to take it.
+
+    THE NATIVE-QUERY HANDLE IS CHECKED, not assumed. `Snowflake.Databases` and `Databricks.Catalogs`
+    return a COLLECTION of databases, so a native query against the root is nonfunctional - this
+    repo's own `storage_mode.py` records it - and chaining one native query onto another's result is
+    not a shape the generator emits. Both were certified before. Now at most one native-query step is
+    allowed, and unless the root is a `DIRECT_DATABASE_ROOTS` member it must be preceded by at least
+    one navigation step.
+
     Measured across BOTH real bundles (280 partitions, canonical engine 2.339.0): every one of the 49
-    live-connector partitions matches it - 41 Snowflake and 3 Databricks as 4-step chains, 3 Sql and 2
-    PostgreSQL as 2-step. So this recognises a known generator's output rather than inferring, which
-    is the distinction that makes a pass defensible here. `Value.NativeQuery` does not appear in
-    either bundle (neither migrated a custom-SQL relation live) but is admitted on the same reasoning:
-    its first argument IS the connection handle, and it is how a Tableau custom-SQL table lands - the
-    exact shape of the incident this gate was built for.
+    live-connector partitions matches - 41 Snowflake and 3 Databricks as 4-step chains, 3 Sql and 2
+    PostgreSQL as 2-step, none with a nested `let` and none with a native query. So this recognises a
+    known generator's output rather than inferring, and tightening to it cost zero passes.
 
     Anything else - a hand-edited partition, an extra binding in the chain, a branch, a missing link -
     returns nothing, and the caller reports NOT_CHECKED. Unreachable bindings are ignored by
     construction: they are never visited, so an unused connector call cannot vote.
     """
-    match = _LET_BLOCK.search(_strip_m_noise(body))
-    if not match:
+    parsed = _canonical_let(body)
+    if parsed is None:
         return frozenset()
-    bindings: dict[str, str] = {}
-    for chunk in _split_bindings(match.group("body")):
-        found = _BINDING.match(chunk)
-        if found:
-            bindings[found.group("name").strip('#"')] = found.group("expr")
-    current = match.group("final").strip('#"')
+    bindings, current = parsed
+    navigations = 0
+    native_queries = 0
     for _step in range(len(bindings) + 1):
         expr = bindings.get(current)
         if expr is None:
             return frozenset()
         root = _CONNECTOR_CALL.match(expr)
         if root and root.group(1) in CONNECTOR_TOKENS:
-            return frozenset({root.group(1)})
+            return _root_verdict(f"{root.group(1)}.{root.group(2)}", root.group(1), navigations, native_queries)
         # A call that is NOT a known connector falls through to the step patterns rather than ending
         # the walk: `Value.NativeQuery(...)` matches the root shape too, and returning here made every
         # custom-SQL partition unprovable - including the committed `mixed-live-and-flat-file` fixture,
         # which is the one artifact in this repo that shows the incident's own shape.
-        nav = _NAVIGATION_STEP.match(expr) or _NATIVE_QUERY_STEP.match(expr)
-        if not nav:
+        navigation = _NAVIGATION_STEP.match(expr)
+        native = None if navigation else _NATIVE_QUERY_STEP.match(expr)
+        if navigation:
+            navigations += 1
+        elif native:
+            native_queries += 1
+            if native_queries > 1:
+                return frozenset()  # a native query over a native query's result is not a chain
+        else:
             return frozenset()
-        current = nav.group(1).strip('#"')
+        current = (navigation or native).group(1).strip('#"')
     return frozenset()
+
+
+def _root_verdict(root: str, token: str, navigations: int, native_queries: int) -> frozenset[str]:
+    """Whether a completed chain's shape is one the generator emits and the connector can execute.
+
+    `navigations` and `native_queries` are counted between the `in` expression and the root, so a
+    native query with no navigation before it means the query sits on whatever the root returned.
+    For a collection-returning root that cannot work, and certifying a shape this repo documents as
+    broken is worse than refusing it.
+    """
+    if native_queries and navigations == 0 and root not in DIRECT_DATABASE_ROOTS:
+        return frozenset()
+    return frozenset({token})
 
 
 def partition_connectors(body: str) -> frozenset[str]:
