@@ -3264,3 +3264,100 @@ def test_the_direct_database_root_list_fails_closed_for_unknown_connectors() -> 
     assert "Sql.Database" in ccf.DIRECT_DATABASE_ROOTS
     body = 'let\n Source = Teradata.Database("srv"),\n Data = Value.NativeQuery(Source, "SELECT 1")\nin\n Data'
     assert ccf.partition_provenance(body) == frozenset({"Teradata"})
+
+
+# --- round 20: a chain step must CONSUME its whole binding -----------------------------------------
+#
+# The same rule as round 19's `let` fix, one level down: `_CONNECTOR_CALL` and the step matchers
+# matched a PREFIX and ignored whatever followed. Balanced-delimiter counting closes it - find where
+# the call or navigation ends, then require nothing but whitespace after it. No operator precedence,
+# no types, no evaluation, so the walker stays a closed enumeration rather than an M interpreter.
+#
+# Each fixture below is built so the ROUND-20 rule is the SOLE reason for the verdict: every one uses
+# a `Sql.Database` root, which the round-19 handle rule permits, so nothing else can be doing the
+# refusing. (`test_a_native_query_needs_a_usable_connector_handle` covers the round-19 rule.)
+
+_SQL_ROOT = 'Sql.Database("srv", "db")'
+
+
+def test_a_native_query_concatenated_with_inline_rows_is_not_provenance() -> None:
+    """The round-20 reproduction: the SQL returns nothing by construction, the only row is inline.
+
+    `Value.NativeQuery(Source, "... WHERE 1=0") & #table(..., {{1}})` was certified fully
+    SQL-provenanced because the step matched the prefix and ignored the concatenation. A `Sql.Database`
+    root is used deliberately: the handle rule permits it, so full consumption is the only rule that
+    can refuse this.
+    """
+    body = (
+        f"let\n    Source = {_SQL_ROOT},\n"
+        '    Data = Value.NativeQuery(Source, "SELECT CAST(NULL AS int) AS A WHERE 1=0")\n'
+        "           & #table(type table [A = Int64.Type], {{1}})\n"
+        "in\n    Data"
+    )
+    assert ccf.partition_provenance(body) == frozenset()
+    # ...and the same chain WITHOUT the concatenation still proves provenance, so the refusal is
+    # attributable to the trailing operator and nothing else.
+    clean = (
+        f"let\n    Source = {_SQL_ROOT},\n"
+        '    Data = Value.NativeQuery(Source, "SELECT CAST(NULL AS int) AS A WHERE 1=0")\n'
+        "in\n    Data"
+    )
+    assert ccf.partition_provenance(clean) == frozenset({"Sql"})
+
+
+def test_a_connector_call_with_a_trailing_operator_is_not_a_root() -> None:
+    """`Sql.Database(...) = null` is a LOGICAL value, not a handle - the call is only a prefix of it."""
+    body = f'let\n    Source = {_SQL_ROOT} = null,\n    Data = Value.NativeQuery(Source, "SELECT 1")\nin\n    Data'
+    assert ccf.partition_provenance(body) == frozenset()
+
+
+def test_a_connector_call_wrapped_in_another_function_is_not_a_root() -> None:
+    """A connector call must BE the binding, not sit inside it.
+
+    ⚠️ MEASURED, because the obvious mutation could not demonstrate it. Loosening `_CONNECTOR_CALL` to
+    an unanchored `search` leaves BOTH wrappers refused, so the `^` anchor is redundant here: FULL
+    CONSUMPTION is what refuses them. `Table.Buffer(...)` also fails the connector-token check, and
+    `Buffered(...)` - a dotless wrapper the head pattern cannot match at all - would, under a search,
+    find the inner call and then stop at the inner `)`, leaving a trailing `)`.
+
+    So this is a characterisation test, not a test of the anchor, and the mutation table says so by
+    NOT claiming a mutation for it. Do not "harden" the anchor believing it carries this property.
+    """
+    for wrapper in ("Table.Buffer", "Buffered"):
+        body = (
+            f"let\n    Source = {wrapper}({_SQL_ROOT}),\n"
+            '    Data = Source{[Schema = "dbo", Item = "T"]}[Data]\nin\n    Data'
+        )
+        assert ccf.partition_provenance(body) == frozenset(), wrapper
+
+
+def test_a_navigation_step_with_a_trailing_operator_is_not_a_step() -> None:
+    """The full-consumption rule applies to navigation too, not only to calls."""
+    body = (
+        f"let\n    Source = {_SQL_ROOT},\n"
+        '    Data = Source{[Schema = "dbo", Item = "T"]}[Data] & #table(type table [A = Int64.Type], {{1}})\n'
+        "in\n    Data"
+    )
+    assert ccf.partition_provenance(body) == frozenset()
+
+
+def test_odbc_query_is_a_terminal_root_but_never_a_handle() -> None:
+    """A factual correction to the allowlist, not a design choice.
+
+    `Odbc.Query(conn, sql)` returns RESULTS, so it can be a valid TERMINAL root when returned
+    directly - but it is never a handle another native query can run against. It was wrongly listed in
+    `DIRECT_DATABASE_ROOTS`. Every remaining member is literally a `.Database(...)` call, which is the
+    rule rather than a coincidence.
+    """
+    assert "Odbc.Query" not in ccf.DIRECT_DATABASE_ROOTS
+    assert "Odbc.DataSource" not in ccf.DIRECT_DATABASE_ROOTS
+    assert all(root.endswith(".Database") for root in ccf.DIRECT_DATABASE_ROOTS)
+
+    as_handle = (
+        'let\n    Source = Odbc.Query("dsn=x", "SELECT 1"),\n'
+        '    Data = Value.NativeQuery(Source, "SELECT 2")\nin\n    Data'
+    )
+    assert ccf.partition_provenance(as_handle) == frozenset()
+
+    returned_directly = 'let\n    Source = Odbc.Query("dsn=x", "SELECT 1")\nin\n    Source'
+    assert ccf.partition_provenance(returned_directly) == frozenset({"Odbc"})

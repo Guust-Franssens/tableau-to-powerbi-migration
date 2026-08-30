@@ -390,19 +390,17 @@ _SOURCE_ASSIGN = re.compile(r"(?ms)^[ \t]*source[ \t]*=[ \t]*")
 _NESTED_LET = re.compile(r"\b(?:let|in)\b")
 _BINDING = re.compile(r"^\s*(?P<name>#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<expr>.*)$", re.DOTALL)
 _CONNECTOR_CALL = re.compile(r"^\s*([A-Z][A-Za-z0-9]*)\.([A-Za-z]+)\s*\(")
-_NAVIGATION_STEP = re.compile(r"^\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*\{.*\}\s*\[[^\]]*\]\s*$", re.DOTALL)
-# `Value.NativeQuery(<handle>, "SELECT ...")` is the engine's custom-SQL step, and its FIRST argument
-# is the connection handle - so rows provably derive from whatever that handle traces back to. It is
-# admitted as a chain step because it is exactly how a Tableau custom-SQL relation lands, which is the
-# shape of the incident this gate was built for (#328). Only the first-argument position counts: a
-# connector named anywhere else in the call does not make the chain.
-_NATIVE_QUERY_STEP = re.compile(r"^\s*Value\.NativeQuery\s*\(\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*,", re.DOTALL)
+_NAV_HEAD = re.compile(r"^\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*(?=\{)")
+_NATIVE_QUERY_HEAD = re.compile(r"^\s*Value\.NativeQuery\s*\(")
+_BARE_IDENTIFIER = re.compile(r"^\s*(#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*$")
 
-# Connector roots that already return a DATABASE handle, so a native query may sit directly on them.
-# Everything else - notably `Snowflake.Databases` and `Databricks.Catalogs` - returns a COLLECTION of
-# databases, and a native query against that root is documented as NONFUNCTIONAL by this repo's own
-# `storage_mode.py`: it needs the drilled database handle. Certifying a shape we document as broken is
-# worse than refusing it, so an unmeasured connector defaults to "drill required" - fail closed.
+# Connector roots that return a single DATABASE handle, so a native query may sit directly on them.
+# Every member is literally a `.Database(...)` call, and that is the rule rather than a coincidence:
+# `Snowflake.Databases` and `Databricks.Catalogs` return a COLLECTION to drill into, and
+# `Odbc.DataSource` returns a navigation table while `Odbc.Query` returns RESULTS - none of the three
+# is a handle another native query can run against. `Odbc.Query` was wrongly listed here; it can be a
+# valid TERMINAL root when returned directly (that path never consults this set), but never a handle.
+# A connector nobody has measured defaults to "drill required", which is the fail-closed direction.
 DIRECT_DATABASE_ROOTS = frozenset(
     {
         "Sql.Database",
@@ -411,10 +409,76 @@ DIRECT_DATABASE_ROOTS = frozenset(
         "Oracle.Database",
         "Teradata.Database",
         "AmazonRedshift.Database",
-        "Odbc.DataSource",
-        "Odbc.Query",
     }
 )
+
+
+def _balanced_end(text: str, opening: int) -> int | None:
+    """Index just past the delimiter closing the one at `opening`, or None if it never closes.
+
+    Delimiter counting only - no operators, no precedence, no semantics. This is what lets a binding
+    be checked for FULL CONSUMPTION without parsing M: find where the call or navigation ends, then
+    require nothing but whitespace after it.
+    """
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack: list[str] = []
+    for index in range(opening, len(text)):
+        char = text[index]
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char in ")]}":
+            if not stack or stack.pop() != char:
+                return None
+            if not stack:
+                return index + 1
+    return None
+
+
+def _whole_connector_call(expr: str) -> tuple[str, str] | None:
+    """`(token, "Token.Func")` when the binding is EXACTLY one connector call, else None."""
+    head = _CONNECTOR_CALL.match(expr)
+    if not head:
+        return None
+    end = _balanced_end(expr, head.end() - 1)
+    if end is None or expr[end:].strip():
+        return None
+    return head.group(1), f"{head.group(1)}.{head.group(2)}"
+
+
+def _whole_navigation(expr: str) -> str | None:
+    """The referenced identifier when the binding is EXACTLY `X{...}[...]`, else None."""
+    head = _NAV_HEAD.match(expr)
+    if not head:
+        return None
+    brace_end = _balanced_end(expr, expr.index("{", head.end() - 1 if head.end() else 0))
+    if brace_end is None:
+        return None
+    rest = expr[brace_end:]
+    stripped = rest.lstrip()
+    if not stripped.startswith("["):
+        return None
+    bracket_end = _balanced_end(rest, len(rest) - len(stripped))
+    if bracket_end is None or rest[bracket_end:].strip():
+        return None
+    return head.group(1).strip('#"')
+
+
+def _whole_native_query(expr: str) -> str | None:
+    """The HANDLE identifier when the binding is EXACTLY one `Value.NativeQuery(...)`, else None.
+
+    The handle must be a bare identifier in the FIRST argument position. Anything else - an expression,
+    a literal, a connector named in a later argument - is not a chain step.
+    """
+    head = _NATIVE_QUERY_HEAD.match(expr)
+    if not head:
+        return None
+    end = _balanced_end(expr, head.end() - 1)
+    if end is None or expr[end:].strip():
+        return None
+    arguments = expr[head.end() : end - 1]
+    first = _split_bindings(arguments)[0] if arguments.strip() else ""
+    handle = _BARE_IDENTIFIER.match(first)
+    return handle.group(1).strip('#"') if handle else None
 
 
 def _split_bindings(body: str) -> list[str]:
@@ -473,28 +537,34 @@ def partition_provenance(body: str) -> frozenset[str]:
              Data   = Value.NativeQuery(Db, ...)  <- AT MOST ONE custom-SQL step over that handle
         in   Data
 
-    WHOLE-EXPRESSION, and that word is load-bearing. Round 19: searching for a `let ... in` ANYWHERE
-    let an unreachable branch supply the provenance - `if true then #table(...) else let Source =
+    EVERY MATCH CONSUMES ITS WHOLE BINDING. Round 20: the step matchers matched a PREFIX and ignored
+    trailing operators, so `Value.NativeQuery(Source, "SELECT ... WHERE 1=0") & #table(..., {{1}})`
+    was certified fully SQL-provenanced while the SQL returned nothing by construction and the only
+    row was inline. `Sql.Database("s","d") = null` - a logical value, not a handle - passed the same
+    way. The remedy is the rule already applied one level up at `let`: match the whole thing, not a
+    prefix. Balanced-delimiter counting is enough for that; no operator or type semantics are needed.
+
+    WHOLE-EXPRESSION at the `let` level too. Round 19: searching for a `let ... in` ANYWHERE let an
+    unreachable branch supply the provenance - `if true then #table(...) else let Source =
     Snowflake.Databases(...) ... in Data` returned inline rows while the walker certified the dead
-    Snowflake chain, exit 0. A NESTED `let` did the same by ending the walk at the inner `in`. Nested
-    `let` is now rejected outright rather than parsed, because NONE of the 8 surveyed canonical shapes
-    contains one - strictness is free here, and that is exactly when to take it.
+    chain. A NESTED `let` did the same by ending the walk at the inner `in`; nested `let` is now
+    rejected outright rather than parsed, because none of the 8 surveyed shapes contains one.
 
     THE NATIVE-QUERY HANDLE IS CHECKED, not assumed. `Snowflake.Databases` and `Databricks.Catalogs`
     return a COLLECTION of databases, so a native query against the root is nonfunctional - this
-    repo's own `storage_mode.py` records it - and chaining one native query onto another's result is
-    not a shape the generator emits. Both were certified before. Now at most one native-query step is
-    allowed, and unless the root is a `DIRECT_DATABASE_ROOTS` member it must be preceded by at least
-    one navigation step.
+    repo's own `storage_mode.py` records it. At most one native-query step is allowed, its handle must
+    be a bare identifier in the FIRST argument position, and unless the root is a
+    `DIRECT_DATABASE_ROOTS` member it must be preceded by at least one navigation step.
 
     Measured across BOTH real bundles (280 partitions, canonical engine 2.339.0): every one of the 49
     live-connector partitions matches - 41 Snowflake and 3 Databricks as 4-step chains, 3 Sql and 2
-    PostgreSQL as 2-step, none with a nested `let` and none with a native query. So this recognises a
-    known generator's output rather than inferring, and tightening to it cost zero passes.
+    PostgreSQL as 2-step, none with a nested `let`, a trailing operator, or a native query. So this
+    recognises a known generator's output rather than inferring, and every tightening so far has cost
+    exactly zero passes on the 52-unit estate.
 
-    Anything else - a hand-edited partition, an extra binding in the chain, a branch, a missing link -
-    returns nothing, and the caller reports NOT_CHECKED. Unreachable bindings are ignored by
-    construction: they are never visited, so an unused connector call cannot vote.
+    Anything else - a hand-edited partition, an extra binding in the chain, a branch, a missing link,
+    a concatenation - returns nothing, and the caller reports NOT_CHECKED. Unreachable bindings are
+    ignored by construction: they are never visited, so an unused connector call cannot vote.
     """
     parsed = _canonical_let(body)
     if parsed is None:
@@ -506,15 +576,15 @@ def partition_provenance(body: str) -> frozenset[str]:
         expr = bindings.get(current)
         if expr is None:
             return frozenset()
-        root = _CONNECTOR_CALL.match(expr)
-        if root and root.group(1) in CONNECTOR_TOKENS:
-            return _root_verdict(f"{root.group(1)}.{root.group(2)}", root.group(1), navigations, native_queries)
-        # A call that is NOT a known connector falls through to the step patterns rather than ending
-        # the walk: `Value.NativeQuery(...)` matches the root shape too, and returning here made every
-        # custom-SQL partition unprovable - including the committed `mixed-live-and-flat-file` fixture,
-        # which is the one artifact in this repo that shows the incident's own shape.
-        navigation = _NAVIGATION_STEP.match(expr)
-        native = None if navigation else _NATIVE_QUERY_STEP.match(expr)
+        root = _whole_connector_call(expr)
+        if root and root[0] in CONNECTOR_TOKENS:
+            return _root_verdict(root[1], root[0], navigations, native_queries)
+        # A call that is NOT a known connector falls through to the step matchers rather than ending
+        # the walk: `Value.NativeQuery(...)` is a call too, and returning here made every custom-SQL
+        # partition unprovable - including the committed `mixed-live-and-flat-file` fixture, the one
+        # artifact in this repo that shows the incident's own shape.
+        navigation = _whole_navigation(expr)
+        native = None if navigation else _whole_native_query(expr)
         if navigation:
             navigations += 1
         elif native:
@@ -523,7 +593,7 @@ def partition_provenance(body: str) -> frozenset[str]:
                 return frozenset()  # a native query over a native query's result is not a chain
         else:
             return frozenset()
-        current = (navigation or native).group(1).strip('#"')
+        current = navigation or native
     return frozenset()
 
 
