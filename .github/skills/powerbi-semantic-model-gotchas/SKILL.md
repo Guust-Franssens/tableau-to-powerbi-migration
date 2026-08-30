@@ -59,10 +59,132 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 - **`database.tmdl` must be exactly**: `database` (no name after it) on its own line, then a
   tab-indented `compatibilityLevel: <n>` on the next line. A name after `database` or an unindented
   `compatibilityLevel` causes a TMDL indentation parse error.
-- **Prefer single-line DAX over multi-line expressions for `column`/`measure`.** Multi-line
-  expression continuation has a subtle, easy-to-get-wrong indentation contract; single-line
-  `column X = <full DAX expression>` (DAX has no newline requirement) followed by properties at
-  declaration+1 tab is the proven-safe pattern.
+- ⚠️ **The fatal TMDL expression mistake is NOT a newline, and NOT a blank line — it is starting the
+  expression on the `=` line and then CONTINUING it onto the next line.** A customer field report
+  (issue #254) had an agent write a measure with blank lines between fragments; Desktop answered
+  `TMDL Format Error: Unexpected line type: Other!` and **refused to open the model at all**. The
+  obvious lesson ("never use newlines in DAX") is the wrong one, and it is a costly wrong one,
+  because it forces every long measure onto one unreviewable line.
+
+  ✅ **Measured 2026-08-29** against `TmdlSerializer.DeserializeDatabaseFromFolder` (AMO 19.84.1 —
+  the same parser Desktop uses), 34 synthetic variants injected into a real committed model:
+
+  | layout | verdict |
+  |---|---|
+  | `measure 'M' = IF(1=1,"a","b")` — single line | ✅ opens |
+  | expression starts on the line **after** `=`, indented deeper than the properties | ✅ opens; newlines preserved in the expression |
+  | …**with empty lines between fragments** | ✅ opens — blank lines are part of the expression |
+  | …with whitespace-only lines, or a blank line right after `=`, or a blank line before the properties | ✅ opens |
+  | ` ``` `-enclosed block, blank lines and all | ✅ opens (verbatim) |
+  | **`measure 'M' = IF(` then a continuation line** | ❌ `Unexpected line type: Other!` — model does not open |
+  | same, with blank lines between the fragments (the reported crash) | ❌ identical failure; the blank line is **not** the trigger |
+  | inline start whose continuation is `VAR x = 1` / `RETURN x` | ❌ `UnsupportedObjectType — VAR is not a supported property in the current context` |
+  | multi-line whose continuation **dedents to the object's own indent** | ❌ `Invalid indentation was detected!` |
+  | multi-line indented to the **same level as the properties** | ⚠️ **opens, silently corrupt** — the properties are swallowed *into the DAX* and never set |
+
+  **The rule, stated positively:** an expression is either **entirely on the `=` line**, or it
+  **starts on the line after `=`** and every one of its lines is indented **strictly deeper than the
+  object's properties** (properties at declaration+1 tab ⇒ expression at declaration+2). Inside that
+  block, blank lines are legal and preserved. Mixing the two — text after `=` *and* continuation
+  lines — is what kills the model, because TMDL commits to single-line mode the moment it sees text
+  after `=`, and then every following line must be a property or a child object.
+
+  Microsoft documents exactly this: *"If multi-line, they must be located in the line immediately
+  following the property or object declaration… Multi-line expressions must be indented one level
+  deeper to the parent object properties… Vertical whitespaces (blank lines without whitespaces) are
+  allowed and are considered part of the expression."*
+  ([TMDL overview → Expressions](https://learn.microsoft.com/en-us/analysis-services/tmdl/tmdl-overview))
+
+  **Which to write.** Both are safe, so choose on reviewability: single-line for anything that fits,
+  multi-line (starting *after* the `=`) for a `VAR`/`RETURN` measure that is genuinely unreadable on
+  one line. The committed corpus in this repo is 100 % single-line (167 TMDL documents, zero
+  multi-line expressions, zero backtick blocks) — so single-line remains the **house default**, but
+  it is a style choice now, not a format constraint.
+
+  **The under-indented case deserves its own fear, and it is broader than it looks.** It is the only
+  one that *passes* the parser. The contract is that a multi-line expression must be indented **one
+  level deeper than the object's properties** — so if it starts at the *property* level instead,
+  **every** property the object declares after it is read as DAX and silently never set. Measured:
+  `formatString`, a bare `isHidden` (shortcut syntax, no colon), a documented `isKey: true`, an
+  `annotation` — all absorbed, `IsHidden`/`IsKey` come back `False`, and AMO reports nothing.
+  Do not think of this as "watch out for `formatString`"; think of it as "the indent decides".
+
+  ✅ **Gated offline by the real parser, not by a re-implementation of it:**
+  `python scripts/check_datamodel.py <model>` runs the **TMDL oracle**
+  (`scripts/tmdl_oracle.py` + `tools/tmdl_oracle/`, needs the .NET SDK), which hands the model to
+  `TmdlSerializer.DeserializeDatabaseFromFolder` — the parser Desktop itself uses — and reports
+  `TMDL_PARSER_REJECTED` with AMO's own document and line number, exiting **1**. Whatever AMO
+  accepts is accepted, by construction, so a false positive is structurally impossible.
+  `TMDL_BOM` and `TMDL_UNREADABLE` remain text checks, deliberately *stricter* than AMO (see the
+  BOM entry below).
+
+  **Why an oracle:** issue #254's gate was hand-written three times — a property-name allowlist,
+  then the documented INDENTATION contract, then an AMO-plus-reflection readback — and blind review
+  broke all three, each time with false negatives *and* **false positives on valid TMDL**: a
+  case-different `IsHidden`, a second `tablePermission` in one role, an M query returning a variable
+  named `isRemoved`. Re-implementing someone else's grammar is a completeness claim, and a
+  completeness claim over a parser you do not own cannot be finished by patching. Asking the parser
+  can.
+
+  ⚠️ **The gate needs `dotnet`, and it FAILS CLOSED.** If the oracle cannot run,
+  `check_datamodel.py` exits **3 — unassessable** — never 0, and `check_unit.py` records
+  `NOT_CHECKED` rather than PASS. `--no-oracle` is the explicit opt-out. Never read "could not run"
+  as a clean model: while that was a mere warning, a machine without the .NET SDK exited **0** on
+  TMDL that Desktop cannot open.
+
+  ❌ **The under-indented case is NOT gated, and cannot be by readback.** ✅ Measured 2026-08-30:
+  the two documents below differ only in the expression body's indent — on the left `isHidden` is a
+  swallowed property, on the right it is ordinary expression content — and AMO returns
+  `Expression='1\nisHidden'`, `IsHidden=False` for **both**, byte for byte.
+
+  ```tmdl
+  	measure Probe =        |  	measure Probe =
+  		1                  |  			1
+  		isHidden           |  			isHidden
+  ```
+
+  The parser strips the common indent, and that indent is the only carrier of the distinction, so no
+  readback can separate them. Treat this as an **authoring rule you must follow by hand**, not
+  something a gate will catch for you: indent a multi-line expression one level deeper than the
+  object's properties. Issue #404 tracks the search for a mechanism.
+
+- ❌ **`ref table X` in `model.tmdl` must quote the name EXACTLY as the table's own declaration does
+  — and a mismatch fails with a message that tells you nothing.** ✅ Measured 2026-08-30 (AMO
+  19.84.1), a clean 2×2 on a synthetic model:
+
+  | `tables/Foo.tmdl` declares | `model.tmdl` refs | verdict |
+  |---|---|---|
+  | `table Foo` | `ref table Foo` | ✅ opens |
+  | `table 'Foo'` | `ref table 'Foo'` | ✅ opens |
+  | `table Foo` | `ref table 'Foo'` | ❌ `TomInternalException: An internal error has occured.` |
+  | `table 'Foo'` | `ref table Foo` | ❌ same |
+
+  Quoting a name that needs no quotes is legal — what is fatal is quoting it in **one** of the two
+  places. The exception carries **no document, no line and no object name**; the stack (`TmdlObject.
+  AddContentOf` → `TmdlSerializationHelper.MergeAndGroupChildObject`) is the only clue, so bisecting
+  by table is the practical way to localise it. This is not hypothetical: the oracle found it in a
+  **committed, shipped example** in this repo (`examples/airline-alliance-activity`, whose
+  `model.tmdl` said `ref table 'Date'` against `table Date`), where three rounds of text-based
+  gating had never looked. The gate reports it as `TMDL_PARSER_REJECTED`.
+
+- ⚠️ **A UTF-8 BOM on a `.tmdl` file is invisible to every parser except the one that matters.**
+  `TmdlSerializer` accepts it happily; Power BI Desktop's *project reader* does not
+  (`UTF8EncodingThrowOnBOM.CheckBom` → *"Only text with UTF8 encoding without BOM is supported"*)
+  and the project simply does not open — see
+  [`pbip-model-refresh`](../pbip-model-refresh/SKILL.md). So an AMO round-trip is **not** sufficient
+  evidence that a file you wrote is loadable. Always write with `encoding="utf-8"` in Python or
+  `-Encoding utf8NoBOM` in PowerShell; `check_datamodel.py` now reports `TMDL_BOM` rather than
+  quietly stripping it, because normalising it in memory made a broken deliverable pass the gate.
+
+- ❌ **Known gap — TMDL also enforces an ORDERING rule inside an object, and nothing gates it.**
+  Measured alongside the above: `source =` followed by `mode: import` is rejected (*"Invalid
+  indentation was detected!"*) while `source =` followed by `annotation Foo = Bar` is accepted, and
+  a nested multi-line `formatStringDefinition =` followed by `isHidden` is rejected (*"The keyword
+  'isHidden' is neither a property nor an object in the current context"*). This is the same family
+  as the documented "every property must precede every annotation" rule above. Consequence in
+  practice: **put every scalar property BEFORE any expression-valued property** (`source`,
+  `formatStringDefinition`, `detailRowsDefinition`), and annotations last. `check_datamodel.py`
+  does **not** detect violations of this — treat a clean gate as silent on ordering.
 - **A measure's suffix-qualified name must never collide with any column name in the same table**
   (e.g. `measure 'X'` next to `column 'X'`, even if one is hidden). Tabular's naming rule shares one
   namespace between columns and measures per table — a bare-named "value" measure over a same-named
