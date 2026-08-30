@@ -138,16 +138,26 @@ def _resolved(path: Path) -> Path:
     return path.expanduser().resolve()
 
 
-def _same_dir(a: Path, b: Path) -> bool:
-    """Do these two spellings name the SAME directory on disk? Never a string comparison."""
+def _same_dir(a: Path, b: Path) -> bool | None:
+    """Do these two spellings name the SAME directory on disk? Never a string comparison.
+
+    Three-valued on purpose. `None` means the FILESYSTEM could not answer - a permission failure, a
+    disconnected share - which is not the same as "no", and collapsing it to `False` is how an
+    unignored in-repository output was allowed through: with every comparison erroring, containment
+    looked disproven rather than unproven and the guard proceeded (measured: `main()` exit 0, a
+    customer workbook name written to `parse-sweep.json`, `git status` staging it).
+    """
     try:
         return os.path.samefile(a, b)
     except OSError:
-        return False
+        return None
 
 
-def _identity_relative(node: Path, root: Path) -> list[str] | None:
-    """Segments from `root` down to `node` by FILE IDENTITY, or None when `root` does not hold it.
+def _identity_relative(node: Path, root: Path) -> tuple[list[str] | None, bool]:
+    """`(segments from root down to node, every comparison answered)` - by FILE IDENTITY, not text.
+
+    The second element is what separates "walked the whole ancestry and this really is not inside
+    `root`" from "could not tell". Only the first is safe to act on.
 
     Windows can spell one directory several ways that are not lexically relative to each other, and
     both `absolute()` and `resolve()` preserve every one of them, so comparing `--out` against
@@ -164,11 +174,15 @@ def _identity_relative(node: Path, root: Path) -> list[str] | None:
     """
     segments: list[str] = []
     current = node
+    answered = True
     while True:
-        if _same_dir(current, root):
-            return list(reversed(segments))
+        same = _same_dir(current, root)
+        if same is None:
+            answered = False
+        elif same:
+            return list(reversed(segments)), answered
         if current.parent == current:
-            return None
+            return None, answered
         segments.append(current.name)
         current = current.parent
 
@@ -184,19 +198,28 @@ def _canonical_probe_target(out: Path) -> tuple[Path, Path] | None:
     stages `linkdir/sweepout/...`. Asked from `<repo>` the same git answers correctly.
 
     Containment is then decided by `_identity_relative`, never by path spelling, and the probe is
-    rebuilt from the ROOT's own spelling so git is asked about a path it can actually see.
+    rebuilt from the ROOT's own spelling so git is asked about a path it can actually see. That
+    rebuild is load-bearing: with `subst Z: <repo>`, `rev-parse` at `Z:\\` reports the long
+    `C:\\...` toplevel and `check-ignore` answers the canonical path (exit 0) while refusing the
+    `Z:\\` spelling outright (exit 128) - so probing what the caller typed would refuse a plainly
+    ignored output.
 
-    Fails closed on a broken repository. A `.git` entry whose directory yields no work-tree root
-    means git could not answer, not that there is nothing here: an ancestor with `.git` present and
-    `rev-parse` failing (a dubious-ownership refusal over UNC, a stale gitdir pointer, a damaged
-    config) previously skipped `check-ignore` altogether and permitted a write inside a known
-    checkout. Unanswerable is unsafe - the same rule the `check-ignore` probe already follows.
+    EVERY unanswerable probe here is a refusal, not a shrug. Three of them were fail-open:
+
+    * a `.git` entry found with `exists()`, which FOLLOWS a reparse point - a dangling `.git`
+      junction reported absent while `rev-parse` failed, so the broken checkout was skipped and an
+      unignored output was written and staged. `os.path.lexists` asks about the ENTRY.
+    * an identity comparison that errored, collapsed to "not contained" (see `_same_dir`).
+    * an ancestry with no examinable directory at all - a nonexistent drive, a disconnected share -
+      where nothing could be looked at and the run proceeded anyway.
     """
     lexical = _lexical(out)
     tail: list[str] = []
     node = lexical
+    examined = False
     while True:
         if node.is_dir():
+            examined = True
             probe = _git(["rev-parse", "--show-toplevel"], node)
             root = (
                 Path(probe.stdout.strip())
@@ -204,20 +227,30 @@ def _canonical_probe_target(out: Path) -> tuple[Path, Path] | None:
                 else None
             )
             if root is None:
-                if (node / ".git").exists():
+                if os.path.lexists(node / ".git"):
                     detail = "git could not be run" if probe is None else (probe.stderr.strip() or "no work tree")
                     raise OutputPathNotIgnoredError(
                         f"{node} holds a .git entry but git could not identify a work tree there "
                         f"({detail}), so {lexical} cannot be proven ignored"
                     )
             else:
-                relative = _identity_relative(node, root)
+                relative, answered = _identity_relative(node, root)
                 if relative is not None:
                     return root, root.joinpath(*relative, *reversed(tail))
+                if not answered:
+                    raise OutputPathNotIgnoredError(
+                        f"the filesystem could not say whether {node} lies inside the work tree at "
+                        f"{root}, so {lexical} cannot be proven ignored"
+                    )
         if node.parent == node:
-            return None
+            break
         tail.append(node.name)
         node = node.parent
+    if not examined:
+        raise OutputPathNotIgnoredError(
+            f"no directory in the ancestry of {lexical} could be examined, so it cannot be proven ignored"
+        )
+    return None
 
 
 def unignored_output_paths(out: Path, artifacts: Sequence[str] = OUTPUT_ARTIFACTS) -> list[Path]:

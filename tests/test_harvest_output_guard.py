@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -759,25 +760,132 @@ def test_the_relative_dot_dot_spelling_of_the_remedy_still_works(lab, monkeypatc
     assert "REFUSING" not in (result.stdout + result.stderr)
 
 
-def test_the_probe_is_rebuilt_from_the_work_tree_root_spelling(lab) -> None:
-    """A CONTRACT test, and labelled as one - it pins a defence, not an observed behaviour.
+@WINDOWS_ONLY
+def test_the_canonical_probe_is_what_lets_a_substituted_drive_through(lab) -> None:
+    """Rebuilding the probe from the work-tree ROOT's spelling, proved by behaviour not by contract.
 
-    Measured on both platforms: `git check-ignore` answers an aliased spelling exactly as it answers
-    the plain one (`\\\\?\\` and 8.3 on Windows with git 2.55.0, a symlinked root on Linux with
-    2.43.0), or refuses to answer it at all (`\\\\localhost\\c$`, where `rev-parse` fails first and
-    the run is already refused). So rebuilding the probe from the ROOT's own spelling changes no
-    verdict this suite can observe, and no end-to-end test can kill it - said plainly rather than
-    dressed up as coverage.
+    This started life as a contract test, on the measured grounds that git answers every aliased
+    spelling exactly as it answers the plain one - so the rebuild changed no observable verdict and
+    no mutation could kill it. That was wrong, and `subst` is the case that shows it:
 
-    It is kept because the one failure this guard cannot survive is git answering PERMISSIVELY for a
-    spelling it half-understands, and asking about a path the work tree itself named removes that
-    whole class. Pinned here so it cannot be dropped without a deliberate decision.
+        subst Z: <repo>                        exit 0
+        git -C Z:\\ rev-parse --show-toplevel   exit 0, reports the long C:\\...\\repo
+        check-ignore <canonical ignored path>  exit 0   -> ignored
+        check-ignore Z:\\_sweep-p14\\...         exit 128 -> UNANSWERABLE
+
+    Probing what the caller typed would therefore raise and refuse a plainly ignored `--out`;
+    probing the path rebuilt from the root's own spelling answers it correctly. So the assertion
+    below is that an ignored output on a substituted drive PROCEEDS.
+
+    Windows only - `subst` has no POSIX equivalent, and no discriminating case for the rebuild is
+    known there, so on Linux this defence remains unpinned. Said, not hidden.
     """
-    alias = lab.linked_repo / "_sweep-contract"
-    assert alias != lab.repo / "_sweep-contract", "fixture proves nothing: the alias is the plain spelling"
-    root, probe = h._canonical_probe_target(alias)  # pylint: disable=protected-access
-    assert _same_path(root, lab.repo), f"the work tree root was not resolved to the checkout: {root}"
-    assert probe == lab.repo / "_sweep-contract", f"the probe kept the caller's spelling: {probe}"
+    letter = _free_drive_letter()
+    if letter is None:
+        pytest.skip("no free drive letter available for subst")
+    made = subprocess.run(["subst", f"{letter}:", str(lab.repo)], capture_output=True, text=True, check=False)
+    if made.returncode != 0:
+        pytest.skip(f"subst failed: {made.stdout.strip()} {made.stderr.strip()}")
+    try:
+        drive = Path(f"{letter}:\\")
+        canonical = lab.repo / "_sweep-p14" / "assets" / "harvested-workbook.twbx"
+        assert _git(["check-ignore", "-q", "--", str(canonical)], lab.repo).returncode == 0, (
+            "fixture proves nothing: the canonical path is not ignored here"
+        )
+        assert _git(["check-ignore", "-q", "--", str(drive / "_sweep-p14" / "assets")], lab.repo).returncode not in (
+            0,
+            1,
+        ), "fixture proves nothing: git can answer the substituted-drive spelling, so nothing discriminates"
+
+        assert h.refuse_unignored_output(drive / "_sweep-p14", allow_unignored=False) is False
+        assert h.refuse_unignored_output(drive / "leaky-p14", allow_unignored=False) is True
+    finally:
+        subprocess.run(["subst", f"{letter}:", "/D"], capture_output=True, check=False)
+
+
+def _free_drive_letter() -> str | None:
+    """A drive letter nothing is using, for `subst`. None when the machine has none free."""
+    return next((letter for letter in "ZYXWVUT" if not Path(f"{letter}:\\").exists()), None)
+
+
+def test_a_dangling_git_link_is_still_a_checkout(lab) -> None:
+    """`exists()` FOLLOWS a reparse point, so a dangling `.git` link reports absent.
+
+    The checkout marker is then missed, the failed `rev-parse` is treated as "nothing here", and an
+    unignored output is written and staged (measured before the fix: CLI exit 0, wrote). The entry
+    exists; only its target does not. `os.path.lexists` asks the question that matters.
+    """
+    gone = lab.repo.parent / "gone-gitdir"
+    gone.mkdir()
+    shutil.rmtree(lab.repo / ".git")
+    _link_dir(lab.repo / ".git", gone)
+    os.rmdir(gone)
+    try:
+        assert not (lab.repo / ".git").exists(), "fixture proves nothing: the link is not dangling"
+        assert os.path.lexists(lab.repo / ".git"), "fixture proves nothing: the entry is gone entirely"
+        assert _git(["rev-parse", "--show-toplevel"], lab.repo).returncode != 0, "fixture: rev-parse must fail"
+
+        assert h.refuse_unignored_output(lab.repo / "leaky-dangling", allow_unignored=False) is True
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"),
+                "--out",
+                "leaky-dangling",
+                "--skip-download",
+            ],
+            cwd=lab.repo,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 2, f"the CLI wrote into a dangling-.git checkout:\n{result.stdout}{result.stderr}"
+        assert not (lab.repo / "leaky-dangling").exists()
+    finally:
+        _unlink_dir(lab.repo / ".git")
+
+
+def test_an_identity_comparison_that_cannot_answer_is_treated_as_unsafe(lab, monkeypatch) -> None:
+    """A filesystem that will not say whether two paths are the same has not said "no".
+
+    Collapsing that `OSError` to `False` made containment look DISPROVEN rather than unproven, so
+    `_canonical_probe_target` reported "no work tree holds this" and the run proceeded - measured
+    before the fix: exit 0, a customer workbook name in `parse-sweep.json`, `git status` staging it.
+
+    The `--out` here is plainly unignored, and the control below proves the guard refuses it for the
+    ordinary reason first, so this cannot pass merely because the path was bad.
+    """
+    assert h.refuse_unignored_output(lab.repo / "leaky-samefile", allow_unignored=False) is True, "control"
+
+    def denied(_a, _b):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(os.path, "samefile", denied)
+    with pytest.raises(h.OutputPathNotIgnoredError):
+        h.unignored_output_paths(lab.repo / "leaky-samefile")
+    assert h.refuse_unignored_output(lab.repo / "leaky-samefile", allow_unignored=False) is True
+    assert h.refuse_unignored_output(lab.repo / "_sweep-samefile", allow_unignored=False) is True, (
+        "an IGNORED path must also refuse while identity is unprovable - unanswerable is unsafe"
+    )
+
+
+@WINDOWS_ONLY
+def test_an_ancestry_with_nothing_to_examine_is_treated_as_unsafe(lab) -> None:
+    """If not one directory above `--out` can be looked at, nothing about it has been established.
+
+    Both of these previously proceeded. POSIX has no equivalent - `/` always exists, so there is
+    always something to examine - hence Windows only rather than a synthetic stub.
+    """
+    letter = _free_drive_letter()
+    if letter is None:
+        pytest.skip("no unused drive letter to point at")
+    assert not Path(f"{letter}:\\").exists(), "fixture proves nothing: the drive exists"
+
+    for target in (Path(f"{letter}:\\nowhere\\out"), Path("\\\\no-such-host-x9\\share\\out")):
+        assert h.refuse_unignored_output(target, allow_unignored=False) is True, f"{target} was allowed"
+    assert h.refuse_unignored_output(lab.outside / "sweep", allow_unignored=False) is False, (
+        "control: a real directory outside the checkout must still proceed"
+    )
 
 
 @WINDOWS_ONLY
