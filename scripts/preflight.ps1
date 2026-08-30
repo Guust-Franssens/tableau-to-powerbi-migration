@@ -503,12 +503,16 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
     'VERIFY BY HAND: Options > Global > Privacy > "Always ignore Privacy Level settings"' `
     'Without it, any MULTI-SOURCE model blocks on a modal at open and an unattended refresh hangs with no error.'
 
-# --- .NET SDK (builds scripts/tmdl_validate for offline TMDL deserialization) ---
+# --- .NET SDK (builds tools/tmdl_oracle, the TMDL gate's parser) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
 # ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
 # check could never pass. The .NET SDK is still needed to build/run the offline validator, but it does
 # NOT prove AMO/TOM or ADOMD assemblies exist in the NuGet cache; those file checks live below.
-Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the offline TMDL structural validator (tmdl_validate).'
+#
+# Since #254 this is load-bearing for a GATE, not only for an optional validator:
+# `check_datamodel.py` runs the TMDL oracle (tools/tmdl_oracle) to ask TmdlSerializer itself whether
+# each model parses. Without `dotnet` the gate degrades loudly and CI's `--require-oracle` fails.
+Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the TMDL oracle (tools/tmdl_oracle) that check_datamodel.py uses, and the per-example tmdl_validate helpers.'
 
 # --- AMO/TOM client assembly (the pbip-model-refresh skill's progress trace + ImageSave persist) ---
 # `dotnet` being on PATH proves only that a restore COULD run. It does not prove the restored package is

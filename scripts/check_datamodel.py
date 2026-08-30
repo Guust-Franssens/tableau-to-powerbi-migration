@@ -38,15 +38,18 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
   * duplicate scalar TMDL properties within one object
   * measure/column name collisions within one table file
   * empty measure expressions
-  * DAX/M expression blocks whose LINE LAYOUT the TMDL parser cannot read as intended - an
-    expression started on the `=` line and then continued onto the next, which makes Desktop
-    refuse to open the model, and an under-indented multi-line expression, which parses cleanly
-    while silently swallowing the object's own properties
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
   * legacy BIFF8 `.xls` partitions with a resolvable local source: their navigation key and type
     conversion culture, which otherwise fail or silently corrupt rows at refresh
 
-A clean result does NOT prove the model opens; it only excludes these structural classes.
+On top of those text checks it runs the TMDL ORACLE (`scripts/tmdl_oracle.py`, needs the .NET SDK),
+which hands each model to `TmdlSerializer` - the parser Power BI Desktop itself uses - and then
+reads the parse back to catch the one failure the parser cannot report: a property written at the
+wrong indent, silently swallowed into the preceding DAX/M expression while the document still
+parses clean. `--require-oracle` (used by CI) turns "the oracle could not run" into a failure
+instead of a warning.
+
+A clean result does NOT prove the model refreshes; it only excludes these structural classes.
 """
 
 from __future__ import annotations
@@ -62,11 +65,11 @@ from pathlib import Path
 from check_empty_model import eval_m_path, model_parameters
 from tmdl_checks import (
     TmdlFinding,
-    check_tmdl_expressions,
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
 )
+from tmdl_oracle import OracleUnavailable, check_models
 
 # Re-exported so `from check_datamodel import ...` keeps working for callers and tests that
 # predate the split of the TMDL half into tmdl_checks.
@@ -75,7 +78,6 @@ __all__ = [
     "check_datamodel",
     "check_model",
     "check_model_counted",
-    "check_tmdl_expressions",
     "check_tmdl_model",
     "check_tmdl_text",
     "find_compact_filters",
@@ -797,12 +799,52 @@ def check_datamodel(model_dir: Path) -> tuple[list[Finding], int, list[TmdlFindi
     return m_findings, m_scanned, tmdl_findings, tmdl_scanned
 
 
+def _run_oracle(targets: list[Path], mode: str) -> tuple[int, bool]:
+    """Run the TMDL oracle over every target; returns (problems reported, ran to completion).
+
+    "Could not run" is never silently equivalent to "clean": it is a warning by default and a
+    failure under --require-oracle, which is what CI uses.
+    """
+    if mode == "off":
+        log.warning("TMDL ORACLE SKIPPED (--no-oracle) - expression layout was NOT checked.")
+        return 0, False
+    try:
+        findings, inspected = check_models(targets)
+    except OracleUnavailable as exc:
+        level = log.error if mode == "require" else log.warning
+        level("TMDL ORACLE COULD NOT RUN - expression layout was NOT checked. This is NOT a pass.\n  %s", exc)
+        return (1, False) if mode == "require" else (0, False)
+    by_model: dict[Path, list[TmdlFinding]] = {}
+    for finding in findings:
+        by_model.setdefault(finding.file, []).append(finding)
+    for _, group in sorted(by_model.items()):
+        log.error("TMDL PARSER/READBACK ERRORS")
+        for finding in group:
+            log.error("%s", finding.render(REPO_ROOT))
+    if inspected == 0 and mode == "require":
+        log.error("TMDL ORACLE INSPECTED NOTHING - no definition/ folder in any target. This is NOT a pass.")
+        return 1, False
+    log.info("TMDL oracle: %d model(s) handed to TmdlSerializer (AMO), %d problem(s).", inspected, len(findings))
+    return len(findings), True
+
+
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-branches
     """CLI entry point: check every requested model and exit non-zero if anything is structurally wrong."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="*", type=Path, help="a .SemanticModel, or a folder containing some")
     parser.add_argument("--all", action="store_true", help="check every model in every migration tree")
+    oracle = parser.add_mutually_exclusive_group()
+    oracle.add_argument(
+        "--require-oracle",
+        action="store_true",
+        help="fail if the TMDL oracle cannot run (needs the .NET SDK); this is what CI uses",
+    )
+    oracle.add_argument(
+        "--no-oracle",
+        action="store_true",
+        help="skip the TMDL oracle entirely - expression layout is then NOT checked",
+    )
     args = parser.parse_args(argv)
 
     targets: list[Path] = []
@@ -854,10 +896,14 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         for model in empty_tmdl:
             log.warning("  %s", model)
 
+    mode = "require" if args.require_oracle else ("off" if args.no_oracle else "auto")
+    oracle_problems, oracle_ran = _run_oracle(targets, mode)
+    total += oracle_problems
+
     if total:
         log.error(
-            "\n%d problem(s) across %d model(s).\nThese are dependency-free structural checks for "
-            "defects that otherwise surface later as opaque Power BI Desktop model-load failures.",
+            "\n%d problem(s) across %d model(s).\nThese are structural checks for defects that "
+            "otherwise surface later as opaque Power BI Desktop model-load failures.",
             total,
             len(targets),
         )
@@ -872,10 +918,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         return 1
     log.info(
         "Data model OK - %d M expression(s) and %d TMDL document(s) across %d model(s), no structural "
-        "problems found.\n  NOTE: structural checks only; a clean result does not prove the model opens.",
+        "problems found.\n  NOTE: structural checks only%s; a clean result does not prove the model "
+        "refreshes.",
         m_scanned_total,
         tmdl_scanned_total,
         len(targets),
+        "" if oracle_ran else ", and the TMDL oracle did NOT run",
     )
     return 0
 

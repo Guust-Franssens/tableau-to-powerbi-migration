@@ -23,6 +23,15 @@ jobs:
         with:
           enable-cache: true
 
+      - uses: actions/setup-dotnet@v4
+        # The TMDL oracle (tools/tmdl_oracle) hands each semantic model to TmdlSerializer - the
+        # parser Power BI Desktop itself uses - instead of re-implementing the TMDL grammar in
+        # Python for a third time (issue #254). AMO's netcore package is genuinely cross-platform:
+        # measured 2026-08-30, the helper builds and deserializes on Ubuntu 24.04 under .NET 9, so
+        # the gate keeps full teeth on this runner rather than degrading to a text scan.
+        with:
+          dotnet-version: '9.0.x'
+
       - name: Install dependencies
         # uv.lock is deliberately gitignored (it resolves to internal package-feed URLs), so this
         # resolves fresh rather than restoring a committed lockfile.
@@ -63,7 +72,9 @@ jobs:
         run: uv run python scripts/set_data_folder.py --check
 
       - name: Data model gate - catch M and TMDL structural defects first
-        run: uv run python scripts/check_datamodel.py --all
+        # --require-oracle: "the .NET SDK was missing so TMDL layout went unchecked" must fail CI,
+        # not pass quietly. Locally the same command degrades to a loud warning instead.
+        run: uv run python scripts/check_datamodel.py --all --require-oracle
 
       - name: Navigation index covers agent-facing docs and gates
         run: uv run python scripts/check_navigation_index.py

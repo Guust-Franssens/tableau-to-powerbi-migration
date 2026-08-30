@@ -109,16 +109,47 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   `annotation` — all absorbed, `IsHidden`/`IsKey` come back `False`, and AMO reports nothing.
   Do not think of this as "watch out for `formatString`"; think of it as "the indent decides".
 
-  ✅ **Gated offline:** `python scripts/check_datamodel.py <model>` (checks live in
-  `scripts/tmdl_checks.py`) reports `TMDL_EXPRESSION_CONTINUATION`, `TMDL_EXPRESSION_UNINDENTED`,
-  `TMDL_EXPRESSION_ABSORBS_PROPERTY`, `TMDL_MISPLACED_DESCRIPTION`, `TMDL_UNTERMINATED_EXPRESSION`,
-  `TMDL_BOM` and `TMDL_UNREADABLE`, exiting **1** on any finding. The absorption check enforces the
-  **indentation contract**, not a list of property names — an earlier revision matched known names
-  and so missed a bare `isHidden`, missed `isKey:`, and was structurally unable to catch a property
-  it had never heard of. It agrees with the real parser on 42 variants and fires on none of the 16
-  committed example models (167 TMDL docs) nor a 58-model / 471-document estate run. Run it
-  **before** the first Desktop open — that is the whole point, since after the crash Desktop names
-  no file and no line.
+  ✅ **Gated offline by the real parser, not by a re-implementation of it:**
+  `python scripts/check_datamodel.py <model>` runs the **TMDL oracle**
+  (`scripts/tmdl_oracle.py` + `tools/tmdl_oracle/`, needs the .NET SDK), which hands the model to
+  `TmdlSerializer.DeserializeDatabaseFromFolder` — the parser Desktop itself uses — and reports
+  `TMDL_PARSER_REJECTED` with AMO's own document and line number, exiting **1**. It then reads the
+  parse back to catch the one failure that parser *cannot* report, `TMDL_EXPRESSION_ABSORBS_PROPERTY`:
+  the document is well-formed, so nothing throws, and the property is simply gone. The vocabulary it
+  compares against is taken by **reflection over the TOM type**, so a property nobody wrote down is
+  still recognised. `TMDL_BOM` and `TMDL_UNREADABLE` remain text checks, deliberately *stricter*
+  than AMO (see the BOM entry below).
+
+  **Why an oracle:** issue #254 shipped a hand-written TMDL grammar twice — first matching property
+  NAMES, then enforcing the documented INDENTATION contract — and blind review broke both, each time
+  with false negatives *and* false positives. The indentation version capped one level at a tab, so
+  the same absorption indented **five or eight spaces** sailed through; it rejected the perfectly
+  valid `IsHidden` (TMDL keywords are case-insensitive) and the second `tablePermission` in a role.
+  Re-implementing someone else's grammar is a completeness claim, and a completeness claim over a
+  parser you do not own cannot be finished by patching. Asking the parser can.
+
+  ⚠️ **This means the gate needs `dotnet`.** Without it `check_datamodel.py` degrades **loudly** —
+  it says the layout was not checked and that this is not a pass. CI passes `--require-oracle`,
+  which turns that into a failure. Never read a "could not run" line as a clean model.
+
+- ❌ **`ref table X` in `model.tmdl` must quote the name EXACTLY as the table's own declaration does
+  — and a mismatch fails with a message that tells you nothing.** ✅ Measured 2026-08-30 (AMO
+  19.84.1), a clean 2×2 on a synthetic model:
+
+  | `tables/Foo.tmdl` declares | `model.tmdl` refs | verdict |
+  |---|---|---|
+  | `table Foo` | `ref table Foo` | ✅ opens |
+  | `table 'Foo'` | `ref table 'Foo'` | ✅ opens |
+  | `table Foo` | `ref table 'Foo'` | ❌ `TomInternalException: An internal error has occured.` |
+  | `table 'Foo'` | `ref table Foo` | ❌ same |
+
+  Quoting a name that needs no quotes is legal — what is fatal is quoting it in **one** of the two
+  places. The exception carries **no document, no line and no object name**; the stack (`TmdlObject.
+  AddContentOf` → `TmdlSerializationHelper.MergeAndGroupChildObject`) is the only clue, so bisecting
+  by table is the practical way to localise it. This is not hypothetical: the oracle found it in a
+  **committed, shipped example** in this repo (`examples/airline-alliance-activity`, whose
+  `model.tmdl` said `ref table 'Date'` against `table Date`), where three rounds of text-based
+  gating had never looked. The gate reports it as `TMDL_PARSER_REJECTED`.
 
 - ⚠️ **A UTF-8 BOM on a `.tmdl` file is invisible to every parser except the one that matters.**
   `TmdlSerializer` accepts it happily; Power BI Desktop's *project reader* does not
