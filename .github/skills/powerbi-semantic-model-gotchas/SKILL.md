@@ -1156,13 +1156,22 @@ payload whose check set was recomputed — and the gate's own source comment cla
 Filed upstream as [`tableau-fabric-skills#183`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/183):
 it is a regression from the fix for upstream #177, which silently retracts the disclosure #141 added.
 
-**The only offline proof that a model opens** is the parser Desktop itself uses,
-`TmdlSerializer.DeserializeDatabaseFromFolder` — wired here as `scripts/tmdl_oracle.py` and reached
-through `python scripts/check_datamodel.py` or `check_unit.py --scope data-model`. Note what that
-gate does differently: it exits **3 (`UNASSESSABLE`)** rather than `0` when it cannot run, which is
-the discipline `openability_selfcheck` does not apply to its own skipped checks. And a clean oracle
-is still *necessary, not sufficient* — see this file's header, and §6 for a model that passed every
-structural gate with every decimal inflated 493×.
+**No static gate settles openability, and the TMDL oracle is not the exception.** The strongest
+offline signal is the parser Desktop itself uses — `TmdlSerializer.DeserializeDatabaseFromFolder`,
+wired here as `scripts/tmdl_oracle.py` and reached through `python scripts/check_datamodel.py` or
+`check_unit.py --scope data-model`. Treat it as the **mandatory parser-level structural gate**, and
+note what it does better than the selfcheck: it exits **3 (`UNASSESSABLE`)** rather than `0` when it
+cannot run, which is the discipline `openability_selfcheck` does not apply to its own skipped checks.
+
+⚠️ **But "deserializes" is not "opens", and §4 of this file is the committed counterexample.** A model
+with **model-wide duplicate measure names** deserializes *cleanly* through
+`DeserializeDatabaseFromFolder` and Power BI Desktop then **refuses to open the `.pbip`** — *"Could not
+add Measure with the name X because a Measure with the same name already exists"*. That shipped once
+and broke a Desktop open. A measure name equal to a column name in the same table fails the same way,
+at commit. `tools/tmdl_oracle/Program.cs` calls `DeserializeDatabaseFromFolder` and nothing else — no
+open, no commit — and says so in its own header. So the oracle is **necessary, not sufficient**;
+**only a cold Desktop open** settles openability, and even that proves nothing about rows: see this
+file's header, and §6 for a model that passed every structural gate with every decimal inflated 493×.
 
 ### RETRACTED: "the queue is unreachable and fails silently"
 

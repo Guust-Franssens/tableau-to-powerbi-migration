@@ -138,10 +138,11 @@ reasoning or self-report of success.
 Refuse to do a meaningful pass without these — flag it back rather than guessing:
 
 1. **`handover/<workbook>.json`** — the deterministic tier's own **claims** about what it built and
-   what it deferred (`viz_fidelity[]`, `model_translation_handoff`, `openability_selfcheck`, the
-   estate's `pending_gates`). Pass 0 classifies every row of it, and two other agents wait on that
-   classification. Without it you are reviewing the artifact with no record of what its builder
-   *believed* it was doing — which is exactly where the `status: "rebuilt"` blind spot hides.
+   deferred (`viz_fidelity[]`, `model_translation_handoff`, `openability_selfcheck`, the estate's
+   `pending_gates`): its account of itself, never verification. Pass 0 classifies every row of it,
+   and two other agents wait on that classification. Without it you are reviewing the artifact with
+   no record of what its builder *believed* it was doing — which is exactly where the
+   `status: "rebuilt"` blind spot hides.
 2. **`migration-spec.json`** — ground truth for what's *supposed* to exist (worksheet list, mark
    types, encodings, reference lines, filters, parameters). This is what makes your review
    structurally grounded instead of just "vibes-based pixel comparison." **NOT REQUIRED, and often
@@ -213,7 +214,9 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
      cite it.** It is a static scan of the *model's* TMDL text: blind to the report, blind to data,
      and blind to every check its `checks` map omits (absent = **not evaluated**, never passed). It
      shipped `ok: true` on **30 of 44** workbooks the same `report.json` recorded defects for
-     (2.339.0). Only the TMDL oracle proves a model opens — `check_unit.py --scope data-model`.
+     (2.339.0). No static gate settles openability: the TMDL oracle (`check_unit.py --scope
+     data-model`) is the mandatory parser-level gate and is itself necessary, not sufficient — only a
+     cold Desktop open does.
    - **Adjudicate each engine claim against the Tableau source/reference, never against the shipped
      visual alone.** The shipped visual was built from the claim, so agreement only proves the claim
      was followed. For a `false-claim`, cite the `.twb` shelves/encodings, migration-spec, or
@@ -222,12 +225,11 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
      and its output share a blind spot: if it believes a visual rebuilt correctly, **nothing else
      ever looks at it**. A defect found in a `rebuilt` row is the highest-value finding you can
      produce, because it is the class no other check covers.
-   - **Some deferrals must NOT be reversed**, and only you can tell. Measured, verbatim: *"table-calc
-     filter on 'Last' (LAST) is not reproduced: it runs after aggregation and HIDES marks, which
-     Power BI cannot express as a filter … 6 other table calc(s) share this view and would be
-     silently re-scoped if it were re-added as an ordinary filter."* Re-adding that changes **other
-     visuals' numbers**. A builder acting on the raw list would do exactly that; your classification
-     is what prevents it.
+   - **Some deferrals must NOT be reversed**, and only you can tell. A `LAST` table-calc filter runs
+     *after* aggregation and HIDES marks; re-adding it as an ordinary filter silently re-scopes the 6
+     other table calcs sharing that view and changes **other visuals' numbers**. A builder acting on
+     the raw list would do exactly that; your classification is what prevents it. The verbatim
+     handover entry and the mechanism live in the `powerbi-report-gotchas` skill.
 1. **Inventory/completeness pass** (cheap, mechanical). Scope each dashboard to **its own**
    worksheets: from that `dashboards[]` entry's zone tree, derive the worksheets *it actually
    references*, and confirm a corresponding PBI page exists with a visual for each of them. **Do NOT
@@ -331,10 +333,9 @@ question.
   underlying DAX was independently confirmed correct via `EVALUATE`. Before flagging a visual
   discrepancy from a screenshot alone, sanity-check with a second capture method or a direct DAX/data
   check — don't let a capture-tooling quirk become a false bug report.
-- **Tableau Public's canvas-rendered viz body defeats text-based Playwright locators.** `getByText`/
-  `getByRole` time out silently against in-viz labels because the content isn't real DOM, and the page
-  never reaches `networkidle`. Don't re-derive the recipe: `scripts/capture_tableau_reference.py`
-  implements it, and `docs/reference-capture.md` records it.
+- **Tableau Public renders the viz body on canvas, so text-based Playwright locators never resolve**
+  and the page never reaches `networkidle`. Don't re-derive the capture recipe —
+  `scripts/capture_tableau_reference.py` implements it and `docs/reference-capture.md` records it.
 - **Never grade a report you just helped build in the same conversation thread.** If your context
   already contains the build rationale, you're not providing independent review — ask the orchestrator
   to invoke you statelessly with only the ground-truth artifacts listed above.

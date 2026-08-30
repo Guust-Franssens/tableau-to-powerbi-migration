@@ -444,10 +444,13 @@ v1 duplicated `report.json`. **Deleted** (now pointers — copies drift on every
 paths it emitted, and nothing in it was handed to a parser. The same caution applies, harder, to
 `workbooks[].openability_selfcheck.ok`: a static scan of model TMDL *text*, blind to the report and
 to data, which shipped `ok: true` on **30 of 44** workbooks the same `report.json` recorded defects
-for (measured on `_runs/estate-2.339.0-20260829`). Only `TmdlSerializer.DeserializeDatabaseFromFolder`
-— `scripts/tmdl_oracle.py`, via `check_datamodel.py` / `check_unit.py --scope data-model` — proves a
-model opens. Full breakdown, including which of the `checks` omissions are vacuous and which are
-genuine: `.github/skills/powerbi-semantic-model-gotchas/SKILL.md` §8.
+for (measured on `_runs/estate-2.339.0-20260829`). The strongest offline signal is
+`TmdlSerializer.DeserializeDatabaseFromFolder` — `scripts/tmdl_oracle.py`, via `check_datamodel.py` /
+`check_unit.py --scope data-model` — but **that is a parser-level structural gate, necessary and not
+sufficient**: duplicate measure names deserialize cleanly there and Desktop still refuses to open the
+`.pbip`. Only a cold Desktop open settles it. Full breakdown, including which of the `checks`
+omissions are vacuous and which are genuine:
+`.github/skills/powerbi-semantic-model-gotchas/SKILL.md` §8.
 
 **Kept / added — each verified absent upstream:**
 
