@@ -435,6 +435,17 @@ back in a persona.
     "agentDescription":"Read-only reviewer that critiques…"}
    ```
 
+   ⚠️ **`transcriptPath` stopped being populated after 2026-07-31 — do not build on it.** The same
+   probe hook, same persona, same machine, logged 16 payloads: **5/5 carried a real
+   `…\events.jsonl` path on 07-31; 11/11 from 08-01 through 08-03 carried an empty string.** A clean
+   cutover, not intermittent. The cause was never established (no CLI version was recorded on either
+   side), so this is a measurement, not a diagnosis — but the shape above is the *07-31* shape, and
+   a hook that reads `transcriptPath` to locate a subagent's transcript would have silently degraded
+   to reading nothing. Treat every field here as **advisory and version-fragile**: re-measure before
+   depending on one, and fail loudly on an empty value rather than proceeding. Evidence retained
+   outside the repo (session `files/hook-probe-subagentstart-evidence.log`); the probe hook itself is
+   long gone, so re-measuring means re-installing it.
+
    **This does not change the §5 rule.** A hook can carry supplementary context, but it can still be
    disabled wholesale via `disableAllHooks`, so nothing whose absence is silent and harmful may move
    into it. Useful for *advisory* context; never for load-bearing rules.
