@@ -2,7 +2,7 @@
 purpose: run the deterministic tier over an ESTATE and turn its output into something a downstream
          agent tier can consume safely - a real exit code, collision-checked approvals, per-workbook
          handover slices, and a phase-timing record.
-usage:   python scripts/run_estate.py --input <folder-of-.twb/.twbx> --output <bundle-dir>
+usage:   python scripts/run_estate.py --input <folder-of-.twb/.twbx/.tds/.tdsx> --output <bundle-dir>
                                       [--approved-dax <file.json>] [--dry-run]
                                       [--accept-bundle-rewrite] [--accept-engine-version-change]
          python scripts/run_estate.py --slice-only --output <existing-bundle-dir>
@@ -29,8 +29,10 @@ things a conversation cannot be trusted to remember every time:
    `{calc name: DAX}` dict with no model scoping, and the seam carries it into *every* model build.
    Two workbooks with a same-named calc and different formulas therefore collide - and the names
    really are generic: a real 6-workbook run produced `Calculation2` (Tableau's auto-generated
-   default), `Rank`, `Size`, `Running Sum`. Measured 0 collisions in that sample, so this is a
-   LATENT hazard, not an observed one - which is exactly when a cheap check is worth having.
+   default), `Rank`, `Size`, `Running Sum`. That 6-workbook sample measured 0 collisions, which read
+   as a LATENT hazard - but at estate scale it is OBSERVED: a 52-asset run (engine 2.339.0,
+   2026-08-29) exited 4 `EXIT_COLLISION` on `calculation1`, claimed by two models with differing
+   formulas. Sample size, not luck, is what made it look latent.
 
 3. **`report.json` is ~14 KB per workbook** (83.4 KB measured for 6). At estate scale that is
    hundreds of KB of mostly-irrelevant context if handed whole to a per-workbook agent.
@@ -1026,7 +1028,12 @@ def check_blank_placeholders(out_dir: Path) -> dict:
 def build_parser() -> argparse.ArgumentParser:
     """The CLI surface, kept out of ``main`` so the run logic stays readable."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--input", type=Path, help="folder of .twb/.twbx to migrate")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        help="folder of .twb/.twbx/.tds/.tdsx to migrate - point it at ALL of them in ONE pass; "
+        "the engine migrates datasources before workbooks and feeds the result through ds_catalog",
+    )
     parser.add_argument("--output", type=Path, required=True, help="bundle output folder")
     parser.add_argument(
         "--engine",
