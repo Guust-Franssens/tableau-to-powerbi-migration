@@ -25,6 +25,7 @@ unambiguous on their own, and a conflict block always carries both.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
@@ -34,6 +35,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Built at runtime so this file never contains a literal marker and cannot flag itself.
 OPEN_MARKER = b"<" * 7 + b" "
 CLOSE_MARKER = b">" * 7 + b" "
+
+# All three line-ending conventions, CRLF first so it counts as ONE separator and line
+# numbers stay correct. Splitting on b"\n" alone let a lone-CR file hide a marker mid-"line".
+LINE_BREAK = re.compile(rb"\r\n|\r|\n")
 
 
 def tracked_files(root: Path = REPO_ROOT) -> list[str]:
@@ -61,7 +66,7 @@ def scan_for_markers(root: Path, names: Iterable[str]) -> tuple[list[str], list[
         except OSError as exc:
             unreadable.append(f"{name}: {exc.__class__.__name__}: {exc}")
             continue
-        for number, line in enumerate(blob.split(b"\n"), start=1):
+        for number, line in enumerate(LINE_BREAK.split(blob), start=1):
             if line.startswith(OPEN_MARKER) or line.startswith(CLOSE_MARKER):
                 shown = line[:60].decode("utf-8", "replace")
                 offenders.append(f"{name}:{number}: {shown}")
@@ -113,6 +118,32 @@ def test_a_bare_setext_underline_is_not_a_finding(tmp_path: Path) -> None:
     (tmp_path / "doc.md").write_bytes(b"Heading\n" + b"=" * 7 + b"\n\nbody\n")
 
     offenders, unreadable = scan_for_markers(tmp_path, ["doc.md"])
+
+    assert offenders == []
+    assert unreadable == []
+
+
+def test_every_line_ending_convention_is_scanned(tmp_path: Path) -> None:
+    """Splitting on b"\\n" alone let a lone-CR file hide a marker mid-"line"."""
+    for name, blob in {
+        "lf.txt": b"a\n" + OPEN_MARKER + b"HEAD\n",
+        "crlf.txt": b"a\r\n" + OPEN_MARKER + b"HEAD\r\n",
+        "cr.txt": b"a\r" + OPEN_MARKER + b"HEAD\r",
+    }.items():
+        (tmp_path / name).write_bytes(blob)
+        offenders, unreadable = scan_for_markers(tmp_path, [name])
+
+        assert unreadable == []
+        assert len(offenders) == 1, f"{name} escaped the scan"
+        # CRLF must count as ONE separator, or reported line numbers drift.
+        assert offenders[0].startswith(f"{name}:2:"), offenders[0]
+
+
+def test_a_marker_not_at_line_start_is_not_a_finding(tmp_path: Path) -> None:
+    """Prose may legitimately quote a marker; only a line-start occurrence is a failed merge."""
+    (tmp_path / "prose.md").write_bytes(b"see " + OPEN_MARKER + b"HEAD in the docs\n")
+
+    offenders, unreadable = scan_for_markers(tmp_path, ["prose.md"])
 
     assert offenders == []
     assert unreadable == []
