@@ -114,20 +114,88 @@ def _collected_test_files() -> list[Path]:
     return files
 
 
-def _sub_second_budget_tests() -> set[str]:
-    """Re-derive, from the suite's own AST, every test that asserts a sub-second wall-clock budget.
+def _marked(func: ast.FunctionDef, marker: str) -> bool:
+    """Whether a test function carries `@pytest.mark.<marker>` in its own source."""
+    for decorator in func.decorator_list:
+        for node in ast.walk(decorator):
+            if isinstance(node, ast.Attribute) and node.attr == marker:
+                return True
+    return False
 
-    The shape being looked for is `elapsed = time.monotonic() - started; assert elapsed < 0.5`, in
-    either spelling - the comparison may read the clock inline, or through a local assigned from it.
-    Deriving it beats trusting a hand-written list: a rename or a brand-new budget test both show up
-    as drift instead of quietly leaving a flaky test in the parallel tier.
+
+def _marked_timing(func: ast.FunctionDef) -> bool:
+    """Whether a test function carries `@pytest.mark.timing` in its own source."""
+    return _marked(func, "timing")
+
+
+def _launches_the_live_desktop(func: ast.FunctionDef) -> bool:
+    """Whether a test drives a real WPF window through UI Automation.
+
+    Two spellings exist and both are stable: calling the module's `_run_probe_against_wpf_modal`
+    helper, or launching the fixture app directly, which is identifiable by the `-ReadyFile` argument
+    the app uses to announce that its window is up. Deriving it beats a name list - a new live
+    regression added next to these gets caught rather than silently joining the parallel tier.
     """
-    found: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "_run_probe_against_wpf_modal":
+                return True
+        if isinstance(node, ast.Constant) and node.value == "-ReadyFile":
+            return True
+    return False
+
+
+def _live_desktop_tests_with_marks() -> dict[str, bool]:
+    """Every live WPF/UI-Automation test, mapped to whether it is marked `serial`."""
+    found: dict[str, bool] = {}
+    for path, tree in _parsed_test_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef) or not func.name.startswith("test_"):
+                continue
+            if _launches_the_live_desktop(func):
+                found[f"{rel}::{func.name}"] = _marked(func, "serial")
+    return found
+
+
+def test_every_live_ui_test_declares_itself_serial() -> None:
+    """The interactive desktop and its UIA provider are a singleton; two live tests degrade each other.
+
+    Measured (issue #387) across three rounds of two whole-suite parallel runs started concurrently:
+    `test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it` failed in 3 of 6,
+    every time with `harvest=INCOMPLETE` / `VERDICT: DIALOG_UNREADABLE` - the probe degrading safely
+    and the test's stricter assertion correctly refusing it. Marking only the one that was observed
+    would move the boundary rather than remove it: all of them share the mechanism.
+    """
+    live = _live_desktop_tests_with_marks()
+    assert len(live) >= 7, f"expected the bundle's live WPF regressions to be found, got {sorted(live)}"
+    unmarked = sorted(node for node, marked in live.items() if not marked)
+    assert not unmarked, (
+        "these tests drive a real WPF window through UI Automation but do not carry "
+        f"@pytest.mark.serial, so two concurrent parallel runs would race them: {unmarked}"
+    )
+
+
+def _sub_second_budget_tests() -> set[str]:
+    """Every test that asserts a sub-second wall-clock budget, by node id."""
+    return set(_budget_tests_with_marks())
+
+
+def _parsed_test_files() -> list[tuple[Path, ast.Module]]:
+    """Every `test_*.py` under the `testpaths` roots, parsed once."""
+    parsed: list[tuple[Path, ast.Module]] = []
     for path in _collected_test_files():
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            parsed.append((path, ast.parse(path.read_text(encoding="utf-8"))))
         except SyntaxError:  # deliberately malformed fixture files exist in this repo
             continue
+    return parsed
+
+
+def _budget_tests_with_marks() -> dict[str, bool]:
+    """Every sub-second wall-clock budget test, mapped to whether it is marked `timing`."""
+    found: dict[str, bool] = {}
+    for path, tree in _parsed_test_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
         for func in ast.walk(tree):
             if not isinstance(func, ast.FunctionDef) or not func.name.startswith("test_"):
@@ -154,53 +222,86 @@ def _sub_second_budget_tests() -> set[str]:
                     isinstance(name, ast.Name) and name.id in clock_locals for name in ast.walk(compare.left)
                 )
                 if reads_clock:
-                    found.add(f"{rel}::{func.name}")
+                    found[f"{rel}::{func.name}"] = _marked_timing(func)
     return found
 
 
-def _declared_timing_tests() -> set[str]:
-    """The node ids the root conftest excludes from the parallel tier.
+def test_every_sub_second_wall_clock_test_declares_itself_timing() -> None:
+    """A budget test that is not marked runs in the parallel tier, and eventually flakes there.
 
-    Loaded from the file by path under a distinct module name rather than `import conftest`, so this
-    reads the same bytes whether or not pytest itself loaded the root conftest for this run - the
-    mutation harness deliberately runs with `--confcutdir=tests`, where it has not.
+    Derived from the suite's own AST rather than a list, so it fails in both directions that matter:
+    a new sub-second budget test nobody marked, and a marked test whose budget was removed. The
+    first is the one that costs everyone re-runs.
     """
-    spec = importlib.util.spec_from_file_location("t2p_root_conftest", ROOT_CONFTEST)
-    assert spec is not None and spec.loader is not None, f"cannot load {ROOT_CONFTEST}"
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return set(module.TIMING_BUDGET_TESTS)
-
-
-def test_the_conftest_timing_list_matches_the_suite_it_claims_to_describe() -> None:
-    """A hand-written node-id list rots on the first rename; re-deriving it is what stops that.
-
-    Fails in both directions on purpose: an entry that no longer exists (renamed, deleted) and a new
-    sub-second budget test that nobody added. The second direction is the one that matters - it is
-    how a fresh flaky test gets caught before it starts costing everyone re-runs.
-    """
-    derived = _sub_second_budget_tests()
-    declared = _declared_timing_tests()
-    assert declared == derived, (
-        "conftest.TIMING_BUDGET_TESTS is out of step with the suite.\n"
-        f"  declared but not found in the suite: {sorted(declared - derived)}\n"
-        f"  found in the suite but not declared: {sorted(derived - declared)}"
+    budget_tests = _budget_tests_with_marks()
+    assert budget_tests, "no sub-second wall-clock budget tests found at all - the gate is vacuous"
+    unmarked = sorted(node for node, marked in budget_tests.items() if not marked)
+    assert not unmarked, (
+        "these tests assert a sub-second wall-clock budget but do not carry @pytest.mark.timing, "
+        f"so the parallel tier would still run them: {unmarked}"
     )
 
 
-def test_the_timing_marker_actually_deselects_those_tests() -> None:
-    """The list is inert unless the marker lands before pytest's own `-m` filtering runs."""
-    declared = sorted(_declared_timing_tests())
-    assert declared, "nothing declared - this test would pass vacuously"
-    target = declared[0].split("::")[0]
+def test_the_markers_actually_deselect_those_tests() -> None:
+    """The markers are inert unless `-m` really removes those node ids from a collected run."""
+    excluded = _sub_second_budget_tests() | set(_live_desktop_tests_with_marks())
+    assert excluded, "nothing derived - this test would pass vacuously"
+    target = sorted(excluded)[0].split("::")[0]
+    in_target = sorted(node for node in excluded if node.startswith(target + "::"))
     result = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "-m", "not (serial or timing)", target])
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert f"{len(declared)} deselected" in output, (
-        f"expected {len(declared)} deselected from {target}, got:\n{output[-2000:]}"
+    assert f"{len(in_target)} deselected" in output, (
+        f"expected {len(in_target)} deselected from {target}, got:\n{output[-2000:]}"
     )
-    for node in declared:
+    for node in in_target:
         assert node not in output, f"{node} survived the -m filter:\n{output[-2000:]}"
+
+
+def test_the_timing_marker_travels_with_the_bundle_that_uses_it() -> None:
+    """`-m "not (serial or timing)"` has to work in the COPIED bundle, where this repo's pyproject is absent."""
+    bundle_conftest = REPO_ROOT / ".github/skills/pbip-model-refresh/tests/conftest.py"
+    body = bundle_conftest.read_text(encoding="utf-8")
+    for marker in ("timing:", "serial:"):
+        assert "addinivalue_line" in body and f'"{marker}' in body, (
+            f"{bundle_conftest.relative_to(REPO_ROOT).as_posix()} does not register `{marker[:-1]}`; "
+            "copied out of this repo the marker is unregistered and the filter silently stops meaning anything"
+        )
+
+
+def test_the_nested_bundle_run_inherits_the_parallel_tier_exclusion(monkeypatch: object) -> None:
+    """`test_skills.py` re-runs the bundle in a temp dir, where the root conftest cannot reach.
+
+    Measured (issue #387): during a parallel campaign the outer suite deselected
+    `test_refresh_main_returns_credential_missing_fast_at_t0`, and the nested copy of that same test
+    failed at 0.519s against its 0.5s budget - the flake walked straight through the exclusion.
+
+    Driven behaviourally rather than by grepping the file. A first draft asserted on the presence of
+    the two strings anywhere in the source; deleting the propagation entirely still passed it,
+    because both strings also appear in the prose that explains them.
+    """
+    skills = REPO_ROOT / "tests" / "test_skills.py"
+    spec = importlib.util.spec_from_file_location("t2p_test_skills", skills)
+    assert spec is not None and spec.loader is not None, f"cannot load {skills}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+    assert module._nested_marker_filter() == [], "a serial outer run must still execute every bundled test"
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+    assert module._nested_marker_filter() == ["-m", "not (serial or timing)"], (
+        "the nested bundle run does not inherit the parallel-tier exclusion, so a wall-clock-budget "
+        "or live UI test still runs under 22 workers"
+    )
+
+    tree = ast.parse(skills.read_text(encoding="utf-8"))
+    spliced = any(
+        isinstance(node, ast.Starred)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", "") == "_nested_marker_filter"
+        for node in ast.walk(tree)
+    )
+    assert spliced, "_nested_marker_filter() is never spliced into the nested pytest argv"
 
 
 def test_a_parallel_run_without_loadfile_is_refused(tmp_path: Path) -> None:

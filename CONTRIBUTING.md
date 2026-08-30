@@ -53,12 +53,12 @@ promoted to a global skill location) — splitting it across `scripts/` and `tes
 "just copy it" claim untrue. Same conventions apply inside the bundle (`purpose:`/`usage:` headers,
 10.00/10 pylint), and the same commands, with the extra paths:
 ```bash
-ruff format --check scripts tests .github/skills
-ruff check scripts tests .github/skills
+ruff format --check conftest.py scripts tests .github/skills
+ruff check conftest.py scripts tests .github/skills
 pylint scripts                                          # one invocation PER bundle, never combined:
 pylint .github/skills/pbip-model-refresh/scripts        # a shim and its bundled script share a
 pylint .github/skills/powerbi-ai-readiness/scripts      # module name, so a combined run resolves
-                                                        # the import to the shim (false E0611)
+pylint conftest.py                                      # the import to the shim (false E0611)
 ```
 
 **A bundle need not ship code at all.** `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
@@ -99,11 +99,18 @@ reason when absent rather than fail.
 
 ## Tests
 
-The deterministic parser has a `pytest` regression suite:
+Two tiers. Iterate on the fast one; **quote the slow one**:
 
 ```bash
-pytest -q                    # currently 188 tests
+uv run pytest -q -n auto --dist loadfile -m "not (serial or timing)"   # tier 1, ~4 min
+uv run pytest -q                                                       # tier 2, the gate of record
 ```
+
+Measured on 22 cores: 911 s serial against ~250 s parallel, identical node id by node id. Tier 1 is
+not a substitute for tier 2 — one green parallel run is not proof of isolation, and tier 1 deselects
+six wall-clock-budget tests by construction. `-n auto` **without** `--dist loadfile` is refused by the
+root `conftest.py` (exit 4). Full reasoning, evidence and the marker rules:
+[`docs/parallel-test-loop.md`](docs/parallel-test-loop.md).
 
 `testpaths` in `pyproject.toml` covers both roots (`tests` **and** `.github/skills`) — pytest skips
 dot-directories by default, so a skill's bundled tests would otherwise be collected by nobody.

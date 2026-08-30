@@ -18,8 +18,9 @@ Power BI Desktop / UI-Automation tests - the ones the parallel tier is most dang
 the second root. A `tests/conftest.py` would leave `pytest .github/skills/... -n 4` ungated, which
 is precisely the run that needs gating.
 
-The companion half is the `serial` marker registered in `pyproject.toml`; see
-`docs/parallel-test-loop.md` for the two-tier loop that uses it.
+The companion half is the `serial` and `timing` markers registered in `pyproject.toml`; the tests
+that carry `timing` declare it themselves, in their own source, so it survives being copied out of
+this repo. See `docs/parallel-test-loop.md` for the two-tier loop that uses them.
 """
 
 from __future__ import annotations
@@ -27,38 +28,6 @@ from __future__ import annotations
 import pytest
 
 REQUIRED_DIST = "loadfile"
-
-# Tests that assert a sub-second WALL-CLOCK budget. They measure the machine as much as the code, so
-# a box running 22 xdist workers (plus whatever else) fails them without anything being wrong.
-#
-# Measured (issue #387), eight whole-suite `-n auto --dist loadfile` runs against one serial run and
-# 30 serial repetitions of the owning file (15 quiet, 15 beside a live 22-worker suite):
-#   * exactly ONE node id ever disagreed, out of 2564;
-#   * `test_refresh_main_returns_credential_missing_fast_at_t0` took 0.941s against its 0.5s budget
-#     on worker gw9, in the slowest of the eight runs (305s vs a 160-217s median);
-#   * it never failed in any serial repetition, loaded or quiet.
-# So this is not a `--dist loadfile` isolation failure - no shared state raced, and the deselection
-# below is not a substitute for one. It is CPU starvation, and the durable fix is in the tests: a
-# budget assertion wants a monotonic-clock floor it controls, not a share of a contended machine.
-# Until their owners change them, the parallel tier deselects them and the serial tier still runs
-# them - that is what tier 2 is for.
-#
-# ⚠️ Marked by NODE ID, which a rename would silently break, and blind to a new budget test added
-# elsewhere. `tests/test_parallel_test_loop.py` re-derives this set from the suite's own AST and
-# fails on either drift, so the list cannot rot quietly.
-TIMING_BUDGET_FILE = ".github/skills/pbip-model-refresh/tests/test_credential_modal_detection.py"
-
-TIMING_BUDGET_TESTS = frozenset(
-    f"{TIMING_BUDGET_FILE}::{name}"
-    for name in (
-        "test_direct_refresh_returns_credential_missing_fast_at_t0",
-        "test_direct_refresh_returns_blocked_by_dialog_fast_at_t0",
-        "test_direct_refresh_raises_desktop_gone_fast_at_t0",
-        "test_refresh_poll_catches_late_modal",
-        "test_refresh_main_returns_credential_missing_fast_at_t0",
-        "test_probe_query_returns_credential_missing_fast_at_t0",
-    )
-)
 
 WRONG_DIST_MESSAGE = (
     "pytest-xdist is active with --dist {dist!r}. This suite is only measured safe under "
@@ -90,23 +59,3 @@ def pytest_configure(config: pytest.Config) -> None:
     if dist == REQUIRED_DIST:
         return
     raise pytest.UsageError(WRONG_DIST_MESSAGE.format(dist=dist))
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Apply `timing` to the wall-clock-budget tests so `-m` can deselect them.
-
-    A marker added here is only useful if it lands **before** pytest's own `-m` filtering, which
-    `_pytest.mark` performs from its own `@hookimpl(tryfirst=True)`. Measured on pytest 9.1.1, both
-    a `tryfirst` hook and a plain one deselect correctly, so `tryfirst` here is defensive rather than
-    load-bearing on this version - removing it is an equivalent mutation and
-    `test_the_timing_marker_actually_deselects_those_tests` does not distinguish it. That test does
-    catch the failure that matters: a marker that never reaches the filter at all.
-
-    Under xdist this runs inside every worker, and every worker applies the same set, so collection
-    stays identical across them. Deselected counts stay visible in the summary line
-    (``N passed, 6 deselected``) - the exclusion is never silent.
-    """
-    for item in items:
-        if item.nodeid in TIMING_BUDGET_TESTS:
-            item.add_marker(pytest.mark.timing)

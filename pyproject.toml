@@ -56,12 +56,15 @@ markers = [
     # concurrent live suites turned one harvest into `DIALOG_UNREADABLE` and made another test SKIP.
     # See docs/parallel-test-loop.md for the tier that runs these on their own.
     "serial: contends for a singleton external resource; must not run beside another such test",
-    # Different hazard, same tier. A `timing` test asserts a sub-second WALL-CLOCK budget, so it
-    # measures the machine as much as the code. Measured (issue #387): 1 failure in 8 whole-suite
-    # `-n auto` runs - `test_refresh_main_returns_credential_missing_fast_at_t0` took 0.941s against
-    # a 0.5s budget on worker gw9. The root `conftest.py` applies this marker automatically; you do
-    # not write it by hand.
-    "timing: asserts a sub-second wall-clock budget, so a saturated box fails it",
+    # Different hazard, same tier. A `timing` test asserts a WALL-CLOCK budget, so it measures the
+    # machine as much as the code. Measured (issue #387): under 22 xdist workers,
+    # `test_refresh_main_returns_credential_missing_fast_at_t0` took 0.941s against a 0.5s budget on
+    # an operation that takes 0.03s serially - a 31x inflation of a very short measured window, so
+    # widening the bound is not a fix. Every SUB-SECOND budget test must carry this (gated from the
+    # suite's AST); a larger budget earns it once measured to fail, as the 10s process-rendezvous
+    # barrier in test_check_migration_progress.py did. Tests carry the marker in their own source
+    # (and the pbip-model-refresh bundle registers it in its own conftest) so it survives a copy.
+    "timing: asserts a wall-clock budget, so a saturated box fails it",
 ]
 
 [tool.ruff]

@@ -102,6 +102,23 @@ def _repo_free_env() -> dict[str, str]:
     return env
 
 
+def _nested_marker_filter() -> list[str]:
+    """Deselect wall-clock-budget tests from the nested run, but only under a parallel outer run.
+
+    This nested pytest is serial, but its PROCESS competes with every other xdist worker, and the
+    bundle contains assertions on a ~0.03s operation finishing inside 0.5s. Measured (issue #387):
+    that test failed at 0.519s inside this nested run during a parallel campaign, while the outer
+    suite's own copy of it - deselected by `-m "not (serial or timing)"` - never ran. The outer
+    exclusion structurally cannot reach here: the bundle is copied to a temp directory, so the repo
+    root `conftest.py` and `pyproject.toml` are both absent by construction.
+
+    Conditional on `PYTEST_XDIST_WORKER` rather than unconditional, so the serial pre-PR gate still
+    executes every test the bundle ships. Tier 1 trades those six for a loop that does not flake;
+    tier 2 gives them back.
+    """
+    return ["-m", "not (serial or timing)"] if os.environ.get("PYTEST_XDIST_WORKER") else []
+
+
 @pytest.mark.parametrize("skill_dir", BUNDLED_SKILLS, ids=lambda p: p.name)
 def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_repo(
     skill_dir: Path, tmp_path: Path
@@ -122,7 +139,7 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
         ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
     )
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", str(copied / "tests")],
+        [sys.executable, "-m", "pytest", "-q", str(copied / "tests"), *_nested_marker_filter()],
         cwd=tmp_path,
         env=_repo_free_env(),
         capture_output=True,

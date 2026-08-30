@@ -20,6 +20,38 @@ SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SKILL_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPTS))
 
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register `timing` and `serial` HERE so the markers travel with the bundle.
+
+    **`timing`** - a handful of tests in this folder assert a sub-second wall-clock budget on an
+    operation that takes ~0.03s. Measured (issue #387) under 22 concurrent pytest-xdist workers, one
+    of them took **0.941s against a 0.5s budget** - a 31x inflation of a very short measured window,
+    which is scheduler starvation rather than proportional slowdown. Widening the bound is therefore
+    not a fix; the host repo's parallel test tier deselects them with `-m "not timing"` instead.
+
+    **`serial`** - seven tests here launch a real WPF application and drive it through UI Automation.
+    The interactive desktop and its UIA provider are a singleton, so two of these running at once
+    degrade each other. Measured (issue #387) across three rounds of two whole-suite parallel runs
+    started concurrently: `test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it`
+    failed in **3 of 6** runs, every time with `harvest=INCOMPLETE` and `VERDICT: DIALOG_UNREADABLE` -
+    the probe degrading safely, and the test's stricter assertion correctly refusing it. Not one of
+    them failed in seven runs that were not concurrently paired, so this needs the pairing.
+
+    Registering them in this conftest rather than a host `pyproject.toml` is the whole point: copy
+    this folder into another repo and `-m "not (serial or timing)"` still works, with no
+    unregistered-marker warning.
+    """
+    config.addinivalue_line(
+        "markers",
+        "timing: asserts a wall-clock budget, so a saturated box fails it",
+    )
+    config.addinivalue_line(
+        "markers",
+        "serial: contends for a singleton external resource; must not run beside another such test",
+    )
+
+
 # The path above must be in place before the skill's own modules import, hence the E402 waiver.
 from _credential_modal import CredentialDetection  # noqa: E402
 

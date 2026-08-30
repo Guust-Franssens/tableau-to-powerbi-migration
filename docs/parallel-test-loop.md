@@ -23,46 +23,31 @@ Both must be green. Tier 1 is not a substitute for tier 2, and the reason is bel
 `pyproject.toml`), so `uv sync --all-extras` puts it in every worktree venv. Agents each work in
 their own `git worktree` with their own `.venv`; anything not declared there is absent everywhere.
 
-Measured on 22 logical cores, machine shared with other agents throughout - so these wall times
-carry real external load, which is the condition this loop exists for.
-
-**Before the `timing` exclusion below** (2564 node ids):
+Measured on 22 logical cores, machine shared with other agents throughout - so these wall times carry
+real external load, which is the condition this loop exists for. 2697 node ids; tier 1 deselects 14.
 
 | run | wall | outcome |
 |---|---|---|
-| serial, `pytest -q` | **681 s** | 3 failed, 2554 passed, 7 skipped |
-| `-n auto --dist loadfile`, 8 runs | **160 - 305 s** | 7 identical to serial; 1 had one extra failure |
+| tier 2, serial `pytest -q` | **911 s** | 3 failed, 2684 passed, 7 skipped |
+| tier 1, 3 sequential runs | **242 / 252 / 254 s** | identical, node id by node id |
 
-**After** (2568 node ids; tier 1 deselects 6):
+**~3.6x faster.** The three standing failures are the deliberate `tests/test_upstream_repro_pins.py`
+engine-drift tripwires (engine pinned 2.260.0, installed 2.339.0); they fail identically on `master`.
 
-| run | wall | outcome |
-|---|---|---|
-| tier 2, serial `pytest -q` | **646 s** | 3 failed, 2558 passed, 7 skipped |
-| tier 1, 3 runs | **297 / 307 / 329 s** | 3 failed, 2552 passed, 7 skipped - **identical node id by node id** |
-
-**2.0 - 4.3x faster**, depending entirely on what else the machine is doing. The three standing
-failures are the deliberate `tests/test_upstream_repro_pins.py` engine-drift tripwires (engine pinned
-2.260.0, installed 2.339.0); they fail identically on `master`.
-
-The runs were compared **by node id**, not by summary totals, because a summary hides the failure
+Every run was compared **by node id**, not by summary totals, because a summary hides the failure
 mode that matters: a test that skips or short-circuits under contention leaves `N passed` looking
-healthy. Across the eight pre-change runs, exactly **one** node id ever disagreed (below). Across the
-three post-change tier-1 runs, **none** did - and tier 2 differs from tier 1 by exactly the six
-deselected `timing` tests and nothing else.
+healthy. Three campaigns were run in total - before the live UI tests landed on `master`, after they
+landed, and again after the fixes below.
 
-Why it parallelises so well: most of the ~2,500 tests spawn a subprocess
-(`subprocess.run([sys.executable, ...])`), so the suite is process-spawn and I/O bound, not GIL
-bound. Contention also matters - the same serial suite took 4m37s on a quiet machine and 12m20s with
-nine agents competing, so shortening the window shortens everybody's.
+⚠️ **Sequential runs are not a hard enough test.** Two of the three real defects found here appear
+only when **two whole-suite parallel runs are started concurrently** - the condition two agents on
+one machine actually create. If you re-measure, measure that.
 
-## The one node id that disagreed, and what it was not
+## The hazard that is real: wall-clock budgets, not shared state
 
-`test_credential_modal_detection.py::test_refresh_main_returns_credential_missing_fast_at_t0` took
-**0.941 s against a 0.5 s budget** on worker `gw9`, in the slowest of the eight parallel runs (305 s,
-against a 160-217 s median - the machine was busiest then). Its externals are all monkeypatched; the
-assertion is purely a wall clock.
-
-Follow-up experiments, to find out whether parallelism caused it:
+Across eight parallel runs of the first campaign, exactly **one** node id ever disagreed:
+`test_credential_modal_detection.py::test_refresh_main_returns_credential_missing_fast_at_t0`, which
+took **0.941 s against a 0.5 s budget** on worker `gw9`. Isolation experiments:
 
 | condition | samples | failures |
 |---|---|---|
@@ -71,49 +56,122 @@ Follow-up experiments, to find out whether parallelism caused it:
 | owning file only, serial, quiet machine | 15 | 0 |
 | owning file only, serial, **beside a live 22-worker suite** | 15 | 0 |
 
-So this is **not** a `--dist loadfile` isolation failure. No shared state raced; no fixture collided;
-no file was split across workers. It is CPU starvation of a wall-clock assertion, and it needs the
-test's own process to be one of 22 competing workers - running it serially beside 22 busy workers did
-not reproduce it in 15 attempts.
+So this is **not** a `--dist loadfile` isolation failure. No shared state raced; no file was split
+across workers. It is CPU starvation, and it needs the test's own process to be one of 22 competing
+workers.
 
-That also makes it a **different hazard from the one this was expected to find** (see the live-test
-section below), and it is the one that actually exists in the tree today.
+**Widening the bound is not a fix.** That operation takes **0.03 s** serially. A 0.5 s budget is
+already 16x headroom, and it still blew at 0.941 s - a **31x** inflation of a very short measured
+window, which is scheduler starvation of a short sample rather than proportional slowdown. There is
+no bound that is both tight enough to catch the regression it exists for and loose enough to survive
+a saturated box. Excluding it from the contended tier is the honest answer.
 
-## The `timing` marker: what tier 1 excludes, and why it is not silent
+## The `timing` marker, and where it has to live
 
 `pyproject.toml` registers three markers with deliberately narrow, different meanings:
 
 | marker | means | applied |
 |---|---|---|
 | `slow` | takes a long time | by hand |
-| `serial` | must not run beside another test wanting the same singleton external resource | by hand |
-| `timing` | asserts a **sub-second wall-clock budget**, so a saturated box fails it | **automatically**, by the root `conftest.py` |
+| `serial` | must not run beside another test wanting the same singleton external resource | by hand, in the test's own source |
+| `timing` | asserts a **wall-clock budget**, so a saturated box fails it | by hand, in the test's own source |
 
-Six tests carry `timing`, all in `test_credential_modal_detection.py`, all asserting a 0.5 s or 1.0 s
-budget. Tier 1 deselects them; **tier 2 still runs them**, and the deselection is visible in tier 1's
-own summary line (`... 6 deselected`), so nothing disappears quietly.
+Seven tests carry `serial` and seven carry `timing`. Tier 1 deselects both; **tier 2 still runs
+them**, and the deselection is visible in tier 1's own summary (`... 14 deselected`).
 
-Two looser budgets are deliberately **left in** the parallel tier, because a bigger margin is not the
-same hazard and neither has ever been observed failing: `tests/test_credential_gate.py`'s 5.0 s hook
-budget and `test_refresh_wall_clock.py`'s 15 s bound.
+`timing`'s automatic floor is **sub-second**: every test asserting a budget under 2 s must carry it,
+gated from the suite's AST. A larger budget earns the marker on measured evidence instead - the 10 s
+process-rendezvous barrier in `test_check_migration_progress.py` did, after failing under 44 workers.
+Two budgets are deliberately **left in** the parallel tier, having never been observed to fail:
+`tests/test_credential_gate.py`'s 5.0 s hook budget and `test_refresh_wall_clock.py`'s 15 s bound.
 
-The list is hand-written node ids, which a rename would silently break - so
-`tests/test_parallel_test_loop.py` re-derives the set from the suite's own AST (an
-`assert <expr> < <number under 2>` whose left side reads `time.monotonic()`/`perf_counter()`) and
-fails on drift in **both** directions. A new sub-second budget test added anywhere fails that gate
-until it is listed.
+Three things make the marker hold up, and each is gated by `tests/test_parallel_test_loop.py`:
 
-**The durable fix is in the tests, not here.** A budget assertion should measure something it
-controls - a monotonic floor, an injected clock, a call count - rather than its share of a contended
-machine. This exclusion is an interim owned by the parallel tier, and the list should shrink.
+1. **The marker is in the test's own source**, not applied from outside. `test_parallel_test_loop.py`
+   re-derives the budget set from the suite's **AST** (an `assert <expr> < <number under 2>` whose
+   left side reads `time.monotonic()`/`perf_counter()`) and fails when any of them lacks
+   `@pytest.mark.timing`. A new budget test added anywhere fails that gate until it is marked.
+2. **The bundle registers `timing` in its own `conftest.py`.** `pbip-model-refresh` is meant to be
+   copied into another repo, where this repo's `pyproject.toml` does not exist; without local
+   registration the copied bundle raises an unknown-mark warning and `-m "not timing"` quietly stops
+   meaning anything. Verified by copying the folder out and running it standalone: `235 passed,
+   3 skipped, 6 deselected`, with `PytestUnknownMarkWarning` promoted to an error.
+3. **`tests/test_skills.py` propagates the exclusion into its nested run** - see below.
+
+**The durable fix still belongs in those tests**, which should assert against something they control
+(a call count, an injected clock, a monotonic floor) rather than their share of a contended machine.
+This exclusion is an interim, and the list should shrink.
+
+### The nested run: where the first draft of this leaked
+
+`tests/test_skills.py` copies each skill bundle to a temp directory and runs its tests there, to
+execute the portability promise rather than assert it. That nested pytest is **serial**, but its
+process competes with every other xdist worker - and the copied tree contains no root `conftest.py`
+and no `pyproject.toml`, so an exclusion expressed at repo level **structurally cannot reach it**.
+
+Measured: in one concurrent-pair stress run, the outer suite correctly deselected
+`test_refresh_main_returns_credential_missing_fast_at_t0`, and the nested copy of that same test
+failed at **0.519 s** against its 0.5 s budget. Tier 1 was still ~1-in-7 flaky, through a different
+door. The fix moves the failure boundary unless the nested run inherits the filter, so it does -
+conditional on `PYTEST_XDIST_WORKER`, which is set only inside an xdist worker (verified: `None`
+serially, `'gw0'` under `-n 2`). Tier 2 therefore still executes every test the bundle ships.
+
+## The live Power BI Desktop / UI-Automation tests: measured, and they DO need `serial`
+
+`.github/skills/pbip-model-refresh/tests/` carries **seven live tests** that launch a real WPF
+application and drive it through UI Automation, including a wedged-UI-thread regression whose whole
+point is a `< 25 s` wall-clock bound. Two independent reports had them degrading under contention -
+one live harvest returning `DIALOG_UNREADABLE`, and one live test skipping when run beside the full
+skills suite.
+
+**The first verdict here was that they were stable, and it was wrong.** Across seven parallel runs -
+three sequential, plus two concurrent pairs - not one of them failed or skipped, and this page said
+so. Three *more* concurrent pairs found the failure:
+
+| condition | runs | live-test failures |
+|---|---|---|
+| tier 1, sequential | 3 | 0 |
+| tier 1, concurrent pairs (44 workers on 22 cores) | 8 | **3** |
+
+`test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it` failed in **3 of 6**
+runs of the later rounds - twice in the *same pair*, both sides at once - every time like this:
+
+```
+a dialog was up during the refresh: ... size=650x400 harvest=INCOMPLETE
+  it matched no credential-prompt signature, so this is NOT a credential wall
+  but a window we could not account for was open
+VERDICT: DIALOG_UNREADABLE
+```
+
+That is the documented hazard verbatim: the UIA harvest could not finish, the probe **degraded
+safely**, and the test's stricter assertion correctly refused the degraded verdict. The test took
+**30.6 s against 8.08 s serially**. Three sequential runs would have shipped this as "stable" - the
+condition it needs is *two live suites at once*, which is exactly what two agents on one machine do.
+
+So all seven now carry **`@pytest.mark.serial`**. Marking only the one that was observed would move
+the boundary rather than remove it - they share one mechanism and one singleton resource. Run them
+deliberately, on their own:
+
+```bash
+uv run pytest -q -m serial
+```
+
+⚠️ `--dist loadfile` is what keeps them from racing *inside* one run (all seven live in one file, so
+one worker owns them). It cannot help *across* runs, and neither can any scheduler flag. The marker
+is the only lever.
+
+A second, unrelated test was caught in the same rounds and is marked `timing`:
+`test_declare_wrapper_concurrent_writers_keep_both_declarations` gives two child processes **10 s**
+to reach a rendezvous barrier, and under 44 workers they did not both start in time. Its budget is
+far above the sub-second rule below, so it is marked on **measured** evidence rather than by the
+automatic gate.
 
 ## `--dist loadfile` is not optional, and the repo now enforces that
 
 Plain `-n auto` means `--dist load`, which distributes **individual tests**, so two tests from one
-file can run on different workers at the same time. `--dist loadfile` keeps every test in one file
-on one worker, which is what makes module-scoped fixtures, per-file caches and shared on-disk
-scratch safe. Every measurement above was taken **with** `loadfile`; `--dist load` has never been
-measured here.
+file can run on different workers at the same time. `--dist loadfile` keeps every test in one file on
+one worker - which is exactly what keeps the seven live UI tests above from running beside each
+other. Every measurement here was taken **with** `loadfile`; `--dist load` has never been measured.
 
 `-n auto` is shorter to type than `-n auto --dist loadfile`, so the root `conftest.py` refuses it:
 
@@ -135,10 +193,9 @@ To use a different scheduler, edit the guard deliberately and re-measure. That i
 
 **One green parallel run is not proof of isolation.** A test that quietly changed behaviour under
 concurrency - took a different branch, skipped instead of running, degraded to a safer verdict - can
-still report at the summary level as though nothing happened. `2554 passed` is the same string
-whether a test asserted something or bailed out early. And tier 1 deliberately deselects the `timing`
-tests, so it is a strictly smaller suite by construction - measured, 2562 node ids against tier 2's
-2568.
+still report at the summary level as though nothing happened. And tier 1 deliberately deselects the
+`serial` and `timing` tests, so it is a strictly smaller suite by construction: 2683 node ids against
+tier 2's 2697, plus fourteen more inside the nested bundle run.
 
 So the plain serial `pytest -q` stays the gate of record before a PR. It is slower and it is the one
 whose result you quote. Tier 1 buys iteration speed; tier 2 buys the claim.
@@ -153,39 +210,39 @@ uv run pytest -q -n auto --dist loadfile -m "not (serial or timing)" --junitxml=
 then diff the `classname`/`name`/outcome triples. A skip that replaced a pass is invisible in the
 summary line and obvious in the XML.
 
-## The `serial` marker, and the live-test hazard
+## One thing this loop does NOT fix: two pytest processes in ONE working tree
 
-Some tests contend for a **singleton external resource**: a real Power BI Desktop instance, its
-UI-Automation tree, a live credential dialog. Two of them running at once degrade each other. This
-is measured, not theoretical (issue #387):
+Running two concurrent whole-suite campaigns in the *same checkout* also surfaced
+`tests/test_check_unit.py::test_cli_model_scope_reports_not_checked_for_unattributable_connection_fixture`
+failing on the **second** process, deterministically, 3 pairs out of 3 - while the first passed every
+time. That is not a parallelism defect and no marker or scheduler flag can address it:
+`_freshen_clean_fixture_cache()` mutates a **git-tracked fixture inside the repo**
+(`tests/fixtures/check-unit-clean-integration/.../cache.abf`) and stamps it with a 60-second future
+mtime. Two processes sharing that path overwrite each other's freshness window. `--dist loadfile` is
+irrelevant: only one file touches that fixture, so it never leaves a single worker within a run.
 
-- running the all-skills suite concurrently with the credential suite made one live harvest degrade
-  to `DIALOG_UNREADABLE` and fail its stricter assertion; rerunning without the contention passed;
-- the same bundle ran **100 passed** alone, and **skipped** one live test when run beside the full
-  skills suite.
+**It does not affect the documented workflow**, because agents each work in their own `git worktree`
+with their own `.venv`, and that fixture path is then not shared. It is recorded here so the next
+person who reproduces it does not spend an afternoon blaming xdist. If you deliberately run two
+suites in one checkout, expect it.
 
-Note the shape: contention pushes those tests toward the **fail-safe**, not toward a false pass -
-and it is already reachable **serially**, whenever two agents run pytest at the same time.
-Parallelism inside one invocation is the same hazard with a shorter fuse.
+## The `serial` marker
 
-A test opts in with `@pytest.mark.serial`. Tier 1 already excludes them, so the marker takes effect
-the moment it is applied. Run them on their own afterwards:
+`serial` means a test contends for a **singleton external resource** - a real Power BI Desktop
+instance, its UI-Automation tree, a live credential dialog - such that two of them running at once
+degrade each other. A test opts in with `@pytest.mark.serial`. Seven tests carry it today, all of
+them the live WPF/UIA regressions measured above. Run them deliberately, on their own, when you have
+touched the credential probe:
 
 ```bash
 uv run pytest -q -m serial
 ```
 
-**Exit code 5 from that command means no test carries the marker yet** - that is "nothing to run",
-not a failure.
+That is not part of either tier. Tier 1 excludes them because two agents running tier 1 at once
+raced them; tier 2 includes them, because a serial whole-suite run is the one condition in which they
+were never observed to fail.
 
-**Current status, stated plainly:** no test in the tree carries `serial`, and no tracked test drives
-a real Desktop or a real UI-Automation tree (`DIALOG_UNREADABLE` appears in zero tracked test files).
-The live tests the quotes above describe are in flight against issue #367 in the `pbip-model-refresh`
-bundle and are **not on `master`**, so that hazard **could not be reproduced here** and the `serial`
-marker is unapplied scaffolding. When those tests land, marking them is a one-line change per test
-and needs nothing from this page.
-
-⚠️ One residual gap worth knowing: the exclusion only happens if the command carries
+⚠️ One residual gap worth knowing: the exclusions only happen if the command carries
 `-m "not (serial or timing)"`. A hand-typed `pytest -n auto --dist loadfile` still runs everything.
 The doc-drift tests keep every *documented* command honest; they cannot police what you type.
 
@@ -196,15 +253,14 @@ The doc-drift tests keep every *documented* command honest; they cannot police w
 **4 vCPU**, so `-n auto` would pick 4 workers rather than an absurd number. That makes parallel CI
 *plausible*, not *measured*:
 
-- every xdist worker re-imports and re-collects all ~2,560 tests, and that fixed cost is a much
-  larger fraction of the total on 4 cores than on 22;
-- the one defect this work found is **CPU starvation of a wall-clock assertion**. A 4-vCPU runner
-  running 4 workers is exactly the shape that makes that worse, and CI is where a flaky red costs
-  the most;
+- every xdist worker re-imports and re-collects ~2,690 tests, and that fixed cost is a much larger
+  fraction of the total on 4 cores than on 22;
+- the defect this work found is **CPU starvation of a wall-clock assertion**. A 4-vCPU runner running
+  4 workers is exactly the shape that makes that worse, and CI is where a flaky red costs the most;
 - CI is the shared trust anchor. A flaky gate is worse than a slow one for the same reason tier 2
   exists;
-- the cost this issue is about is the **agent iteration loop on a developer machine**, which is
-  where the 3.4x lands. CI wall time was never the complaint.
+- the cost this issue is about is the **agent iteration loop on a developer machine**, which is where
+  the 3.6x lands. CI wall time was never the complaint.
 
 If CI time does become the complaint, the change is one line per job plus a measurement on the
 runners themselves - and the root-`conftest.py` guard already makes it impossible to add `-n` there
