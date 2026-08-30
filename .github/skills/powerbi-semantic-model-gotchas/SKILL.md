@@ -113,24 +113,40 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   `python scripts/check_datamodel.py <model>` runs the **TMDL oracle**
   (`scripts/tmdl_oracle.py` + `tools/tmdl_oracle/`, needs the .NET SDK), which hands the model to
   `TmdlSerializer.DeserializeDatabaseFromFolder` — the parser Desktop itself uses — and reports
-  `TMDL_PARSER_REJECTED` with AMO's own document and line number, exiting **1**. It then reads the
-  parse back to catch the one failure that parser *cannot* report, `TMDL_EXPRESSION_ABSORBS_PROPERTY`:
-  the document is well-formed, so nothing throws, and the property is simply gone. The vocabulary it
-  compares against is taken by **reflection over the TOM type**, so a property nobody wrote down is
-  still recognised. `TMDL_BOM` and `TMDL_UNREADABLE` remain text checks, deliberately *stricter*
-  than AMO (see the BOM entry below).
+  `TMDL_PARSER_REJECTED` with AMO's own document and line number, exiting **1**. Whatever AMO
+  accepts is accepted, by construction, so a false positive is structurally impossible.
+  `TMDL_BOM` and `TMDL_UNREADABLE` remain text checks, deliberately *stricter* than AMO (see the
+  BOM entry below).
 
-  **Why an oracle:** issue #254 shipped a hand-written TMDL grammar twice — first matching property
-  NAMES, then enforcing the documented INDENTATION contract — and blind review broke both, each time
-  with false negatives *and* false positives. The indentation version capped one level at a tab, so
-  the same absorption indented **five or eight spaces** sailed through; it rejected the perfectly
-  valid `IsHidden` (TMDL keywords are case-insensitive) and the second `tablePermission` in a role.
-  Re-implementing someone else's grammar is a completeness claim, and a completeness claim over a
-  parser you do not own cannot be finished by patching. Asking the parser can.
+  **Why an oracle:** issue #254's gate was hand-written three times — a property-name allowlist,
+  then the documented INDENTATION contract, then an AMO-plus-reflection readback — and blind review
+  broke all three, each time with false negatives *and* **false positives on valid TMDL**: a
+  case-different `IsHidden`, a second `tablePermission` in one role, an M query returning a variable
+  named `isRemoved`. Re-implementing someone else's grammar is a completeness claim, and a
+  completeness claim over a parser you do not own cannot be finished by patching. Asking the parser
+  can.
 
-  ⚠️ **This means the gate needs `dotnet`.** Without it `check_datamodel.py` degrades **loudly** —
-  it says the layout was not checked and that this is not a pass. CI passes `--require-oracle`,
-  which turns that into a failure. Never read a "could not run" line as a clean model.
+  ⚠️ **The gate needs `dotnet`, and it FAILS CLOSED.** If the oracle cannot run,
+  `check_datamodel.py` exits **3 — unassessable** — never 0, and `check_unit.py` records
+  `NOT_CHECKED` rather than PASS. `--no-oracle` is the explicit opt-out. Never read "could not run"
+  as a clean model: while that was a mere warning, a machine without the .NET SDK exited **0** on
+  TMDL that Desktop cannot open.
+
+  ❌ **The under-indented case is NOT gated, and cannot be by readback.** ✅ Measured 2026-08-30:
+  the two documents below differ only in the expression body's indent — on the left `isHidden` is a
+  swallowed property, on the right it is ordinary expression content — and AMO returns
+  `Expression='1\nisHidden'`, `IsHidden=False` for **both**, byte for byte.
+
+  ```tmdl
+  	measure Probe =        |  	measure Probe =
+  		1                  |  			1
+  		isHidden           |  			isHidden
+  ```
+
+  The parser strips the common indent, and that indent is the only carrier of the distinction, so no
+  readback can separate them. Treat this as an **authoring rule you must follow by hand**, not
+  something a gate will catch for you: indent a multi-line expression one level deeper than the
+  object's properties. Issue #404 tracks the search for a mechanism.
 
 - ❌ **`ref table X` in `model.tmdl` must quote the name EXACTLY as the table's own declaration does
   — and a mismatch fails with a message that tells you nothing.** ✅ Measured 2026-08-30 (AMO

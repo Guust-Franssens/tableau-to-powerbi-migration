@@ -43,11 +43,16 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
     conversion culture, which otherwise fail or silently corrupt rows at refresh
 
 On top of those text checks it runs the TMDL ORACLE (`scripts/tmdl_oracle.py`, needs the .NET SDK),
-which hands each model to `TmdlSerializer` - the parser Power BI Desktop itself uses - and then
-reads the parse back to catch the one failure the parser cannot report: a property written at the
-wrong indent, silently swallowed into the preceding DAX/M expression while the document still
-parses clean. `--require-oracle` (used by CI) turns "the oracle could not run" into a failure
-instead of a warning.
+which hands each model to `TmdlSerializer` - the parser Power BI Desktop itself uses - and reports
+`TMDL_PARSER_REJECTED` when it refuses, with AMO's own document and line. That is the failure issue
+#254 reported: Desktop names no file and no line, and the model does not open at all.
+
+The oracle is MANDATORY. If it cannot run, this exits `EXIT_UNASSESSABLE` (3) rather than 0: "we
+could not check" must never look like "clean". `--no-oracle` is the explicit opt-out.
+
+It deliberately does NOT detect silent absorption (a property swallowed into an expression while the
+document still parses). That is measurably undecidable from the parse - see scripts/tmdl_oracle.py
+and issue #404.
 
 A clean result does NOT prove the model refreshes; it only excludes these structural classes.
 """
@@ -86,6 +91,11 @@ __all__ = [
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TREES = ("examples", "migrations/workbooks", "migrations/datasources")
+
+# A DISTINCT exit code for "the gate could not assess this", kept apart from 0 (clean) and 1
+# (findings). `check_unit.py` has no fail-open fallthrough, so an exit code it does not recognise
+# is recorded as NOT_CHECKED rather than PASS - which is exactly the meaning here.
+EXIT_UNASSESSABLE = 3
 
 log = logging.getLogger("check_datamodel")
 
@@ -799,31 +809,36 @@ def check_datamodel(model_dir: Path) -> tuple[list[Finding], int, list[TmdlFindi
     return m_findings, m_scanned, tmdl_findings, tmdl_scanned
 
 
-def _run_oracle(targets: list[Path], mode: str) -> tuple[int, bool]:
+class Unassessable(RuntimeError):
+    """The TMDL oracle could not run, so the model's loadability is UNKNOWN - never 'clean'."""
+
+
+def _run_oracle(targets: list[Path], skip: bool) -> tuple[int, bool]:
     """Run the TMDL oracle over every target; returns (problems reported, ran to completion).
 
-    "Could not run" is never silently equivalent to "clean": it is a warning by default and a
-    failure under --require-oracle, which is what CI uses.
+    The oracle is MANDATORY by default. "Could not run" raises Unassessable, which `main` turns
+    into EXIT_UNASSESSABLE - never 0. That is deliberate and it is the one behaviour here with a
+    field history: while it was merely a warning, `check_datamodel.py <model>` exited 0 on
+    parser-fatal TMDL whenever `dotnet` was missing, and `check_unit.py` recorded a PASS for a model
+    Desktop cannot open. Unassessable collapsing into clean is the exact defect class this whole
+    repo keeps finding; a gate of record must not contain it.
     """
-    if mode == "off":
-        log.warning("TMDL ORACLE SKIPPED (--no-oracle) - expression layout was NOT checked.")
+    if skip:
+        log.warning(
+            "TMDL ORACLE SKIPPED (--no-oracle) - whether these models LOAD was NOT checked. "
+            "This is an explicit opt-out, not a clean result."
+        )
         return 0, False
-    try:
-        findings, inspected = check_models(targets)
-    except OracleUnavailable as exc:
-        level = log.error if mode == "require" else log.warning
-        level("TMDL ORACLE COULD NOT RUN - expression layout was NOT checked. This is NOT a pass.\n  %s", exc)
-        return (1, False) if mode == "require" else (0, False)
+    findings, inspected = check_models(targets)
     by_model: dict[Path, list[TmdlFinding]] = {}
     for finding in findings:
         by_model.setdefault(finding.file, []).append(finding)
     for _, group in sorted(by_model.items()):
-        log.error("TMDL PARSER/READBACK ERRORS")
+        log.error("TMDL PARSER ERRORS")
         for finding in group:
             log.error("%s", finding.render(REPO_ROOT))
-    if inspected == 0 and mode == "require":
-        log.error("TMDL ORACLE INSPECTED NOTHING - no definition/ folder in any target. This is NOT a pass.")
-        return 1, False
+    if inspected == 0:
+        raise Unassessable("no definition/ folder in any target, so no model was handed to the parser")
     log.info("TMDL oracle: %d model(s) handed to TmdlSerializer (AMO), %d problem(s).", inspected, len(findings))
     return len(findings), True
 
@@ -834,16 +849,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="*", type=Path, help="a .SemanticModel, or a folder containing some")
     parser.add_argument("--all", action="store_true", help="check every model in every migration tree")
-    oracle = parser.add_mutually_exclusive_group()
-    oracle.add_argument(
-        "--require-oracle",
-        action="store_true",
-        help="fail if the TMDL oracle cannot run (needs the .NET SDK); this is what CI uses",
-    )
-    oracle.add_argument(
+    parser.add_argument(
         "--no-oracle",
         action="store_true",
-        help="skip the TMDL oracle entirely - expression layout is then NOT checked",
+        help="skip the TMDL oracle - whether the models LOAD is then not checked at all",
     )
     args = parser.parse_args(argv)
 
@@ -896,10 +905,18 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         for model in empty_tmdl:
             log.warning("  %s", model)
 
-    mode = "require" if args.require_oracle else ("off" if args.no_oracle else "auto")
-    oracle_problems, oracle_ran = _run_oracle(targets, mode)
+    try:
+        oracle_problems, oracle_ran = _run_oracle(targets, args.no_oracle)
+    except (OracleUnavailable, Unassessable) as exc:
+        log.error(
+            "TMDL ORACLE COULD NOT RUN, so whether these models LOAD is UNKNOWN. This is NOT a "
+            "pass and NOT a finding - it is unassessable (exit %d).\n  %s\n  Fix the oracle, or pass "
+            "--no-oracle to state explicitly that you are skipping it.",
+            EXIT_UNASSESSABLE,
+            exc,
+        )
+        return EXIT_UNASSESSABLE
     total += oracle_problems
-
     if total:
         log.error(
             "\n%d problem(s) across %d model(s).\nThese are structural checks for defects that "
