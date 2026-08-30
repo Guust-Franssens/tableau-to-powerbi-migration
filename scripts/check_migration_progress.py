@@ -280,6 +280,40 @@ def _matching_declaration(
     return None
 
 
+def adjudicate_generated_drift(bundle: Path, generated: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every generated artifact that moved since the engine ran, with its declaration verdict.
+
+    The structured core of :func:`tamper_check`, exposed as a PUBLIC contract so a second consumer
+    can adjudicate provenance with THIS machinery instead of re-deriving weaker rules of its own
+    (issue #274). ``harvest_engine_gaps.py`` is that consumer: a blind review found its own
+    hand-rolled attribution missed a baseline rewrite, a post-engine file addition, a post-engine
+    deletion and a stale declaration - all four of which this function already reported as drift.
+
+    Returns one record per moved artifact: ``target`` (bundle-relative POSIX path), ``kind``
+    (``changed`` / ``missing`` / ``added``), and ``declared_by`` - the declaring script identity,
+    populated ONLY when a declaration ties this run id, this baseline hash, this operation and this
+    exact resulting hash together. Anything weaker is undeclared, which is the point.
+    """
+    declarations = load_generated_edit_declarations(bundle)
+    adjudicated: list[dict[str, Any]] = []
+    for relative, kind in _artifact_drift(bundle, generated["files"]):
+        declaration = _matching_declaration(
+            declarations,
+            generated,
+            relative,
+            kind,
+            _current_hash(bundle, relative),
+        )
+        adjudicated.append(
+            {
+                "target": relative,
+                "kind": kind,
+                "declared_by": declaration["script_identity"] if declaration else None,
+            }
+        )
+    return adjudicated
+
+
 def tamper_check(bundle: Path) -> tuple[str, list[str]]:
     """Detect generated artifacts that changed without structured declaration evidence."""
     generated = load_generated_artifact_baseline(bundle)
@@ -300,27 +334,19 @@ def tamper_check(bundle: Path) -> tuple[str, list[str]]:
     )
 
     baseline = generated["files"]
-    drift = _artifact_drift(bundle, baseline)
-    if not drift:
+    adjudicated = adjudicate_generated_drift(bundle, generated)
+    if not adjudicated:
         return "CLEAN", [
             f"{len(baseline)} generated artifact(s) are pristine against their engine-run hashes",
             *coverage_notes,
         ]
 
-    declarations = load_generated_edit_declarations(bundle)
     notes = []
     undeclared = []
-    for relative, kind in drift:
-        current_hash = _current_hash(bundle, relative)
-        declaration = _matching_declaration(
-            declarations,
-            generated,
-            relative,
-            kind,
-            current_hash,
-        )
-        if declaration:
-            notes.append(f"DECLARED {kind}: {relative} via {declaration['script_identity']}")
+    for item in adjudicated:
+        relative, kind = item["target"], item["kind"]
+        if item["declared_by"]:
+            notes.append(f"DECLARED {kind}: {relative} via {item['declared_by']}")
         else:
             undeclared.append((relative, kind))
             notes.append(

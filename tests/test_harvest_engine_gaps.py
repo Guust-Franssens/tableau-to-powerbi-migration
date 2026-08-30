@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,9 @@ SCRIPT = REPO_ROOT / "scripts" / "harvest_engine_gaps.py"
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import check_migration_progress as cmp_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_engine_gaps as heg  # noqa: E402  # pylint: disable=wrong-import-position
+import harvest_gap_shapes as hgs  # noqa: E402  # pylint: disable=wrong-import-position
 
 VISUAL = "definition/pages/page-1/visuals/v1/visual.json"
 
@@ -122,6 +125,56 @@ def _run(*args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         check=False,
+    )
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _recorded(bundle: Path, target: str) -> str | None:
+    """The engine-time hash of one bundle-relative path, straight from the manifest."""
+    manifest = json.loads((bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    return manifest["generated_artifacts"]["files"].get(target)
+
+
+def _declare(
+    bundle: Path,
+    target: str,
+    *,
+    kind: str = "changed",
+    identity: str = "scripts/fix_layout.py",
+    run_id: str = "test-run",
+    baseline_sha256: str | None = "recorded",
+    expected_sha256: str | None = "current",
+) -> None:
+    """Write ONE edit declaration in the exact shape the tamper gate accepts as proof.
+
+    The sentinel defaults resolve to the real hashes, so a test that wants a STALE or FORGED
+    declaration overrides just the field it is falsifying and nothing else changes.
+    """
+    if baseline_sha256 == "recorded":
+        baseline_sha256 = _recorded(bundle, target)
+    if expected_sha256 == "current":
+        path = bundle / target
+        expected_sha256 = _sha(path) if path.is_file() else None
+    _write(
+        bundle / "_build" / "generated-edit-declarations.json",
+        {
+            "version": 1,
+            "declarations": [
+                {
+                    "version": 1,
+                    "run_id": run_id,
+                    "kind": kind,
+                    "target": target,
+                    "baseline_sha256": baseline_sha256,
+                    "expected_sha256": expected_sha256,
+                    "script_identity": identity,
+                    "script_sha256": "0" * 64,
+                }
+            ],
+        },
     )
 
 
@@ -262,7 +315,7 @@ def test_edit_after_the_engine_ran_is_attributed_as_a_tier_edit(tmp_path):
 
     assert report["provenance"][heg.PROV_TIER] == 1
     assert report["tier_edits"][0]["path"] == VISUAL
-    assert heg.SHAPE_LAYOUT in report["tier_edits"][0]["shapes"]
+    assert hgs.SHAPE_LAYOUT in report["tier_edits"][0]["shapes"]
 
 
 def test_tampered_baseline_is_refused_rather_than_reported(tmp_path):
@@ -292,21 +345,11 @@ def test_bundle_without_a_baseline_reports_unattributed_not_engine_internal(tmp_
 
 
 def test_declared_tier_edit_names_the_declaring_script(tmp_path):
+    """A declaration is credited only when it proves THIS run, THIS baseline and THIS result."""
     bundle = _bundle(tmp_path)
-    _write(bundle / "pbip" / "WB" / "WB.Report" / VISUAL, _visual("Orders", position=7))
-    _write(
-        bundle / "_build" / "generated-edit-declarations.json",
-        {
-            "version": 1,
-            "declarations": [
-                {
-                    "version": 1,
-                    "target": "pbip/WB/WB.Report/" + VISUAL,
-                    "script_identity": "scripts/fix_layout.py",
-                }
-            ],
-        },
-    )
+    target = "pbip/WB/WB.Report/" + VISUAL
+    _write(bundle / target, _visual("Orders", position=7))
+    _declare(bundle, target)
 
     report = heg.harvest(bundle)
 
@@ -321,31 +364,31 @@ def test_declared_tier_edit_names_the_declaring_script(tmp_path):
 @pytest.mark.parametrize(
     ("pointer", "expected"),
     [
-        ("/position/x", heg.SHAPE_LAYOUT),
-        ("/position/tabOrder", heg.SHAPE_LAYOUT),
-        ("/filterConfig/filters[]/name", heg.SHAPE_FILTER),
-        ("/visual/objects/general[]/properties/filter/filter/From[]/Entity", heg.SHAPE_FILTER),
-        ("/visual/visualType", heg.SHAPE_VISUAL_TYPE),
-        ("/datasetReference/byPath/path", heg.SHAPE_REBIND),
-        ("/pageOrder[]", heg.SHAPE_PAGE_ORDER),
-        ("/activePageName", heg.SHAPE_PAGE_ORDER),
-        ("/resourcePackages[]/items[]", heg.SHAPE_RESOURCES),
-        ("/visual/query/queryState/Y/projections[]/queryRef", heg.SHAPE_MODEL_NAMES),
-        ("/visual/query/queryState/Y/projections[]/field/Aggregation", heg.SHAPE_QUERY),
-        ("/visual/objects/dataPoint[]/properties/fill/solid/color", heg.SHAPE_FORMATTING),
-        ("/somethingEntirelyNew", heg.SHAPE_UNCLASSIFIED),
+        ("/position/x", hgs.SHAPE_LAYOUT),
+        ("/position/tabOrder", hgs.SHAPE_LAYOUT),
+        ("/filterConfig/filters[]/name", hgs.SHAPE_FILTER),
+        ("/visual/objects/general[]/properties/filter/filter/From[]/Entity", hgs.SHAPE_FILTER),
+        ("/visual/visualType", hgs.SHAPE_VISUAL_TYPE),
+        ("/datasetReference/byPath/path", hgs.SHAPE_REBIND),
+        ("/pageOrder[]", hgs.SHAPE_PAGE_ORDER),
+        ("/activePageName", hgs.SHAPE_PAGE_ORDER),
+        ("/resourcePackages[]/items[]", hgs.SHAPE_RESOURCES),
+        ("/visual/query/queryState/Y/projections[]/queryRef", hgs.SHAPE_MODEL_NAMES),
+        ("/visual/query/queryState/Y/projections[]/field/Aggregation", hgs.SHAPE_QUERY),
+        ("/visual/objects/dataPoint[]/properties/fill/solid/color", hgs.SHAPE_FORMATTING),
+        ("/somethingEntirelyNew", hgs.SHAPE_UNCLASSIFIED),
     ],
 )
 def test_pointer_shape_classification(pointer, expected):
-    assert heg._pointer_shape(pointer) == expected  # pylint: disable=protected-access
+    assert hgs.pointer_shape(pointer) == expected
 
 
 def test_entity_rename_into_the_bound_model_is_binding_resolution(tmp_path):
     """The reference copy names entities that exist nowhere; resolving them is by design."""
     report = heg.harvest(_bundle(tmp_path, entity_baseline="Extract", entity_working="Orders"))
     shapes = {row["shape"] for row in report["shapes"]}
-    assert heg.SHAPE_BINDING in shapes
-    assert heg.SHAPE_MODEL_NAMES not in shapes
+    assert hgs.SHAPE_BINDING in shapes
+    assert hgs.SHAPE_MODEL_NAMES not in shapes
 
 
 def test_rename_between_two_valid_tables_is_not_excused_as_binding_resolution(tmp_path):
@@ -361,8 +404,8 @@ def test_rename_between_two_valid_tables_is_not_excused_as_binding_resolution(tm
     report = heg.harvest(bundle)
 
     shapes = {row["shape"] for row in report["shapes"]}
-    assert heg.SHAPE_MODEL_NAMES in shapes
-    assert heg.SHAPE_BINDING not in shapes
+    assert hgs.SHAPE_MODEL_NAMES in shapes
+    assert hgs.SHAPE_BINDING not in shapes
 
 
 def test_tmdl_measure_addition_is_classified_not_dismissed_as_binary(tmp_path):
@@ -377,7 +420,7 @@ def test_tmdl_measure_addition_is_classified_not_dismissed_as_binary(tmp_path):
 
     shapes = {row["shape"] for row in report["shapes"]}
     assert "TMDL_MEASURE" in shapes
-    assert heg.SHAPE_BINARY not in shapes
+    assert hgs.SHAPE_BINARY not in shapes
 
 
 def test_added_and_removed_files_carry_their_own_shapes(tmp_path):
@@ -532,3 +575,580 @@ def test_cli_runs_end_to_end_and_writes_both_artifacts(tmp_path):
     assert proc.returncode == heg.EXIT_OK, proc.stderr
     assert json_path.is_file() and md_path.is_file()
     assert "differing files" in proc.stdout
+
+
+# ---------------------------------------------------------------------------------------------
+# The delegation contract. These are the tests the first version could not have passed, and they
+# are written as a PROPERTY rather than as seven examples: whatever the mutation, the harvest must
+# never look cleaner than `check_migration_progress.tamper_check()` does on the same bundle. That
+# gate found every one of the four provenance defects a blind review of PR #399 reported, so it is
+# the oracle, not a second opinion.
+# ---------------------------------------------------------------------------------------------
+
+
+def _identical_bundle(tmp_path: Path) -> Path:
+    """A bundle whose two trees are byte-identical, so the delta alone reports NOTHING."""
+    bundle = tmp_path / "bundle"
+    _report(bundle / "reports" / "WB.Report", entity="Orders", model_relative="../Sales.SemanticModel")
+    _report(bundle / "pbip" / "WB" / "WB.Report", entity="Orders", model_relative="../Sales.SemanticModel")
+    _model(bundle / "pbip" / "WB" / "Sales.SemanticModel", "Orders")
+    _model(bundle / "semantic_models" / "Sales.SemanticModel", "Orders")
+    _record_baseline(bundle)
+    return bundle
+
+
+def _differing_bundle(tmp_path: Path) -> Path:
+    """The normal shape: the reference emission and the bound working copy legitimately differ."""
+    return _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
+
+
+WORKING_VISUAL = "pbip/WB/WB.Report/" + VISUAL
+BASELINE_VISUAL = "reports/WB.Report/" + VISUAL
+
+
+def _mutate_baseline_rewritten(bundle: Path) -> None:
+    """Replace the pristine baseline with a copy of the working tree - the delta then agrees."""
+    shutil.rmtree(bundle / "reports" / "WB.Report")
+    shutil.copytree(bundle / "pbip" / "WB" / "WB.Report", bundle / "reports" / "WB.Report")
+
+
+def _mutate_baseline_file_added(bundle: Path) -> None:
+    _write(bundle / "reports" / "WB.Report" / "definition/pages/p9/page.json", {"name": "p9"})
+
+
+def _mutate_baseline_file_deleted(bundle: Path) -> None:
+    (bundle / BASELINE_VISUAL).unlink()
+
+
+def _mutate_working_file_created(bundle: Path) -> None:
+    _write(bundle / "pbip" / "WB" / "WB.Report" / "definition/pages/p2/page.json", {"name": "p2"})
+
+
+def _mutate_working_file_deleted(bundle: Path) -> None:
+    (bundle / WORKING_VISUAL).unlink()
+
+
+def _mutate_working_file_changed(bundle: Path) -> None:
+    _write(bundle / WORKING_VISUAL, _visual("Orders", position=42))
+
+
+def _mutate_stale_declaration(bundle: Path) -> None:
+    """Declare an edit, then edit again: the declaration no longer describes the current file."""
+    _write(bundle / WORKING_VISUAL, _visual("Orders", position=7))
+    _declare(bundle, WORKING_VISUAL, identity="scripts/unrelated_old.py")
+    _write(bundle / WORKING_VISUAL, _visual("Orders", position=99))
+
+
+MUTATIONS = {
+    "baseline_rewritten_from_working": (_differing_bundle, _mutate_baseline_rewritten),
+    "baseline_file_added": (_identical_bundle, _mutate_baseline_file_added),
+    "baseline_file_deleted": (_identical_bundle, _mutate_baseline_file_deleted),
+    "working_file_created": (_identical_bundle, _mutate_working_file_created),
+    "working_file_deleted": (_identical_bundle, _mutate_working_file_deleted),
+    "working_file_changed": (_identical_bundle, _mutate_working_file_changed),
+    "stale_declaration": (_identical_bundle, _mutate_stale_declaration),
+}
+
+
+def _moved_paths(report: dict) -> set[str]:
+    """Every bundle-relative path the harvest says moved after the engine ran."""
+    moved = {entry["target"] for entry in report["baseline_drift"]}
+    for record in report["tier_edits"] + report["baseline_tampered"]:
+        moved |= {p for p in (record["working_path"], record["baseline_path"]) if p}
+    return moved
+
+
+@pytest.mark.parametrize("name", sorted(MUTATIONS))
+def test_every_drift_the_tamper_gate_finds_is_accounted_for(tmp_path, name):
+    """The property behind the whole redesign, over every mutation shape the review found.
+
+    Not "the harvest must also look unhappy" - a fully attributed tier edit is exactly the evidence
+    this module exists to produce, and `complete` is the right word for it. The contract is stricter
+    and more useful: **every path the gate says moved must appear in the harvest's own output.**
+    Measured on the first version (2026-08-30), five of these seven shapes returned `complete` while
+    `tamper_check()` returned `DRIFT` on the identical bundle, and four of them named nothing at all.
+    """
+    build, mutate = MUTATIONS[name]
+    bundle = build(tmp_path)
+    mutate(bundle)
+
+    state, _notes = cmp_mod.tamper_check(bundle)
+    assert state in {"DRIFT", "DECLARED_DRIFT"}, f"fixture no longer produces drift for {name}"
+    generated = cmp_mod.load_generated_artifact_baseline(bundle)
+    drifted = {item["target"] for item in cmp_mod.adjudicate_generated_drift(bundle, generated)}
+    assert drifted, f"fixture no longer produces drift for {name}"
+
+    report = heg.harvest(bundle)
+
+    assert drifted <= _moved_paths(report), f"{name}: {sorted(drifted - _moved_paths(report))} went unreported"
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 1: a baseline rewrite must not be able to erase its own evidence.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_baseline_rewritten_from_the_working_copy_is_untrustworthy_though_the_delta_is_empty(tmp_path):
+    """The delta agrees perfectly afterwards - that is exactly what makes this the dangerous shape."""
+    bundle = _differing_bundle(tmp_path)
+    _mutate_baseline_rewritten(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert report["provenance"]["differing_files"] == 0
+    assert report["baseline_drift"], "baseline integrity must be validated independently of the delta"
+    assert report["status"] == heg.STATUS_UNTRUSTWORTHY
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_UNTRUSTWORTHY
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_kind"),
+    [(_mutate_baseline_file_added, "added"), (_mutate_baseline_file_deleted, "missing")],
+)
+def test_baseline_tree_additions_and_deletions_are_refused(tmp_path, mutate, expected_kind):
+    """`reports/` is validated as a complete file SET, not only where it still pairs up."""
+    bundle = _identical_bundle(tmp_path)
+    mutate(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert [e["kind"] for e in report["baseline_drift"]] == [expected_kind]
+    assert report["status"] == heg.STATUS_UNTRUSTWORTHY
+
+
+def test_a_declared_edit_to_the_pristine_baseline_is_still_refused(tmp_path):
+    """A declaration makes an edit visible, not legitimate: `reports/` is never edited by anyone."""
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / BASELINE_VISUAL, _visual("Orders", position=3))
+    _declare(bundle, BASELINE_VISUAL)
+
+    report = heg.harvest(bundle)
+
+    assert cmp_mod.tamper_check(bundle)[0] == "DECLARED_DRIFT"
+    assert report["baseline_drift"][0]["declared_by"] == "scripts/fix_layout.py"
+    assert report["status"] == heg.STATUS_UNTRUSTWORTHY
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 2: post-engine additions and deletions ARE tier edits.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_file_created_after_the_engine_is_a_tier_edit_not_unattributed(tmp_path):
+    bundle = _identical_bundle(tmp_path)
+    _mutate_working_file_created(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert report["provenance"][heg.PROV_TIER] == 1
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 0
+    assert report["tier_edits"][0]["post_engine"] == "created"
+
+
+def test_file_deleted_after_the_engine_is_a_tier_edit_not_engine_internal(tmp_path):
+    """The record used to inspect only the BASELINE path, so a deletion looked like engine output."""
+    bundle = _identical_bundle(tmp_path)
+    _mutate_working_file_deleted(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert report["provenance"][heg.PROV_TIER] == 1
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert report["tier_edits"][0]["post_engine"] == "deleted"
+
+
+def test_deleted_engine_emitted_working_only_file_does_not_vanish(tmp_path):
+    """Absent from BOTH trees, so only the engine-time inventory still remembers it existed."""
+    bundle = _identical_bundle(tmp_path)
+    working_only = "pbip/WB/WB.Report/definition/pages/p9/page.json"
+    _write(bundle / working_only, {"name": "p9"})
+    _record_baseline(bundle)
+    (bundle / working_only).unlink()
+
+    report = heg.harvest(bundle)
+
+    assert [r["path"] for r in report["tier_edits"]] == ["definition/pages/p9/page.json"]
+    assert report["tier_edits"][0]["kind"] == "removed_after_engine"
+    assert _pair(report, "report", "WB")["files"]["post_engine_only"] == 1
+    assert _pair(report, "report", "WB")["status"] == heg.PAIR_DIFFERS
+
+
+def test_working_copy_reverted_onto_the_baseline_is_still_a_tier_edit(tmp_path):
+    """Content-identical to the reference again, so the delta sees nothing. The inventory does."""
+    bundle = _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
+    _write(bundle / WORKING_VISUAL, _visual("Extract"))
+
+    report = heg.harvest(bundle)
+
+    reverted = [r for r in report["tier_edits"] if r["path"] == VISUAL]
+    assert reverted and reverted[0]["kind"] == "changed_after_engine"
+    assert hgs.SHAPE_REVERTED in reverted[0]["shapes"]
+
+
+def test_a_post_engine_change_is_never_counted_twice(tmp_path):
+    """The record set is a UNION; a file in both the delta and the inventory gets ONE record."""
+    bundle = _identical_bundle(tmp_path)
+    _mutate_working_file_changed(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert report["provenance"]["differing_files"] == 1
+    assert [r["path"] for r in report["tier_edits"]] == [VISUAL]
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 3: `complete` may not contain unattributed or backfilled evidence.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_empty_recorded_inventory_is_unavailable_not_complete(tmp_path):
+    """`files: {}` covers nothing, so it can neither attribute nor be read as 'all added later'."""
+    bundle = _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
+    manifest = json.loads((bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    manifest["generated_artifacts"]["files"] = {}
+    (bundle / "input_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    report = heg.harvest(bundle)
+
+    assert report["attribution"]["usable"] is False
+    assert report["attribution"]["unavailable_reason"] == "empty_inventory"
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE
+
+
+def test_slice_only_backfill_is_unavailable_for_engine_attribution(tmp_path):
+    """It proves nothing changed since the BACKFILL - and this module asks about the ENGINE."""
+    bundle = _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
+    manifest = json.loads((bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    manifest["generated_artifacts"]["coverage"] = "slice_only_backfill"
+    (bundle / "input_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    report = heg.harvest(bundle)
+
+    assert report["attribution"]["unavailable_reason"] == "slice_only_backfill"
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == report["provenance"]["differing_files"]
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+def test_any_unattributed_difference_forces_incomplete(tmp_path):
+    """Existence of an attribution object is not coverage of the paths actually compared.
+
+    A `.pbi` sidecar is the honest example: the tamper gate deliberately excludes it (a refresh
+    rewrites it and must not read as tampering), so the engine inventory can say nothing about it -
+    yet the tree comparison still sees it. That difference is real and its authorship is unknown,
+    which is `unattributed`, which may not be reported as a `complete` harvest.
+    """
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / "pbip" / "WB" / "WB.Report" / ".pbi" / "localSettings.json", {"version": "1.0"})
+
+    report = heg.harvest(bundle)
+    coverage = report["attribution"]["coverage"]
+
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+    assert coverage["paths_unattributed"] == 1
+    assert coverage["complete"] is False
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE
+
+
+def test_attribution_coverage_is_reported_with_its_denominator(tmp_path):
+    """A fully covered bundle says so in numbers, so the claim is inspectable rather than implied."""
+    report = heg.harvest(_bundle(tmp_path, entity_baseline="Extract", entity_working="Orders"))
+    coverage = report["attribution"]["coverage"]
+
+    assert coverage["paths_compared"] == report["provenance"]["differing_files"]
+    assert coverage["paths_attributed"] == coverage["paths_compared"]
+    assert coverage["complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("recorded", "drift", "baseline_rel", "working_rel", "expected"),
+    [
+        (["reports/a", "pbip/a"], {}, "reports/a", "pbip/a", heg.PROV_ENGINE),
+        (["reports/a"], {}, "reports/a", None, heg.PROV_ENGINE),
+        (["reports/a", "pbip/a"], {"pbip/a": "changed"}, "reports/a", "pbip/a", heg.PROV_TIER),
+        (["reports/a", "pbip/a"], {"pbip/a": "missing"}, "reports/a", "pbip/a", heg.PROV_TIER),
+        (["reports/a", "pbip/a"], {"reports/a": "changed"}, "reports/a", "pbip/a", heg.PROV_TAMPERED),
+        # Baseline drift outranks working drift: the reference the comparison rests on is gone, so
+        # nothing can be said about what the tier did to the other side.
+        (
+            ["reports/a", "pbip/a"],
+            {"reports/a": "changed", "pbip/a": "changed"},
+            "reports/a",
+            "pbip/a",
+            heg.PROV_TAMPERED,
+        ),
+        # ⚠️ ONE side matching is not attribution. Only when EVERY present side is accounted for can
+        # a difference be called the engine's own. Unobserved on the estate corpus - `artifact_drift`
+        # reports an unrecorded but existing generated artifact as `added` drift, so this mixed state
+        # needs a path the inventory excludes by design (a `.pbi` sidecar) on exactly one side - but
+        # it is the method's contract, and relaxing it to `"match" in states` survived every
+        # end-to-end test in this file.
+        (["reports/a"], {}, "reports/a", "pbip/a", heg.PROV_UNATTRIBUTED),
+        ([], {}, "reports/a", "pbip/a", heg.PROV_UNATTRIBUTED),
+    ],
+)
+def test_evidence_verdict_requires_every_present_side_to_be_accounted_for(
+    recorded, drift, baseline_rel, working_rel, expected
+):
+    evidence = heg.Evidence(
+        Path("bundle"),
+        {path: "hash" for path in recorded},
+        {path: {"kind": kind, "declared_by": None} for path, kind in drift.items()},
+        [],
+    )
+    assert evidence.verdict(baseline_rel, working_rel) == expected
+
+
+def test_an_unusable_evidence_object_attributes_nothing():
+    evidence = heg.Evidence(Path("bundle"), {"reports/a": "hash"}, {}, [], unavailable_reason="empty_inventory")
+    assert evidence.usable is False
+    assert evidence.verdict("reports/a", "pbip/a") == heg.PROV_UNATTRIBUTED
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 4: an inaccessible directory must not fabricate additions beneath it.
+# ---------------------------------------------------------------------------------------------
+
+
+def _block_directory(monkeypatch, blocked_name: str, side: str, *, locatable: bool = True) -> None:
+    """Make `os.walk` fail on one directory of one side, exactly as a PermissionError would."""
+    real_walk = heg.os.walk
+
+    def walk(top, onerror=None, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, onerror=onerror, **kwargs):
+            if Path(dirpath).name == blocked_name and side in Path(dirpath).parts:
+                if onerror is not None:
+                    exc = PermissionError(13, "injected: unreadable directory")
+                    exc.filename = dirpath if locatable else "<unlocatable>"
+                    onerror(exc)
+                continue
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(heg.os, "walk", walk)
+
+
+def _bundle_with_blocked_dir(tmp_path: Path) -> Path:
+    bundle = _identical_bundle(tmp_path)
+    for side in ("reports/WB.Report", "pbip/WB/WB.Report"):
+        _write(bundle / side / "definition/pages/blocked/visual.json", _visual("Orders"))
+    _record_baseline(bundle)
+    return bundle
+
+
+def test_unreadable_directory_does_not_fabricate_additions_beneath_it(tmp_path, monkeypatch):
+    """`os.walk` reports only the directory, so exact-path withdrawal left every descendant behind."""
+    bundle = _bundle_with_blocked_dir(tmp_path)
+    _block_directory(monkeypatch, "blocked", "reports")
+
+    report = heg.harvest(bundle)
+    entry = _pair(report, "report", "WB")
+
+    assert entry["files"]["added"] == 0, "a file under an unreadable directory was counted as added"
+    assert entry["files"]["removed"] == 0
+    assert entry["status"] == heg.PAIR_UNASSESSABLE
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+def test_a_traversal_failure_that_cannot_be_located_suppresses_the_whole_pair(tmp_path, monkeypatch):
+    """Nothing about the pair can be scoped, so a partial answer would look complete and be wrong."""
+    bundle = _bundle_with_blocked_dir(tmp_path)
+    _write(bundle / "pbip/WB/WB.Report/definition/pages/p2/page.json", {"name": "p2"})
+    _block_directory(monkeypatch, "blocked", "reports", locatable=False)
+
+    report = heg.harvest(bundle)
+    entry = _pair(report, "report", "WB")
+
+    assert entry["provenance"] == {}
+    assert entry["status"] == heg.PAIR_UNASSESSABLE
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 5: `BINDING_RESOLUTION` is decided per changed leaf, never per file.
+# ---------------------------------------------------------------------------------------------
+
+
+def _projection(entity: str, prop: str) -> dict:
+    return {
+        "field": {"Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}},
+        "queryRef": f"{entity}.{prop}",
+        "nativeQueryRef": prop,
+    }
+
+
+def _multi_visual(*pairs: tuple[str, str]) -> dict:
+    return {
+        "position": {"x": 0, "y": 0, "width": 100, "height": 100, "tabOrder": 0},
+        "visual": {
+            "visualType": "columnChart",
+            "query": {
+                "queryState": {
+                    f"role{index}": {"projections": [_projection(entity, prop)]}
+                    for index, (entity, prop) in enumerate(pairs)
+                }
+            },
+        },
+    }
+
+
+def _mixed_name_change_bundle(tmp_path: Path, before: tuple, after: tuple) -> Path:
+    bundle = tmp_path / "bundle"
+    _write(
+        bundle / "reports" / "WB.Report" / "definition.pbir",
+        {"version": "4.0", "datasetReference": {"byPath": {"path": "../Sales.SemanticModel"}}},
+    )
+    _write(bundle / "reports" / "WB.Report" / VISUAL, _multi_visual(*before))
+    _write(
+        bundle / "pbip" / "WB" / "WB.Report" / "definition.pbir",
+        {"version": "4.0", "datasetReference": {"byPath": {"path": "../Sales.SemanticModel"}}},
+    )
+    _write(bundle / "pbip" / "WB" / "WB.Report" / VISUAL, _multi_visual(*after))
+    for root in (bundle / "pbip" / "WB" / "Sales.SemanticModel", bundle / "semantic_models" / "Sales.SemanticModel"):
+        _model(root, "Orders")
+        _write(root / "definition" / "tables" / "Returns.tmdl", "table 'Returns'\n\n\tcolumn A\n")
+    _record_baseline(bundle)
+    return bundle
+
+
+def test_one_valid_rebind_does_not_excuse_an_unrelated_table_substitution(tmp_path):
+    """Measured on the first version: all three of these collapsed into BINDING_RESOLUTION alone."""
+    bundle = _mixed_name_change_bundle(
+        tmp_path,
+        before=(("Extract", "A"), ("Orders", "A"), ("Orders", "A")),
+        after=(("Orders", "A"), ("Returns", "A"), ("Orders", "B")),
+    )
+
+    shapes = {row["shape"] for row in heg.harvest(bundle)["shapes"]}
+
+    assert hgs.SHAPE_BINDING in shapes, "the genuine invalid->valid rebind must still be recognised"
+    assert hgs.SHAPE_MODEL_NAMES in shapes, "a valid->valid substitution must not be excused"
+
+
+def test_a_property_rename_is_never_excused_as_binding_resolution(tmp_path):
+    """Only TABLE names are read from the bound model, so a column rename cannot be demonstrated."""
+    bundle = _mixed_name_change_bundle(
+        tmp_path,
+        before=(("Extract", "A"),),
+        after=(("Orders", "B"),),
+    )
+
+    shapes = {row["shape"] for row in heg.harvest(bundle)["shapes"]}
+
+    assert hgs.SHAPE_MODEL_NAMES in shapes
+
+
+@pytest.mark.parametrize(
+    ("leaf", "before", "after", "expected"),
+    [
+        ("/visual/query/x/Entity", "Extract", "Orders", hgs.SHAPE_BINDING),
+        ("/visual/query/x/Entity", "Orders", "Returns", hgs.SHAPE_MODEL_NAMES),
+        ("/visual/query/x/Entity", "Orders", "Nowhere", hgs.SHAPE_MODEL_NAMES),
+        ("/visual/query/x/queryRef", "Extract.A", "Orders.A", hgs.SHAPE_BINDING),
+        ("/visual/query/x/queryRef", "Extract.A", "Orders.B", hgs.SHAPE_MODEL_NAMES),
+        ("/visual/query/x/Property", "A", "B", hgs.SHAPE_MODEL_NAMES),
+        ("/visual/query/x/nativeQueryRef", "A", "B", hgs.SHAPE_MODEL_NAMES),
+        # ⚠️ A COLUMN whose name collides with a TABLE name. `bound_model_tables` returns table names
+        # only, so testing a property against it is a category error: `Property: Extract -> Orders`
+        # would look exactly like an invalid->valid rebind while being a column rename. Without these
+        # two rows the guard is unobserved - mutation-tested: widening the `Entity` branch to cover
+        # `Property`/`nativeQueryRef` survived the whole suite until they existed.
+        ("/visual/query/x/Property", "Extract", "Orders", hgs.SHAPE_MODEL_NAMES),
+        ("/visual/query/x/nativeQueryRef", "Extract", "Orders", hgs.SHAPE_MODEL_NAMES),
+    ],
+)
+def test_name_change_shape_is_decided_leaf_by_leaf(leaf, before, after, expected):
+    difference = hgs.Difference(leaf, "value", before, after)
+    assert hgs.name_change_shape(difference, {"Orders", "Returns"}) == expected
+
+
+def test_an_unknown_bound_model_never_excuses_a_name_change():
+    difference = hgs.Difference("/visual/query/x/Entity", "value", "Extract", "Orders")
+    assert hgs.name_change_shape(difference, None) == hgs.SHAPE_MODEL_NAMES
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 6: unreadable metadata is `incomplete` (exit 3), never the tamper exit code.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(b'{"generated_artifacts": "\xff\xfe not utf-8"}', id="invalid-utf8"),
+        pytest.param(b"{not json at all", id="invalid-json"),
+    ],
+)
+def test_undecodable_manifest_is_incomplete_not_untrustworthy(tmp_path, payload):
+    """Two very different situations must not share the exit code that means 'tampered baseline'."""
+    bundle = _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
+    (bundle / "input_manifest.json").write_bytes(payload)
+
+    report = heg.harvest(bundle)
+
+    assert report["attribution"]["usable"] is False
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE
+
+
+def test_undecodable_manifest_still_writes_the_structured_report(tmp_path):
+    """`--json` is a contract; a crash out of main() destroyed it and named no reason."""
+    bundle = _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
+    (bundle / "input_manifest.json").write_bytes(b'{"generated_artifacts": "\xff\xfe"}')
+    destination = tmp_path / "out" / "harvest.json"
+
+    assert heg.main([str(bundle), "--quiet", "--json", str(destination)]) == heg.EXIT_INCOMPLETE
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    assert payload["attribution"]["unavailable_reason"].startswith("UnicodeDecodeError")
+
+
+def test_an_unreadable_declaration_ledger_does_not_crash_the_harvest(tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path)
+    _write(bundle / WORKING_VISUAL, _visual("Orders", position=42))
+
+    def explode(_bundle_path):
+        raise OSError("injected: declaration ledger is unreadable")
+
+    monkeypatch.setattr(cmp_mod, "load_generated_edit_declarations", explode)
+    report = heg.harvest(bundle)
+
+    assert report["attribution"]["usable"] is False
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 7: a declaration is credited only when it proves the CURRENT edit.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("override", "reason"),
+    [
+        ({"run_id": "some-other-run"}, "a declaration from another engine run"),
+        ({"kind": "added"}, "a declaration describing a different operation"),
+        ({"baseline_sha256": "0" * 64}, "a declaration whose baseline is not the engine's"),
+        ({"expected_sha256": "0" * 64}, "a declaration whose result is not the current file"),
+        ({"identity": ""}, "a declaration naming no script"),
+    ],
+)
+def test_a_declaration_that_does_not_prove_the_current_edit_is_not_credited(tmp_path, override, reason):
+    bundle = _bundle(tmp_path)
+    _write(bundle / WORKING_VISUAL, _visual("Orders", position=7))
+    _declare(bundle, WORKING_VISUAL, **override)
+
+    report = heg.harvest(bundle)
+
+    assert report["tier_edits"][0]["declared_by"] is None, reason
+
+
+def test_a_declaration_invalidated_by_a_later_edit_is_not_credited(tmp_path):
+    """The file moved again after being declared, so the declaration describes a state that is gone."""
+    bundle = _bundle(tmp_path)
+    _mutate_stale_declaration(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert cmp_mod.tamper_check(bundle)[0] == "DRIFT"
+    assert report["tier_edits"][0]["declared_by"] is None
