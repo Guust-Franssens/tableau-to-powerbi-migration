@@ -273,7 +273,7 @@ class Model:
         comment - `// prior source was Snowflake.Databases("s","d")` - made a fully file-backed source
         report CONNECTED, which is a false PASS in the exact direction this gate exists to prevent.
         """
-        return bool(re.search(rf"\b{re.escape(token)}\.[A-Za-z]", _strip_m_noise(self.m_text)))
+        return bool(re.search(rf"\b{re.escape(token)}\.[A-Za-z]", _strip_m_noise(self.m_text) or self.m_text))
 
     def file_tables(self, only: set[str] | None = None) -> list[str]:
         """Distinct table names whose partitions are file-backed, for finding evidence.
@@ -339,13 +339,23 @@ def _table_names(data_source: dict[str, Any]) -> list[str]:
     return names
 
 
-def _strip_m_noise(text: str) -> str:
-    """Remove M comments AND string literals, preserving length so structure survives.
+def _strip_m_noise(text: str) -> str | None:
+    """Remove M comments AND string literals, preserving length - or None if the text is UNTERMINATED.
 
-    String literals matter as much as comments now. Blind review round 18: a partition carrying
+    String literals matter as much as comments. Blind review round 18: a partition carrying
     `Note = "Snowflake.Databases(""fake"")"` was reported as a connected Snowflake source, because
     only comments were stripped. Doubled quotes are M's escape, and blanking the whole literal handles
     them without needing to parse the escape.
+
+    ⚠️ REACHING EOF INSIDE A STRING OR BLOCK COMMENT RETURNS None, and that is the round-21 finding.
+    Blanking the remainder as if the quote had closed handed back a CANONICAL-LOOKING expression: a
+    valid chain followed by `Data "unterminated literal with ) ] }` certified as connected, exit 0 -
+    while `check_datamodel.py`, our own sibling gate, already reported UNTERMINATED, exit 1. A state a
+    neighbouring module computes must not be silently discarded here.
+
+    Callers choose their own fail-closed direction: provenance refuses outright (no pass), while the
+    lexical scan falls back to the RAW text so a connector hidden in the unterminated region still
+    suppresses a finding rather than enabling one.
     """
     out = []
     i, n, in_string = 0, len(text), False
@@ -374,15 +384,21 @@ def _strip_m_noise(text: str) -> str:
                 i += 1
             continue
         if text.startswith("/*", i):
-            while i < n and not text.startswith("*/", i):
+            closed = False
+            while i < n:
+                if text.startswith("*/", i):
+                    out.append("  ")
+                    i += 2
+                    closed = True
+                    break
                 out.append("\n" if text[i] == "\n" else " ")
                 i += 1
-            out.append("  ")
-            i += 2
+            if not closed:
+                return None
             continue
         out.append(char)
         i += 1
-    return "".join(out)
+    return None if in_string else "".join(out)
 
 
 _WHOLE_LET = re.compile(r"^let\b(?P<body>.*)\bin\b\s*(?P<final>#?\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\s*$", re.DOTALL)
@@ -506,6 +522,8 @@ def _canonical_let(body: str) -> tuple[dict[str, str], str] | None:
     surveyed canonical shape contains one.
     """
     stripped = _strip_m_noise(body)
+    if stripped is None:
+        return None  # unterminated string or block comment: nothing here can be trusted
     assignment = _SOURCE_ASSIGN.search(stripped)
     expression = (stripped[assignment.end() :] if assignment else stripped).strip()
     match = _WHOLE_LET.match(expression)
@@ -615,8 +633,14 @@ def partition_connectors(body: str) -> frozenset[str]:
 
     LEXICAL and deliberately over-detecting: it feeds only `connector_present`, which can move a
     verdict to NOT_CHECKED and never to a pass. The pass side uses `partition_provenance`.
+
+    On UNTERMINATED text it falls back to the RAW body rather than giving up, because over-detecting
+    here suppresses a finding while under-detecting would enable one - the opposite direction to
+    `partition_provenance`, and fail-closed for both.
     """
     text = _strip_m_noise(body)
+    if text is None:
+        text = body
     return frozenset(token for token in CONNECTOR_TOKENS if re.search(rf"\b{re.escape(token)}\.[A-Za-z]", text))
 
 

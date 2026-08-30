@@ -3312,16 +3312,18 @@ def test_a_connector_call_with_a_trailing_operator_is_not_a_root() -> None:
 
 
 def test_a_connector_call_wrapped_in_another_function_is_not_a_root() -> None:
-    """A connector call must BE the binding, not sit inside it.
+    """A connector call must BE the binding, not sit inside it - and the `^` anchor IS load-bearing.
 
-    ⚠️ MEASURED, because the obvious mutation could not demonstrate it. Loosening `_CONNECTOR_CALL` to
-    an unanchored `search` leaves BOTH wrappers refused, so the `^` anchor is redundant here: FULL
-    CONSUMPTION is what refuses them. `Table.Buffer(...)` also fails the connector-token check, and
-    `Buffered(...)` - a dotless wrapper the head pattern cannot match at all - would, under a search,
-    find the inner call and then stop at the inner `)`, leaving a trailing `)`.
+    ⚠️ I GOT THIS WRONG IN ROUND 20 AND THE CORRECTION IS THE POINT. I measured that loosening
+    `_CONNECTOR_CALL` to an unanchored `search` left both WRAPPER cases refused, and concluded the
+    anchor was redundant. It was redundant FOR THOSE INPUTS: every wrapper I tried has a trailing `)`,
+    so full consumption independently rejected them. A PREFIX form with no trailing suffix does not -
+    `try Sql.Database("srv", "db")` yields a try-record, not a database handle, and with both
+    mechanisms removed it returns `{'Sql'}`. A real false pass that only the anchor prevents.
 
-    So this is a characterisation test, not a test of the anchor, and the mutation table says so by
-    NOT claiming a mutation for it. Do not "harden" the anchor believing it carries this property.
+    The honest version of my note would have been "I could not construct a case where the anchor is
+    load-bearing", which invites the counterexample. "Redundant" claimed a general property from a
+    sample of two.
     """
     for wrapper in ("Table.Buffer", "Buffered"):
         body = (
@@ -3329,6 +3331,58 @@ def test_a_connector_call_wrapped_in_another_function_is_not_a_root() -> None:
             '    Data = Source{[Schema = "dbo", Item = "T"]}[Data]\nin\n    Data'
         )
         assert ccf.partition_provenance(body) == frozenset(), wrapper
+
+    # The prefix form: no trailing suffix, so ONLY the anchor refuses it.
+    prefixed = (
+        f'let\n    Source = try {_SQL_ROOT},\n    Data = Source{{[Schema = "dbo", Item = "T"]}}[Data]\nin\n    Data'
+    )
+    assert ccf.partition_provenance(prefixed) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("label", "template"),
+    [
+        # After the `in` expression: `_WHOLE_LET`'s trailing `\s*$` ALSO refuses these, so they are
+        # the weak cases - kept because they are the reviewer's verbatim reproduction.
+        ("unterminated-string-after-in", 'let\n Source = {sql},\n Data = {nav}\nin\n Data "oops with ) ] }}'),
+        ("unterminated-comment-after-in", "let\n Source = {sql},\n Data = {nav}\nin\n Data\n/* oops ) ] }}"),
+        # MID-BINDING: the chain still parses without the unterminated region, so `_strip_m_noise`
+        # returning None is the ONLY thing refusing these. Measured: with that refusal removed they
+        # return {{'Sql'}}, while the weak cases return {{}} either way - so a fixture built only from
+        # the weak ones cannot pin the rule. Same fixture error as round 20, caught by the harness.
+        ("unterminated-string-mid-binding", 'let\n X = "oops,\n Source = {sql},\n Data = {nav}\nin\n Data'),
+        ("unterminated-comment-mid-binding", "let\n /* oops,\n Source = {sql},\n Data = {nav}\nin\n Data"),
+    ],
+)
+def test_unterminated_noise_is_not_provenance(label: str, template: str) -> None:
+    """Blanking an unterminated string or comment as if it closed yields a canonical-LOOKING chain.
+
+    Round 21: a valid chain followed by `Data "unterminated literal with ) ] }` was certified
+    connected, exit 0 - while `check_datamodel.py`, our own sibling gate, already reported
+    UNTERMINATED, exit 1. One gate certifying what a neighbour rejects is the worst shape available,
+    and the state was already being computed next door.
+    """
+    body = template.format(sql=_SQL_ROOT, nav='Source{[Schema = "dbo", Item = "T"]}[Data]')
+    assert ccf._strip_m_noise(body) is None, f"{label}: the stripper must report unterminated"
+    assert ccf.partition_provenance(body) == frozenset(), label
+
+
+def test_properly_closed_noise_is_still_handled(tmp_path: Path) -> None:
+    """The negative beside the positive: closed strings and comments must not become refusals.
+
+    Delimiters inside properly closed strings, doubled quotes, and braces inside closed block comments
+    all survived the round-21 attack, so the unterminated check must not sweep them up with it.
+    """
+    body = (
+        "let\n"
+        '    Note = "a } b , c ""quoted"" )",\n'
+        "    /* a closed comment with ) ] } */\n"
+        f"    Source = {_SQL_ROOT},\n"
+        '    Data = Source{[Schema = "dbo", Item = "T"]}[Data]\n'
+        "in\n    Data"
+    )
+    assert ccf._strip_m_noise(body) is not None
+    assert ccf.partition_provenance(body) == frozenset({"Sql"})
 
 
 def test_a_navigation_step_with_a_trailing_operator_is_not_a_step() -> None:
