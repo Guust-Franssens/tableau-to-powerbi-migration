@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import check_running_total_axis as crta  # noqa: E402  # pylint: disable=wrong-import-position
+import dax_grain as dg  # noqa: E402  # pylint: disable=wrong-import-position
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,6 +38,14 @@ ORDERS_TMDL = """table Orders
 	column Order_Month
 		dataType: dateTime
 
+	column 'Order Month Label' = FORMAT('Orders'[Order_Date], "yyyy-MM")
+
+	column 'Order Quarter No' = QUARTER('Orders'[Order_Date])
+
+	column 'Order Quarter' = "Q" & 'Orders'[Order Quarter No]
+
+	column 'Fiscal Period' = 1
+
 	column Region
 		dataType: string
 
@@ -45,6 +54,7 @@ ORDERS_TMDL = """table Orders
 """
 
 DATE_TMDL = """table Date
+	dataCategory: Time
 
 	column Date
 		dataType: dateTime
@@ -370,6 +380,254 @@ def test_as_of_cross_table_axis_is_unassessable(tmp_path: Path) -> None:
     assert codes(crta.scan(_as_of_bundle(tmp_path, "Date", "Month Start"))) == ["cross_table_axis"]
 
 
+# --- review findings #1-#3: the proxies that used to decide "safe" --------------------------
+
+
+@pytest.mark.parametrize("role", ["Category", "Rows", "Columns", "Series", "Tooltips"])
+def test_every_projected_column_is_examined_not_a_curated_axis_list(tmp_path: Path, role: str) -> None:
+    """Finding 1. A `dateTime` bin under the pivotTable's real `Columns` role used to be INVISIBLE:
+    the axis-role list omitted it, the survivor list came back empty, and empty was read as
+    "the axis is cleared". Measured on the estate's Section 12 pivot - exit 1 under `Rows`, exit 0
+    under `Columns`, same measure, same column. Every projected column groups the query."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {
+            role: {"projections": [_column_projection("Orders", "Order_Month")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+        visual_type="pivotTable",
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+
+
+def test_as_of_on_a_measure_only_visual_is_unassessable(tmp_path: Path) -> None:
+    """Finding 1, second half. A card has no grouping column to clear, so "cleared" is not a fact
+    about it. This returned `ok`/exit 0 while the module's own contract promised exit 3."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {"Data": {"projections": [_measure_projection("_Measures", "Running Sales")]}},
+        visual_type="cardVisual",
+    )
+    report = crta.scan(bundle)
+    assert codes(report) == ["no_grouping_column"]
+    assert report["status"] == crta.STATUS_UNASSESSABLE
+
+
+def test_as_of_with_a_hierarchy_projection_is_unassessable(tmp_path: Path) -> None:
+    """A hierarchy level may expand to a date grain, so a clean as-of verdict is not honest."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {
+            "Category": {
+                "projections": [
+                    _column_projection("Orders", "Order_Date"),
+                    _hierarchy_projection("Date", "Calendar", "Month"),
+                ]
+            },
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    assert codes(crta.scan(bundle)) == ["hierarchy_projection"]
+
+
+@pytest.mark.parametrize("column", ["Order Month Label", "Order Quarter"])
+def test_date_bins_derived_by_calculation_are_flagged_whatever_their_type(tmp_path: Path, column: str) -> None:
+    """Finding 2. The engine writes its coarse grains as TEXT calculated columns -
+    `Month = FORMAT('Date'[Date], "MMM")`, `Quarter = "Q" & QUARTER(...)` - carrying no `dataType`
+    at all (95 such columns in the 2026-08-29 estate). Their filters survive exactly like a
+    `dateTime` bin's, so lineage decides, not the declared scalar type. `Order Quarter` also proves
+    the chain is followed transitively (via `Order Quarter No`)."""
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", column))
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert codes(report) == ["axis_grain_not_cleared"]
+
+
+def test_a_date_named_column_with_no_proof_is_unassessable_not_clean(tmp_path: Path) -> None:
+    """A name is not evidence enough to fail a build, but it is too much to wave through."""
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Fiscal Period"))
+    assert codes(report) == ["axis_grain_unresolved"]
+    assert report["status"] == crta.STATUS_UNASSESSABLE
+
+
+def test_a_pinned_cutoff_is_not_a_running_total(tmp_path: Path) -> None:
+    """Finding 3, a FALSE POSITIVE. `<= DATE(2024,12,31)` is an ordinary "sales through cutoff"
+    measure whose per-bucket totals are INTENDED. Reading only the `<=` operator blocked it."""
+    fixed = (
+        "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), 'Orders'[Order_Date] <= DATE(2024, 12, 31)))"
+    )
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", fixed))
+    assert report["status"] == crta.STATUS_NOT_APPLICABLE, crta.render(report)
+    assert report["mismatches"] == 0
+
+
+def test_an_as_of_bound_hoisted_into_a_var_is_still_a_running_total(tmp_path: Path) -> None:
+    """The documented fix for the filter form hoists the as-of date into a VAR; following it is what
+    keeps the pinned-cutoff exclusion from also excusing the real thing."""
+    hoisted = (
+        "VAR _asOf = MAX('Orders'[Order_Date]) "
+        "RETURN CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
+        "'Orders'[Order_Date] <= _asOf))"
+    )
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", hoisted))
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+
+
+def test_an_unresolvable_as_of_bound_is_unassessable(tmp_path: Path) -> None:
+    """`<= [As Of Date]` may well be a running total; nothing static proves it either way."""
+    by_measure = (
+        "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), 'Orders'[Order_Date] <= [As Of Date]))"
+    )
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", by_measure))
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+
+
+def test_a_grouping_column_is_never_used_as_a_dict_key(tmp_path: Path) -> None:
+    """Regression: grading survivors in a dict keyed by `check_field_bindings.FieldRef` raised
+    `TypeError: unhashable type` at runtime. A crash exits 1 - indistinguishable from a mismatch to
+    anything reading only the exit code, and the reproduction harness scored it as a pass."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Month")]},
+            "Rows": {"projections": [_column_projection("Orders", "Order Quarter")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"]
+    assert "Order_Month" in report["pairs"][0]["findings"][0]["detail"]
+
+
+# --- review finding #4: every window call, not the first ------------------------------------
+
+
+def test_every_window_call_is_assessed_not_just_the_first(tmp_path: Path) -> None:
+    """Finding 4. `_classify_window` returned from inside the first call site, so a second
+    `WINDOW(... ORDERBY(<unprojected>))` in the same measure was ignored - measured exit 0 on an
+    estate-shaped measure with two windows."""
+    two = _measures_tmdl(
+        _measure(
+            "Two Windows",
+            "MAXX(WINDOW(1, ABS, -1, ABS, ORDERBY('Orders'[Order_Date], ASC)), CALCULATE(SUM('Orders'[Sales]))) "
+            "+ MAXX(WINDOW(1, ABS, -1, ABS, ORDERBY('Orders'[Region], ASC)), CALCULATE(SUM('Orders'[Sales])))",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        two,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Two Windows")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert "'Orders'[Region]" in report["pairs"][0]["findings"][0]["detail"]
+
+
+def test_a_relation_on_a_LATER_window_call_still_makes_it_unassessable(tmp_path: Path) -> None:
+    """The conservative half of the same fix: one unreadable call makes the measure unreadable."""
+    mixed = _measures_tmdl(
+        _measure(
+            "Mixed Windows",
+            "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC)), CALCULATE(SUM('Orders'[Sales]))) "
+            "+ MAXX(WINDOW(1, ABS, 0, REL, ALLSELECTED('Orders'), ORDERBY('Orders'[Region], ASC)), "
+            "CALCULATE(SUM('Orders'[Sales])))",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        mixed,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Mixed Windows")]},
+        },
+    )
+    assert verdicts(crta.scan(bundle)) == ["unassessable"]
+
+
+# --- review finding #5: period-to-date is judged, not excused -------------------------------
+
+
+def test_fact_table_period_to_date_on_a_coarse_axis_is_unassessable(tmp_path: Path) -> None:
+    """Finding 5. Excluding period-to-date and merely LISTING it under `not_assessed_by_design`
+    returned `NOT_APPLICABLE`/exit 0 for the known-bad fact-table case. Reproduced on the committed
+    Superstore model, whose relationship runs from `[Order Date 2017]`, not `[Order Date]`."""
+    measures = _measures_tmdl(_measure("YTD Sales", "TOTALYTD(SUM('Orders'[Sales]), 'Orders'[Order_Date])"))
+    bundle = build_bundle(
+        tmp_path,
+        measures,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Month")]},
+            "Y": {"projections": [_measure_projection("_Measures", "YTD Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert codes(report) == ["period_to_date_grain_unproven"], crta.render(report)
+    assert report["status"] == crta.STATUS_UNASSESSABLE
+    assert "not_assessed_by_design" not in report
+
+
+def test_period_to_date_on_a_marked_date_table_is_clean(tmp_path: Path) -> None:
+    """The common, correct shape must stay silent, or the gate gets muted: a `dataCategory: Time`
+    table's other columns ARE auto-removed by time intelligence."""
+    measures = _measures_tmdl(_measure("YTD Sales", "TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date])"))
+    bundle = build_bundle(
+        tmp_path,
+        measures,
+        {
+            "Category": {"projections": [_column_projection("Date", "Month Start")]},
+            "Series": {"projections": [_column_projection("Orders", "Region")]},
+            "Y": {"projections": [_measure_projection("_Measures", "YTD Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert codes(report) == ["date_table_marked"], crta.render(report)
+    assert report["status"] == crta.STATUS_OK
+
+
+def test_period_to_date_with_no_date_grain_on_the_visual_is_clean(tmp_path: Path) -> None:
+    """A YTD measure on a pure Region bar chart has no coarser date grain to be truncated by."""
+    measures = _measures_tmdl(_measure("YTD Sales", "TOTALYTD(SUM('Orders'[Sales]), 'Orders'[Order_Date])"))
+    bundle = build_bundle(
+        tmp_path,
+        measures,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Region")]},
+            "Y": {"projections": [_measure_projection("_Measures", "YTD Sales")]},
+        },
+        visual_type="clusteredColumnChart",
+    )
+    assert codes(crta.scan(bundle)) == ["no_date_grain_on_axis"]
+
+
+def test_a_fixed_window_comparison_is_still_not_an_accumulation(tmp_path: Path) -> None:
+    """`DATESBETWEEN` is anchored by its arguments. The committed Superstore model's whole CP/PP
+    family is this shape, and reporting it once cost 12 rows against shipping evidence."""
+    measures = _measures_tmdl(
+        _measure(
+            "Prior Period",
+            "CALCULATE(SUM('Orders'[Sales]), DATESBETWEEN('Date'[Date], MIN('Date'[Date]), MAX('Date'[Date])))",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        measures,
+        {
+            "Category": {"projections": [_column_projection("Date", "Month Start")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Prior Period")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert report["status"] == crta.STATUS_NOT_APPLICABLE
+    assert "Prior Period" not in crta.render(report)
+
+
 def test_as_of_allexcept_is_unassessable(tmp_path: Path) -> None:
     """ALLEXCEPT inverts the cleared set, which this gate deliberately does not model."""
     expression = (
@@ -434,8 +692,9 @@ def test_an_ordinary_blank_stub_is_not_surfaced(tmp_path: Path) -> None:
     assert report["stubbed_cumulative_measures"] == []
 
 
-def test_period_to_date_is_named_on_a_clean_run(tmp_path: Path) -> None:
-    """A pass has to say what it did not look at, or it reads as a full clearance."""
+def test_period_to_date_is_judged_not_listed_and_fixed_windows_stay_out(tmp_path: Path) -> None:
+    """The `not_assessed_by_design` bucket is GONE - it hid the fact-table case above. What remains
+    true is that a fixed window is not an accumulation at all."""
     measures = _measures_tmdl(
         _measure("YTD Sales", "TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date])"),
         _measure(
@@ -452,13 +711,9 @@ def test_period_to_date_is_named_on_a_clean_run(tmp_path: Path) -> None:
         },
     )
     report = crta.scan(bundle)
-    assert report["status"] == crta.STATUS_NOT_APPLICABLE
-    assert report["not_assessed_by_design"] == ["'_Measures'[YTD Sales]"]
-    rendered = crta.render(report)
-    assert "NOT ASSESSED by this gate" in rendered
-    assert "YTD Sales" in rendered
-    # A fixed window is anchored by its arguments, so no axis can disagree with it.
-    assert "Prior Period" not in rendered
+    assert "not_assessed_by_design" not in report
+    assert codes(report) == ["date_table_marked"]
+    assert "Prior Period" not in crta.render(report)
 
 
 def test_unbound_cumulative_measure_is_reported_not_cleared(tmp_path: Path) -> None:
@@ -536,18 +791,18 @@ def test_a_clean_pair_cannot_mask_an_unassessed_one(tmp_path: Path) -> None:
 
 
 def test_split_arguments_respects_nesting_and_strings() -> None:
-    assert crta._split_arguments("1, ABS, 0, REL, ORDERBY('T'[A], ASC)") == [
+    assert dg._split_arguments("1, ABS, 0, REL, ORDERBY('T'[A], ASC)") == [
         "1",
         "ABS",
         "0",
         "REL",
         "ORDERBY('T'[A], ASC)",
     ]
-    assert crta._split_arguments('SUM(a), "x, y"') == ["SUM(a)", '"x, y"']
+    assert dg._split_arguments('SUM(a), "x, y"') == ["SUM(a)", '"x, y"']
 
 
 def test_column_refs_read_quoted_and_bare_tables() -> None:
-    refs = crta._column_refs("'Sample Superstore'[Order Date], Orders[Sales], [Bare]")
+    refs = dg._column_refs("'Sample Superstore'[Order Date], Orders[Sales], [Bare]")
     assert [(r.table, r.column) for r in refs] == [
         ("Sample Superstore", "Order Date"),
         ("Orders", "Sales"),

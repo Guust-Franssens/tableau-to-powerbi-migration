@@ -17,6 +17,18 @@ Two false-green traps are guarded explicitly, both of them measured in this repo
    snippet appends its own name to a sentinel file **after** the patch, and additionally asserts the
    patched object actually changed identity. No sentinel line, no verdict - the run is an ERROR.
 
+Scoring rule, stated because the sibling harness got it wrong
+--------------------------------------------------------------
+Blind review of PR #405 found that ``tests/mutation_harness.py`` scored ``CAUGHT`` for *any*
+non-zero pytest exit, including a collection error (4) or an interrupt (2) where **no test ran**.
+This harness never does that. A mutation is ``CAUGHT`` only when the **named** test the table
+claims for it appears in pytest's ``FAILED`` lines:
+
+* non-zero exit with **no** named failure  -> ``ERROR (no test outcome)``, and the run fails;
+* non-zero exit naming a **different** test -> reported as misattributed, and the run fails;
+* the baseline must be **green first**, or nothing is run at all - so an already-failing test cannot
+  be credited to every mutation after it.
+
 Read the PR for #218 for the result table.
 """
 
@@ -46,9 +58,9 @@ assert crta._judge_window is not _orig
     ),
     "explicit-relation-not-detected": (
         """
-_orig = crta._is_positional
-crta._is_positional = lambda arg: True
-assert crta._is_positional is not _orig
+_orig = dg._is_positional
+dg._is_positional = lambda arg: True
+assert dg._is_positional is not _orig
 """,
         "test_explicit_relation_is_unassessable_not_a_mismatch",
     ),
@@ -70,75 +82,73 @@ assert crta.VisualBinding.has_hierarchy is not _orig
     ),
     "every-column-treated-as-a-date": (
         """
-_orig = crta._is_date_typed
-crta._is_date_typed = lambda columns, table, column: True
-assert crta._is_date_typed is not _orig
+_orig = dg.ModelFacts.grain_of
+dg.ModelFacts.grain_of = lambda self, ref, anchor: dg.GRAIN_DATE
+assert dg.ModelFacts.grain_of is not _orig
 """,
         "test_as_of_non_date_axis_is_deliberately_not_flagged",
     ),
     "cleared-columns-dropped": (
         """
-_orig = crta._column_refs
+_orig = dg._column_refs
 def refs(text):
     return _orig(text)
-crta._classify_as_of_orig = crta._classify_as_of
+dg._classify_as_of_orig = dg._classify_as_of
 def as_of(expr, base):
-    out = crta._classify_as_of_orig(expr, base)
+    out = dg._classify_as_of_orig(expr, base)
     if out is not None:
         out.cleared_columns = []
         out.cleared_tables = []
     return out
-crta._classify_as_of = as_of
-assert crta._classify_as_of is not crta._classify_as_of_orig
+dg._classify_as_of = as_of
+assert dg._classify_as_of is not dg._classify_as_of_orig
 """,
         "test_as_of_clearing_the_coarser_column_too_is_clean",
     ),
     "compared-column-not-treated-as-cleared": (
         """
-_orig = crta.ColumnRef.key
-crta.ColumnRef.key = lambda self: ((self.table or "").casefold(), self.column.casefold(), id(self))
-assert crta.ColumnRef.key is not _orig
+_orig = dg.ColumnRef.key
+dg.ColumnRef.key = lambda self: ((self.table or "").casefold(), self.column.casefold(), id(self))
+assert dg.ColumnRef.key is not _orig
 """,
         "test_as_of_axis_is_the_compared_column",
     ),
     "every-blank-stub-claimed": (
         """
-_orig = crta._classify_stub
+_orig = dg._classify_stub
 def stub(member, base):
     base.shape = "stub"
     base.assessable = False
     base.reason = "mutated"
     return base
-crta._classify_stub = stub
-assert crta._classify_stub is not _orig
+dg._classify_stub = stub
+assert dg._classify_stub is not _orig
 """,
         "test_an_ordinary_blank_stub_is_not_surfaced",
     ),
     "running-total-stub-not-surfaced": (
         """
-_orig = crta._classify_stub
-crta._classify_stub = lambda member, base: None
-assert crta._classify_stub is not _orig
+_orig = dg._classify_stub
+dg._classify_stub = lambda member, base: None
+assert dg._classify_stub is not _orig
 """,
         "test_running_total_stub_bound_to_a_visual_is_unassessable",
     ),
-    "period-to-date-omission-hidden": (
+    "period-to-date-judgement-skipped": (
         """
-_orig = crta.period_to_date_measures
-crta.period_to_date_measures = lambda measures: []
-assert crta.period_to_date_measures is not _orig
+_orig = crta._judge_period_to_date
+crta._judge_period_to_date = lambda cumulative, visual, facts: crta._verdict("ok", "period_to_date", "mutated")
+assert crta._judge_period_to_date is not _orig
 """,
-        "test_period_to_date_is_named_on_a_clean_run",
+        "test_fact_table_period_to_date_on_a_coarse_axis_is_unassessable",
     ),
-    "fixed-window-datesbetween-counted": (
+    "fixed-window-datesbetween-classified-as-accumulation": (
         """
-import re
-_orig = crta._TIME_INTELLIGENCE_RE
-crta._TIME_INTELLIGENCE_RE = re.compile(
-    r"\\b(DATESYTD|DATESMTD|DATESQTD|DATESBETWEEN|DATESINPERIOD|TOTALYTD|TOTALMTD|TOTALQTD)\\s*\\(", re.IGNORECASE)
-assert crta._TIME_INTELLIGENCE_RE is not _orig
+_orig = dict(dg._PERIOD_TO_DATE_FUNCTIONS)
+dg._PERIOD_TO_DATE_FUNCTIONS["DATESBETWEEN"] = 0
+assert "DATESBETWEEN" in dg._PERIOD_TO_DATE_FUNCTIONS and "DATESBETWEEN" not in _orig
 """,
-        "test_period_to_date_is_named_on_a_clean_run",
+        "test_a_fixed_window_comparison_is_still_not_an_accumulation",
     ),
     "unassessed-pair-masked-by-a-clean-one": (
         """
@@ -206,17 +216,17 @@ assert crta.VisualBinding.columns is not _orig
     ),
     "argument-splitting-is-naive": (
         """
-_orig = crta._split_arguments
-crta._split_arguments = lambda text: [part.strip() for part in text.split(",")]
-assert crta._split_arguments is not _orig
+_orig = dg._split_arguments
+dg._split_arguments = lambda text: [part.strip() for part in text.split(",")]
+assert dg._split_arguments is not _orig
 """,
         "test_split_arguments_respects_nesting_and_strings",
     ),
     "column-matching-is-case-sensitive": (
         """
-_orig = crta.ColumnRef.key
-crta.ColumnRef.key = lambda self: (self.table or "", self.column)
-assert crta.ColumnRef.key is not _orig
+_orig = dg.ColumnRef.key
+dg.ColumnRef.key = lambda self: (self.table or "", self.column)
+assert dg.ColumnRef.key is not _orig
 """,
         "test_case_only_difference_does_not_invent_a_mismatch",
     ),
@@ -230,16 +240,130 @@ assert all(g.check_id != "running-total-axis" for g in check_unit.GATES)
     ),
     "partitionby-treated-as-an-ordering-key": (
         """
-_orig = crta._classify_window
+_orig = dg._classify_window
 def window(expr, base):
     out = _orig(expr, base)
     if out is not None and out.partition_by:
-        out.ordered_by = out.ordered_by + out.partition_by + [crta.ColumnRef("Nowhere", "Nothing")]
+        out.ordered_by = out.ordered_by + out.partition_by + [dg.ColumnRef("Nowhere", "Nothing")]
     return out
-crta._classify_window = window
-assert crta._classify_window is not _orig
+dg._classify_window = window
+assert dg._classify_window is not _orig
 """,
         "test_partitionby_legend_is_not_a_mismatch",
+    ),
+    # --- mutations that reinstate each of the five review findings ---------------------------
+    "f1-axis-role-list-decides-safety": (
+        """
+_orig = crta.VisualBinding.columns
+crta.VisualBinding.columns = lambda self: self.axis_columns() if self.roles.get("Columns") else _orig(self)
+crta.AXIS_ROLES = ("Category", "Rows", "X")
+assert crta.AXIS_ROLES == ("Category", "Rows", "X")
+""",
+        "test_every_projected_column_is_examined_not_a_curated_axis_list",
+    ),
+    "f1-empty-projection-reads-as-cleared": (
+        """
+_orig = crta._grouping_or_reason
+crta._grouping_or_reason = lambda visual: (visual.columns(), None)
+assert crta._grouping_or_reason is not _orig
+""",
+        "test_as_of_on_a_measure_only_visual_is_unassessable",
+    ),
+    "f1-hierarchy-ignored-in-as-of": (
+        """
+_orig = crta._hierarchy_caveat
+crta._hierarchy_caveat = lambda visual: None
+assert crta._hierarchy_caveat is not _orig
+""",
+        "test_as_of_with_a_hierarchy_projection_is_unassessable",
+    ),
+    "f2-declared-type-is-the-only-grain-signal": (
+        """
+_orig = dg.ModelFacts.grain_of
+def grain_of(self, ref, anchor):
+    if self.data_type(ref.table or "", ref.column) in crta._DATE_TYPES:
+        return dg.GRAIN_DATE
+    return dg.GRAIN_UNRELATED
+dg.ModelFacts.grain_of = grain_of
+assert dg.ModelFacts.grain_of is not _orig
+""",
+        "test_date_bins_derived_by_calculation_are_flagged_whatever_their_type",
+    ),
+    "f2-lineage-not-followed-transitively": (
+        """
+_orig = dg.ModelFacts.derives_from
+def derives_from(self, ref, anchor):
+    expression = self.calc_expressions.get(ref.key())
+    if not expression:
+        return False
+    return any(dg.ColumnRef(f.table or ref.table, f.column).key() == anchor.key()
+               for f in dg._column_refs(expression))
+dg.ModelFacts.derives_from = derives_from
+assert dg.ModelFacts.derives_from is not _orig
+""",
+        "test_date_bins_derived_by_calculation_are_flagged_whatever_their_type",
+    ),
+    "f2-date-named-column-waved-through": (
+        """
+_orig = dg.ModelFacts.grain_of
+def grain_of(self, ref, anchor):
+    out = _orig(self, ref, anchor)
+    return dg.GRAIN_UNRELATED if out == dg.GRAIN_SUSPECT else out
+dg.ModelFacts.grain_of = grain_of
+assert dg.ModelFacts.grain_of is not _orig
+""",
+        "test_a_date_named_column_with_no_proof_is_unassessable_not_clean",
+    ),
+    "f3-any-less-than-is-a-running-total": (
+        """
+_orig = dg._classify_bound
+dg._classify_bound = lambda bound, compared, variables, depth=0: dg.BOUND_CONTEXT
+assert dg._classify_bound is not _orig
+""",
+        "test_a_pinned_cutoff_is_not_a_running_total",
+    ),
+    "f3-var-bound-never-followed": (
+        """
+_orig = dg._resolve_vars
+dg._resolve_vars = lambda expr: {}
+assert dg._resolve_vars is not _orig
+""",
+        "test_an_as_of_bound_hoisted_into_a_var_is_still_a_running_total",
+    ),
+    "f4-only-the-first-window-call": (
+        """
+_orig = dg._window_call_sites
+dg._window_call_sites = lambda expr: _orig(expr)[:1]
+assert dg._window_call_sites is not _orig
+""",
+        "test_every_window_call_is_assessed_not_just_the_first",
+    ),
+    "f5-period-to-date-excused-again": (
+        """
+_orig = dg._classify_period_to_date
+dg._classify_period_to_date = lambda expr, base: None
+assert dg._classify_period_to_date is not _orig
+""",
+        "test_fact_table_period_to_date_on_a_coarse_axis_is_unassessable",
+    ),
+    "f5-every-table-reads-as-a-marked-date-table": (
+        """
+_orig = dg.ModelFacts.is_time_table
+dg.ModelFacts.is_time_table = lambda self, table: True
+assert dg.ModelFacts.is_time_table is not _orig
+""",
+        "test_fact_table_period_to_date_on_a_coarse_axis_is_unassessable",
+    ),
+    "crash-grading-keyed-by-an-unhashable-fieldref": (
+        """
+_orig = crta._judge_as_of
+def judge(cumulative, visual, facts):
+    {ref: 1 for ref in visual.columns()}
+    return _orig(cumulative, visual, facts)
+crta._judge_as_of = judge
+assert crta._judge_as_of is not _orig
+""",
+        "test_a_grouping_column_is_never_used_as_a_dict_key",
     ),
 }
 
@@ -248,7 +372,7 @@ assert crta._classify_window is not _orig
 CONTROLS: dict[str, str] = {
     "control-noop-rebind": """
 crta._judge_window = crta._judge_window
-crta._is_date_typed = crta._is_date_typed
+dg.ModelFacts.grain_of = dg.ModelFacts.grain_of
 """,
     "control-identity-wrapper": """
 _orig = crta._judge_window
@@ -266,7 +390,7 @@ def run(name: str, code: str) -> tuple[int, list[str], str]:
         "import sys\n"
         f"sys.path.insert(0, r'{ROOT / 'scripts'}')\n"
         f"sys.path.insert(0, r'{ROOT / 'tests'}')\n"
-        "import check_running_total_axis as crta\n"
+        "import check_running_total_axis as crta\nimport dax_grain as dg\n"
         + code
         + f"\nopen(r'{SENTINEL}', 'a', encoding='utf-8').write({name!r} + '\\n')\n",
         encoding="utf-8",
@@ -321,11 +445,18 @@ def main() -> int:
     _check_controls()
     survivors: list[str] = []
     misattributed: list[str] = []
+    errored: list[str] = []
     for name, (code, expected) in MUTATIONS.items():
         rc, failed, tail = run(name, code)
         if rc == 0:
             survivors.append(name)
             print(f"SURVIVED  {name:44s} -> {tail}")
+            continue
+        if not failed:
+            # The exact bug blind review found in tests/mutation_harness.py: a non-zero exit with no
+            # test outcome (collection error 4, interrupt 2) is NOT a catch.
+            errored.append(name)
+            print(f"ERROR     {name:44s} -> exit {rc} with NO named test outcome: {tail}")
             continue
         if expected not in failed:
             misattributed.append(name)
@@ -336,7 +467,8 @@ def main() -> int:
     print()
     print("survivors (holes in the suite):", survivors or "none")
     print("caught by a different test than claimed:", misattributed or "none")
-    return 1 if survivors or misattributed else 0
+    print("non-zero exit with no test outcome (NOT a catch):", errored or "none")
+    return 1 if survivors or misattributed or errored else 0
 
 
 if __name__ == "__main__":

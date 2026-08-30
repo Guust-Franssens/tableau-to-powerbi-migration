@@ -37,11 +37,35 @@ The two mechanisms, and the ONE invariant each
    ordered column (correct); axis `'Date'[Date]` or `'Date'[Month Start]` does not (both wrong).
 
 2. **As-of filter** - `CALCULATE(<agg>, FILTER(ALL(t[c], ...), t[c] <= MAX(t[c])))`. `ALL` clears
-   only the columns it names; a coarser same-table date column left on the axis survives, so the
+   only the columns it names; a coarser same-table date grain left on the visual survives, so the
    rows are restricted to that bucket and the "running total" becomes the bucket's own total.
-   **Invariant: an axis column on the compared column's table must be cleared, or be the compared
-   column itself.** Flagged only when that surviving axis column is `dataType: date`/`dateTime`,
-   because that is the measured mechanism and a non-date axis is a legitimate partition.
+   **Invariant: a projected column on the compared column's table must be cleared, or be the
+   compared column itself.** The bound must MOVE with the visual (a `MAX` of the compared column, or
+   a `VAR` resolving to one); a pinned `<= DATE(2024,12,31)` is an ordinary "through cutoff" measure
+   whose per-bucket totals are the point, and is not classified at all.
+
+3. **Period-to-date** - `TOTALYTD`/`DATESYTD`/`DATESMTD`/`DATESQTD` and friends. Time intelligence
+   auto-removes filters from the other columns of a table marked `dataCategory: Time`, which is what
+   makes a month axis correct. Nothing removes a date grain on an **unmarked** table.
+   **Invariant: every date grain projected by the visual must sit on the marked date table that owns
+   the `<dates>` argument** - otherwise `unassessable`, never a pass.
+
+Two words this module refuses to conflate: PROXY and PROPERTY
+-------------------------------------------------------------
+Blind review found four defects that were all one mistake - deciding "safe" from something merely
+correlated with safety. Each is now decided from the property itself, and the proxies are gone:
+
+* **a curated axis-role list; empty => "axis cleared"** -> EVERY projected column groups the query,
+  so all of them are examined, and an empty projection is `unassessable`, not clean. `AXIS_ROLES`
+  survives as presentation only. Measured on the estate's Section 12 pivot: a `dateTime` bin under
+  the real `Columns` role exited 0 while the identical bin under `Rows` exited 1.
+* **declared `dataType` is not date => safe grain** -> declared type **or calculated lineage back to
+  the anchor**. The engine writes its coarse bins as `Month = FORMAT('Date'[Date], "MMM")` and
+  `Quarter = "Q" & QUARTER(...)`, with no `dataType` at all - 95 such columns in the 2026-08-29
+  estate - and their filters survive exactly like a `dateTime` bin's.
+* **the FIRST window call** -> every window call in the measure.
+* **period-to-date => "by design" => not assessed** -> judged against the date-table marking;
+  anything unproven is `unassessable`.
 
 What it DELIBERATELY does not flag
 ----------------------------------
@@ -49,27 +73,25 @@ Every one of these is a place where a confident verdict would be a guess, so it 
 `unassessable` (exit 3, "needs a live EVALUATE") or as a named non-flag - never silently dropped
 and never counted as clean:
 
-* **Period-to-date time intelligence** (`DATESYTD`, `TOTALYTD`, `DATESMTD`, `DATESQTD`, ...). On a
-  table marked `dataCategory: Time` these auto-remove filters from the date table's other columns,
-  so a month axis is CORRECT; on an unmarked table, or against a fact-table date column, it is not.
-  Deciding that needs the date-table marking AND the relationship path, which is more inference
-  than evidence. They are counted and NAMED as `not_assessed_by_design` on every run - including a
-  clean one - but they never produce a per-visual finding and never move the exit code. Measured
-  reason: an earlier revision reported them as `unassessable` and emitted **12 rows against one
-  committed worked example** (`examples/superstore-sales-performance`), whose CP/PP measures are
-  fixed-window `DATESBETWEEN` comparisons, not accumulations at all. A gate that noisy on shipping
-  evidence gets muted, and muting it costs the two mechanisms below.
-* **Fixed-window date filters** (`DATESBETWEEN`, `DATESINPERIOD`). Not accumulations: their window
-  is anchored by arguments, not by the visual's grain, so there is nothing for an axis to disagree
-  with. Not counted, not flagged.
+* **Fixed-window and pinned-cutoff date filters** (`DATESBETWEEN`, `DATESINPERIOD`, and
+  `FILTER(ALL(t[c]), t[c] <= <constant>)`). Not accumulations: the window is anchored by arguments,
+  not by the visual's grain, so there is nothing for an axis to disagree with. This is the only
+  class dropped in silence, and deliberately: it is not a running total, so listing it would be the
+  same noise as listing every other non-cumulative measure in the model.
+* **An unresolvable as-of bound** - a measure, a what-if parameter, a foreign column. It may well be
+  an as-of date; nothing proves it either way -> `unassessable`.
 * **An explicit relation argument** to a window function. The relation then decides the ordering
   domain, not the visual, and a table expression cannot be resolved statically -> `unassessable`.
 * **A cross-table as-of filter.** Whether a `'Date'[Month Start]` axis reaches the fact table
   depends on the relationship graph and cross-filter direction -> `unassessable`.
-* **A visual that projects no grouping column at all** (a card, a KPI). "The ORDERBY column is not
-  projected" is true but says nothing about whether the single-row result is wrong -> `unassessable`.
-* **A non-date axis on an as-of filter.** A running total partitioned by Region is an ordinary
-  shape, not a defect -> reported as `ok` carrying `not_flagged`, so the decision is visible.
+* **A visual that projects no grouping column at all** (a card, a KPI) -> `unassessable`, for every
+  shape. "The ordered column is not projected" is true there but says nothing about whether the
+  single-row result is wrong.
+* **A grouping column named like a date part but proven to be neither** (no date type, no lineage to
+  the anchor) -> `unassessable`. A name is not evidence enough to fail a build, but it is too much
+  to wave through.
+* **A non-date grouping column on an as-of filter.** A running total partitioned by Region is an
+  ordinary shape, not a defect -> reported as `ok` carrying `not_flagged`, so the decision is visible.
 * **A stubbed running total** (`= BLANK()`). Real: all five `RUNNING_SUM` translations in the
   2026-08-29 estate are stubs. They have no grain to disagree with; `check_stub_measures.py` owns
   them, and they are surfaced here as a count so a reader is not told the model is clean. This is
@@ -86,35 +108,46 @@ the axis grain, which is exactly what the `unassessable` rows ask for.
 Corpus reality, stated plainly
 ------------------------------
 Measured on `_runs/estate-2.339.0-20260829` (58 models, 471 TMDL docs, 51 pbip projects) and on the
-16 committed `examples/`: **no live instance exists**. The estate holds two real
+16 committed `examples/`: **no live axis mismatch exists**. The estate holds two real
 `WINDOW(... ORDERBY(...))` measures (`HR Dashboard` -> `_Measures`: `Highlight Max`,
 `% Highlight Max`) and neither is referenced anywhere in its report - not in `queryState`, not in a
 filter, not in conditional formatting - so there is no binding to disagree with. Five more
-"Running ..." measures are `BLANK()` stubs. So this gate is proven on the reproduced S14 fixture and
-on synthetic corpora, and on real estate data it is proven only to stay silent. That is a real
-limitation, not a clean bill of health.
+"Running ..." measures are `BLANK()` stubs, two of them bound to a `pivotTable`. So this gate is
+proven on the reproduced S14 fixture and on real engine bytes with a binding injected, and on real
+estate data as shipped it is proven only to stay silent. That is a real limitation, not a clean bill
+of health.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from bundle_corpus import shipping_reports
 
 # Deliberate reuse over reimplementation. `_walk`/`_source_scope` carry a measured fix (`From` is a
 # SIBLING of `queryState`, so a walk started inside it resolves every aliased projection to None);
-# re-deriving that here would re-open the bug in a second place. `_parse_column_census` is the
-# existing TMDL column/dataType reader. Module-private by name, shared by intent - the same way
-# `check_relationship_health` already borrows `check_field_bindings`' relationship components.
+# re-deriving that here would re-open the bug in a second place. Module-private by name, shared by
+# intent - the same way `check_relationship_health` already borrows `check_field_bindings`'
+# relationship components. `dax_grain` is this gate's own model-side half, split out at the seam
+# where a module stops knowing anything about a report.
 from check_field_bindings import FieldRef, _source_scope, _walk, model_for_report
-from check_relationship_health import _parse_column_census
-from check_stub_measures import is_stub_expression, parse_model, strip_comments
+from check_stub_measures import parse_model
+from dax_grain import (
+    GRAIN_DATE,
+    GRAIN_DERIVED,
+    GRAIN_SUSPECT,
+    GRAIN_UNRELATED,
+    ColumnRef,
+    Cumulative,
+    ModelFacts,
+    classify,
+    read_model_facts,
+)
 
 REPORT_NAME = "running-total-axis-check.json"
 REPORT_VERSION = 1
@@ -130,101 +163,13 @@ EXIT_MISMATCH = 1
 EXIT_USAGE = 2
 EXIT_UNASSESSABLE = 3
 
-# Window functions whose `<relation>` argument is OPTIONAL and, when omitted, defaults to the
-# visual's own shaped table. That default is the whole reason the visual's axis is the contract.
-# MOVINGAVERAGE/RUNNINGSUM are excluded on purpose: their relation is REQUIRED, so the visual never
-# decides their ordering domain and this gate has no standing to judge them.
-WINDOW_FUNCTIONS = ("WINDOW", "OFFSET", "INDEX", "RANK", "ROWNUMBER")
-
-# Bare positional tokens a window function may legally carry that are NOT a relation. Anything else
-# in a positional slot is treated as an explicit relation, which makes the call unassessable.
-_POSITIONAL_KEYWORDS = frozenset(
-    {
-        "ABS",
-        "REL",
-        "ASC",
-        "DESC",
-        "DEFAULT",
-        "DENSE",
-        "SKIP",
-        "KEEP",
-        "NONE",
-        "BLANK",
-        "FIRST",
-        "LAST",
-        "TRUE",
-        "FALSE",
-    }
-)
-_CLAUSE_FUNCTIONS = ("ORDERBY", "PARTITIONBY", "MATCHBY")
-_NUMBER_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
-
-# `'Table'[Column]`, `Table[Column]` or a bare `[Column]`. A `'` inside a quoted table name is
-# doubled in DAX exactly as it is in TMDL, so the alternation mirrors `check_field_bindings._NAME`.
-_COLUMN_REF_RE = re.compile(r"(?:'((?:[^']|'')*)'|([A-Za-z_][\w. ]*?))?\s*\[([^\]]+)\]")
-
-_TIME_INTELLIGENCE_RE = re.compile(
-    r"\b(DATESYTD|DATESMTD|DATESQTD|TOTALYTD|TOTALMTD|TOTALQTD)\s*\(",
-    re.IGNORECASE,
-)
-# The engine's own words when it could not translate a Tableau running total, plus the name shapes
-# a hand-authored one uses. Used ONLY to surface a `BLANK()` stub as a former running total - never
-# to judge one, because a stub has no DAX shape to judge.
-_RUNNING_STUB_RE = re.compile(r"\bRUNNING[_ ]?(SUM|AVG|COUNT|MAX|MIN)\b|running|cumulative", re.IGNORECASE)
-_ALL_FUNCTION_RE = re.compile(r"^ALL(SELECTED|NOBLANKROW|CROSSFILTERED|EXCEPT)?$", re.IGNORECASE)
-
-# The roles that put a column on the AXIS of a chart, measured across the estate + examples corpora
-# (319 Category, 47 X, 40 Rows). `Series`/`Tooltips`/`Size` group the query too, but they are a
-# legend or a hover detail rather than the accumulation axis, so they only ever ACQUIT.
-AXIS_ROLES = ("Category", "Rows", "X")
-
-# A measure-only visual has no grouping column at all, so "the ordered column is absent" is true but
-# uninformative - the single-row result may be a perfectly good grand total.
-_DATE_TYPES = frozenset({"date", "datetime"})
-
-
-@dataclass(frozen=True)
-class ColumnRef:
-    """One `'Table'[Column]` reference, with the table left None when DAX did not qualify it."""
-
-    table: str | None
-    column: str
-
-    def qualified(self) -> str:
-        """The reference as a human would write it back into DAX."""
-        return f"'{self.table}'[{self.column}]" if self.table else f"[{self.column}]"
-
-    def key(self) -> tuple[str, str]:
-        """Case-insensitive identity, so a casing-only difference does not invent a finding."""
-        return ((self.table or "").casefold(), self.column.casefold())
-
-
-@dataclass
-class Cumulative:  # pylint: disable=too-many-instance-attributes
-    """One measure whose DAX declares an accumulation grain, plus how confidently we read it.
-
-    Wide on purpose: the two mechanisms address a grain in structurally different ways (an ORDERBY
-    list versus a cleared-column set plus a compared column), and collapsing them into a shared
-    field would force every reader to remember which shape reused which slot.
-    """
-
-    table: str
-    name: str
-    shape: str
-    tmdl: str
-    line: int
-    ordered_by: list[ColumnRef] = field(default_factory=list)
-    partition_by: list[ColumnRef] = field(default_factory=list)
-    cleared_columns: list[ColumnRef] = field(default_factory=list)
-    cleared_tables: list[str] = field(default_factory=list)
-    compared: ColumnRef | None = None
-    assessable: bool = True
-    reason: str = ""
-
-    @property
-    def label(self) -> str:
-        """`'Table'[Measure]`, the spelling that can be pasted into a DAX query."""
-        return f"'{self.table}'[{self.name}]"
+# PRESENTATIONAL ONLY - the roles named in a finding's "Axis is ..." sentence. This list must NEVER
+# gate whether a column is examined. It used to: a curated axis-role list omitted the pivotTable's
+# real `Columns` role, and an empty result was then read as "the axis is cleared", so a `dateTime`
+# grain under `Columns` passed silently (measured on the estate's Section 12 pivot: exit 1 under
+# `Rows`, exit 0 under `Columns`, same measure, same column). Safety is now decided from EVERY
+# projected column - `VisualBinding.columns()` - because every projected column groups the query.
+AXIS_ROLES = ("Category", "Rows", "Columns", "X", "Series", "Group", "Details")
 
 
 @dataclass
@@ -251,226 +196,6 @@ class VisualBinding:
     def has_hierarchy(self) -> bool:
         """Whether any role projects a hierarchy level, which may expand to an unnamed column."""
         return any(ref.kind == "HierarchyLevel" for refs in self.roles.values() for ref in refs)
-
-
-def _split_arguments(text: str) -> list[str]:
-    """Split a DAX argument list at depth 0, respecting strings, parens and brackets.
-
-    `str.split(",")` cannot do this: `ORDERBY('T'[A], ASC)` is ONE argument of `WINDOW`, and a table
-    name may legally contain a comma inside its quotes.
-    """
-    args: list[str] = []
-    depth = 0
-    in_string = False
-    current: list[str] = []
-    for char in text:
-        if in_string:
-            current.append(char)
-            if char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-            current.append(char)
-        elif char in "([":
-            depth += 1
-            current.append(char)
-        elif char in ")]":
-            depth -= 1
-            current.append(char)
-        elif char == "," and depth == 0:
-            args.append("".join(current).strip())
-            current = []
-        else:
-            current.append(char)
-    tail = "".join(current).strip()
-    if tail or args:
-        args.append(tail)
-    return args
-
-
-def _call_bodies(expr: str, name: str) -> list[str]:
-    """The argument text of every `name(...)` call in `expr`, at any nesting depth."""
-    bodies: list[str] = []
-    pattern = re.compile(rf"\b{re.escape(name)}\s*\(", re.IGNORECASE)
-    for match in pattern.finditer(expr):
-        depth = 0
-        in_string = False
-        for index in range(match.end() - 1, len(expr)):
-            char = expr[index]
-            if in_string:
-                if char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    bodies.append(expr[match.end() : index])
-                    break
-    return bodies
-
-
-def _column_refs(text: str) -> list[ColumnRef]:
-    """Every column reference in a fragment of DAX, table-qualified where DAX qualified it."""
-    refs: list[ColumnRef] = []
-    for quoted, bare, column in _COLUMN_REF_RE.findall(text):
-        table = quoted.replace("''", "'") if quoted else (bare.strip() or None)
-        refs.append(ColumnRef(table=table, column=column.strip()))
-    return refs
-
-
-def _is_positional(arg: str) -> bool:
-    """Whether a window-function argument is a bare literal/keyword rather than a relation."""
-    token = arg.strip().rstrip(")").strip()
-    return bool(_NUMBER_RE.match(token)) or token.upper() in _POSITIONAL_KEYWORDS
-
-
-def _clause(args: Iterable[str], name: str) -> str | None:
-    """The body of the first `name(...)` clause among a window function's arguments."""
-    prefix = re.compile(rf"^{name}\s*\(", re.IGNORECASE)
-    for arg in args:
-        if prefix.match(arg.strip()):
-            bodies = _call_bodies(arg, name)
-            if bodies:
-                return bodies[0]
-    return None
-
-
-def _classify_window(expr: str, base: Cumulative) -> Cumulative | None:
-    """Read a window-family call, or record why its grain cannot be read."""
-    for func in WINDOW_FUNCTIONS:
-        for body in _call_bodies(expr, func):
-            args = _split_arguments(body)
-            named = [
-                a for a in args if any(re.match(rf"^{c}\s*\(", a.strip(), re.IGNORECASE) for c in _CLAUSE_FUNCTIONS)
-            ]
-            positional = [a for a in args if a not in named]
-            base.shape = f"{func.lower()}_orderby"
-            if any(not _is_positional(arg) for arg in positional):
-                base.assessable = False
-                base.reason = (
-                    f"{func} carries an explicit relation argument, so the ordering domain is that "
-                    "table expression rather than the visual"
-                )
-                return base
-            order_body = _clause(args, "ORDERBY")
-            if order_body is None:
-                # No ORDERBY means the window orders by the relation's own columns, and the relation
-                # IS the visual. There is no second grain that could disagree - a verified acquittal,
-                # not a guess.
-                base.reason = f"{func} has no ORDERBY clause, so it orders by the visual's own grain"
-                return base
-            base.ordered_by = _column_refs(order_body)
-            partition_body = _clause(args, "PARTITIONBY")
-            if partition_body:
-                base.partition_by = _column_refs(partition_body)
-            if not base.ordered_by:
-                base.assessable = False
-                base.reason = f"{func} ORDERBY names no resolvable column reference"
-            elif any(ref.table is None for ref in base.ordered_by):
-                base.assessable = False
-                base.reason = f"{func} ORDERBY uses an unqualified column, so its table is ambiguous"
-            return base
-    return None
-
-
-def _as_of_predicate(args: list[str]) -> ColumnRef | None:
-    """The compared column of an `<col> <= <bound>` as-of predicate, if this FILTER has one."""
-    if len(args) < 2:
-        return None
-    predicate = args[1]
-    match = re.search(r"(.+?)(<=|<)(?!=)", predicate, re.DOTALL)
-    if not match:
-        return None
-    left = _column_refs(match.group(1))
-    return left[-1] if left else None
-
-
-def _classify_as_of(expr: str, base: Cumulative) -> Cumulative | None:
-    """Read a `FILTER(ALL(...), t[c] <= ...)` running total, or record why it cannot be read."""
-    for body in _call_bodies(expr, "FILTER"):
-        args = _split_arguments(body)
-        if not args:
-            continue
-        head = re.match(r"^([A-Za-z]+)\s*\(", args[0].strip())
-        if not head or not _ALL_FUNCTION_RE.match(head.group(1)):
-            continue
-        compared = _as_of_predicate(args)
-        if compared is None:
-            continue
-        base.shape = "as_of_filter"
-        base.compared = compared
-        if head.group(1).upper() == "ALLEXCEPT":
-            base.assessable = False
-            base.reason = "ALLEXCEPT clears every column except the ones it names, which this gate does not model"
-            return base
-        cleared_body = _call_bodies(args[0], head.group(1))
-        cleared_text = cleared_body[0] if cleared_body else ""
-        base.cleared_columns = _column_refs(cleared_text)
-        base.cleared_tables = [
-            arg.strip().strip("'").replace("''", "'")
-            for arg in _split_arguments(cleared_text)
-            if arg.strip() and "[" not in arg
-        ]
-        if compared.table is None:
-            base.assessable = False
-            base.reason = "the as-of comparison uses an unqualified column, so its table is ambiguous"
-        return base
-    return None
-
-
-def classify(member: Any) -> Cumulative | None:
-    """Read one TMDL measure as an accumulation, or return None when it declares no grain.
-
-    Deliberately shape-driven, never name-driven: a name match would both miss the engine's
-    `Highlight Max`/`% Highlight Max` (real `WINDOW(... ORDERBY(...))` measures) and fire on the
-    five `Running Sum` measures in the estate that are `BLANK()` stubs with no grain at all. The one
-    exception is the stub branch below, which uses the name/annotation only to SURFACE the measure.
-    """
-    expr = strip_comments(member.expression or "")
-    if not expr.strip():
-        return None
-    base = Cumulative(
-        table=member.table,
-        name=member.name,
-        shape="unknown",
-        tmdl=member.tmdl.as_posix(),
-        line=member.line,
-    )
-    if is_stub_expression(member.expression or ""):
-        return _classify_stub(member, base)
-    window = _classify_window(expr, base)
-    if window is not None:
-        return window
-    return _classify_as_of(expr, base)
-
-
-def _classify_stub(member: Any, base: Cumulative) -> Cumulative | None:
-    """Surface a `BLANK()` stub only when the evidence says it WAS a running total."""
-    haystack = " ".join(
-        [
-            member.name or "",
-            member.annotations.get("TableauFormula", ""),
-            member.annotations.get("TranslationStubReason", ""),
-        ]
-    )
-    if not _RUNNING_STUB_RE.search(haystack):
-        return None
-    base.shape = "stub"
-    base.assessable = False
-    base.reason = "the measure is a BLANK() stub, so it has no grain yet (check_stub_measures.py owns it)"
-    return base
-
-
-def period_to_date_measures(measures: list[Any]) -> list[str]:
-    """Period-to-date measures this gate deliberately does not assess, named so the omission shows."""
-    return sorted(
-        f"'{m.table}'[{m.name}]" for m in measures if _TIME_INTELLIGENCE_RE.search(strip_comments(m.expression or ""))
-    )
 
 
 def iter_visuals(report_dir: Path) -> list[VisualBinding]:
@@ -513,25 +238,52 @@ def _verdict(kind: str, code: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"verdict": kind, "code": code, "detail": detail, **extra}
 
 
+def _grouping_or_reason(visual: VisualBinding) -> tuple[list[FieldRef], dict[str, Any] | None]:
+    """The columns this visual groups by, or the single reason no verdict can be formed from them.
+
+    ONE place answers "was there a recognised grouping to reason about?", for all three shapes. The
+    bug this replaces was structural: each judge inferred safety from its own empty list, so an
+    unsupported role, a card and a hierarchy level all silently became "the axis is cleared".
+    """
+    grouping = visual.columns()
+    if not grouping:
+        return grouping, _verdict(
+            "unassessable",
+            "no_grouping_column",
+            f"{visual.visual_type} projects no grouping column, so whether the accumulation "
+            "degenerates depends on the query Power BI generates - probe it with EVALUATE",
+        )
+    return grouping, None
+
+
+def _hierarchy_caveat(visual: VisualBinding) -> dict[str, Any] | None:
+    """A hierarchy level may expand to a grain this gate cannot name, so no clean verdict is honest."""
+    if not visual.has_hierarchy():
+        return None
+    return _verdict(
+        "unassessable",
+        "hierarchy_projection",
+        "the visual projects a hierarchy level, which may expand to a grain this gate cannot resolve",
+    )
+
+
+def _axis_text(visual: VisualBinding) -> str:
+    """The human-readable "Axis is ..." clause. Presentational; it never gates a verdict."""
+    return ", ".join(f"'{r.entity}'[{r.prop}]" for r in visual.axis_columns()) or "(no axis role)"
+
+
 def _judge_window(cumulative: Cumulative, visual: VisualBinding) -> dict[str, Any]:
     """Window family: every ORDERBY column must be among the visual's own projections."""
-    projected = {ColumnRef(ref.entity, ref.prop).key() for ref in visual.columns()}
+    grouping, blocked = _grouping_or_reason(visual)
+    projected = {ColumnRef(ref.entity, ref.prop).key() for ref in grouping}
     absent = [ref for ref in cumulative.ordered_by if ref.key() not in projected]
     if not absent:
         return _verdict("ok", "orderby_projected", "every ORDERBY column is projected by this visual")
-    if not projected:
-        return _verdict(
-            "unassessable",
-            "no_grouping_column",
-            f"{visual.visual_type} projects no grouping column, so whether the window degenerates "
-            "depends on the query Power BI generates - probe it with EVALUATE",
-        )
-    if visual.has_hierarchy():
-        return _verdict(
-            "unassessable",
-            "hierarchy_projection",
-            "the visual projects a hierarchy level, which may expand to the ordered column",
-        )
+    if blocked is not None:
+        return blocked
+    caveat = _hierarchy_caveat(visual)
+    if caveat is not None:
+        return caveat
     return _verdict(
         "mismatch",
         "orderby_not_on_axis",
@@ -539,72 +291,150 @@ def _judge_window(cumulative: Cumulative, visual: VisualBinding) -> dict[str, An
         + ", ".join(ref.qualified() for ref in absent)
         + ", which this visual does not project; the window degenerates to each bucket's own value. "
         + "Axis is "
-        + (", ".join(f"'{r.entity}'[{r.prop}]" for r in visual.axis_columns()) or "(no axis role)"),
+        + _axis_text(visual),
         ordered_by=[ref.qualified() for ref in cumulative.ordered_by],
-        projected=[f"'{r.entity}'[{r.prop}]" for r in visual.columns()],
+        projected=[f"'{r.entity}'[{r.prop}]" for r in grouping],
     )
 
 
-def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, columns: dict[str, Any]) -> dict[str, Any]:
-    """As-of filter: a surviving same-table date column on the axis is the measured defect."""
-    compared = cumulative.compared
-    assert compared is not None  # guarded by classify(); an unqualified compare is unassessable
-    cleared = {ref.key() for ref in cumulative.cleared_columns} | {compared.key()}
-    cleared_tables = {name.casefold() for name in cumulative.cleared_tables}
-    survivors = [
-        ref
-        for ref in visual.axis_columns()
-        if ColumnRef(ref.entity, ref.prop).key() not in cleared and ref.entity.casefold() not in cleared_tables
-    ]
-    if not survivors:
-        return _verdict(
-            "ok", "axis_cleared", "every axis column is cleared by the as-of filter or is the compared column"
-        )
+def _judge_same_table_survivors(
+    survivors: list[FieldRef], compared: ColumnRef, cumulative: Cumulative, facts: ModelFacts, axis: str
+) -> dict[str, Any] | None:
+    """Grade the survivors that sit on the anchor's own table, or None when none of them decide it."""
     same_table = [ref for ref in survivors if ref.entity.casefold() == (compared.table or "").casefold()]
-    dated = [ref for ref in same_table if _is_date_typed(columns, ref.entity, ref.prop)]
-    if dated:
+    # Keyed by the casefolded (table, column) tuple, NOT by the FieldRef: `check_field_bindings`'
+    # dataclass is mutable and therefore unhashable, and using it as a dict key raised TypeError at
+    # runtime - which exits 1, i.e. indistinguishable from a mismatch to any caller reading only the
+    # exit code. Caught because the crashing run printed nothing on stdout.
+    graded = {
+        ColumnRef(ref.entity, ref.prop).key(): facts.grain_of(ColumnRef(ref.entity, ref.prop), compared)
+        for ref in same_table
+    }
+    proven = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] in (GRAIN_DATE, GRAIN_DERIVED)]
+    if proven:
         return _verdict(
             "mismatch",
             "axis_grain_not_cleared",
-            "axis column(s) "
-            + ", ".join(f"'{r.entity}'[{r.prop}]" for r in dated)
+            "grouping column(s) "
+            + ", ".join(f"'{r.entity}'[{r.prop}] ({graded[ColumnRef(r.entity, r.prop).key()]})" for r in proven)
             + f" sit on {compared.qualified()}'s table and are NOT cleared, so the surviving filter "
             "restricts the rows to that bucket and the running total becomes the bucket's own total",
             compared=compared.qualified(),
             cleared=[ref.qualified() for ref in cumulative.cleared_columns],
+            axis=axis,
         )
-    cross_table = [ref for ref in survivors if ref not in same_table]
+    suspect = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] == GRAIN_SUSPECT]
+    if suspect:
+        return _verdict(
+            "unassessable",
+            "axis_grain_unresolved",
+            "grouping column(s) "
+            + ", ".join(f"'{r.entity}'[{r.prop}]" for r in suspect)
+            + f" sit on {compared.qualified()}'s table and are named like a date grain, but nothing in "
+            "the model proves it - no declared date type and no calculated lineage back to the anchor. "
+            "Probe it with EVALUATE",
+        )
+    return None
+
+
+def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
+    """As-of filter: a surviving grouping column on the anchor's table truncates the accumulation.
+
+    "Surviving" is decided from EVERY projected column, not from a curated axis-role list, and
+    "is it a date grain" is decided from lineage as well as declared type. Both of those used to be
+    proxies, and both let real defects through - see `AXIS_ROLES` and `dax_grain.ModelFacts`.
+    """
+    compared = cumulative.compared
+    assert compared is not None  # guarded by classify(); an unqualified compare is unassessable
+    grouping, blocked = _grouping_or_reason(visual)
+    if blocked is not None:
+        return blocked
+    cleared = {ref.key() for ref in cumulative.cleared_columns} | {compared.key()}
+    cleared_tables = {name.casefold() for name in cumulative.cleared_tables}
+    survivors = [
+        ref
+        for ref in grouping
+        if ColumnRef(ref.entity, ref.prop).key() not in cleared and ref.entity.casefold() not in cleared_tables
+    ]
+    caveat = _hierarchy_caveat(visual)
+    if not survivors:
+        return caveat or _verdict(
+            "ok", "axis_cleared", "every projected column is cleared by the as-of filter or is the compared column"
+        )
+    decided = _judge_same_table_survivors(survivors, compared, cumulative, facts, _axis_text(visual))
+    if decided is not None:
+        return decided
+    cross_table = [ref for ref in survivors if ref.entity.casefold() != (compared.table or "").casefold()]
     if cross_table:
         return _verdict(
             "unassessable",
             "cross_table_axis",
-            "axis column(s) "
+            "grouping column(s) "
             + ", ".join(f"'{r.entity}'[{r.prop}]" for r in cross_table)
             + f" are on another table than {compared.qualified()}; whether their filter reaches the "
             "aggregated rows depends on the relationship graph - probe it with EVALUATE",
         )
-    return _verdict(
+    return caveat or _verdict(
         "ok",
         "axis_not_a_date_grain",
-        "the surviving axis column(s) are not date-typed; a running total partitioned by a "
-        "non-date column is a legitimate shape",
+        "the surviving grouping column(s) are neither date-typed nor derived from "
+        f"{compared.qualified()}; a running total partitioned by a non-date column is a legitimate shape",
         not_flagged=[f"'{r.entity}'[{r.prop}]" for r in survivors],
     )
 
 
-def _is_date_typed(columns: dict[str, Any], table: str, column: str) -> bool:
-    """Whether TMDL declares this column `dataType: date`/`dateTime`.
+def _judge_period_to_date(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
+    """Period-to-date: safe ONLY when every date grain on the visual sits on the marked date table.
 
-    Strictly the declared type, never the name heuristic `ColumnInfo.is_date_like` also accepts: a
-    column called `Updated` is not evidence enough to fail a build on.
+    Time intelligence auto-removes filters from the OTHER columns of a table marked
+    `dataCategory: Time`, which is what makes `TOTALYTD` correct on a month axis. Nothing removes a
+    date grain that lives on an unmarked table - a fact table, typically - so that case is exactly
+    the trap. It is reported `unassessable` rather than `mismatch` because the auto-removal rules
+    have more inputs than this gate reads; what is NOT acceptable is calling it a pass.
     """
-    for name, info in columns.items():
-        if name.casefold() != table.casefold():
-            continue
-        for col_name, col in info.columns.items():
-            if col_name.casefold() == column.casefold():
-                return (col.data_type or "").casefold() in _DATE_TYPES
-    return False
+    anchor = cumulative.compared
+    assert anchor is not None  # guarded by classify()
+    grouping, blocked = _grouping_or_reason(visual)
+    if blocked is not None:
+        return blocked
+    caveat = _hierarchy_caveat(visual)
+    if caveat is not None:
+        return caveat
+    grains = [
+        ref
+        for ref in grouping
+        if facts.grain_of(ColumnRef(ref.entity, ref.prop), anchor) != GRAIN_UNRELATED
+        and ColumnRef(ref.entity, ref.prop).key() != anchor.key()
+    ]
+    if not grains:
+        return _verdict(
+            "ok",
+            "no_date_grain_on_axis",
+            f"no projected column is a date grain of {anchor.qualified()}, so nothing coarser survives",
+        )
+    unmarked = [
+        ref
+        for ref in grains
+        if ref.entity.casefold() != (anchor.table or "").casefold() or not facts.is_time_table(ref.entity)
+    ]
+    if not unmarked:
+        return _verdict(
+            "ok",
+            "date_table_marked",
+            f"every date grain sits on '{anchor.table}', which is marked dataCategory: Time, so time "
+            "intelligence removes those filters",
+        )
+    return _verdict(
+        "unassessable",
+        "period_to_date_grain_unproven",
+        "date grain(s) "
+        + ", ".join(f"'{r.entity}'[{r.prop}]" for r in unmarked)
+        + f" are not on a table marked dataCategory: Time together with {anchor.qualified()}, so "
+        "nothing here proves their filter is removed and the period-to-date value may be the "
+        "bucket's own total - probe it with EVALUATE",
+        anchor=anchor.qualified(),
+        marked_date_tables=sorted(facts.time_tables),
+    )
 
 
 def _tmdl_documents(model_dir: Path) -> int:
@@ -633,7 +463,6 @@ def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
         "model": str(model_dir),
         "measures_parsed": len(measures),
         "cumulative_measures": len(cumulatives),
-        "not_assessed_by_design": period_to_date_measures(measures),
     }
     if not measures and not _tmdl_documents(model_dir):
         return {
@@ -646,12 +475,13 @@ def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
         return {
             **base,
             "status": STATUS_NOT_APPLICABLE,
-            "reason": "no running-total or window measure in this model, so no grain can disagree with an axis",
+            "reason": "no running-total, window or period-to-date measure in this model, so no grain "
+            "can disagree with an axis",
             "findings": [],
         }
-    columns = _parse_column_census(model_dir)
+    facts = read_model_facts(model_dir)
     visuals = iter_visuals(report_dir)
-    findings, bound = _grade_visuals(visuals, cumulatives, columns)
+    findings, bound = _grade_visuals(visuals, cumulatives, facts)
     unbound = sorted(c.label for key, c in cumulatives.items() if key not in bound)
     stubs = sorted(c.label for c in cumulatives.values() if c.shape == "stub")
     return {
@@ -667,7 +497,7 @@ def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
 def _grade_visuals(
     visuals: list[VisualBinding],
     cumulatives: dict[tuple[str, str], Cumulative],
-    columns: dict[str, Any],
+    facts: ModelFacts,
 ) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
     """Judge every (cumulative measure, binding visual) pair, and report which measures were bound."""
     findings: list[dict[str, Any]] = []
@@ -688,13 +518,13 @@ def _grade_visuals(
                     "visual": visual.visual,
                     "visual_type": visual.visual_type,
                     "visual_file": str(visual.file),
-                    **_judge(cumulative, visual, columns),
+                    **_judge(cumulative, visual, facts),
                 }
             )
     return findings, bound
 
 
-def _judge(cumulative: Cumulative, visual: VisualBinding, columns: dict[str, Any]) -> dict[str, Any]:
+def _judge(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
     """Route one pair to the invariant its DAX shape actually declares."""
     if not cumulative.assessable:
         return _verdict("unassessable", cumulative.shape, cumulative.reason)
@@ -702,8 +532,10 @@ def _judge(cumulative: Cumulative, visual: VisualBinding, columns: dict[str, Any
         return _judge_window(cumulative, visual)
     if cumulative.shape.endswith("_orderby"):
         return _verdict("ok", "orders_by_visual_grain", cumulative.reason)
+    if cumulative.shape == "period_to_date" and cumulative.compared is not None:
+        return _judge_period_to_date(cumulative, visual, facts)
     if cumulative.compared is not None:
-        return _judge_as_of(cumulative, visual, columns)
+        return _judge_as_of(cumulative, visual, facts)
     return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
 
 
@@ -780,7 +612,6 @@ def merge(pairs: list[dict[str, Any]], unresolved: list[str], root: str) -> dict
         "assessed_clean": sum(1 for f in findings if f["verdict"] == "ok"),
         "unbound_cumulative_measures": sorted({m for p in pairs for m in p.get("unbound_cumulative_measures", [])}),
         "stubbed_cumulative_measures": sorted({m for p in pairs for m in p.get("stubbed_cumulative_measures", [])}),
-        "not_assessed_by_design": sorted({m for p in pairs for m in p.get("not_assessed_by_design", [])}),
         "pairs": pairs,
     }
 
@@ -800,9 +631,15 @@ def _render_findings(report: dict[str, Any], verdict: str, header: str) -> list[
 def _render_notes(report: dict[str, Any]) -> list[str]:
     """The lines that must print at EVERY status, including a clean one.
 
-    An affirmative verdict has to say what it did NOT look at, or it reads as a full clearance. The
-    period-to-date list in particular is printed on a PASS for the same reason `check_path_ceiling`
-    prints `root_budget` on a PASS: a number shown only sometimes cannot be told from a dropped one.
+    An affirmative verdict has to say what it did NOT look at, or it reads as a full clearance -
+    which is why an unassessed pair, an unresolved model and an unbound cumulative measure all print
+    here rather than only on a failure.
+
+    There is deliberately no "not assessed by design" list any more. Period-to-date measures used to
+    be listed here and excluded from judgement, and a blind review proved the bucket was hiding real
+    cases rather than disclosing them: a fact-table `TOTALYTD` on a coarser same-table axis exited 0
+    with its name printed under that heading. Naming something you refused to check is not the same
+    as checking it. They are now judged, and land in `unassessable` when safety cannot be proven.
     """
     lines: list[str] = []
     for entry in report.get("unassessed_pairs", []):
@@ -819,13 +656,6 @@ def _render_notes(report: dict[str, Any]) -> list[str]:
             "  note: BLANK() stub(s) with no grain yet (check_stub_measures.py owns these): "
             + ", ".join(report["stubbed_cumulative_measures"])
         )
-    if report.get("not_assessed_by_design"):
-        names = report["not_assessed_by_design"]
-        lines.append(
-            f"  NOT ASSESSED by this gate ({len(names)} period-to-date measure(s)): "
-            + ", ".join(names)
-            + "\n      their grain depends on date-table marking and the relationship path - probe with EVALUATE"
-        )
     return lines
 
 
@@ -834,7 +664,10 @@ def render(report: dict[str, Any]) -> str:
     status = report.get("status")
     head = f"RUNNING-TOTAL AXIS CHECK: {status}"
     if status == STATUS_NOT_APPLICABLE:
-        first = f"{head} - no running-total or window measure in any shipping model; nothing can disagree with an axis."
+        first = (
+            f"{head} - no running-total, window or period-to-date measure in any shipping model; "
+            "nothing can disagree with an axis."
+        )
         return "\n".join([first] + _render_notes(report))
     if status == STATUS_SKIPPED:
         first = f"{head} - nothing was assessed across {report.get('pairs_scanned', 0)} report/model pair(s)"

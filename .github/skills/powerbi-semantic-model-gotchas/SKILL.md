@@ -363,26 +363,35 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 
     The emitted report used `'Date'[Month Start]` on the axis beside a measure ordered by
     `'Orders'[Order_Date]`, so the measure disagreed with its own visual.
-  - **Gate reality (updated 2026-08-30, issue #218 closed):** structural validators and
+  - **Gate reality (updated 2026-08-31, issue #218 closed):** structural validators and
     `check_datamodel.py` still do not see PBIR category bindings — but the cross-artifact check now
     exists: **`python scripts/check_running_total_axis.py <bundle>`**, also wired into
     `check_unit.py` as the `running-total-axis` row (integration scope). It reads the measure's DAX
     *shape*, never its name, and enforces one invariant per mechanism: a `WINDOW`/`OFFSET`/`INDEX`/
-    `RANK`/`ROWNUMBER` with `ORDERBY(<col>)` and no explicit relation must have `<col>` **projected
-    by the visual** (that is exactly the table above); a `FILTER(ALL(...), t[c] <= MAX(t[c]))` must
-    **clear** any date-typed axis column on `t`, or have it be `t[c]` itself. Exit 0 clean / 1
-    mismatch / **3 unassessable, which is never a pass**.
-  - **It does NOT replace the `EVALUATE` probe, and says so in its own output.** Period-to-date time
-    intelligence (`TOTALYTD`/`DATESYTD`/…) is counted and named as `not_assessed_by_design` on every
-    run rather than judged, because its grain depends on `dataCategory: Time` marking *and* the
-    relationship path; an explicit relation argument, a cross-table as-of axis, a hierarchy
-    projection, `ALLEXCEPT` and a measure-only visual are all reported `unassessable`. For any of
-    those, still run `EVALUATE` probes at every axis grain the emitted visuals bind to and compare
-    to the source/oracle. ⚠️ And note what "gate exists" does not mean: swept over
-    `_runs/estate-2.339.0-20260829` (51 pbip projects) and all 16 committed `examples/`, it found
-    **zero live instances** — the estate's two real `WINDOW(... ORDERBY(...))` measures are bound to
-    no visual at all. It is proven against the reproduced S14 fixture, not against a defect found in
-    the wild.
+    `RANK`/`ROWNUMBER` with `ORDERBY(<col>)` and no explicit relation must have **every** ordered
+    column, in **every** window call, **projected by the visual** (that is exactly the table above);
+    a `FILTER(ALL(...), t[c] <= MAX(t[c]))` must **clear** any date grain on `t`, or have it be
+    `t[c]`; and a `TOTALYTD`/`DATESYTD` must have every date grain on the visual sitting on the
+    marked `dataCategory: Time` table that owns its `<dates>` argument. Exit 0 clean / 1 mismatch /
+    **3 unassessable, which is never a pass**.
+  - ⚠️ **A coarse date grain is usually NOT `dataType: dateTime`, so do not check the type alone.**
+    Measured across `_runs/estate-2.339.0-20260829`: the engine emits its month/quarter bins as
+    **calculated text** columns — `column Month = FORMAT('Date'[Date], "MMM")`, `column Quarter =
+    "Q" & QUARTER('Date'[Date])` — carrying **no `dataType` at all** (95 such columns). Their
+    filters survive exactly like a `dateTime` bin's, so a running total plotted against one is just
+    as wrong and a type-only check waves it through. Only `*_Start` bins (`Year Start`,
+    `Month Start`) are date-typed. Judge by **lineage back to the anchor date column**, which the
+    gate now does; when neither type nor lineage proves it, treat it as unassessable, not clean.
+  - **It does NOT replace the `EVALUATE` probe, and says so in its own output.** An explicit relation
+    argument, a cross-table as-of axis, a hierarchy projection, `ALLEXCEPT`, a measure-only visual, a
+    column merely *named* like a date part, and any period-to-date measure whose date table is not
+    marked are all reported `unassessable`. For any of those, still run `EVALUATE` probes at every
+    axis grain the emitted visuals bind to and compare to the source/oracle. ⚠️ And note what "gate
+    exists" does not mean: swept over `_runs/estate-2.339.0-20260829` (51 pbip projects) and all 16
+    committed `examples/`, it found **zero live instances** — the estate's two real
+    `WINDOW(... ORDERBY(...))` measures are bound to no visual at all. It is proven against the
+    reproduced S14 fixture and against real engine bytes with a binding injected, not against a
+    defect found in the wild.
 
 **Month/quarter binning is a MODEL job, and it lands on you mid-migration:**
 - Power BI cannot bin a date to month in the **report** layer when the model has no date table, no
