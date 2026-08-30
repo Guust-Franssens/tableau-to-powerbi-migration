@@ -258,8 +258,18 @@ def test_inspecting_nothing_is_unassessable_not_clean(tmp_path, monkeypatch):
 
 @needs_dotnet
 def test_no_oracle_is_an_explicit_opt_out(tmp_path):
-    """--no-oracle is a human saying "I know"; it is logged, and it does not gate."""
-    root = _write_model(tmp_path, CASES["valid_baseline"][0])
+    """--no-oracle is a human saying "I know" - and the fixture is PARSER-FATAL on purpose.
+
+    With valid TMDL this test could not fail: ignoring the flag entirely would still exit 0, so it
+    would be credited as coverage while observing nothing. Measured - mutating `if skip:` to
+    `if False:` left the whole file green. Against a model the parser refuses, honouring the flag
+    exits 0 and ignoring it exits 1, which is a difference the test can see.
+
+    The first assertion anchors the fixture: if this model ever stops being parser-fatal, that line
+    fails loudly instead of the second one quietly going vacuous again.
+    """
+    root = _write_model(tmp_path, CASES["fatal_uppercase_kind"][0])
+    assert check_datamodel.main([str(root)]) == 1
     assert check_datamodel.main([str(root), "--no-oracle"]) == 0
 
 
