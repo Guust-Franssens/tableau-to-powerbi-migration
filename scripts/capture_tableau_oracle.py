@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-oracle")
@@ -97,6 +98,10 @@ LOG = logging.getLogger("tableau-oracle")
 REST_TIMEOUT_SEC = 180
 SESSION_LOST_CODE = "401002"
 MAX_REAUTH_PER_VIEW = 2
+# A capability probe costs metered export calls (Tableau meters ~100/hour/Creator), so it is bounded.
+# More than one is still needed because a single blocked view fails every route and would otherwise be
+# read as "this site cannot render", which is exactly the wrong conclusion.
+MAX_CAPABILITY_PROBE_VIEWS = 3
 DEFAULT_MAX_ATTEMPTS = 5
 BACKOFF_BASE_SEC = 1.0
 BACKOFF_CAP_SEC = 30.0
@@ -131,6 +136,7 @@ SVG_MIN_API_VERSION = "3.29"
 SVG_VERSION_MARKER = "SVG export requires API version"
 _SVG_ROOT_MM = re.compile(r'width="([\d.]+)mm"\s+height="([\d.]+)mm"')
 _SVG_HREF = re.compile(r'(?:xlink:)?href="([^"]{0,120})')
+_PDF_MEDIABOX = re.compile(rb"/MediaBox\s*\[([^\]]*)\]")
 
 
 class ExportFailed(RuntimeError):
@@ -324,6 +330,18 @@ class TableauSession:
             self._request("POST", "/auth/signout")
             self.token = None
 
+    def raw_get(self, path: str) -> tuple[int, bytes]:
+        """ONE unretried GET, for capability probing.
+
+        Separate from :meth:`export` on purpose. ``export`` exists to survive *transient* faults, and
+        a capability probe is asking a question whose "no" is **permanent** -- a version gate is not
+        fixed by waiting, and retrying it five times with backoff only burns a metered export budget
+        to learn the same thing. It also must not re-authenticate: a probe that silently healed a dead
+        session would report a capability the real capture then cannot use.
+        """
+        status, payload, _ = self._request("GET", path)
+        return status, payload
+
     def get_json(self, path: str) -> dict[str, Any]:
         """GET a metadata endpoint as JSON, retrying transient failures."""
         for attempt in range(1, self.retry.max_attempts + 1):
@@ -503,10 +521,14 @@ def capture_view(
     session: TableauSession,
     view: dict[str, Any],
     out_dir: Path,
-    want_images: bool,
-    want_svg: bool = False,
+    wants: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Capture one view's data (and optionally its rendered image and/or SVG), keyed by view LUID."""
+    """Capture one view's data plus every requested render, keyed by view LUID.
+
+    ``wants`` is a set drawn from ``_RENDER_ROUTES`` ("png", "svg", "pdf") rather than a boolean per
+    format: three parallel booleans made the call site unreadable at the third one, and every new
+    route would have added another positional flag that some caller forgets to pass.
+    """
     view_luid = view["id"]
     workbook = view.get("workbook", {}) or {}
     stem = f"{safe_slug(view.get('name', ''))}__{view_luid[:8]}"
@@ -539,25 +561,66 @@ def capture_view(
         **summarise_csv(payload),
     }
 
-    if want_images:
-        record["image"] = _capture_render(session, view_luid, out_dir / "images" / f"{stem}.png", "png")
-    if want_svg:
-        record["svg"] = _capture_render(session, view_luid, out_dir / "images" / f"{stem}.svg", "svg")
+    for kind in ("png", "svg", "pdf"):
+        if kind in wants:
+            leg = "image" if kind == "png" else kind
+            record[leg] = _capture_render(
+                session, view_luid, out_dir / "images" / f"{stem}.{_RENDER_EXTENSIONS[kind]}", kind
+            )
     return record
+
+
+# Route per tier. `pdf` uses `type=Unspecified`, which sizes the page to the viz instead of a paper
+# size -- MEASURED to work and to give `0.75 * declared_px + 72pt` on 52/52 dashboards, but NOT in
+# Tableau's documented value list (`A3, A4, A5, B5, Executive, Folio, Ledger, Legal, Letter, Note,
+# Quarto, Tabloid`), so it is an observed behaviour, not a contract. `pdf_facts` records the page it
+# actually got, so a server that silently ignored the value is visible rather than assumed.
+_RENDER_ROUTES = {
+    "png": ("image", "?resolution=high"),
+    "svg": ("image", "?format=svg"),
+    "pdf": ("pdf", "?type=Unspecified"),
+}
+_RENDER_EXTENSIONS = {"png": "png", "svg": "svg", "pdf": "pdf"}
+
+
+def pdf_facts(payload: bytes) -> dict[str, Any]:
+    """Page geometry and vector-ness of a REST PDF export, stdlib only.
+
+    ``/pdf`` reaches back to **API 2.8 / Tableau Server 10.5**, which is why it is the portable rung of
+    the ladder -- but "it returned a PDF" is not the same as "it returned the page I asked for", and
+    ``type=Unspecified`` is undocumented. Recording the ``MediaBox`` is what distinguishes the two: a
+    server that ignored the value falls back to a paper size (measured default **612x792 = Letter
+    portrait**, notwithstanding the docs' claim that the default is ``Legal`` = 612x1008).
+
+    ``fontfile_count`` is the fidelity note: unlike the SVG, a Tableau PDF **embeds** its fonts, so it
+    renders with the workbook's real typefaces on a machine that does not have them installed.
+    """
+    facts: dict[str, Any] = {
+        "vector": True,
+        "fontfile_count": len(re.findall(rb"/FontFile\d?", payload)),
+        "image_xobjects": len(re.findall(rb"/Subtype\s*/Image", payload)),
+    }
+    boxes = sorted({m.decode().strip() for m in _PDF_MEDIABOX.findall(payload)})
+    if boxes:
+        parts = boxes[0].split()
+        if len(parts) >= 4:
+            facts["page_pt"] = {"width": round(float(parts[2])), "height": round(float(parts[3]))}
+    return facts
 
 
 def _capture_render(session: TableauSession, view_luid: str, path: Path, kind: str) -> dict[str, Any]:
     """Fetch one rendered form of a view and describe what was actually obtained.
 
-    Both forms come from the SAME ``/views/{id}/image`` endpoint and the same VizQL render, so neither
-    survives a workbook whose data sources are not connected -- measured, both return HTTP 400
-    ``ExportViewException: Error: data sources not connected``. What differs is the CEILING: the PNG
-    is capped at 2x the dashboard's declared size, the SVG is resolution-independent.
+    All three rungs come from the same VizQL render, so none survives a workbook whose data sources
+    are not connected -- measured, ``image``, ``image?format=svg``, ``pdf`` and ``data`` all return the
+    same HTTP 400 ``ExportViewException: Error: data sources not connected``. What differs is the
+    CEILING and the REACH: PNG is capped at 2x a dashboard's declared size but works back to API 2.5;
+    SVG is resolution-independent but needs 3.29; PDF is vector with embedded fonts from API 2.8.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    query = "?format=svg" if kind == "svg" else "?resolution=high"
+    endpoint, query = _RENDER_ROUTES[kind]
     try:
-        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/image{query}")
+        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}")
     except ExportFailed as exc:
         record = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
         if kind == "svg" and SVG_VERSION_MARKER in exc.detail:
@@ -580,6 +643,8 @@ def _capture_render(session: TableauSession, view_luid: str, path: Path, kind: s
     if kind == "svg":
         record.update(svg_facts(payload))
         record["vector"] = True
+    elif kind == "pdf":
+        record.update(pdf_facts(payload))
     else:
         record["vector"] = False
         dimensions = png_dimensions(payload)
@@ -610,6 +675,19 @@ def build_parser() -> argparse.ArgumentParser:
             f"also capture /image?format=svg per view -- resolution-independent, and its <text> "
             f"elements carry the dashboard's literal labels. Requires REST API >= {SVG_MIN_API_VERSION}"
         ),
+    )
+    parser.add_argument(
+        "--pdf",
+        action="store_true",
+        help="also capture /pdf?type=Unspecified per view -- vector with EMBEDDED fonts, and available "
+        "back to REST API 2.8 (Tableau Server 10.5), so it is the portable choice for on-prem sites",
+    )
+    parser.add_argument(
+        "--reference-best",
+        action="store_true",
+        help="PROBE the site and capture the best render tier it actually supports (svg > pdf > "
+        "png_high), instead of assuming one from a version string. Records the tier and why in the "
+        "manifest. Combines with the explicit flags above, which are always honoured as well",
     )
     parser.add_argument("--limit", type=int, default=0, help="stop after N views (0 = all)")
     parser.add_argument(
@@ -677,62 +755,100 @@ def _render_statuses(record: dict[str, Any]) -> tuple[str, ...]:
     keeps the three aggregate sets below reading the same legs, so adding a fourth output format
     cannot silently be counted by one of them and missed by the others.
     """
-    return tuple(record.get(leg, {"status": "ok"}).get("status") for leg in ("image", "svg"))
+    return tuple(record.get(leg, {"status": "ok"}).get("status") for leg in ("image", "svg", "pdf"))
+
+
+def _partition(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Split records into the four sets the manifest and the exit code both read.
+
+    One function so the sets cannot drift apart: they must all consult the same render legs, and the
+    bug this replaces was three list comprehensions where only two had been taught about a new leg.
+    """
+    ok = [r for r in records if r.get("data", {}).get("status") == "ok"]
+    return {
+        "ok": ok,
+        "empty": [r for r in ok if r["data"]["row_count"] == 0],
+        "complete": [
+            r
+            for r in records
+            if r.get("data", {}).get("status") == "ok" and all(s == "ok" for s in _render_statuses(r))
+        ],
+        "blocked": [
+            r for r in records if "source_credential" in {r.get("data", {}).get("status"), *_render_statuses(r)}
+        ],
+        "failed": [
+            r
+            for r in records
+            if any(
+                status not in {"ok", "source_credential"}
+                for status in (r.get("data", {}).get("status"), *_render_statuses(r))
+            )
+        ],
+    }
+
+
+@dataclass(frozen=True)
+class CaptureRun:
+    """Where and when one capture happened -- the provenance half of the manifest.
+
+    Bundled because ``write_manifest`` needs all four together and nothing else needs any of them
+    individually; passing them as loose positional parameters is what pushed the signature past the
+    readable limit as soon as capability reporting was added.
+    """
+
+    session: TableauSession
+    env: dict[str, str]
+    out_dir: Path
+    started: float
 
 
 def write_manifest(
-    records: list[dict[str, Any]], session: TableauSession, env: dict[str, str], out_dir: Path, started: float
+    records: list[dict[str, Any]],
+    run: CaptureRun,
+    capability_report: dict[str, Any] | None = None,
 ) -> int:
     """Write the manifest and return the process exit code.
 
     Codes: 0 all selected views captured, 1 partial non-credential failure, 2 credential-blocked,
     3 total non-credential failure, 4 no views selected.
     """
-    ok = [r for r in records if r.get("data", {}).get("status") == "ok"]
-    empty = [r for r in ok if r["data"]["row_count"] == 0]
-    complete = [
-        r for r in records if r.get("data", {}).get("status") == "ok" and all(s == "ok" for s in _render_statuses(r))
-    ]
-    blocked = [r for r in records if "source_credential" in {r.get("data", {}).get("status"), *(_render_statuses(r))}]
-    failed = [
-        r
-        for r in records
-        if any(
-            status not in {"ok", "source_credential"}
-            for status in (r.get("data", {}).get("status"), *_render_statuses(r))
-        )
-    ]
+    sets = _partition(records)
+    blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "server": env["TABLEAU_SERVER_URL"],
-        "site": env["TABLEAU_SITE"],
-        "rest_api_version": env.get("TABLEAU_REST_API_VERSION"),
+        "server": run.env["TABLEAU_SERVER_URL"],
+        "site": run.env["TABLEAU_SITE"],
+        "rest_api_version": run.env.get("TABLEAU_REST_API_VERSION"),
         "view_count": len(records),
         "captured_complete": len(complete),
-        "data_ok": len(ok),
-        "data_empty": len(empty),
+        "data_ok": len(sets["ok"]),
+        "data_empty": len(sets["empty"]),
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
         "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
+        "pdf_ok": sum(1 for r in records if r.get("pdf", {}).get("status") == "ok"),
+        # #403's surviving half: the manifest must STATE the grade of evidence it holds, so a
+        # downstream validator reads it instead of inferring it from the fact that a file exists.
+        "render_capability": capability_report,
         "credential_blocked": len(blocked),
         "failed": len(failed),
-        "total_reauths": session.reauth_count,
-        "total_retries": session.retry_count,
-        "elapsed_sec": round(time.perf_counter() - started, 1),
+        "total_reauths": run.session.reauth_count,
+        "total_retries": run.session.retry_count,
+        "elapsed_sec": round(time.perf_counter() - run.started, 1),
         "views": records,
     }
-    manifest_path = out_dir / "oracle-manifest.json"
+    manifest_path = run.out_dir / "oracle-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     LOG.info(
         "\n%d/%d captured (%d empty), %d credential-blocked, %d failed, %d re-auth(s), %d retr(ies), %.0fs -> %s",
         len(complete),
         len(records),
-        len(empty),
+        len(sets["empty"]),
         len(blocked),
         len(failed),
-        session.reauth_count,
-        session.retry_count,
+        run.session.reauth_count,
+        run.session.retry_count,
         manifest["elapsed_sec"],
         manifest_path,
     )
@@ -747,6 +863,7 @@ def write_manifest(
                 record.get("data", {}).get("detail")
                 or record.get("image", {}).get("detail")
                 or record.get("svg", {}).get("detail")
+                or record.get("pdf", {}).get("detail")
             )
             LOG.warning("  - %s (%s): %s", record["view_name"], record["workbook_name"], blocked_detail)
     stale_api = [r for r in records if r.get("svg", {}).get("status") == "unsupported_api_version"]
@@ -756,11 +873,14 @@ def write_manifest(
         # in the wrong system.
         LOG.warning(
             "\n%d view(s) could not produce SVG: this site's REST API version is below %s. "
-            "Set TABLEAU_REST_API_VERSION=%s in .env and re-run; the PNG capture is unaffected.",
+            "Set TABLEAU_REST_API_VERSION=%s in .env and re-run; the PNG and PDF captures are "
+            "unaffected (they reach back to API 2.5 and 2.8 respectively).",
             len(stale_api),
             SVG_MIN_API_VERSION,
             SVG_MIN_API_VERSION,
         )
+    for warning in (capability_report or {}).get("warnings", []):
+        LOG.warning("! %s", warning)
     if not records:
         return 4
     if failed:
@@ -795,6 +915,51 @@ def build_retry_policy(max_attempts: int, budget_sec: float) -> RetryPolicy:
     return RetryPolicy(max_attempts=max_attempts, budget_sec=budget_sec)
 
 
+def probe_render_capability(
+    session: TableauSession, env: dict[str, str], views: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Ask the SITE what it can render, by probing, and reconcile that with both version strings.
+
+    The probe view matters. A workbook whose data sources are not connected fails every route
+    identically, so probing one would report "no tier available" for a site that is perfectly capable
+    -- so try successive views until one gives a determinate answer, capped at
+    ``MAX_CAPABILITY_PROBE_VIEWS`` because each attempt costs metered export calls.
+    """
+    info = capability.server_info(env["TABLEAU_SERVER_URL"])
+    configured = env.get("TABLEAU_REST_API_VERSION", "3.21")
+    advertised = info.get("rest_api_version")
+    LOG.info(
+        "site reports product=%s build=%s, advertises REST %s; we are asking as %s",
+        info.get("product_version"),
+        info.get("build"),
+        advertised,
+        configured,
+    )
+
+    def fetcher(view_luid: str):
+        def fetch(endpoint: str, query: str) -> tuple[int, bytes]:
+            # Deliberately the RAW request, not `export()`: a version gate is a permanent answer and
+            # must not be run through a retry/re-auth ladder built for transient faults.
+            return session.raw_get(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}")
+
+        return fetch
+
+    report: dict[str, Any] = {}
+    for view in views[:MAX_CAPABILITY_PROBE_VIEWS]:
+        report = capability.detect(
+            fetcher(view["id"]),
+            view["id"],
+            configured_api=configured,
+            advertised_api=advertised,
+        )
+        report["probe_view_name"] = view.get("name")
+        if report.get("selected_tier"):
+            break
+    report["server"] = info
+    LOG.info("render capability: best tier = %s", report.get("selected_tier") or "UNDETERMINED")
+    return report
+
+
 def main() -> int:
     """Capture the oracle for every selected view.
 
@@ -825,14 +990,24 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     LOG.info("capturing %d view(s) -> %s", len(views), out_dir)
 
+    capability_report = None
+    wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
+    if args.reference_best and views:
+        capability_report = probe_render_capability(session, env, views)
+        tier = capability_report.get("selected_tier")
+        if tier:
+            # The ladder names the PNG rung `png_high` (it is `?resolution=high`, not the plain
+            # render); the capture kinds are keyed by file format. One mapping, stated once.
+            wants.add({"png_high": "png"}.get(tier, tier))
+
     records, started = [], time.perf_counter()
     for index, view in enumerate(views, 1):
-        record = capture_view(session, view, out_dir, args.images, args.svg)
+        record = capture_view(session, view, out_dir, frozenset(wants))
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
         records.append(record)
         log_progress(index, len(views), record)
 
-    exit_code = write_manifest(records, session, env, out_dir, started)
+    exit_code = write_manifest(records, CaptureRun(session, env, out_dir, started), capability_report)
     session.sign_out()
     return exit_code
 

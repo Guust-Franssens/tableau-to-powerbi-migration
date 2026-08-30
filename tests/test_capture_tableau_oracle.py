@@ -262,14 +262,16 @@ def test_reflected_session_token_is_redacted_from_exceptions_and_manifest(tmp_pa
             session,
             {"id": "view-id-12345678", "name": "Echo", "workbook": {"id": "wb", "name": "Workbook"}},
             tmp_path,
-            False,
+            frozenset(),
         )
         oracle.write_manifest(
             [record],
-            session,
-            {"TABLEAU_SERVER_URL": "http://example", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"},
-            tmp_path,
-            0.0,
+            oracle.CaptureRun(
+                session,
+                {"TABLEAU_SERVER_URL": "http://example", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"},
+                tmp_path,
+                0.0,
+            ),
         )
         manifest = (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
         assert token not in manifest
@@ -334,7 +336,7 @@ def _record(status: str, rows: int = 1, image_status: str | None = None) -> dict
 def _write(tmp_path, records):
     session = oracle.TableauSession(_creds())
     env = {"TABLEAU_SERVER_URL": "https://x", "TABLEAU_SITE": "s", "TABLEAU_REST_API_VERSION": "3.29"}
-    return oracle.write_manifest(records, session, env, tmp_path, 0.0)
+    return oracle.write_manifest(records, oracle.CaptureRun(session, env, tmp_path, 0.0))
 
 
 def test_a_clean_capture_exits_zero(tmp_path):

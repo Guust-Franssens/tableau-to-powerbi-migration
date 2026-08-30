@@ -274,15 +274,101 @@ retried. Only the offline `.twb` thumbnail path survives this, at 192×192.
 
 ### Practical consequence
 
-**Best available: `--images --svg` together.** The PNG is the immediately-viewable artifact; the SVG is
-the resolution-independent one that also carries the content as text. Both are one call each on the
-same endpoint with the same credential, so the marginal cost of the SVG is one REST call and some
-bytes. Where the site is unreachable or its sources are disconnected, the 192×192 thumbnail is still
-the only thing left and a verdict signed off on it is **layout-grade, never validation-grade**.
+**Best available: `--reference-best`, which probes rather than assumes.** On Cloud that resolves to
+`svg`; on an on-prem site below 2026.2 it resolves to `pdf`. Explicit `--images --svg --pdf` still
+work and are always honoured on top. Where the site is unreachable or its sources are disconnected,
+the 192×192 thumbnail is the only thing left and a verdict signed off on it is **layout-grade, never
+validation-grade**.
 
 ⚠️ **One PAT = one live session.** Two concurrent probes against the same PAT invalidated each other
 mid-run (`401002` on the older token, then a hard 401 on every later call). Do not run two Tableau
 captures in parallel with one PAT.
+
+### Reach — which of these a customer can actually use (issue #403 follow-up)
+
+Everything above was measured on **Tableau Cloud**, which is force-upgraded and gets features first.
+On-prem **Tableau Server customers routinely run 2023.x–2025.x**, and they are the ones doing large
+migrations — so "use `?format=svg`" is only a recommendation if it reaches them. It mostly does not.
+
+**Documented version floors** (Tableau's REST reference; these rows are **INFERRED from documentation**,
+not measured against a real old Server — we have only a Cloud site):
+
+| route | API floor | Tableau release | reach for a 2023.x–2025.x on-prem site |
+|---|---|---|---|
+| `/image` + `?resolution=high` | **2.5** | **Server 10.2** (2017) | ✅ universal |
+| `/pdf` | **2.8** | **Server 10.5** (2018) | ✅ universal |
+| `/data` | 2.8 | Server 10.5 | ✅ |
+| `/crosstab/excel` | 3.9 | Server 2020.3 | ✅ |
+| **`/image?format=svg`** | **3.29** | **Cloud June 2026 / Server 2026.2** | ❌ **none** |
+
+> *"Available in API 3.29 (Tableau Cloud June 2026 / Server 2026.2 and later:"* — verbatim, and
+> identical on both `Query View Image` and `Get Custom View Image` (including the unclosed
+> parenthesis). SVG **is** documented for on-prem, just only from 2026.2.
+
+**The API → release map** is the translation an API number alone cannot give a customer. It lives in
+[`scripts/tableau_render_capability.py`](../scripts/tableau_render_capability.py) as `API_RELEASE`,
+transcribed from Tableau's [version
+table](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_concepts_versions.htm), and is
+gated by tests. Six rows are **Cloud-only** — API 3.26, 3.24, 3.22, 3.20, 3.18, 3.16 — so an on-prem
+site can never reach them at all. An on-prem 2025.1 site tops out at **API 3.25**; 2023.3 at **3.21**.
+
+⚠️ **The published table lags the product.** A live Cloud site probed on 2026-08-30 advertised
+`restApiVersion 3.30 / productVersion 2026.3.0`, and neither 3.30 nor 2026.3 appears in Tableau's
+version table, REST "What's New", or method reference. `release_for()` says *"not in the published
+table"* rather than inventing a release.
+
+### Detect capability; never infer it from a version string
+
+**The same Cloud site moved from `2026.2.5 / 3.29` to `2026.3.0 / 3.30` between two runs a week
+apart.** Three numbers claim to answer "can this site export SVG?" and they disagree:
+
+| # | source | what it really is |
+|---|---|---|
+| 1 | `TABLEAU_REST_API_VERSION` in `.env` | a **client preference** we send in the URI — asking as 3.21 against a 3.30 server loses SVG, and the error blames the API version without saying *we* set it |
+| 2 | `/api/{v}/serverinfo` → `restApiVersion` | the **server's advertised ceiling**. Unauthenticated; measured HTTP 200 at 2.4, 3.15, 3.21 and 3.29 alike (404 at 3.99), always reporting the server's own number rather than echoing the one asked for |
+| 3 | what the endpoint does | **the only authoritative answer** |
+
+So `--reference-best` **probes** the ladder (`svg` → `pdf` → `png_high`), stops at the first rung that
+answers, and records the tier, the per-rung verdicts and all three version numbers in
+`oracle-manifest.json` under `render_capability`. Measured live:
+
+| client pin | server | selected tier | warning raised |
+|---|---|---|---|
+| 3.29 | 2026.3.0 / advertises 3.30 | **svg** | — |
+| **3.21** (on-prem-shaped) | same site | **pdf** | *"tier 'svg' is supported by this server (advertises API 3.30) but TABLEAU_REST_API_VERSION is pinned to 3.21"* |
+| 3.29, probing a **blocked** view | same site | **`null`** | *"capability UNDETERMINED … re-probe with a different view"* |
+
+That third row matters most. A workbook with disconnected sources fails **every** route identically, so
+a naive probe would report "this site cannot render" for a site that is perfectly capable — the
+unassessable-collapsing-into-a-clean-answer shape. `classify_probe` keeps three outcomes distinct
+(`available` / `unsupported` / `indeterminate`) and `--reference-best` tries up to
+`MAX_CAPABILITY_PROBE_VIEWS` views before giving up.
+
+### Which rung to default to
+
+**Cloud → `svg`. On-prem below 2026.2 → `pdf`.** `--reference-best` decides that by probing.
+
+- **PDF is the portable answer** (API 2.8 / Server 10.5, i.e. 2018), genuinely vector, and it **embeds
+  its fonts** — which SVG does not — so it is *more* faithful on a machine lacking the workbook's
+  typefaces. Its cost is a rasteriser dependency (none installed here), which is the only reason it is
+  not the default where SVG exists.
+- **SVG is the premium answer**, needs no new dependency (Chromium via Playwright already ships), and
+  additionally carries the content as machine-readable `<text>` — but reaches only 2026.2+.
+- **PNG is the floor** and always works.
+
+⚠️ **`type=Unspecified` is measured, not documented.** Tableau's documented `type` values are
+`A3, A4, A5, B5, Executive, Folio, Ledger, Legal, Letter, Note, Quarto, Tabloid` — `Unspecified` is
+**absent**, and the docs say the default is `Legal`. Measured: the default is **612×792 = Letter
+portrait** (explicit `?type=Legal` gives 612×1008), and `Unspecified` fits the page to the viz. So
+`pdf_facts` records the `MediaBox` actually returned; a server that ignored the value is then visible
+rather than assumed.
+
+⚠️ **Correction to the sweep above: `vizWidth`/`vizHeight` are ignored for DASHBOARDS, not universally.**
+A dashboard has a fixed declared size and cannot be resized — byte-identical responses on both
+dashboards, on both endpoints. On a **worksheet** `vizHeight` *is* honoured: `Revenue by Region` went
+361×835 → **361×1535** with `vizHeight=1500`, and → 722×3070 with `resolution=high` as well. `vizWidth`
+alone changed nothing on that content-width-bound viz. The 2× dashboard ceiling stands; the "silently
+ignored" claim was over-general.
 
 ## State-locking (the single-image trap)
 

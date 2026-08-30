@@ -139,13 +139,13 @@ def test_png_dimensions_returns_none_for_a_non_png_rather_than_a_bogus_number():
 
 def test_svg_leg_is_only_fetched_when_asked_for(tmp_path):
     session = _Session({"/data": (200, b"a\n1\n")})
-    oracle.capture_view(session, VIEW, tmp_path, want_images=False, want_svg=False)
+    oracle.capture_view(session, VIEW, tmp_path, frozenset())
     assert not any("format=svg" in p for p in session.paths)
 
 
 def test_svg_capture_writes_the_file_and_grades_it_in_the_record(tmp_path):
     session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (200, HR_SVG)})
-    record = oracle.capture_view(session, VIEW, tmp_path, want_images=False, want_svg=True)
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
     svg = record["svg"]
     assert svg["status"] == "ok"
     assert svg["vector"] is True
@@ -158,7 +158,7 @@ def test_png_and_svg_are_captured_side_by_side_from_the_same_endpoint(tmp_path):
     session = _Session(
         {"/data": (200, b"a\n1\n"), "image?resolution=high": (200, _png(2800, 1600)), "image?format=svg": (200, HR_SVG)}
     )
-    record = oracle.capture_view(session, VIEW, tmp_path, want_images=True, want_svg=True)
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"png", "svg"}))
     assert record["image"]["dimensions_px"] == {"width": 2800, "height": 1600}
     assert record["image"]["vector"] is False
     assert record["svg"]["vector"] is True
@@ -174,7 +174,7 @@ def test_a_failed_png_no_longer_swallows_the_svg_leg(tmp_path):
             "image?format=svg": (200, HR_SVG),
         }
     )
-    record = oracle.capture_view(session, VIEW, tmp_path, want_images=True, want_svg=True)
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"png", "svg"}))
     assert record["image"]["status"] != "ok"
     assert record["svg"]["status"] == "ok"
 
@@ -184,7 +184,7 @@ def test_a_failed_png_no_longer_swallows_the_svg_leg(tmp_path):
 
 def test_a_pre_329_site_is_reported_as_a_configuration_fault_not_a_broken_view(tmp_path):
     session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (400, SVG_TOO_OLD.encode())})
-    record = oracle.capture_view(session, VIEW, tmp_path, want_images=False, want_svg=True)
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
     assert record["svg"]["status"] == "unsupported_api_version"
     assert oracle.SVG_MIN_API_VERSION in record["svg"]["remedy"]
     assert "TABLEAU_REST_API_VERSION" in record["svg"]["remedy"]
@@ -192,7 +192,7 @@ def test_a_pre_329_site_is_reported_as_a_configuration_fault_not_a_broken_view(t
 
 def test_a_disconnected_source_keeps_its_own_classification_and_is_not_relabelled(tmp_path):
     session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (400, SOURCES_DISCONNECTED.encode())})
-    record = oracle.capture_view(session, VIEW, tmp_path, want_images=False, want_svg=True)
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
     assert record["svg"]["status"] == "failed"
     assert "remedy" not in record["svg"]
 
@@ -207,7 +207,7 @@ class _Counter:
 
 def _manifest(records, tmp_path):
     env = {"TABLEAU_SERVER_URL": "https://s", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"}
-    code = oracle.write_manifest(records, _Counter(), env, tmp_path, 0.0)
+    code = oracle.write_manifest(records, oracle.CaptureRun(_Counter(), env, tmp_path, 0.0))
     return code, json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
 
 
@@ -248,3 +248,61 @@ def test_both_legs_ok_counts_once_in_each_column(tmp_path):
     )
     assert code == 0
     assert (manifest["image_ok"], manifest["svg_ok"], manifest["captured_complete"]) == (1, 1, 1)
+
+
+# --------------------------------------------------------------------------- the PDF rung
+
+# Real bytes from `/pdf?type=Unspecified` on the 1000x800 `Seed - 92 - Viz Gauntlet Dashboard`:
+# 0.75 * 1000 + 72 = 822pt wide, 0.75 * 800 + 72 = 672pt tall.
+PDF_FITTED = b"%PDF-1.4\n/Type/Page /MediaBox [0 0 822.000000 672.000000]\n/FontFile2 /Subtype /Image\n"
+# What a server that ignored the undocumented `type=Unspecified` falls back to: measured 612x792
+# (US Letter portrait), NOT the 612x1008 Legal the documentation claims is the default.
+PDF_LETTER = b"%PDF-1.4\n/Type/Page /MediaBox [0 0 612.000000 792.000000]\n/FontFile\n"
+
+
+def test_pdf_facts_records_the_page_actually_returned_not_the_one_requested():
+    """`type=Unspecified` is undocumented, so the fitted page must be verified, never assumed."""
+    assert oracle.pdf_facts(PDF_FITTED)["page_pt"] == {"width": 822, "height": 672}
+    assert oracle.pdf_facts(PDF_LETTER)["page_pt"] == {"width": 612, "height": 792}
+
+
+def test_a_pdf_is_always_marked_vector_and_its_embedded_fonts_counted():
+    """Embedded fonts are the PDF rung's one advantage over SVG, so the count is evidence."""
+    facts = oracle.pdf_facts(PDF_FITTED)
+    assert facts["vector"] is True
+    assert facts["fontfile_count"] == 1
+    assert facts["image_xobjects"] == 1
+
+
+def test_pdf_capture_uses_the_fitted_page_route(tmp_path):
+    session = _Session({"/data": (200, b"a\n1\n"), "pdf?type=Unspecified": (200, PDF_FITTED)})
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"pdf"}))
+    assert record["pdf"]["status"] == "ok"
+    assert record["pdf"]["vector"] is True
+    assert record["pdf"]["page_pt"] == {"width": 822, "height": 672}
+    assert (tmp_path / record["pdf"]["path"]).read_bytes() == PDF_FITTED
+
+
+def test_all_three_rungs_can_be_captured_together(tmp_path):
+    session = _Session(
+        {
+            "/data": (200, b"a\n1\n"),
+            "image?resolution=high": (200, _png(2000, 1600)),
+            "image?format=svg": (200, HR_SVG),
+            "pdf?type=Unspecified": (200, PDF_FITTED),
+        }
+    )
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"png", "svg", "pdf"}))
+    assert [record[leg]["status"] for leg in ("image", "svg", "pdf")] == ["ok", "ok", "ok"]
+
+
+def test_a_failed_pdf_leg_is_counted_like_the_others(tmp_path):
+    code, manifest = _manifest([_ok_record(pdf={"status": "failed", "detail": "boom"})], tmp_path)
+    assert code == 3
+    assert manifest["pdf_ok"] == 0
+    assert manifest["captured_complete"] == 0
+
+
+def test_render_routes_and_extensions_stay_in_step():
+    """A kind present in one map and missing from the other writes a file with the wrong suffix."""
+    assert set(oracle._RENDER_ROUTES) == set(oracle._RENDER_EXTENSIONS)  # pylint: disable=protected-access
