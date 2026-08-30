@@ -14,7 +14,8 @@ JSON payload:
 
 The command is a facade, not a merge: the existing gates remain independently runnable and their
 native statuses/exit codes are recorded under ``checks[].native_*``. Page parity and oracle coverage
-live here because no existing gate owned those questions.
+live here because no existing gate owned those questions; path ceiling lives here because remembering
+a nineteenth ``check_*.py`` by name is the problem this facade exists to remove.
 """
 
 # Unit gate, brownfield inventory, and CLI rendering intentionally live together as one facade.
@@ -91,7 +92,7 @@ MODEL_CHECK_IDS = frozenset(
 REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
 INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings", "connection-fidelity"})
 ALL_ONLY_CHECK_IDS = frozenset(
-    {"engine-receipt", "desktop-orphans", "visual-layer-done", "visual-comparison-done", "finalized"}
+    {"engine-receipt", "desktop-orphans", "path-ceiling", "visual-layer-done", "visual-comparison-done", "finalized"}
 )
 
 OWNER_HINTS = {
@@ -115,6 +116,7 @@ OWNER_HINTS = {
     "occlusion": "report",
     "engine-receipt": "orchestrator",
     "desktop-orphans": "orchestrator",
+    "path-ceiling": "orchestrator (install root length + engine-side name duplication; not a layer defect)",
 }
 
 
@@ -239,6 +241,23 @@ GATES = (
         frozenset({0}),
         frozenset({"STUBS"}),
         frozenset({1}),
+    ),
+    # Whole-unit shippability, so `all` scope only (see ALL_ONLY_CHECK_IDS): the scan walks the entire
+    # target tree and cannot be attributed to a layer - a model-scoped run would be judging report
+    # paths and vice versa. Kept GATING because the native gate already exits 1 and the facade must
+    # never be the one place a bundle Desktop cannot open reads as done; "not fixable by the persona
+    # that hit it" is answered by the orchestrator owner hint, not by silence. Its statuses are
+    # lowercase, unlike every other gate here - that is the native contract, not a typo.
+    Gate(
+        "path-ceiling",
+        "check_path_ceiling.py",
+        (),
+        frozenset({"ok"}),
+        frozenset({0}),
+        frozenset({"over_ceiling"}),
+        frozenset({1}),
+        frozenset({"unknown_paths", "no_paths", "ERROR"}),
+        frozenset({2, 3}),
     ),
 )
 
@@ -1025,6 +1044,38 @@ def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) ->
     return check
 
 
+def _annotate_path_ceiling(check: dict[str, Any]) -> dict[str, Any]:
+    """Carry the numbers that make a path-ceiling verdict judgeable into the facade row.
+
+    The native gate prints them; with ``--quiet`` (how the facade runs every gate) it prints only a
+    verdict line, so without this the row is a bare FINDINGS with no way to tell a genuinely fragile
+    bundle from a deep checkout. ``root_budget`` is the portable number - the longest install root
+    this tree still tolerates - and the verdict itself is measured against THIS checkout root, which
+    is stated rather than left for the reader to infer.
+    """
+    payload = check.get("payload")
+    if not isinstance(payload, dict):
+        return check
+    counted = payload.get("counted")
+    if not isinstance(counted, dict):
+        # No census means the scan never ran (a usage error, an unwritable JSON). Synthesizing
+        # "0 of 0 paths over ceiling" here would read as reassurance for a check that failed.
+        return check
+    longest = payload.get("longest") if isinstance(payload.get("longest"), dict) else {}
+    parts = [
+        f"{counted.get('over_ceiling', 0)} of {counted.get('measured', 0)} paths over ceiling",
+        f"longest {longest.get('length', 'unknown')}",
+        f"root budget {payload.get('root_budget', 'unknown')} at root length {payload.get('root_length', 'unknown')}",
+    ]
+    if counted.get("unknown"):
+        parts.append(f"{counted['unknown']} unmeasurable")
+    summary = "; ".join(parts) + " (measured against this checkout root; a shorter install root may pass)"
+    existing = check.get("detail")
+    check["detail"] = f"{existing}; {summary}" if existing else summary
+    check["root_budget"] = payload.get("root_budget")
+    return check
+
+
 def _run_simple(argv: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
     """Run a native checker in a fresh process and capture its exact exit code."""
     return subprocess.run(
@@ -1352,6 +1403,8 @@ def _append_cli_checks(
             check = _run_cli_gate(gate, target, output_dir)
             if gate.check_id == "stub-measures":
                 check = _apply_stub_exemptions(check, exemptions)
+            if gate.check_id == "path-ceiling":
+                check = _annotate_path_ceiling(check)
             checks.append(check)
         if _in_scope("occlusion", scope):
             checks.append(check_occlusion(target, output_dir))
@@ -1494,7 +1547,7 @@ def _payload_findings(payload: Any, limit: int = 5) -> list[str]:
             identity = _compact_identity(value)
             if identity and any(key in value for key in ("severity", "kind", "category", "reason", "path")):
                 findings.append(identity)
-            for child_key in ("findings", "unresolved", "skipped", "models", "reports"):
+            for child_key in ("findings", "unresolved", "skipped", "models", "reports", "worst_offenders"):
                 child = value.get(child_key)
                 if isinstance(child, list):
                     walk(child)
