@@ -1,20 +1,29 @@
-"""The mutation harness must not credit a mutation for pytest failing to run.
+"""The mutation harness must credit a mutation only when a test actually observed it.
 
-This exists because it did. `main()` judged every mutation with
+Two defects, both found by blind review, both from the same root cause -- **scraping pytest's
+terminal output is a proxy for "did a test observe the mutation", and the proxy fails in both
+directions.**
+
+Round 1 (the original defect, on master since #331)::
 
     verdict = "CAUGHT " if rc != 0 else "SURVIVED"
 
-which awards CAUGHT to a collection error (exit 4), an internal error (exit 3) or an
-interrupt (exit 2) -- none of which involve a test observing anything. Measured on master:
-`pytest tests/does_not_exist.py -q` exits **4** with **zero** named FAILED lines, and that
-expression scored it CAUGHT.
+``run()`` already extracted named FAILED lines; ``main()`` threw them away. Measured:
+``pytest tests/does_not_exist.py -q`` exits **4** having run nothing, and scored CAUGHT.
 
-The same file already guarded ONE instance of this class, with a comment reading "the harness
-would report a FALSE 'CAUGHT'", so the hazard was known and only partially closed.
+Round 2 -- this file's first fix was still text-based, and was wrong three ways:
 
-Found by blind review of PR #405, whose own 14/14 mutation table was produced by this harness.
-A surviving neutral control does not disprove the defect: a neutral change exits 0, so it only
-exercises the SURVIVED direction.
+* a **collection** failure on a class emits ``ERROR path::TestName``, indistinguishable from a
+  named test error, so it scored CAUGHT*;
+* a dying **xdist** worker emits ``FAILED path::test_name`` for a test that never executed;
+* ``PY_COLORS=1`` prefixes those tokens with ANSI escapes, so ``startswith`` failed and genuine
+  detections became HARNESS-ERROR -- the opposite bug.
+
+The verdict now comes from pytest's own lifecycle hooks (``pytest_runtest_logreport``,
+``pytest_collectreport``, ``pytest_internalerror``, ``pytest_testnodedown``), recorded to JSON by
+the injected plugin. ``report.when`` is the discriminator terminal text throws away: ``call``
+means an assertion noticed, ``setup``/``teardown`` means a crash noticed, and neither exists when
+pytest never ran.
 """
 
 from __future__ import annotations
@@ -24,48 +33,81 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mutation_harness import named_failures, named_outcomes  # noqa: E402
+from mutation_harness import is_harness_error, read_outcomes  # noqa: E402
 
 
-REAL_FAILURE = "FAILED tests/test_e2e_offline.py::test_something - AssertionError: boom"
-NAMED_ERROR = "ERROR tests/test_e2e_offline.py::test_the_front_half_produced_real_artifacts_from_real_bytes"
-COLLECTION_ERROR = "ERROR tests/does_not_exist.py\n!!!!! Interrupted: no tests ran !!!!!"
+def record(**kwargs) -> dict:
+    """A lifecycle record with the given fields set and the rest empty."""
+    base = {
+        "call_failed": [],
+        "setup_failed": [],
+        "collect_error": [],
+        "internal_error": False,
+        "node_down": False,
+        "recorded": True,
+    }
+    base.update(kwargs)
+    return base
 
 
-def test_a_named_failure_is_evidence() -> None:
-    """An assertion observed the mutation - the strongest form."""
-    assert named_outcomes(REAL_FAILURE) == (["test_something"], [])
+def test_an_assertion_failure_is_not_a_harness_error() -> None:
+    """The strongest evidence: a test ran and its assertion noticed."""
+    assert is_harness_error(record(call_failed=["test_x"])) is False
 
 
-def test_a_named_ERROR_is_also_evidence_but_kept_separate() -> None:
-    """A setup/teardown crash in a NAMED test observed the mutation too, just not by asserting.
+def test_a_setup_crash_is_not_a_harness_error() -> None:
+    """Weaker evidence, but still a named test observing the mutation."""
+    assert is_harness_error(record(setup_failed=["test_x"])) is False
 
-    Measured: the ``engine-stand-in-emits-no-pages`` mutation produces exactly this shape. An
-    earlier version of this fix classified it as a harness error and would have discarded a real
-    detection - the opposite bug to the one being fixed.
+
+def test_a_collection_error_is_a_harness_error_even_though_it_names_a_node() -> None:
+    """Reviewer's reproduction: a class-level collection failure emits ``ERROR path::TestName``.
+
+    Text parsing cannot tell that from a named test error. The lifecycle record can.
     """
-    failed, errored = named_outcomes(NAMED_ERROR)
-
-    assert failed == []
-    assert errored == ["test_the_front_half_produced_real_artifacts_from_real_bytes"]
+    assert is_harness_error(record(collect_error=["tests/test_x.py::TestSynthetic"])) is True
 
 
-def test_a_collection_error_names_no_test_and_is_not_evidence() -> None:
-    """Exit 4 with no test named means pytest never ran anything."""
-    assert named_outcomes(COLLECTION_ERROR) == ([], [])
+def test_a_dead_xdist_worker_is_a_harness_error_despite_a_failed_line() -> None:
+    """Reviewer's reproduction: ``[gw0] node down`` then ``FAILED path::test_name``.
+
+    That FAILED line names a test which never executed, so the terminal summary is actively
+    misleading here -- ``call_failed`` is populated AND the run is still a harness error.
+    """
+    assert is_harness_error(record(node_down=True, call_failed=["test_never_ran"])) is True
 
 
-def test_empty_output_is_not_evidence() -> None:
-    assert named_outcomes("") == ([], [])
+def test_an_internal_error_is_a_harness_error() -> None:
+    assert is_harness_error(record(internal_error=True)) is True
 
 
-def test_every_named_failure_is_returned_not_just_the_first() -> None:
-    """``run()`` reports the first for brevity, but the verdict must see the whole set."""
-    out = "\n".join(
-        [
-            "FAILED tests/test_a.py::test_one - AssertionError",
-            "FAILED tests/test_a.py::test_two - AssertionError",
-        ]
-    )
+def test_no_record_at_all_is_a_harness_error() -> None:
+    """If the plugin never wrote its file, pytest never started. Absence is not innocence."""
+    assert is_harness_error(record(recorded=False)) is True
 
-    assert named_failures(out) == ["test_one", "test_two"]
+
+def test_a_missing_outcome_file_reads_as_unrecorded(tmp_path: Path) -> None:
+    outcomes = read_outcomes(tmp_path / "nope.json")
+
+    assert outcomes["recorded"] is False
+    assert is_harness_error(outcomes) is True
+
+
+def test_an_unparseable_outcome_file_reads_as_unrecorded(tmp_path: Path) -> None:
+    """A truncated write must not be mistaken for a clean run with no failures."""
+    path = tmp_path / "outcomes.json"
+    path.write_bytes(b'{"call_failed": [')
+
+    outcomes = read_outcomes(path)
+
+    assert outcomes["recorded"] is False
+    assert is_harness_error(outcomes) is True
+
+
+def test_a_clean_run_is_neither_caught_nor_a_harness_error() -> None:
+    """The SURVIVED case: pytest ran, nothing failed. That is a hole in the suite."""
+    outcomes = record()
+
+    assert is_harness_error(outcomes) is False
+    assert not outcomes["call_failed"]
+    assert not outcomes["setup_failed"]
