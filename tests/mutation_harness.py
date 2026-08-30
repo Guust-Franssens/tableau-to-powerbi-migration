@@ -188,7 +188,15 @@ me._FAKE_ENGINE = me._FAKE_ENGINE.replace('"pageOrder": pages or []', '"pageOrde
 }
 
 
-def run(name: str, code: str, target: str) -> tuple[str, int, str]:
+def run(name: str, code: str, target: str) -> tuple[str, int, str, list[str], list[str]]:
+    """Apply one mutation and report ``(name, exit_code, detail, failed, errored)``.
+
+    ``failed`` and ``errored`` are the load-bearing return values. A non-zero exit code alone
+    does NOT mean the mutation was caught -- pytest exits non-zero for collection errors (4),
+    usage errors (4), internal errors (3) and interrupts (2), none of which involve a test
+    observing anything. Measured on master: ``pytest tests/does_not_exist.py`` exits 4 with zero
+    named outcomes, and the old verdict expression scored it CAUGHT.
+    """
     plugin = ROOT / "tests" / "_mutation_plugin.py"
     plugin.write_text(
         "import sys\nfrom pathlib import Path\n"
@@ -209,22 +217,54 @@ def run(name: str, code: str, target: str) -> tuple[str, int, str]:
     plugin.unlink(missing_ok=True)
     if "Error importing plugin" in proc.stdout + proc.stderr:
         raise SystemExit(f"{name}: the mutation never applied - the harness would report a FALSE 'CAUGHT'")
-    caught = [line.split("::")[-1].split(" ")[0] for line in proc.stdout.splitlines() if line.startswith("FAILED")]
-    if caught:
-        return name, proc.returncode, caught[0]
+    failed, errored = named_outcomes(proc.stdout)
+    if failed:
+        return name, proc.returncode, failed[0], failed, errored
     lines = (proc.stdout.strip() or proc.stderr.strip() or "(no output)").splitlines()
-    return name, proc.returncode, lines[-1][:120]
+    return name, proc.returncode, lines[-1][:120], failed, errored
+
+
+def named_outcomes(stdout: str) -> tuple[list[str], list[str]]:
+    """Return ``(failed, errored)`` test names pytest reported.
+
+    Both are evidence the mutation was **observed by a named test**. They are kept apart
+    because they are not equally strong: a FAILED line is an assertion that noticed, an ERROR
+    line is a setup/teardown crash that noticed. Neither is the same as pytest failing to run
+    at all, which names no test and is the case that must never earn credit.
+    """
+    failed, errored = [], []
+    for line in stdout.splitlines():
+        if line.startswith("FAILED"):
+            failed.append(line.split("::")[-1].split(" ")[0])
+        elif line.startswith("ERROR ") and "::" in line:
+            errored.append(line.split("::")[-1].split(" ")[0])
+    return failed, errored
+
+
+def named_failures(stdout: str) -> list[str]:
+    """Test names pytest reported as FAILED. Kept for callers that only want assertions."""
+    return named_outcomes(stdout)[0]
 
 
 def main() -> int:
     targets = ["tests/test_e2e_offline.py", "tests/test_mock_fabric.py", "tests/test_mock_tableau.py"]
+    dirty = []
     for target in targets:
         baseline = subprocess.run(
             [PY, "-m", "pytest", target, "-q", "--no-header"], cwd=ROOT, capture_output=True, text=True, check=False
         )
         print(f"BASELINE {target:32s} exit={baseline.returncode}  {baseline.stdout.strip().splitlines()[-1]}")
+        if baseline.returncode != 0:
+            dirty.append(f"{target} (exit {baseline.returncode})")
+    if dirty:
+        # A mutation is only evidence against a clean baseline: an already-failing test would be
+        # credited to every mutation that follows it.
+        print("\nHARNESS ERROR: baseline is not clean, so no mutation verdict is trustworthy:")
+        for item in dirty:
+            print(f"  {item}")
+        return 2
     print()
-    survivors = []
+    survivors, harness_errors = [], []
     for name, code in MUTATIONS.items():
         if name.startswith("mock-"):
             target = "tests/test_mock_fabric.py"
@@ -232,13 +272,31 @@ def main() -> int:
             target = "tests/test_mock_tableau.py"
         else:
             target = "tests/test_e2e_offline.py"
-        label, rc, detail = run(name, code, target)
-        verdict = "CAUGHT " if rc != 0 else "SURVIVED"
-        if rc == 0:
+        label, rc, detail, failed, errored = run(name, code, target)
+        if failed:
+            verdict = "CAUGHT  "
+        elif errored:
+            # Observed, but by a crash rather than an assertion. Credited and marked, because a
+            # test that only errors is weaker coverage than one that asserts.
+            verdict = "CAUGHT* "
+            detail = f"{errored[0]} (errored, did not assert)"
+        elif rc == 0:
+            verdict = "SURVIVED"
             survivors.append(label)
+        else:
+            # Non-zero while naming NO test is pytest failing to run - collection error (4),
+            # internal error (3), interrupt (2). The mutation was never observed.
+            verdict = "HARNESS-ERROR"
+            harness_errors.append(f"{label} (exit {rc}, no named test outcome)")
         print(f"{verdict}  {label:52s} -> {detail}")
     print()
     print("survivors (holes in the suite):", survivors or "none")
+    print("CAUGHT* = a named test ERRORED rather than asserting; weaker coverage, still observed")
+    if harness_errors:
+        print("HARNESS ERRORS (no verdict - pytest never ran the tests):")
+        for item in harness_errors:
+            print(f"  {item}")
+        return 2
     return 0
 
 
