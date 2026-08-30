@@ -21,6 +21,7 @@ damaging change anyone could make to this file.
 
 from __future__ import annotations
 
+import codecs
 import io
 import json
 import os
@@ -668,29 +669,92 @@ def test_cp1252_console_preserves_a_finding_exit_code(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == cpc.STATUS_OVER_CEILING
 
 
-def test_stdout_without_reconfigure_is_a_no_op_not_an_error(tmp_path, monkeypatch, capsys):
-    """A substituted stdout (StringIO, `redirect_stdout`) has no `reconfigure`; that is fine.
+def test_stdout_errors_is_unchanged_after_main(tmp_path, capsys):
+    """The caller's stream is SHARED. Fixing our own output must not reconfigure it.
 
-    Note pytest's own captured stdout IS a real TextIOWrapper and DOES reconfigure - so an explicit
-    stand-in is needed to exercise the fallback rather than assuming the harness provides one.
+    Measured on the first attempt at this fix: a clean `--quiet` run returned 0 and left
+    `sys.stdout.errors` switched from `surrogateescape` to `backslashreplace`, silently escaping an
+    unrelated caller's later output. `--quiet` and a non-TTY are checked too, because the mutation
+    happened there as well.
     """
     _tree(tmp_path)
-    monkeypatch.setattr(sys, "stdout", io.StringIO())
-    assert cpc._make_stdout_lossy() is False  # pylint: disable=protected-access
+    before = sys.stdout.errors
     assert cpc.main([str(tmp_path)]) == cpc.EXIT_OK
+    assert sys.stdout.errors == before
+    assert cpc.main([str(tmp_path), "--quiet"]) == cpc.EXIT_OK
+    assert sys.stdout.errors == before
     capsys.readouterr()
 
 
-def test_make_stdout_lossy_sets_backslashreplace_on_a_real_stream(tmp_path, monkeypatch):
-    stream = open(tmp_path / "console.txt", "w", encoding="cp1252")  # pylint: disable=consider-using-with
-    try:
-        monkeypatch.setattr(sys, "stdout", stream)
-        assert cpc._make_stdout_lossy() is True  # pylint: disable=protected-access
-        assert stream.errors == "backslashreplace"
-        print("cafe\u0301")  # would raise under the default 'strict'
-    finally:
-        stream.close()
-    assert "cafe" in (tmp_path / "console.txt").read_text(encoding="cp1252")
+def _strict_cp1252_stream() -> tuple[object, io.BytesIO]:
+    """A stream that REALLY refuses non-cp1252 text and has no `reconfigure`.
+
+    `io.StringIO` is the obvious stand-in and it is worthless here: it accepts every `str`, so it can
+    only ever prove the happy path. Measured, `codecs.getwriter("cp1252")(...)` exposes no
+    `.encoding` attribute either, so it also catches a fix that keys off `stream.encoding`.
+    """
+    buffer = io.BytesIO()
+    return codecs.getwriter("cp1252")(buffer), buffer
+
+
+@pytest.mark.parametrize(
+    ("ceiling", "expected"),
+    [(None, 0), ("10", 1)],
+    ids=["clean-verdict", "finding-verdict"],
+)
+def test_strict_unreconfigurable_stream_preserves_the_exit_code(tmp_path, monkeypatch, ceiling, expected):
+    """Both verdicts must survive a console that cannot encode the path.
+
+    Before the fix this raised `UnicodeEncodeError` and the process exited 1 - which is also the
+    findings code, so a consumer could not tell a crash from a real over-ceiling result.
+    """
+    if _make_combining_fixture(tmp_path) is None:
+        pytest.skip("filesystem will not store a combining-character filename unchanged")
+    out = tmp_path / "out.json"
+    stream, buffer = _strict_cp1252_stream()
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    argv = [str(tmp_path), "--json", str(out)] + (["--ceiling", ceiling] if ceiling else [])
+    assert cpc.main(argv) == expected
+
+    assert out.exists()
+    written = buffer.getvalue().decode("cp1252")
+    assert "cafe" in written, "the report must still be printed, merely escaped"
+    assert "\\u0301" in written
+
+
+def test_stream_without_an_encoding_attribute_still_prints(tmp_path, monkeypatch, capsys):
+    """A stream that accepts everything (StringIO) must keep working - the no-op path."""
+    _tree(tmp_path)
+    sink = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", sink)
+    assert cpc.main([str(tmp_path)]) == cpc.EXIT_OK
+    assert "OK:" in sink.getvalue()
+    capsys.readouterr()
+
+
+def test_console_safe_escapes_to_ascii_when_the_stream_hides_its_encoding():
+    stream, _ = _strict_cp1252_stream()
+    assert not hasattr(stream, "encoding"), "this test exists because the attribute is absent"
+    escaped = cpc._console_safe("cafe\u0301", stream)  # pylint: disable=protected-access
+    assert escaped == "cafe\\u0301"
+    escaped.encode("cp1252")  # must not raise
+
+
+def test_console_safe_uses_the_stream_encoding_when_it_is_declared(tmp_path):
+    with open(tmp_path / "c.txt", "w", encoding="cp1252") as handle:
+        escaped = cpc._console_safe("caf\u00e9 \u0301", handle)  # pylint: disable=protected-access
+    assert "caf\u00e9" in escaped, "cp1252 CAN encode e-acute; only the unencodable part degrades"
+    assert "\\u0301" in escaped
+
+
+def test_usage_error_on_an_unencodable_path_does_not_crash(tmp_path, monkeypatch, capsys):
+    """The `not a directory` message carries caller-supplied paths and used a raw print too."""
+    stream, buffer = _strict_cp1252_stream()
+    monkeypatch.setattr(sys, "stderr", stream)
+    assert cpc.main([str(tmp_path / "cafe\u0301")]) == 2
+    assert "cafe" in buffer.getvalue().decode("cp1252")
+    capsys.readouterr()
 
 
 def test_multiple_targets_are_all_reported_and_the_worst_decides_the_exit(tmp_path, capsys):

@@ -519,33 +519,49 @@ def render(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _console_safe(text: str, stream: object) -> str:
+    """Rewrite `text` so `stream` can accept it. Never mutates the stream.
+
+    Measured: `codecs.getwriter("cp1252")(...)` exposes **no** `.encoding` attribute, so a rewrite
+    that keys off `stream.encoding` silently does nothing for exactly the stream that needs it.
+    When the stream will not say what it accepts, escaping to pure ASCII is the only answer that
+    every codec accepts.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if isinstance(encoding, str):
+        try:
+            return text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+        except LookupError:  # pragma: no cover - an encoding name Python does not know
+            pass
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def _emit(text: str, stream) -> None:
+    """Print one line, degrading only the characters this stream cannot encode.
+
+    Lossiness is LOCAL to this write. An earlier revision called
+    `sys.stdout.reconfigure(errors="backslashreplace")`, which fixed the crash but permanently
+    mutated the caller's shared stream - measured, a clean `--quiet` run returned 0 and left an
+    unrelated caller's later output escaped. As a library that is a side effect nobody asked for.
+
+    Nor can the fix depend on `reconfigure` existing: a restricted stream that lacks it (a
+    `codecs.StreamWriter`) still raised `UnicodeEncodeError` and exited 1 - indistinguishable from a
+    finding, which is the very ambiguity this code exists to remove.
+
+    The happy path is untouched, so a UTF-8 terminal still prints paths verbatim; only a stream that
+    actually refuses the text sees escapes.
+    """
+    try:
+        print(text, file=stream)
+    except UnicodeEncodeError:
+        print(_console_safe(text, stream), file=stream)
+
+
 def _nonneg(raw: str) -> int:
     value = int(raw)
     if value < 0:
         raise argparse.ArgumentTypeError("must be >= 0")
     return value
-
-
-def _make_stdout_lossy() -> bool:
-    """Let `print` degrade an unencodable path instead of raising. Returns True if reconfigured.
-
-    Every path in the report comes from the filesystem, so it can contain anything the filesystem
-    allows - including characters this console's codec cannot represent. On a Windows cp1252 console
-    a legal filename carrying a combining character (`e` + U+0301) made `print(render(report))` raise
-    `UnicodeEncodeError` and take the whole run down.
-
-    Escaping the paths inside `render` would fix that too, but it would mangle every non-ASCII path
-    on the UTF-8 terminals where they display perfectly well. Degrading only at the point of output
-    keeps readable consoles readable and unreadable ones merely ugly.
-
-    Not every stdout is a real stream - pytest's capture and `contextlib.redirect_stdout` replace it
-    with objects that have no `reconfigure` - so the failure to reconfigure is not an error.
-    """
-    try:
-        sys.stdout.reconfigure(errors="backslashreplace")  # type: ignore[union-attr]
-    except (AttributeError, ValueError, OSError):
-        return False
-    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -590,7 +606,7 @@ def main(argv: list[str] | None = None) -> int:
 
     missing = [str(t) for t in args.targets if not t.is_dir()]
     if missing:
-        print(f"ERROR: not a directory: {', '.join(missing)}", file=sys.stderr)
+        _emit(f"ERROR: not a directory: {', '.join(missing)}", sys.stderr)
         return EXIT_USAGE
 
     reports = [
@@ -616,9 +632,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = reports[0] if len(reports) == 1 else {"version": REPORT_VERSION, "roots": reports}
         args.json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    _make_stdout_lossy()
     for report in reports:
-        print(render(report) if not args.quiet else f"{report['status']}: {report['root']}")
+        _emit(render(report) if not args.quiet else f"{report['status']}: {report['root']}", sys.stdout)
 
     if args.warn_only:
         return EXIT_OK
