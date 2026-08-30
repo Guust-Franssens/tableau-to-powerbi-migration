@@ -239,7 +239,11 @@ class TableauSession:
         """Scrub every Tableau credential known at this point before text leaves the HTTP layer."""
         return redact(text, self._creds.pat_secret, self._creds.pat_name, self.token or "")
 
-    def _request(
+    # A single HTTP round trip whose parameters map 1:1 to distinct HTTP concerns -- verb, path,
+    # entity body, Accept header, auth header, API-version segment. Grouping any two of them would be
+    # arbitrary, and every internal call site sets a different subset, so a shaping object would add
+    # noise without removing a decision. Waived deliberately rather than restructured.
+    def _request(  # pylint: disable=too-many-arguments
         self,
         method: str,
         path: str,
@@ -247,14 +251,18 @@ class TableauSession:
         body: dict[str, Any] | None = None,
         accept: str | None = None,
         authed: bool = True,
+        api: str | None = None,
     ) -> tuple[int, bytes, dict[str, str]]:
         """One HTTP round trip. Never raises for a network failure -- returns status 0 when no HTTP
         response arrived at all (reset/DNS/refused/timeout), so the retry loop can treat a reset
         connection and a gateway 503 the same way. When a response DID arrive but reading its body
         failed mid-stream, the real HTTP status is kept (a 503 is still usefully a 503) and the body
-        read error is reported in the payload -- either way, this method does not raise."""
+        read error is reported in the payload -- either way, this method does not raise.
+
+        ``api`` overrides the client api-version for this one call. Only the capability probe uses it,
+        to re-measure a version-gated feature at its documented floor rather than inferring support."""
         req = urllib.request.Request(
-            f"{self._creds.base.rstrip('/')}/api/{self._creds.version}{path}",
+            f"{self._creds.base.rstrip('/')}/api/{api or self._creds.version}{path}",
             data=json.dumps(body).encode() if body else None,
             method=method,
         )
@@ -330,17 +338,27 @@ class TableauSession:
             self._request("POST", "/auth/signout")
             self.token = None
 
-    def raw_get(self, path: str) -> tuple[int, bytes]:
-        """ONE unretried GET, for capability probing.
+    def raw_get(self, path: str, *, api: str | None = None) -> tuple[int, bytes, str | None]:
+        """ONE unretried GET, for capability probing. Returns ``(status, body, content_type)``.
 
         Separate from :meth:`export` on purpose. ``export`` exists to survive *transient* faults, and
         a capability probe is asking a question whose "no" is **permanent** -- a version gate is not
         fixed by waiting, and retrying it five times with backoff only burns a metered export budget
         to learn the same thing. It also must not re-authenticate: a probe that silently healed a dead
         session would report a capability the real capture then cannot use.
+
+        ``api`` overrides the client api-version for one call, so a version-gated tier can be
+        re-probed at its documented floor instead of having its support *inferred* from a version
+        string. The body is returned RAW; :meth:`redact_text` is the caller's obligation before any of
+        it is printed or serialised (classification must see the raw text -- see
+        ``classify_export_error``).
         """
-        status, payload, _ = self._request("GET", path)
-        return status, payload
+        status, payload, headers = self._request("GET", path, api=api)
+        return status, payload, headers.get("Content-Type")
+
+    def redact_text(self, text: str) -> str:
+        """Public scrubber for anything derived from a response body that will be persisted."""
+        return self._redact_response(text)
 
     def get_json(self, path: str) -> dict[str, Any]:
         """GET a metadata endpoint as JSON, retrying transient failures."""
@@ -630,6 +648,20 @@ def _capture_render(session: TableauSession, view_luid: str, path: Path, kind: s
             record["status"] = "unsupported_api_version"
             record["remedy"] = f"set TABLEAU_REST_API_VERSION={SVG_MIN_API_VERSION} or later in .env"
         return record
+    # HTTP 200 is not proof the requested format came back. An older server that does not recognise
+    # `format=svg` can ignore the unknown parameter and return its default PNG -- and writing those
+    # bytes to a `.svg` labelled `vector: true` manufactures exactly the false evidence this capture
+    # exists to prevent. Refuse to persist a mislabelled file at all.
+    matches, why = capability.format_matches(kind, payload, None)
+    if not matches:
+        return {
+            "status": "format_mismatch",
+            "requested_format": kind,
+            "detail": why,
+            "bytes": len(payload),
+            "elapsed_sec": round(elapsed, 2),
+            **stats,
+        }
     path.write_bytes(payload)
     record = {
         "status": "ok",
@@ -747,18 +779,31 @@ def log_progress(index: int, total: int, record: dict[str, Any]) -> None:
         LOG.warning("  %2d/%d  %-34s FAILED (%s): %s", index, total, name, status, data.get("detail"))
 
 
-def _render_statuses(record: dict[str, Any]) -> tuple[str, ...]:
-    """Status of every RENDER leg that was actually requested for this view.
+def _render_statuses(record: dict[str, Any], requested: frozenset[str] = frozenset()) -> tuple[str, ...]:
+    """Status of every RENDER leg for this view, judged against what was actually ASKED FOR.
 
-    An absent key means the leg was not asked for, which must read as ``ok`` -- otherwise a plain
-    data-only capture (no ``--images``, no ``--svg``) would count itself as failed. Returning a tuple
-    keeps the three aggregate sets below reading the same legs, so adding a fourth output format
-    cannot silently be counted by one of them and missed by the others.
+    An absent key normally means the leg was not requested, which must read as ``ok`` -- otherwise a
+    plain data-only capture (no ``--images``, ``--svg`` or ``--pdf``) would count itself as failed.
+    But when a leg WAS requested and is nevertheless absent, "absent" is a real failure: without
+    ``requested`` the capture silently degrades to data-only and still reports success, which is
+    exactly the exit-0-with-no-reference hole. Returning a tuple keeps the aggregate sets below
+    reading the same legs, so adding a fourth output format cannot be counted by one and missed by
+    the others.
     """
-    return tuple(record.get(leg, {"status": "ok"}).get("status") for leg in ("image", "svg", "pdf"))
+    statuses = []
+    for kind, leg in (("png", "image"), ("svg", "svg"), ("pdf", "pdf")):
+        if leg in record:
+            statuses.append(record[leg].get("status"))
+        elif kind in requested:
+            statuses.append("not_captured")
+        else:
+            statuses.append("ok")
+    return tuple(statuses)
 
 
-def _partition(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _partition(
+    records: list[dict[str, Any]], requested: frozenset[str] = frozenset()
+) -> dict[str, list[dict[str, Any]]]:
     """Split records into the four sets the manifest and the exit code both read.
 
     One function so the sets cannot drift apart: they must all consult the same render legs, and the
@@ -771,17 +816,19 @@ def _partition(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
         "complete": [
             r
             for r in records
-            if r.get("data", {}).get("status") == "ok" and all(s == "ok" for s in _render_statuses(r))
+            if r.get("data", {}).get("status") == "ok" and all(s == "ok" for s in _render_statuses(r, requested))
         ],
         "blocked": [
-            r for r in records if "source_credential" in {r.get("data", {}).get("status"), *_render_statuses(r)}
+            r
+            for r in records
+            if "source_credential" in {r.get("data", {}).get("status"), *_render_statuses(r, requested)}
         ],
         "failed": [
             r
             for r in records
             if any(
                 status not in {"ok", "source_credential"}
-                for status in (r.get("data", {}).get("status"), *_render_statuses(r))
+                for status in (r.get("data", {}).get("status"), *_render_statuses(r, requested))
             )
         ],
     }
@@ -794,12 +841,19 @@ class CaptureRun:
     Bundled because ``write_manifest`` needs all four together and nothing else needs any of them
     individually; passing them as loose positional parameters is what pushed the signature past the
     readable limit as soon as capability reporting was added.
+
+    ``requested_renders`` is what the caller ASKED for, which is not the same as what came back --
+    that gap is the point. ``reference_required`` records that ``--reference-best`` was used, so a run
+    whose capability probe returned UNDETERMINED (and therefore requested nothing) is still judged
+    against the operator's intent rather than against its own empty plan.
     """
 
     session: TableauSession
     env: dict[str, str]
     out_dir: Path
     started: float
+    requested_renders: frozenset[str] = frozenset()
+    reference_required: bool = False
 
 
 def write_manifest(
@@ -810,10 +864,18 @@ def write_manifest(
     """Write the manifest and return the process exit code.
 
     Codes: 0 all selected views captured, 1 partial non-credential failure, 2 credential-blocked,
-    3 total non-credential failure, 4 no views selected.
+    3 total non-credential failure, 4 no views selected, **5 a reference render was required but none
+    was obtained**.
+
+    Code 5 exists because the alternative is silence. With ``--reference-best`` and an UNDETERMINED
+    probe, no render kind is requested at all, every view's data still succeeds, and the run would
+    otherwise exit **0 having captured zero reference images** -- a caller gating on the exit code
+    would read that as a complete capture.
     """
-    sets = _partition(records)
+    sets = _partition(records, run.requested_renders)
     blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
+    rendered = sum(1 for r in records if any(r.get(leg, {}).get("status") == "ok" for leg in ("image", "svg", "pdf")))
+    reference_missing = run.reference_required and rendered == 0
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -827,6 +889,9 @@ def write_manifest(
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
         "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
         "pdf_ok": sum(1 for r in records if r.get("pdf", {}).get("status") == "ok"),
+        "requested_renders": sorted(run.requested_renders),
+        "reference_required": run.reference_required,
+        "reference_missing": reference_missing,
         # #403's surviving half: the manifest must STATE the grade of evidence it holds, so a
         # downstream validator reads it instead of inferring it from the fact that a file exists.
         "render_capability": capability_report,
@@ -881,8 +946,18 @@ def write_manifest(
         )
     for warning in (capability_report or {}).get("warnings", []):
         LOG.warning("! %s", warning)
+    if reference_missing:
+        LOG.error(
+            "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
+            "view(s). The capability probe did not settle on a tier, so nothing was requested. This "
+            "run has data only and must not be treated as a complete capture; re-run once the probe "
+            "can reach a renderable view, or name a tier explicitly with --images/--svg/--pdf.",
+            len(records),
+        )
     if not records:
         return 4
+    if reference_missing:
+        return 5
     if failed:
         return 1 if complete else 3
     return 2 if blocked else 0
@@ -937,27 +1012,44 @@ def probe_render_capability(
     )
 
     def fetcher(view_luid: str):
-        def fetch(endpoint: str, query: str) -> tuple[int, bytes]:
+        def fetch(endpoint: str, query: str, api: str | None = None) -> tuple[int, bytes, str | None]:
             # Deliberately the RAW request, not `export()`: a version gate is a permanent answer and
             # must not be run through a retry/re-auth ladder built for transient faults.
-            return session.raw_get(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}")
+            return session.raw_get(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}", api=api)
 
         return fetch
 
-    report: dict[str, Any] = {}
+    best: dict[str, Any] = {}
     for view in views[:MAX_CAPABILITY_PROBE_VIEWS]:
         report = capability.detect(
             fetcher(view["id"]),
             view["id"],
-            configured_api=configured,
-            advertised_api=advertised,
+            capability.ApiVersions(configured=configured, advertised=advertised),
+            # A proxy echoing X-Tableau-Auth puts a LIVE session token in the error body, and this
+            # report is written to disk inside the manifest. Classification still sees raw text.
+            redactor=session.redact_text,
         )
         report["probe_view_name"] = view.get("name")
-        if report.get("selected_tier"):
+        if not best or _capability_rank(report) > _capability_rank(best):
+            best = report
+        # Keep going while the answer is UNDETERMINED *or* merely PROVISIONAL: a rung that answered
+        # while a better rung was blocked on this view is not the site's ceiling, and stopping there
+        # is how a capable site gets silently demoted.
+        if report.get("selected_tier") and report.get("capability_complete"):
             break
-    report["server"] = info
-    LOG.info("render capability: best tier = %s", report.get("selected_tier") or "UNDETERMINED")
-    return report
+    best["server"] = info
+    best["probe_views_tried"] = min(len(views), MAX_CAPABILITY_PROBE_VIEWS)
+    LOG.info(
+        "render capability: best tier = %s%s",
+        best.get("selected_tier") or "UNDETERMINED",
+        " (PROVISIONAL)" if best.get("provisional") else "",
+    )
+    return best
+
+
+def _capability_rank(report: dict[str, Any]) -> tuple[int, int]:
+    """Order two probe reports: a settled answer beats a provisional one beats no answer at all."""
+    return (1 if report.get("selected_tier") else 0, 1 if report.get("capability_complete") else 0)
 
 
 def main() -> int:
@@ -965,7 +1057,8 @@ def main() -> int:
 
     Exit codes: ``0`` all selected views captured, ``1`` partial non-credential failure,
     ``2`` some selected view needs a credential on the Tableau side (actionable only by a human --
-    never by a retry), ``3`` total non-credential failure, ``4`` no views selected.
+    never by a retry), ``3`` total non-credential failure, ``4`` no views selected, ``5`` a reference
+    render was required (``--reference-best``) but none was obtained.
     """
     args = build_parser().parse_args()
 
@@ -1007,7 +1100,11 @@ def main() -> int:
         records.append(record)
         log_progress(index, len(views), record)
 
-    exit_code = write_manifest(records, CaptureRun(session, env, out_dir, started), capability_report)
+    exit_code = write_manifest(
+        records,
+        CaptureRun(session, env, out_dir, started, frozenset(wants), bool(args.reference_best)),
+        capability_report,
+    )
     session.sign_out()
     return exit_code
 

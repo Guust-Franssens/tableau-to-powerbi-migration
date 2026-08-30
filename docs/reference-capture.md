@@ -329,20 +329,42 @@ apart.** Three numbers claim to answer "can this site export SVG?" and they disa
 | 3 | what the endpoint does | **the only authoritative answer** |
 
 So `--reference-best` **probes** the ladder (`svg` → `pdf` → `png_high`), stops at the first rung that
-answers, and records the tier, the per-rung verdicts and all three version numbers in
-`oracle-manifest.json` under `render_capability`. Measured live:
+answers **with the format it asked for**, and records the tier, the per-rung verdicts and all three
+version numbers in `oracle-manifest.json` under `render_capability`. Measured live:
 
-| client pin | server | selected tier | warning raised |
+| client pin | server | selected tier | note |
 |---|---|---|---|
-| 3.29 | 2026.3.0 / advertises 3.30 | **svg** | — |
-| **3.21** (on-prem-shaped) | same site | **pdf** | *"tier 'svg' is supported by this server (advertises API 3.30) but TABLEAU_REST_API_VERSION is pinned to 3.21"* |
-| 3.29, probing a **blocked** view | same site | **`null`** | *"capability UNDETERMINED … re-probe with a different view"* |
+| 3.29 | 2026.3.0 / advertises 3.30 | **svg**, `capability_complete: true` | — |
+| **3.21** (on-prem-shaped) | same site | **svg**, recovered | the version gate triggers a **floor re-probe at 3.29**, which succeeds — so the warning *"tier 'svg' WORKS on this server — **proved by re-probing at API 3.29** — but TABLEAU_REST_API_VERSION is pinned to 3.21"* is measured, not inferred |
+| 3.29, probing a **blocked** workbook | same site | **`null`** → **exit 5** | *"capability UNDETERMINED … re-probe with a different view"* |
 
-That third row matters most. A workbook with disconnected sources fails **every** route identically, so
-a naive probe would report "this site cannot render" for a site that is perfectly capable — the
-unassessable-collapsing-into-a-clean-answer shape. `classify_probe` keeps three outcomes distinct
-(`available` / `unsupported` / `indeterminate`) and `--reference-best` tries up to
-`MAX_CAPABILITY_PROBE_VIEWS` views before giving up.
+Three rules keep a probe from producing a confident wrong answer:
+
+1. **An HTTP 200 is not proof of the format.** The payload signature (`<svg`, `%PDF-`, the PNG magic)
+   is checked, with `Content-Type` corroborating. This is exactly the on-prem case the ladder exists
+   for: an older server that does not recognise `format=svg` **ignores the unknown parameter and
+   returns its default PNG**. Without the check that rung is selected as `svg` and the PNG bytes are
+   written to a `.svg` labelled `vector: true`. A mismatch is **indeterminate**, and the walk
+   continues to the next rung; on capture it is `format_mismatch` and **no file is written**.
+2. **A selection can be PROVISIONAL.** If a rung *above* the winner was indeterminate — a gateway
+   blip, a blocked view, a wrong-format 200 — a better tier may exist and simply could not be
+   measured. The report carries `provisional` and `capability_complete`, and `--reference-best` keeps
+   trying further views rather than treating the first answer as the site's ceiling.
+3. **"No tier available" requires every rung to have been definitively refused.** A mix of version
+   gates and blocked routes is **UNDETERMINED**, not negative — the unassessable-collapsing-into-clean
+   shape, one level up from where it was first caught.
+
+**A required reference that never arrived is exit code 5, never 0.** With `--reference-best` and an
+UNDETERMINED probe no render kind is requested at all, every view's data still succeeds, and the run
+would otherwise exit 0 having captured **zero** reference images. The manifest records
+`requested_renders`, `reference_required` and `reference_missing` so the gap between what was asked
+for and what arrived is legible rather than inferred.
+
+⚠️ **Nothing derived from a response body reaches the manifest unredacted.** A proxy or WAF that
+echoes `X-Tableau-Auth` puts a **live session token** in an error body, and the capability report is
+written to disk. Probe details are scrubbed through the session's redactor before they are printed or
+serialised — while classification still reads the **raw** text, because redaction is handed the
+human-chosen PAT *name* and a short one would rewrite Tableau's own error codes.
 
 ### Which rung to default to
 

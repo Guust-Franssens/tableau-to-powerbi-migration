@@ -61,7 +61,7 @@ class FakeSession(oracle.TableauSession):
         self.signin_count = 0
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
         self.calls.append(path)
         status, payload, headers = self.responses.pop(0)
         return status, payload.encode() if isinstance(payload, str) else payload, headers

@@ -74,7 +74,7 @@ class _Session(oracle.TableauSession):
         self.paths: list[str] = []
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
         self.paths.append(path)
         for suffix, (status, payload) in self.responses.items():
             if path.endswith(suffix):
@@ -205,9 +205,10 @@ class _Counter:
     retry_count = 0
 
 
-def _manifest(records, tmp_path):
+def _manifest(records, tmp_path, run_kwargs=None, capability=None):
     env = {"TABLEAU_SERVER_URL": "https://s", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"}
-    code = oracle.write_manifest(records, oracle.CaptureRun(_Counter(), env, tmp_path, 0.0))
+    run = oracle.CaptureRun(_Counter(), env, tmp_path, 0.0, **(run_kwargs or {}))
+    code = oracle.write_manifest(records, run, capability)
     return code, json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
 
 
@@ -306,3 +307,89 @@ def test_a_failed_pdf_leg_is_counted_like_the_others(tmp_path):
 def test_render_routes_and_extensions_stay_in_step():
     """A kind present in one map and missing from the other writes a file with the wrong suffix."""
     assert set(oracle._RENDER_ROUTES) == set(oracle._RENDER_EXTENSIONS)  # pylint: disable=protected-access
+
+
+# ------------------------------------------- #405 finding 2: a 200 is not proof of the format
+
+
+def test_wrong_format_bytes_are_refused_rather_than_persisted_as_the_requested_type(tmp_path):
+    """An older server that ignores `format=svg` returns default PNG; writing it as .svg is a lie."""
+    session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (200, _png(2000, 1600))})
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
+    assert record["svg"]["status"] == "format_mismatch"
+    assert "vector" not in record["svg"]
+    assert not list((tmp_path / "images").glob("*.svg"))
+
+
+def test_a_format_mismatch_counts_as_a_failure_not_a_success(tmp_path):
+    code, manifest = _manifest([_ok_record(svg={"status": "format_mismatch", "detail": "got png"})], tmp_path)
+    assert code == 3
+    assert manifest["svg_ok"] == 0
+
+
+def test_a_genuine_svg_is_still_captured_and_graded(tmp_path):
+    session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (200, HR_SVG)})
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
+    assert record["svg"]["status"] == "ok" and record["svg"]["vector"] is True
+
+
+# ------------------------------------------- #405 finding 5: no secret may reach the manifest
+
+
+def test_raw_get_body_is_only_reported_through_the_session_redactor():
+    """`raw_get` returns RAW bytes by contract (classification needs them); `redact_text` is the gate."""
+    token = "SYNTHETIC_SESSION_TOKEN_123"
+    body = f"<error><detail>echo X-Tableau-Auth: {token}</detail></error>".encode()
+    session = _Session({"image?format=svg": (401, body)})
+    session.token = token
+    status, payload, _ctype = session.raw_get("/sites/sid/views/v/image?format=svg")
+    assert status == 401 and token.encode() in payload  # raw, by design
+    assert token not in session.redact_text(payload.decode())
+    assert "[REDACTED]" in session.redact_text(payload.decode())
+
+
+# ------------------------------------------- #405 finding 4: a required reference cannot be silent
+
+
+def test_a_requested_render_that_never_arrived_is_a_failure(tmp_path):
+    """Absent-because-not-asked-for is fine; absent-when-asked-for is the exit-0-with-nothing hole."""
+    assert oracle._render_statuses(_ok_record()) == ("ok", "ok", "ok")  # pylint: disable=protected-access
+    assert "not_captured" in oracle._render_statuses(_ok_record(), frozenset({"svg"}))  # pylint: disable=protected-access
+
+
+def test_reference_best_that_selected_no_tier_exits_5_rather_than_0(tmp_path):
+    code, manifest = _manifest(
+        [_ok_record()],
+        tmp_path,
+        run_kwargs={"requested_renders": frozenset(), "reference_required": True},
+        capability={"selected_tier": None, "warnings": ["capability UNDETERMINED"], "tiers": []},
+    )
+    assert code == 5
+    assert manifest["reference_missing"] is True
+    assert manifest["reference_required"] is True
+
+
+def test_reference_best_that_did_capture_something_is_not_flagged(tmp_path):
+    code, manifest = _manifest(
+        [_ok_record(svg={"status": "ok"})],
+        tmp_path,
+        run_kwargs={"requested_renders": frozenset({"svg"}), "reference_required": True},
+    )
+    assert code == 0
+    assert manifest["reference_missing"] is False
+
+
+def test_a_data_only_run_without_reference_best_still_exits_zero(tmp_path):
+    """The flag is what makes a missing reference an error; a plain oracle run is unaffected."""
+    code, manifest = _manifest([_ok_record()], tmp_path)
+    assert code == 0
+    assert manifest["reference_required"] is False
+
+
+def test_the_manifest_records_what_was_requested_not_only_what_arrived(tmp_path):
+    _, manifest = _manifest(
+        [_ok_record(svg={"status": "ok"})],
+        tmp_path,
+        run_kwargs={"requested_renders": frozenset({"svg", "pdf"}), "reference_required": True},
+    )
+    assert manifest["requested_renders"] == ["pdf", "svg"]
