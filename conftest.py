@@ -25,9 +25,18 @@ this repo. See `docs/parallel-test-loop.md` for the two-tier loop that uses them
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 REQUIRED_DIST = "loadfile"
+
+# A test carrying either of these must not run under xdist. `serial` wants an exclusive singleton
+# (the interactive desktop and its UIA provider); `timing` asserts a wall-clock budget that a
+# saturated box blows. Both were MEASURED to fail under parallelism - see docs/parallel-test-loop.md.
+CONTENDED_MARKERS = ("serial", "timing")
+
+INCLUDE_CONTENDED = "--include-contended"
 
 WRONG_DIST_MESSAGE = (
     "pytest-xdist is active with --dist {dist!r}. This suite is only measured safe under "
@@ -38,6 +47,32 @@ WRONG_DIST_MESSAGE = (
     "scratch state do not race. To use another scheduler, change this guard deliberately and "
     "re-measure - see docs/parallel-test-loop.md."
 )
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the deliberate opt-out from the automatic contended-test deselection."""
+    parser.addoption(
+        INCLUDE_CONTENDED,
+        action="store_true",
+        default=False,
+        help=(
+            "Run `serial`/`timing` tests under xdist anyway. They were measured to fail there; "
+            "this exists for deliberately stress-testing that, not for normal use."
+        ),
+    )
+
+
+def _xdist_is_active(config: pytest.Config) -> bool:
+    """Whether this process is part of a distributed run - controller or worker.
+
+    Both halves are needed and neither is redundant. The controller carries `numprocesses`; a
+    **worker** does not - measured with a probe conftest, a worker sees ``numprocesses=None
+    dist='no'`` - and the worker is where collection actually happens under xdist, so a check on
+    `numprocesses` alone would deselect nothing in a real parallel run.
+    """
+    if getattr(config.option, "numprocesses", None):
+        return True
+    return hasattr(config, "workerinput") or bool(os.environ.get("PYTEST_XDIST_WORKER"))
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -59,3 +94,32 @@ def pytest_configure(config: pytest.Config) -> None:
     if dist == REQUIRED_DIST:
         return
     raise pytest.UsageError(WRONG_DIST_MESSAGE.format(dist=dist))
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Deselect every contended test whenever xdist is active. This is the MECHANISM.
+
+    The markers alone are a convention: they only protect anything if the caller remembers
+    `-m "not (serial or timing)"`. Drop half of that - `-m "not timing"` - and all seven live
+    WPF/UI-Automation tests are collected under xdist again, which is precisely the configuration
+    measured to fail 3 times in 8 concurrent-pair runs (`harvest=INCOMPLETE`, 30.6s against 8.08s
+    serially). A guard that validates only `--dist loadfile` cannot see that, and a documented
+    command is not a mechanism.
+
+    So the exclusion no longer depends on being asked for. `--include-contended` is the deliberate
+    opt-out, for stress-testing this very behaviour; it is not for normal use.
+
+    Deselection - rather than skipping - keeps the count visible in the summary line
+    (``N passed, 14 deselected``) and keeps every worker's collection identical, since each applies
+    the same rule to the same items.
+    """
+    if not _xdist_is_active(config) or config.getoption("include_contended"):
+        return
+    kept: list[pytest.Item] = []
+    dropped: list[pytest.Item] = []
+    for item in items:
+        target = dropped if any(item.get_closest_marker(name) for name in CONTENDED_MARKERS) else kept
+        target.append(item)
+    if dropped:
+        items[:] = kept
+        config.hook.pytest_deselected(items=dropped)

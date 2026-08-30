@@ -17,14 +17,19 @@ tree rather than importing it, so they exercise the file an operator actually ge
 from __future__ import annotations
 
 import ast
+import functools
 import importlib.util
+import operator
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tomllib
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from _pytest.mark.expression import Expression
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROOT_CONFTEST = REPO_ROOT / "conftest.py"
@@ -38,6 +43,15 @@ TRIVIAL_TEST = "def test_ok():\n    assert True\n"
 # purpose, and stay in the parallel tier.
 SUB_SECOND_CEILING = 2.0
 CLOCK_FUNCTIONS = {"monotonic", "perf_counter"}
+
+# A budget above SUB_SECOND_CEILING earns `timing` only on measured evidence, never by inference.
+# This one gives two child processes 10s to reach a rendezvous barrier; under two concurrent
+# whole-suite parallel runs (44 workers on 22 cores) they did not both start in time (issue #387).
+MEASURED_LARGER_BUDGETS = frozenset(
+    {"tests/test_check_migration_progress.py::test_declare_wrapper_concurrent_writers_keep_both_declarations"}
+)
+
+BUNDLE_TESTS = ".github/skills/pbip-model-refresh/tests/test_credential_modal_detection.py"
 
 
 def _pyproject() -> dict:
@@ -156,6 +170,44 @@ def _live_desktop_tests_with_marks() -> dict[str, bool]:
             if _launches_the_live_desktop(func):
                 found[f"{rel}::{func.name}"] = _marked(func, "serial")
     return found
+
+
+def _marked_tests(marker: str) -> set[str]:
+    """Every test in the suite carrying `@pytest.mark.<marker>`, by node id."""
+    found: set[str] = set()
+    for path, tree in _parsed_test_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        for func in ast.walk(tree):
+            if isinstance(func, ast.FunctionDef) and func.name.startswith("test_") and _marked(func, marker):
+                found.add(f"{rel}::{func.name}")
+    return found
+
+
+def test_no_timing_marker_outlives_the_budget_it_was_added_for() -> None:
+    """The other direction: a marker left behind after its assertion was removed or loosened.
+
+    The forward gate cannot see this. Delete the clock assertion and keep the marker, and the test
+    simply drops out of the derived set - the remaining entries still satisfy the non-vacuity check
+    and everything passes, while that test and all its OTHER assertions vanish from tier 1 and from
+    the nested bundle run. Coverage disappearing quietly is the exact failure this PR exists to avoid
+    creating, so it is gated from both sides.
+    """
+    stale = sorted(_marked_tests("timing") - _sub_second_budget_tests() - MEASURED_LARGER_BUDGETS)
+    assert not stale, (
+        "these tests carry @pytest.mark.timing but assert no sub-second wall-clock budget, so they "
+        "are excluded from the parallel tier for no reason - remove the marker, or add it to "
+        f"MEASURED_LARGER_BUDGETS with the measurement that earned it: {stale}"
+    )
+
+
+def test_no_serial_marker_outlives_the_live_fixture_it_was_added_for() -> None:
+    """Same both-ways rule for `serial`: it must still drive the live desktop it was marked for."""
+    live = set(_live_desktop_tests_with_marks())
+    stale = sorted(_marked_tests("serial") - live)
+    assert not stale, (
+        "these tests carry @pytest.mark.serial but no longer launch the live WPF fixture, so they "
+        f"are excluded from the parallel tier for no reason: {stale}"
+    )
 
 
 def test_every_live_ui_test_declares_itself_serial() -> None:
@@ -360,26 +412,123 @@ def _documented_pytest_commands() -> list[str]:
     return commands
 
 
-def _is_parallel(command: str) -> bool:
-    """Whether a documented command asks xdist for workers."""
+def _uses_xdist(command: str) -> bool:
+    """Whether a documented command asks xdist for workers, with no exemptions."""
     return " -n " in command or "--numprocesses" in command
+
+
+def _is_filter_judged_parallel(command: str) -> bool:
+    """A parallel command whose marker filter is subject to the exclusion rules.
+
+    `--include-contended` is the documented opt-out from the automatic deselection, so a command
+    carrying it is deliberately running the contended tests. It is exempt from the FILTER rules only
+    - it is still a parallel command for every other purpose, which is what the two predicates keep
+    apart. Conflating them let a mutation of the tier-2 command slip through: the opt-out example was
+    counted as a whole-suite serial run because the single predicate said it was not parallel.
+    """
+    return _uses_xdist(command) and "--include-contended" not in command
 
 
 def test_the_loop_doc_never_documents_parallel_without_loadfile() -> None:
     """A documented command the guard rejects reads as "the guard is broken", not "the doc is wrong"."""
     commands = _documented_pytest_commands()
     assert commands, f"no pytest commands found in {LOOP_DOC.name} - the doc cannot be checked"
-    offenders = [cmd for cmd in commands if _is_parallel(cmd) and "--dist loadfile" not in cmd]
+    offenders = [cmd for cmd in commands if _uses_xdist(cmd) and "--dist loadfile" not in cmd]
     assert not offenders, f"documented parallel commands that the root conftest guard would reject: {offenders}"
 
 
-def test_the_loop_doc_never_documents_a_parallel_run_that_keeps_the_timing_tests() -> None:
-    """The measured flake only reaches an operator through a documented command that forgot the filter."""
-    offenders = [cmd for cmd in _documented_pytest_commands() if _is_parallel(cmd) and "timing" not in cmd]
-    assert not offenders, (
-        "documented parallel commands that would still run the wall-clock-budget tests "
-        f"(measured to fail ~1 run in 8 at 22 workers): {offenders}"
+def _marker_expression(command: str) -> str | None:
+    """The `-m "<expr>"` filter of a documented command, if it has one."""
+    match = re.search(r'-m\s+"([^"]*)"', command)
+    return match.group(1) if match else None
+
+
+def test_the_loop_doc_never_documents_a_parallel_run_that_keeps_contended_tests() -> None:
+    """Judged by pytest's own expression semantics, not by substring.
+
+    A first draft asserted that the documented command *contained* "timing". Mutating
+    `not (serial or timing)` to `not timing` kept the substring, so all three documentation gates
+    returned `3 passed`, exit 0 - while the mutated command collects every live UI test under xdist.
+    Compiling the expression and asking whether it excludes each marker is the only check that can
+    tell those two commands apart.
+    """
+    offenders: list[str] = []
+    for command in _documented_pytest_commands():
+        if not _is_filter_judged_parallel(command):
+            continue
+        expression = _marker_expression(command)
+        if expression is None:
+            offenders.append(f"{command!r}: no -m filter at all")
+            continue
+        compiled = Expression.compile(expression)
+        for marker in ("serial", "timing"):
+            if compiled.evaluate(functools.partial(operator.eq, marker)):
+                offenders.append(f"{command!r}: -m {expression!r} does not exclude `{marker}`")
+    assert not offenders, "documented parallel commands that would still run contended tests: " + "; ".join(offenders)
+
+
+def test_xdist_deselects_contended_tests_without_being_asked() -> None:
+    """The mechanism, not the convention: the exclusion must not depend on the caller's `-m`.
+
+    Reproduces the reviewer's case exactly - a parallel run whose filter drops the `serial` half.
+    Before the root conftest deselected them, this collected all seven live WPF/UI-Automation tests,
+    which is the configuration measured to fail 3 times in 8 concurrent-pair runs.
+    """
+    contended = {node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")}
+    assert len(contended) >= 13, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
+    result = _run_pytest(
+        REPO_ROOT, ["-q", "--collect-only", "-n", "2", "--dist", "loadfile", "-m", "not timing", BUNDLE_TESTS]
     )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"{len(contended)} deselected" in output, f"expected {len(contended)} deselected:\n{output[-1500:]}"
+    for node in sorted(contended):
+        assert node not in output, f"{node} was collected under xdist despite carrying a contended marker"
+
+
+def test_a_real_parallel_run_deselects_them_inside_the_workers(tmp_path: Path) -> None:
+    """`--collect-only` can be answered by the controller; a real run collects in the WORKERS.
+
+    A worker sees `numprocesses=None dist='no'` (measured), so a mechanism that only checked
+    `numprocesses` would deselect nothing in the run that actually matters while looking correct
+    under `--collect-only`. This drives a genuine `-n 2` run to close that blind spot.
+
+    Judged from the JUnit report, not the summary line: xdist does not aggregate the workers'
+    deselections into `N deselected`, so a real run that correctly skipped all thirteen still prints
+    only `87 passed`. Asserting on the executed node ids is both stronger and unambiguous.
+    """
+    contended = {node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")}
+    report = tmp_path / "report.xml"
+    result = _run_pytest(
+        REPO_ROOT, ["-q", "--tb=no", "-n", "2", "--dist", "loadfile", f"--junitxml={report}", BUNDLE_TESTS]
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output[-2000:]
+    executed = {
+        f"{case.get('classname').replace('.', '/')}.py::{case.get('name')}".replace("/github/skills", ".github/skills")
+        for case in ET.parse(report).getroot().iter("testcase")
+    }
+    still_running = sorted(node for node in contended if node in executed)
+    assert not still_running, f"a real parallel run executed contended tests inside its workers: {still_running}"
+    assert executed, f"the run executed nothing at all:\n{output[-1500:]}"
+
+
+def test_the_opt_out_flag_puts_the_contended_tests_back() -> None:
+    """Deliberate stress-testing must remain possible, or the mechanism is a wall rather than a gate."""
+    result = _run_pytest(
+        REPO_ROOT,
+        ["-q", "--collect-only", "-n", "2", "--dist", "loadfile", "--include-contended", BUNDLE_TESTS],
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "deselected" not in output, f"--include-contended did not restore them:\n{output[-1500:]}"
+    for node in sorted(node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")):
+        assert node in output, f"{node} missing even with --include-contended"
+
+
+def _contended_nodes() -> set[str]:
+    """Every node id that carries a marker the parallel tier excludes."""
+    return _marked_tests("serial") | _marked_tests("timing")
 
 
 def test_the_loop_doc_documents_both_tiers() -> None:
@@ -388,7 +537,7 @@ def test_the_loop_doc_documents_both_tiers() -> None:
     assert any("-n auto" in cmd and "--dist loadfile" in cmd for cmd in commands), (
         f"{LOOP_DOC.name} documents no fast tier: {commands}"
     )
-    whole_suite_serial = [cmd for cmd in commands if not _is_parallel(cmd) and " -m " not in cmd]
+    whole_suite_serial = [cmd for cmd in commands if not _uses_xdist(cmd) and " -m " not in cmd]
     assert whole_suite_serial, (
         f"{LOOP_DOC.name} documents no plain whole-suite serial tier - a filtered or parallel run "
         f"cannot be the gate of record: {commands}"

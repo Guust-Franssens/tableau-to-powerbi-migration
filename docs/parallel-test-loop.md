@@ -24,15 +24,18 @@ Both must be green. Tier 1 is not a substitute for tier 2, and the reason is bel
 their own `git worktree` with their own `.venv`; anything not declared there is absent everywhere.
 
 Measured on 22 logical cores, machine shared with other agents throughout - so these wall times carry
-real external load, which is the condition this loop exists for. 2697 node ids; tier 1 deselects 14.
+real external load, which is the condition this loop exists for. 2702 node ids; tier 1 deselects 14.
 
 | run | wall | outcome |
 |---|---|---|
-| tier 2, serial `pytest -q` | **911 s** | 3 failed, 2684 passed, 7 skipped |
-| tier 1, 3 sequential runs | **242 / 252 / 254 s** | identical, node id by node id |
+| tier 2, serial `pytest -q` | **789 s** | 3 failed, 2692 passed, 7 skipped |
+| tier 1, documented command | **239 s** | 3 failed, 2678 passed, 7 skipped |
+| tier 1, **bare `-n auto --dist loadfile`, no `-m` at all** | **235 s** | identical to the row above, **node id by node id** |
 
-**~3.6x faster.** The three standing failures are the deliberate `tests/test_upstream_repro_pins.py`
-engine-drift tripwires (engine pinned 2.260.0, installed 2.339.0); they fail identically on `master`.
+**~3.3x faster**, and the last row is the point of the mechanism below: forgetting the filter no
+longer changes what runs. The three standing failures are the deliberate
+`tests/test_upstream_repro_pins.py` engine-drift tripwires (engine pinned 2.260.0, installed
+2.339.0); they fail identically on `master`.
 
 Every run was compared **by node id**, not by summary totals, because a summary hides the failure
 mode that matters: a test that skips or short-circuits under contention leaves `N passed` looking
@@ -189,13 +192,46 @@ needs gating.
 
 To use a different scheduler, edit the guard deliberately and re-measure. That is the point of it.
 
+## The markers are enforced by a MECHANISM, not by remembering to type them
+
+A marker on its own is a convention. It only protects anything if the caller supplies
+`-m "not (serial or timing)"` - and the guard above validates `--dist loadfile`, not the filter. Drop
+half of it, and every live UI test is collected again:
+
+```
+$ pytest --collect-only -n 2 --dist loadfile -m "not timing" <the bundle's credential tests>
+94/100 tests collected (6 deselected)     # <- all seven live WPF/UIA tests SELECTED
+```
+
+So the root `conftest.py` now **deselects every `serial` and `timing` test whenever xdist is active**,
+whatever `-m` says. The same command today reports `87/100 tests collected (13 deselected)`, and the
+documented tier-1 filter is belt-and-braces rather than the only line of defence.
+
+Deliberately stress-testing those tests under parallelism is still possible, explicitly:
+
+```bash
+uv run pytest -q -n auto --dist loadfile --include-contended
+```
+
+That flag exists for measuring this behaviour, not for normal use - it re-enables exactly the
+configuration measured to fail.
+
+Two details make the mechanism hold up, and both are gated:
+
+- **It must fire inside the workers.** A worker sees `numprocesses=None dist='no'` (measured), so a
+  check on `numprocesses` alone would deselect nothing in a real run while still looking correct
+  under `--collect-only`, which the controller can answer.
+- **The documentation gate parses the marker expression** with pytest's own compiler and asks whether
+  it excludes each marker. A substring check could not tell `not (serial or timing)` from
+  `not timing`: the earlier draft of that gate returned `3 passed` for the mutated command.
+
 ## Why tier 2 exists
 
 **One green parallel run is not proof of isolation.** A test that quietly changed behaviour under
 concurrency - took a different branch, skipped instead of running, degraded to a safer verdict - can
 still report at the summary level as though nothing happened. And tier 1 deliberately deselects the
-`serial` and `timing` tests, so it is a strictly smaller suite by construction: 2683 node ids against
-tier 2's 2697, plus fourteen more inside the nested bundle run.
+`serial` and `timing` tests, so it is a strictly smaller suite by construction: 2688 node ids against
+tier 2's 2702, plus fourteen more inside the nested bundle run.
 
 So the plain serial `pytest -q` stays the gate of record before a PR. It is slower and it is the one
 whose result you quote. Tier 1 buys iteration speed; tier 2 buys the claim.
@@ -242,9 +278,15 @@ That is not part of either tier. Tier 1 excludes them because two agents running
 raced them; tier 2 includes them, because a serial whole-suite run is the one condition in which they
 were never observed to fail.
 
-⚠️ One residual gap worth knowing: the exclusions only happen if the command carries
-`-m "not (serial or timing)"`. A hand-typed `pytest -n auto --dist loadfile` still runs everything.
-The doc-drift tests keep every *documented* command honest; they cannot police what you type.
+⚠️ **Absence of failure in a short campaign proves nothing here.** Seven runs - including two
+concurrent pairs - found none of it. It took eight concurrent pairs to see three failures. The
+instability is **real but rare**, so "I ran it three times and it was fine" is not evidence that the
+markers can come off. If you want to challenge them, use `--include-contended` and run *many*
+concurrent pairs.
+
+The exclusion no longer depends on anyone typing the right filter - the root `conftest.py` deselects
+`serial` and `timing` whenever xdist is active (see above). A hand-typed
+`pytest -n auto --dist loadfile` is therefore safe too.
 
 ## CI stays serial, deliberately
 
