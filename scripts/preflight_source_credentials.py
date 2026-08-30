@@ -25,6 +25,7 @@ The service gate shells out to the Fabric CLI (`fab`), which must be authenticat
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -136,22 +137,92 @@ def _clear_gate_marker(migration: Path) -> None:
         )
 
 
-def _classify_legs(src: dict, index: int) -> list[tuple[str, str, str]]:
-    """Classify every connection behind one data source. Returns (name, verdict, reason) per leg.
+def _norm_case_insensitive(value: object) -> str:
+    """Canonical string fragment for case-insensitive endpoint fields."""
+    return str(value or "").strip().casefold()
+
+
+def _norm_exact(value: object) -> str:
+    """Canonical string fragment for values the generated M query passes through verbatim."""
+    return str(value or "").strip()
+
+
+def _leg_key(src: dict, index: int, leg: dict) -> str:
+    """Stable marker identity for one datasource connection leg.
+
+    Positional keys (`source[0]`) are not identities: reordering the source list between arm and
+    clear can let proof from one endpoint occupy two keys. Hash the datasource's own stable token and
+    the connection endpoint shape instead. If that cannot distinguish two legs, duplicate-key checks
+    in `credential_gate.py block` fail closed rather than letting them collapse.
+    """
+    _ = src, index
+    klass = _norm_case_insensitive(leg.get("class"))
+    if not klass:
+        raise ValueError("connection leg has no class; cannot derive a stable credential-gate key")
+    identity = {"class": klass, "server": _norm_case_insensitive(leg.get("server"))}
+    if not identity["server"]:
+        raise ValueError(f"{klass} connection leg has no server; cannot derive a stable credential-gate key")
+    if klass == "databricks":
+        identity["database"] = _norm_exact(leg.get("database") or leg.get("dbname"))
+        identity["schema"] = _norm_exact(leg.get("schema"))
+        identity["http_path"] = _norm_exact(leg.get("http_path"))
+        if not identity["http_path"]:
+            raise ValueError("databricks connection leg has no http_path; cannot derive a stable credential-gate key")
+    elif klass == "snowflake":
+        identity["database"] = _norm_exact(leg.get("database") or leg.get("dbname"))
+        identity["schema"] = _norm_exact(leg.get("schema"))
+        identity["warehouse"] = _norm_exact(leg.get("warehouse"))
+        identity["role"] = _norm_exact(leg.get("role"))
+        if not identity["warehouse"]:
+            raise ValueError("snowflake connection leg has no warehouse; cannot derive a stable credential-gate key")
+    elif klass in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
+        identity["database"] = _norm_exact(leg.get("database") or leg.get("dbname"))
+        identity["schema"] = _norm_exact(leg.get("schema"))
+    else:
+        identity["database"] = _norm_exact(leg.get("database") or leg.get("dbname"))
+        identity["schema"] = _norm_exact(leg.get("schema"))
+    if leg.get("port") not in (None, ""):
+        identity["port"] = str(leg.get("port")).strip()
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"source-key:{digest[:16]}"
+
+
+def _leg_display(src: dict, index: int, leg: dict, leg_index: int, leg_count: int) -> str:
+    """Human-readable datasource/leg label for logs and marker diagnostics."""
+    conn = src.get("connection", {}) or {}
+    base_name = str(src.get("name") or conn.get("hyper_file") or f"source[{index}]")
+    return base_name if leg_count == 1 else f"{base_name}[{leg_index}] {leg.get('class', '?')}"
+
+
+def _classify_legs(src: dict, index: int) -> list[tuple[str, str, str, str]]:
+    """Classify every connection behind one data source. Returns (key, display, verdict, reason) per leg.
 
     A `federated` datasource wraps SEVERAL named connections - a Tableau join across, say, Azure SQL
     + Snowflake + Databricks is ONE datasource with three live systems behind it. Measured
     2026-08-04, classifying only the primary armed the credential gate for 1 of 3 and reported the
     other two nowhere. Under-reporting live sources is the one direction this must never fail in.
+
+    The key is deliberately not the display name. Display names can duplicate, contain punctuation,
+    or change; the marker identity must stay unique and stable so a proof for one leg cannot clear a
+    sibling endpoint.
     """
     conn = src.get("connection", {}) or {}
-    base_name = str(src.get("name") or conn.get("hyper_file") or f"source[{index}]")
     legs = conn.get("connections") or [conn]
-    classified: list[tuple[str, str, str]] = []
+    classified: list[tuple[str, str, str, str]] = []
     for leg_index, leg in enumerate(legs):
         verdict, reason = classify_source(leg)
-        name = base_name if len(legs) == 1 else f"{base_name}[{leg_index}] {leg.get('class', '?')}"
-        classified.append((name, verdict, reason))
+        display = _leg_display(src, index, leg, leg_index, len(legs))
+        if verdict == "no-creds":
+            classified.append((display, display, verdict, reason))
+            continue
+        try:
+            key = _leg_key(src, index, leg)
+        except ValueError as exc:
+            classified.append(
+                (f"unstable-source[{index}].connection[{leg_index}]", display, "needs-credential", str(exc))
+            )
+            continue
+        classified.append((key, display, verdict, reason))
     return classified
 
 
@@ -176,13 +247,13 @@ def cmd_classify(bundle_path: Path) -> int:
     blocked_names: list[str] = []
     log.info("Data-source credential preflight for %s (%s)", bundle.label, bundle.kind)
     for i, src in enumerate(sources):
-        for name, verdict, reason in _classify_legs(src, i):
+        for key, display, verdict, reason in _classify_legs(src, i):
             marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
-            log.info("%s %-28s %s", marker, name[:28], reason)
+            log.info("%s %-28s %s", marker, display[:28], reason)
             needs += verdict == "needs-credential"
             review += verdict == "review"
             if verdict == "needs-credential":
-                blocked_names.append(name)
+                blocked_names.append(key)
 
     log.info("-" * 60)
     if needs:

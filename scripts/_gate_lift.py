@@ -17,14 +17,13 @@ Why the guards are shaped the way they are - three fail-opens, all measured, all
 * **#348** - the first fix derived proof from `set(live) >= set(all_live)`. A superset test is
   vacuously true against an empty set, so a bundle with **0** live sources cleared the gate having
   proved nothing at all. Fail-OPEN, and worse than the bug it replaced.
-* **#353** - the gate is armed per connection **leg** (`_classify_legs` walks
-  `connection.connections[]`, because one Tableau datasource can join Azure SQL + Snowflake +
-  Databricks) while the probe enumerates **datasources** and reads one outer connection. A marker
-  naming three legs cleared in full after contacting the outer `federated` connection, which carries
-  no server at all.
+* **#353** - the gate is armed per connection **leg** while the probe enumerated **datasources** and
+  read one outer connection. A marker naming three legs cleared in full after contacting the outer
+  `federated` connection, which carries no server at all.
 
 The common shape, and the thing to check in review: **the clearing side reasoning in a key space the
 marker does not use.** Counts, indices and datasources are all wrong units; the marker holds names.
+This helper now accepts ONLY the marker's stable source keys, already proven by the probe.
 """
 
 from __future__ import annotations
@@ -36,17 +35,11 @@ import sys
 from pathlib import Path
 
 log = logging.getLogger("probe_live_source")
-
 MARKER_NAME = ".credential-gate-BLOCKED.json"
 
 
 def marker_named_count(migration: Path) -> int:
-    """How many sources the blocking marker NAMES. 0 when absent, unreadable or unnamed.
-
-    Read straight from the marker rather than through `credential_gate`, which the probe only ever
-    shells out to. `0` is the safe answer for an unreadable marker: it cannot then trigger a refusal
-    on garbage, and `clear_block` still refuses to clear names it cannot match.
-    """
+    """How many source keys the blocking marker still names. 0 when absent or unreadable."""
     try:
         payload = json.loads((migration / MARKER_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -55,40 +48,34 @@ def marker_named_count(migration: Path) -> int:
     return len(names) if isinstance(names, list) else 0
 
 
-def lift_gate(migration: Path, what: str, proved_all: bool, contacted: int) -> bool:
-    """Record an EARNED clear if - and only if - both guards pass. Returns whether one was requested.
+def lift_gate(migration: Path, what: str, source_names: list[str]) -> bool:
+    """Record an EARNED clear for the exact marker source keys the probe reached.
 
-    1. **`proved_all`** - exactly `source_index is None`. Keep it that simple (#348).
-    2. **Cardinality** - the marker must not NAME more sources than the probe CONTACTED (#353).
+    The previous #357 cardinality guard refused when the marker named more sources than the probe
+    contacted. That was safe while the probe still spoke datasource counts, but wrong once the probe
+    speaks marker keys: a partial source-aware clear is legitimate and is handled by
+    `credential_gate.py clear --sources`.
 
-    Cardinality is a COUNT, not a name match: naming one leg is still unsolved (#347). It is not the
-    set arithmetic that caused #348 - endpoints reached and names claimed are both quantities of
-    proof - and it is fail-safe in the case that broke #348: 0 contacted vs N named refuses.
-
-    ⚠️ `what` is a human-readable count and must NEVER be passed as `--sources` (#346).
-
-    Full rationale and measurements: `docs/credential-gate.md`.
+    An empty list is never proof. This is the non-negotiable #348 fail-open guard: zero contacted
+    endpoints must not clear a marker just because an empty set comparison happens to pass.
     """
-    if not proved_all:
+    if not source_names:
         log.warning(
-            "PROBE: gate NOT lifted - a --source-index run proves only one source (%s), and a clear "
-            "would lift a gate covering sources never contacted. Re-run without --source-index to "
-            "earn a clear. See issues #346 and #347.",
-            what,
+            "PROBE: gate NOT lifted - no marker source keys were proven. Zero proof must never "
+            "clear a credential gate. See issues #348 and #353.",
         )
         return False
     named = marker_named_count(migration)
-    if named > contacted:
+    if named > len(source_names):
         log.warning(
-            "PROBE: gate NOT lifted - the marker names %d source(s) but only %d endpoint(s) were "
-            "contacted. A federated datasource joins several systems behind ONE source entry, so "
-            "clearing here would lift a gate covering systems nobody reached. Probe each system, or "
-            "authorize a build-only migration explicitly. See issue #353.",
+            "PROBE: gate NOT lifted - the marker names %d source key(s) but only %d were proven. "
+            "Keeping the conservative #357 refusal: partial proof is a loud, recoverable block; "
+            "over-clearing ships an unvalidated model.",
             named,
-            contacted,
+            len(source_names),
         )
         return False
-    subprocess.run(
+    proc = subprocess.run(
         [
             sys.executable,
             str(Path(__file__).parent / "credential_gate.py"),
@@ -97,8 +84,13 @@ def lift_gate(migration: Path, what: str, proved_all: bool, contacted: int) -> b
             "--reason",
             f"probe-cleared: DATA_OK from {what}",
             "--earned",
+            "--sources",
+            *source_names,
         ],
         capture_output=True,
         check=False,
     )
+    if proc.returncode != 0:
+        log.warning("PROBE: gate clear command failed; gate is still authoritative.")
+        return False
     return True

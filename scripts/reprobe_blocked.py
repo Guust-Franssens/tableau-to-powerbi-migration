@@ -51,19 +51,13 @@ better-classified deadline. It is NOT a 2-minute cap - applying one here would k
 cold-starting warehouse. If a killed probe leaked a Desktop instance, `check_desktop_orphans.py` finds
 it; this tool never closes a Desktop it did not personally open.
 
-A discovered, pre-existing defect this sweep SURFACES (does not mask)
---------------------------------------------------------------------
-Measured 2026-08-27: when the gate was armed with NAMED sources (which `preflight_source_credentials.py
-classify` does), a successful probe does NOT actually lift the gate. `run_probe` calls
-`_lift_gate(migration, "N live source(s)")`, whose summary string is passed as `clear --earned
---sources "N live source(s)"`; that never matches the marker's real source names, so `clear_block`
-takes its PARTIAL-clear branch and leaves the marker and ACL in place while recording a phantom
-`probe-cleared`. The single-unit path clears correctly ONLY when the gate was armed with EMPTY
-`--sources`. This is a defect in `probe_live_source._lift_gate` + `credential_gate.clear_block`, both
-outside this file's ownership, so it is reported (not patched here). This sweep is honest about it: a
-unit whose probe returns DATA_OK yet whose gate is STILL armed afterwards is classified `anomaly`
-(not misreported as `still-blocked: NO_CREDENTIAL`), because ground truth - the gate transition -
-wins over the probe's self-reported verdict.
+A defect this sweep still SURFACES (does not mask)
+--------------------------------------------------
+The probe now clears with the marker's stable source keys, including federated connection-leg keys,
+so the ordinary DATA_OK path earns the gate transition directly. This sweep still treats a DATA_OK
+that leaves the gate armed as `anomaly`, because ground truth - the marker/ACL transition - wins over
+the probe's self-reported verdict. That catches future regressions in the clear path without letting
+the supervisor lift the gate itself.
 
 Per-unit outcomes and exit codes
 --------------------------------

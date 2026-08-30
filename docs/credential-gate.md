@@ -67,8 +67,8 @@ problem before the probe has returned one.
 
 ### Engine-produced bundles: detection, not prevention
 
-The deterministic engine runs before the agent tier and can emit `pbip/`, `semantic_models/`, and
-`data/` before this gate is armed. On that path the gate cannot honestly promise "no model exists";
+The deterministic engine runs before the agent tier and can emit `pbip/`, `reports/`,
+`semantic_models/`, and `data/` before this gate is armed. On that path the gate cannot honestly promise "no model exists";
 it promises that no **agent-tier** artifact is added while the source is unproven, and that pre-gate
 engine output is labelled as unvalidated until a probe clears the gate.
 
@@ -76,7 +76,7 @@ engine output is labelled as unvalidated until a probe clears the gate.
 
 1. the audit log has an `engine-receipt` entry for this exact receipt **before** the latest `block`;
 2. the receipt's `report.json` and `input_manifest.json` hashes still match the current bundle;
-3. the artifact lives under a native engine output root (`pbip/`, `semantic_models/`, or `data/`);
+3. the artifact lives under a native engine output root (`pbip/`, `reports/`, `semantic_models/`, or `data/`);
 4. the artifact's relative path, size and sha256 exactly match a receipt entry.
 
 Anything else still fails closed: missing/malformed/stale provenance, an artifact outside those
@@ -112,7 +112,7 @@ python scripts/credential_gate.py list      <estate-root>     # which units are 
 python scripts/credential_gate.py block     <migration-dir> --sources "a" "b"
 python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok
 python scripts/credential_gate.py authorize <migration-dir> --who "<name>"   # humans only
-python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation — point at the bundle, NOT the ship copy (see below)
+python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation
 ```
 
 ### Where to run `verify` — the bundle, never the ship copy
@@ -141,10 +141,9 @@ resolved. Identical bytes, opposite verdict (reproduced 2026-08-27 on the same c
 *unverified*, not *clean* — from the outside it is indistinguishable from the genuine "extract-only,
 never gated" pass this same message is designed to report.
 
-> **This is a stopgap, not the final design.** `verify` cannot yet recover the originating bundle from
-> a ship copy. The hook exists — both locations carry the same `engine-output-receipt.json` sha256,
-> which a future `verify` could follow back to the bundle, or a `--also-check <bundle>` flag could
-> name — but until that lands the rule is simply *point `verify` at the bundle*. Tracked in issue #354.
+For an engine-bundle migration, point `verify` directly at `<bundle>`. Do not use the ship copy as a
+proxy for the bundle until ship-destination provenance is designed against the engine receipt; that
+work is tracked by issue #354.
 
 ### Across MANY units: enumerate, then re-probe. Do not mass-authorize.
 
@@ -207,20 +206,19 @@ distinct violations:
 
 ### `clear` earns nothing; only the probe does
 
-⚠️ **`--source-index` cannot earn a clear at all (#347).** A probe narrowed to one source leaves the
-gate armed, records **no** `probe-cleared`, and exits **3** — by design: clearing on a partial proof
-would lift a gate covering sources nobody contacted, which is the exact hole `run_probe`'s plural
-guarantee exists to close. Re-run without `--source-index` to earn a clear.
+`--source-index` can earn a **partial** clear, but only in the marker's own keyspace (#347). The
+classifier arms the gate with stable connection-leg fingerprints such as
+`source-key:1d15832d4d2a857a` (the human display name is separate because Tableau names can
+duplicate, reorder or contain punctuation); the probe now iterates `connection.connections[]` and
+passes exactly the keys it reached to `clear --sources`. If only one keyed leg is proven, the
+restored #357 cardinality guard refuses the clear unless the marker names exactly that one leg.
 
-The predicate is exactly `source_index is None`, and it must stay that simple. Blind review found
-the first attempt — `set(live) >= set(all_live)` — was **fail-open**: a superset test is vacuously
-true against an empty set, so a bundle with **0** live sources cleared the gate on ZERO proof
-(`SKIPPED nothing to probe`, then marker deleted, ACL removed, an EARNED `probe-cleared` written),
-and a **1**-source bundle cleared a marker naming two. Both were worse than the bug being fixed,
-because master left the gate armed in exactly those cases. Set arithmetic can never be right here:
-`live` holds bundle *indices* while the marker is keyed by source *names*, and the clear runs
-against the marker — the two sets are independent, so a superset relation over one says nothing
-about the other.
+The fail-open guard is now simpler and stricter: an empty proof list never clears anything. Do not
+replace that with set arithmetic over datasource indices. Blind review found the first attempt —
+`set(live) >= set(all_live)` — was **fail-open**: a superset test is vacuously true against an empty
+set, so a bundle with **0** live sources cleared the gate on ZERO proof (`SKIPPED nothing to probe`,
+then marker deleted, ACL removed, an EARNED `probe-cleared` written). Counts, display names and
+datasource names are the wrong keyspace; only marker source keys may clear marker source keys.
 
 That refusal is the conservative half of the #346 fix. Until 2026-08-27 the probe passed a
 human-readable count (`"2 live source(s)"`) as `--sources`; `clear_block` diffs that against the
@@ -275,15 +273,10 @@ Three properties are load-bearing:
   no sign-in), `anomaly`, `errored`, `skipped`. Exit `0` clean / `1` still blocked / `2` usage / `3`
   forged-override / `5` anomaly.
 
-> ⚠️ **Known caveat the sweep surfaces (does not hide).** When the gate was armed with **named**
-> sources, a successful probe does **not** currently lift it: `run_probe` calls
-> `_lift_gate(migration, "N live source(s)")`, and that summary string never matches the marker's real
-> source names, so `clear_block` takes its partial-clear branch and leaves the ACL in place while
-> recording a phantom `probe-cleared`. A unit whose probe returns DATA_OK yet whose gate stays armed is
-> therefore reported as `anomaly` (never a false `newly-earned`, never a misdiagnosed
-> `NO_CREDENTIAL`). This is a defect in `probe_live_source._lift_gate` + `credential_gate.clear_block`,
-> tracked separately; the single-unit probe clears correctly only when the gate was armed with **empty**
-> `--sources`.
+> ⚠️ **Regression caveat the sweep surfaces (does not hide).** The single-unit probe now clears with
+> stable marker keys, including federated connection-leg keys. The sweep still reports DATA_OK with a
+> still-armed gate as `anomaly` (never a false `newly-earned`, never a misdiagnosed `NO_CREDENTIAL`),
+> because ground truth is the marker/ACL transition, not the probe's own success line.
 
 ### Re-arming is idempotent
 

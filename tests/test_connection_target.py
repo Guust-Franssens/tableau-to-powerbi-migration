@@ -47,12 +47,21 @@ def test_live_extract_reason_warns_about_the_cache() -> None:
 
 @pytest.mark.parametrize(
     "connection_class",
-    ["excel-direct", "excel", "textscan", "csv", "json", "parquet", "msaccess", "spatial"],
+    ["excel-direct", "excel", "textscan", "csv", "json", "parquet", "msaccess", "spatial", "ogr", "ogrdirect"],
 )
 def test_file_sources_are_materialised(connection_class: str) -> None:
     """For a real file there is no upstream to connect to, so extracting IS the faithful migration."""
     target, _ = powerbi_target(connection_class, "extract")
     assert target == FLAT_FILE
+
+
+@pytest.mark.parametrize("connection_class", ["ogr", "ogrdirect"])
+def test_ogr_aliases_are_spatial_files_not_live_systems(connection_class: str) -> None:
+    """Packaged spatial files have no upstream credentialable endpoint."""
+    target, reason = powerbi_target(connection_class, "extract")
+
+    assert target == FLAT_FILE
+    assert "FILE source" in reason
 
 
 def test_unknown_class_is_not_guessed() -> None:

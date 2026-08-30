@@ -55,7 +55,7 @@ Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
 Module-size strategy (pylint `max-module-lines = 1200`): SPLIT, not waive. The verdict-line matchers
 live in `_verdict_lines.py` and the PBIP scaffold writers (`_tmdl_ident` / `_tmdl_filename_stem` /
 `_pbip_files`) in `_probe_pbip.py`; both are re-exported here because the seam tests reach them
-through this module. Gate-lifting (`lift_gate` / `marker_named_count`) is the third, in `_gate_lift.py`: reaching a
+through this module. Gate-lifting (`lift_gate`) is the third, in `_gate_lift.py`: reaching a
 source and deciding whether that earned a clear are different jobs. The next growth spurt needs
 a NEW seam argued on its own merits - not a `# pylint: disable=too-many-lines`, which would only hide it.
 """
@@ -82,10 +82,7 @@ from _probe_pbip import (  # noqa: F401  # pylint: disable=unused-import
     _tmdl_filename_stem,
     _tmdl_ident,
 )
-from _gate_lift import (  # noqa: F401  # pylint: disable=unused-import
-    lift_gate as _lift_gate,
-    marker_named_count as _marker_named_count,
-)
+from _gate_lift import lift_gate as _lift_gate  # noqa: F401  # pylint: disable=unused-import
 from _verdict_lines import (
     _has_credential_stop_verdict,
     _has_data_ok_verdict,
@@ -93,7 +90,9 @@ from _verdict_lines import (
     _has_desktop_unready_verdict,
 )
 from check_desktop_orphans import record_desktop_event
+from connection_target import LIVE_SOURCE, powerbi_target
 from migration_bundle import load_bundle
+from preflight_source_credentials import _leg_key
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("probe_live_source")
@@ -257,7 +256,7 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
         )
         return m, f"Databricks {server}{http_path} :: {database}.{schema}.{table}"
 
-    if klass in {"sqlserver", "azure_sql_dw", "azuresqldw"}:
+    if klass in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
         if native:
             m = (
                 "let\n"
@@ -468,8 +467,26 @@ def _record_desktop_lifecycle(migration: Path, action: str, pid: int, pbip: Path
         return {}
 
 
-def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[dict], str] | None:
-    """Pick the source, its candidate tables and a column to probe. None when nothing to probe.
+def _leg_name(_source: dict, source_index: int, _leg: dict, _leg_count: int, _leg_index: int) -> str:
+    """The credential-gate marker name for one connection leg.
+
+    Must stay byte-for-byte aligned with `preflight_source_credentials._classify_legs`: the marker
+    is keyed by these names, not by datasource indices.
+    """
+    return _leg_key(_source, source_index, _leg)
+
+
+def _connection_target(conn: dict) -> str:
+    """Return the parser-stamped Power BI target, or compute it for legacy/federated legs."""
+    target = conn.get("powerbi_target")
+    if target:
+        return str(target)
+    computed, _reason = powerbi_target((conn.get("class") or "").lower(), (conn.get("mode") or "live").lower())
+    return computed
+
+
+def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple[str, dict, list[dict], str]]:
+    """Pick every live connection leg, its candidate tables and a column to probe.
 
     Returns ALL tables, not just the first: a "table not found" is a spec error, and the workbook
     usually names several, so the probe can move on to the next rather than declaring the whole
@@ -486,14 +503,20 @@ def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict,
         raise SystemExit(1)
     source = sources[source_index]
     conn = source.get("connection", {}) or {}
+    legs = conn.get("connections") or [conn]
+    live_legs = [
+        (_leg_name(source, source_index, leg, len(legs), leg_index), leg)
+        for leg_index, leg in enumerate(legs)
+        if _connection_target(leg) == LIVE_SOURCE
+    ]
 
-    if (conn.get("powerbi_target") or "") != "live_source":
+    if not live_legs:
         # SKIPPED, not DATA_OK. Exit 0 either way, but the verdicts mean different things - "nothing
         # to prove" is not "proven reachable" - and conflating two verdicts into one word is exactly
         # the defect class this script exists to fix. An orchestrator reading the last line would
         # otherwise report a CSV source as a verified live connection.
         log.info("PROBE: SKIPPED not a live source ('%s') - nothing to probe", conn.get("powerbi_target"))
-        return None
+        return []
 
     tables = [t for t in (source.get("tables") or []) if t.get("name")]
     tables.sort(key=lambda t: bool(t.get("custom_sql")))
@@ -501,7 +524,17 @@ def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict,
     if not tables or not fields:
         log.error("PROBE: ERROR source has no table/column to probe")
         raise SystemExit(1)
-    return conn, tables, fields[0]["internal_name"].strip("[]")
+    column = fields[0]["internal_name"].strip("[]")
+    return [(name, leg, tables, column) for name, leg in live_legs]
+
+
+def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[dict], str] | None:
+    """Compatibility wrapper for tests that inspect the first resolved live leg."""
+    targets = _resolve_probe_targets(sources, source_index)
+    if not targets:
+        return None
+    _name, conn, tables, column = targets[0]
+    return conn, tables, column
 
 
 def _write_probe_model(migration: Path, m_query: str, table: str, column: str) -> Path:
@@ -801,7 +834,7 @@ def _default_port(conn: dict) -> int:
     if explicit.isdigit():
         return int(explicit)
     klass = (conn.get("class") or "").lower()
-    if klass in {"sqlserver", "azure_sql_dw", "azuresqldw"}:
+    if klass in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
         return 1433
     return 443
 
@@ -843,19 +876,16 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
             bundle.label,
         )
         return 1
-    live = [
-        i
-        for i, s in enumerate(sources)
-        if ((s.get("connection", {}) or {}).get("powerbi_target") or "") == "live_source"
-    ]
     if source_index is not None:
         live = [source_index]
+    else:
+        live = [i for i, _source in enumerate(sources) if _resolve_probe_targets(sources, i)]
     if not live:
         log.info("PROBE: SKIPPED no live sources in this spec - nothing to probe")
         return 0
 
     log.info("probing %d live source(s): %s", len(live), live)
-    contacted = 0
+    proved_names: list[str] = []
     for idx in live:
         rc, verdict = _probe_one(bundle.migration_dir, sources, idx, timeout_sec, keep)
         if rc != 0:
@@ -865,16 +895,10 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
         # SKIPPED means `_resolve_probe_target` found nothing to reach, so no endpoint was contacted
         # and this source proves nothing. Counting it would re-open #353 for exactly the shape that
         # exposed it: a `federated` outer connection carrying no server at all.
-        contacted += verdict != "SKIPPED"
+        if verdict != "SKIPPED":
+            proved_names.extend(name for name, _leg, _tables, _column in _resolve_probe_targets(sources, idx))
 
-    # `source_index is None` IS the predicate -- see `_lift_gate`. Anything derived from `live`
-    # instead is fail-open: a superset test over bundle indices cleared on ZERO proof.
-    if not _lift_gate(
-        bundle.migration_dir,
-        f"{len(live)} live source(s)",
-        proved_all=source_index is None,
-        contacted=contacted,
-    ):
+    if not _lift_gate(bundle.migration_dir, f"{len(proved_names)} live source leg(s)", proved_names):
         log.warning(
             "PROBE: %d source(s) reachable, but the gate is STILL ARMED and nothing was earned. "
             "Do not treat this as a green light.",
@@ -1008,11 +1032,25 @@ def _probe_one(
     spec error worth retrying past, while a credential or reachability failure is the answer and
     retrying it would just cost another Desktop launch per table.
     """
-    target = _resolve_probe_target(sources, source_index)
-    if target is None:
+    targets = _resolve_probe_targets(sources, source_index)
+    if not targets:
         return 0, "SKIPPED"
-    conn, tables, column = target
+    for leg_name, conn, tables, column in targets:
+        rc, verdict = _probe_leg(migration, leg_name, conn, (tables, column), (timeout_sec, keep))
+        if rc != 0:
+            return rc, verdict
+    return 0, "DATA_OK"
 
+
+def _probe_leg(
+    migration: Path,
+    leg_name: str,
+    conn: dict,
+    target: tuple[list[dict], str],
+    opts: tuple[int, bool],
+) -> tuple[int, str]:
+    """Probe one resolved connection leg."""
+    tables, column = target
     server = normalize_host(conn.get("server") or "")
     if server and not _host_resolves(server):
         log.error(
@@ -1024,8 +1062,9 @@ def _probe_one(
         _record_attempt(migration, "UNREACHABLE", f"{server} -> UNREACHABLE (DNS)")
         return 1, "UNREACHABLE"
 
+    log.info("probing leg: %s", leg_name)
     for i, table in enumerate(tables):
-        rc, verdict = _probe_one_table(migration, conn, (table, column), (timeout_sec, keep))
+        rc, verdict = _probe_one_table(migration, conn, (table, column), opts)
         if rc == 0:
             custom_tables = [candidate for candidate in tables[i + 1 :] if candidate.get("custom_sql")]
             if not custom_tables:
@@ -1036,7 +1075,7 @@ def _probe_one(
                 table.get("name"),
                 len(custom_tables),
             )
-            return _probe_one_table(migration, conn, (custom_tables[0], column), (timeout_sec, keep))
+            return _probe_one_table(migration, conn, (custom_tables[0], column), opts)
         if verdict != "BAD_TABLE" or i == len(tables) - 1:
             return rc, verdict
         log.warning("table '%s' not found at the source - trying the next one in the spec", table.get("name"))

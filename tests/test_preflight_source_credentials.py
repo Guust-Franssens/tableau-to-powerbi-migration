@@ -23,6 +23,7 @@ reappears.
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,8 @@ if str(SCRIPTS) not in sys.path:
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
 # pylint: disable=wrong-import-position,import-error
 from connection_target import FLAT_FILE, LIVE_SOURCE, powerbi_target
-from preflight_source_credentials import classify_source
+from credential_gate import clear_block
+from preflight_source_credentials import GATE_MARKER, classify_source, cmd_classify
 
 # (class, mode, expected verdict). The cases that used to be wrong are marked.
 CASES = [
@@ -52,6 +54,8 @@ CASES = [
     # --- genuine flat files stay credential-free, in either mode ---------------------------------
     ("excel-direct", "extract", "no-creds"),
     ("textscan", "live", "no-creds"),
+    ("ogr", "extract", "no-creds"),
+    ("ogrdirect", "extract", "no-creds"),
 ]
 
 
@@ -107,3 +111,59 @@ def test_an_unknown_class_is_never_silently_cleared() -> None:
     """
     verdict, _ = classify_source({"class": "brand-new-warehouse-2031", "mode": "live"})
     assert verdict != "no-creds"
+
+
+def test_unkeyable_live_source_arms_gate_instead_of_clearing(tmp_path: Path, caplog) -> None:
+    """A known-live source whose key cannot be derived must stay blocking."""
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "name": "OnlyName",
+                        "connection": {"class": "sqlserver", "mode": "live", "powerbi_target": LIVE_SOURCE},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    caplog.set_level("INFO", logger="preflight_source_credentials")
+
+    try:
+        assert cmd_classify(spec) == 1
+        marker = json.loads((tmp_path / GATE_MARKER).read_text(encoding="utf-8"))
+        assert marker["sources"] == ["unstable-source[0].connection[0]"]
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "No live sources" not in messages
+    finally:
+        clear_block(tmp_path, "test-teardown")
+
+
+def test_missing_class_does_not_launder_live_source_to_extract_only(tmp_path: Path, caplog) -> None:
+    """HIGH 1: missing class is unprobeable/blocking, not review/no-live-sources."""
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "name": "OnlyName",
+                        "connection": {"server": "sql.example", "mode": "live", "powerbi_target": LIVE_SOURCE},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    caplog.set_level("INFO", logger="preflight_source_credentials")
+
+    try:
+        assert cmd_classify(spec) == 1
+        marker = json.loads((tmp_path / GATE_MARKER).read_text(encoding="utf-8"))
+        assert marker["sources"] == ["unstable-source[0].connection[0]"]
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "No live sources" not in messages
+    finally:
+        clear_block(tmp_path, "test-teardown")

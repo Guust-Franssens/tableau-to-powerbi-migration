@@ -21,7 +21,7 @@ from connection_target import FLAT_FILE, LIVE_SOURCE, powerbi_target
 from engine_source import engine_provenance
 
 ENGINE_RECEIPT = "engine-output-receipt.json"
-ENGINE_OUTPUT_DIRS = frozenset({"pbip", "semantic_models", "data"})
+ENGINE_OUTPUT_DIRS = frozenset({"pbip", "reports", "semantic_models", "data"})
 ARTIFACT_SUFFIXES = frozenset(
     {".tmdl", ".pbism", ".pbir", ".pbip", ".csv", ".tsv", ".parquet", ".hyper", ".xlsx", ".xls", ".dat"}
 )
@@ -258,6 +258,17 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def is_report_definition_json(path: Path) -> bool:
+    """Whether `path` is PBIR report-definition JSON, not arbitrary metadata JSON."""
+    parts = path.parts
+    return path.suffix.lower() == ".json" and "definition" in parts and any(part.endswith(".Report") for part in parts)
+
+
+def is_engine_artifact(path: Path) -> bool:
+    """Files that constitute native engine output for receipt and gate verification."""
+    return path.suffix.lower() in ARTIFACT_SUFFIXES or is_report_definition_json(path)
+
+
 def engine_artifact_records(bundle_dir: Path) -> list[dict[str, Any]]:
     """List native engine artifacts with size and hash for the provenance receipt."""
     records: list[dict[str, Any]] = []
@@ -265,7 +276,7 @@ def engine_artifact_records(bundle_dir: Path) -> list[dict[str, Any]]:
         root = bundle_dir / root_name
         if not root.exists():
             continue
-        for path in sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in ARTIFACT_SUFFIXES):
+        for path in sorted(p for p in root.rglob("*") if p.is_file() and is_engine_artifact(p)):
             records.append(
                 {
                     "path": path.relative_to(bundle_dir).as_posix(),
