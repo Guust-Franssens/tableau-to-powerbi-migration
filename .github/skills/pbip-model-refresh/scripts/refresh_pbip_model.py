@@ -146,9 +146,11 @@ from _credential_modal import (
     CredentialUnknownError,
     DesktopGoneError,
     DesktopUnreadyError,
-    DialogBlockedError,
-    describe_blocking_dialog,
+    DialogFinding,
+    DialogFoundError,
+    describe_dialog_finding,
     describe_modal,
+    dialog_guidance,
     inspect_credential_modal,
     join_with_credential_poll,
     print_indeterminate_state_notice,
@@ -218,11 +220,17 @@ def _credential_state(pid: int) -> CredentialDetection:
 
 
 def _raise_if_blocked(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
-    """Raise the appropriate exception when ``state`` contains a blocking or terminal condition."""
+    """Raise the appropriate exception for a t=0 observation that must stop the run before it starts.
+
+    Unlike the in-flight poll (``_credential_modal._raise_detection``), a :class:`DialogFinding` DOES
+    raise here: at t=0 the dialog is somebody else's, we have not started anything, and stacking a
+    refresh on top of an unclassified dialog is exactly what the 2026-08-28 field report had to unpick
+    by hand. Mid-wait the same finding is latched instead, so it cannot abort a refresh already running.
+    """
     if state.modal is not None:
         raise CredentialMissingError(pid, state.modal, source_hint)
-    if state.blocking_dialog is not None:
-        raise DialogBlockedError(pid, state.blocking_dialog)
+    if state.dialog is not None:
+        raise DialogFoundError(pid, state.dialog)
     if state.process_gone is not None:
         raise DesktopGoneError(pid, state.process_gone)
 
@@ -232,16 +240,29 @@ def _emit_credential_missing(pid: int, modal: CredentialModal, source_hint: str 
     print(f"REFRESH: CREDENTIAL_MISSING pid={pid}; {describe_modal(modal, source_hint)}")
 
 
-def _emit_blocked_by_dialog(pid: int, dialog) -> None:
-    """Print the distinct generic blocking-dialog verdict."""
-    print(f"REFRESH: BLOCKED_BY_DIALOG pid={pid}; {describe_blocking_dialog(dialog)}")
+def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
+    """Print the verdict for a dialog that could NOT be shown to be harmless (issue #376).
+
+    Replaces ``_emit_blocked_by_dialog``. The token now names what was actually observed -
+    ``DIALOG_NEEDS_HUMAN`` / ``DIALOG_UNREADABLE`` / ``DIALOG_UNRECOGNIZED`` / ``REFRESH_IN_PROGRESS``,
+    the same vocabulary ``probe_desktop_credential.ps1`` speaks - instead of ``BLOCKED_BY_DIALOG``,
+    which this module emitted at exit 1 from a SIZE-ONLY test and which the parent classifier maps to
+    ``NO_CREDENTIAL``. Nothing here can establish that a dialog BLOCKS anything, so nothing here may
+    enter the hard-stop band; all of these are exit 3.
+
+    Both lines are deliberately MARKER-FREE (issue #153): a failing child's whole transcript is scanned
+    as free text by ``probe_live_source``, so prose naming a sign-on problem would re-create exactly
+    the false hard stop this verdict exists to avoid.
+    """
+    print(f"REFRESH: {finding.verdict} pid={pid}; {describe_dialog_finding(finding)}")
+    print(f"  {dialog_guidance(finding)}")
 
 
 def _emit_credential_unknown(pid: int, reason: str) -> None:
     """Print the distinct indeterminate verdict for a latched, unrecoverable UNKNOWN (issue #154).
 
-    ``CREDENTIAL_UNKNOWN`` is a THIRD verdict, deliberately not collapsed into ``BLOCKED_BY_DIALOG``
-    (we did not SEE a block) nor into a bare ``TIMEOUT`` (we did not observe a healthy source): the
+    ``CREDENTIAL_UNKNOWN`` is a THIRD verdict, deliberately not collapsed into a dialog finding
+    (we did not SEE a dialog) nor into a bare ``TIMEOUT`` (we did not observe a healthy source): the
     owner window went iconic, hiding its owned modal dialogs, and that evidence provably does not come
     back. ``reason`` is the detector's marker-free string, and the guidance below is marker-free too,
     so the classification is carried STRUCTURALLY by the ``REFRESH: CREDENTIAL_UNKNOWN`` verdict line
@@ -1617,9 +1638,9 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         if isinstance(exc, CredentialMissingError):
             _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
             return 1
-        if isinstance(exc, DialogBlockedError):
-            _emit_blocked_by_dialog(exc.pid, exc.dialog)
-            return 1
+        if isinstance(exc, DialogFoundError):
+            _emit_dialog_finding(exc.pid, exc.finding)
+            return 3
         if isinstance(exc, CredentialUnknownError):
             _emit_credential_unknown(exc.pid, exc.reason)
             return 3
@@ -1852,9 +1873,9 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     if credential_state.modal is not None:
         _emit_credential_missing(pid, credential_state.modal, source_hint)
         return 1
-    if credential_state.blocking_dialog is not None:
-        _emit_blocked_by_dialog(pid, credential_state.blocking_dialog)
-        return 1
+    if credential_state.dialog is not None:
+        _emit_dialog_finding(pid, credential_state.dialog)
+        return 3
     if credential_state.process_gone is not None:
         _emit_desktop_gone(pid, credential_state.process_gone)
         return 2

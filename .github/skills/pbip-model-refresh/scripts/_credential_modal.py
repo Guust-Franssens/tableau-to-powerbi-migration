@@ -1,8 +1,43 @@
 """Credential modal detection shared by the PBIP refresh/query scripts.
 
-The regex in ``credential_modal_signature.regex`` is the same signature used by
-``probe_desktop_credential.ps1``. Keep the detector's matching rule here and the signature in that
-resource so the fast Python checks and the PowerShell arbiter cannot drift.
+All three regexes in ``*_signature.regex`` beside this file are the same signatures used by
+``probe_desktop_credential.ps1``. Keep the detector's matching rules here and the signatures in those
+resources so the fast Python checks and the PowerShell arbiter cannot drift.
+
+⚠️ **A big window is NOT evidence of anything (issue #376).** Until this module was fixed,
+``inspect_credential_modal`` returned the FIRST visible non-main window >= 100x100 as a
+``blocking_dialog``, and both callers mapped that to ``BLOCKED_BY_DIALOG`` at **exit 1** - the same
+hard-stop band as a real credential wall, which ``probe_live_source`` then classifies ``NO_CREDENTIAL``
+("you may NOT build; a human must sign in"). A Power BI Refresh progress dialog satisfies >= 100x100
+trivially, so a working refresh could halt a migration and send someone to a sign-in screen that was
+never on show. That is the same defect #367 removed from the PowerShell arbiter, on a more dangerous
+path: this detector feeds ``probe_desktop_query.py``, the gate of record.
+
+**The burden of proof runs ONE WAY, exactly as in the arbiter:** a dialog is dismissed only when its
+CONTENT positively reads as recognised progress status. It is never dismissed because the caption
+looked reassuring, and never because we merely read *something*. Everything we could not account for -
+unreadable, caption-only, unrecognised, or progress text mixed with prose - surfaces as its own
+non-credential finding at **exit 3**, which is loud and recoverable, and never as a credential wall.
+
+Three deliberate divergences from ``probe_desktop_credential.ps1``, each because this detector has
+strictly LESS evidence than the arbiter (Win32 child-HWND text only; no UI Automation):
+
+* **No prose join.** The arbiter joins non-interactive elements before matching the credential
+  signature, which needs a control-type signal to exclude an interposed ``Cancel``. Win32 gives no
+  control type, so the only join available here is the naive whole-window one the arbiter discarded in
+  review - and a join can MANUFACTURE a phrase (two adjacent labels ``Account`` + ``Key`` join to the
+  signature ``Account Key``). That error would land on the one verdict issue #376 says to err away
+  from, so matching here stays per-element. The recall this costs routes to ``unrecognized`` /
+  ``unreadable`` (exit 3, loud), and the arbiter - which HAS the control-type signal - is the
+  escalation path.
+* **No enabled-owner exoneration.** The arbiter uses modality one way: an ENABLED owner proves a
+  window blocks nothing. That is a SUPPRESSION path, it needs Win32 owner/enabled state this module
+  does not harvest, and it cannot be verified here without a live Desktop. Omitting it only ever
+  costs one more exit 3.
+* **No ``benign-unverified`` kind.** The arbiter needs it because a UIA harvest can be truncated while
+  still returning text. Here a text read that throws fails the WHOLE enumeration
+  (``Win32EnumerationError`` -> ``unknown_reason``), so a partial read cannot reach the classifier in
+  the first place.
 """
 
 from __future__ import annotations
@@ -23,6 +58,8 @@ from pathlib import Path
 from _lock import _process_alive
 
 SIGNATURE_PATH = Path(__file__).resolve().with_name("credential_modal_signature.regex")
+BENIGN_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_dialog_signature.regex")
+BLOCKING_SIGNATURE_PATH = Path(__file__).resolve().with_name("blocking_prompt_signature.regex")
 CONNECTOR_SOURCE_RE = re.compile(
     r"\b(?P<kind>Sql\.Database|Snowflake\.Databases|Databricks\.[A-Za-z]+|Odbc\.DataSource|Web\.Contents)\s*\("
     r"\s*(?:\"(?P<double>[^\"]+)\"|'(?P<single>[^']+)')?",
@@ -57,10 +94,28 @@ class CredentialModal:
 
 
 @dataclass(frozen=True)
-class BlockingDialog:
-    """Evidence that Desktop is blocked by a visible dialog whose text may be unreadable."""
+class DialogFinding:
+    """A candidate dialog we could NOT dismiss, plus the classification that says why.
 
+    Replaces the old ``BlockingDialog`` (issue #376). The rename is the finding: this module can
+    establish that a window is UP and what it SAYS, never that it BLOCKS anything - so every
+    ``BLOCKED_BY_DIALOG`` it used to emit was an inference dressed as a finding, in the one verdict
+    class the toolkit treats as a hard stop.
+
+    ``kind`` is the classifier's own vocabulary (see :func:`classify_dialog`); ``verdict`` is the
+    machine-readable token the callers print. Both are carried so a caller can print the token and a
+    reader can still see which evidence produced it.
+    """
+
+    kind: str
+    verdict: str
     window: DesktopWindow
+    evidence: str = ""
+
+    @property
+    def excerpt(self) -> str:
+        """Short UI text excerpt suitable for a verdict line."""
+        return self.evidence[:80]
 
 
 @dataclass(frozen=True)
@@ -68,7 +123,7 @@ class CredentialDetection:
     """Credential-dialog inspection result for a Desktop PID."""
 
     modal: CredentialModal | None = None
-    blocking_dialog: BlockingDialog | None = None
+    dialog: DialogFinding | None = None
     unknown_reason: str | None = None
     desktop_unready: str | None = None
     process_gone: str | None = None
@@ -85,13 +140,21 @@ class CredentialMissingError(RuntimeError):
         super().__init__(describe_modal(modal, source_hint))
 
 
-class DialogBlockedError(RuntimeError):
-    """Power BI Desktop is showing an unreadable/non-credential blocking dialog."""
+class DialogFoundError(RuntimeError):
+    """Power BI Desktop is showing a dialog that could NOT be shown to be harmless (issue #376).
 
-    def __init__(self, pid: int, dialog: BlockingDialog) -> None:
+    Deliberately not named "blocked": this detector reads Win32 child-HWND text and can establish that
+    a window is up and what it says, never that it blocks anything. It replaces ``DialogBlockedError``,
+    whose ``BLOCKED_BY_DIALOG`` verdict sat in the exit-1 hard-stop band and was reached from a
+    SIZE-ONLY test - so a Power BI Refresh progress dialog produced the same verdict as a sign-in
+    prompt. Every outcome here is now exit 3: a human should look at the screen, but no sign-in is
+    implied and nothing about the data source has been established.
+    """
+
+    def __init__(self, pid: int, finding: DialogFinding) -> None:
         self.pid = pid
-        self.dialog = dialog
-        super().__init__(describe_blocking_dialog(dialog))
+        self.finding = finding
+        super().__init__(describe_dialog_finding(finding))
 
 
 class CredentialUnknownError(RuntimeError):
@@ -100,7 +163,7 @@ class CredentialUnknownError(RuntimeError):
     Raised by :func:`join_with_credential_poll` when it LATCHED an indeterminate observation - the
     owner window went iconic, which hides its owned modal dialogs from enumeration - that a later
     ``none`` could not erase. It is a mandatory THIRD outcome, distinct from a detected block
-    (:class:`CredentialMissingError` / :class:`DialogBlockedError`) and from a healthy deadline:
+    (:class:`CredentialMissingError` / :class:`DialogFoundError`) and from a healthy deadline:
     minimizing then restoring the owner destroys the dialog evidence for good (measured 2026-08-14,
     issue #154), so ``none`` after the fact is indistinguishable from a genuinely healthy Desktop and
     is NOT proof of health. Reporting a bare timeout here would blame a slow source for what is really
@@ -153,6 +216,58 @@ DESKTOP_MAIN_CLASS_PREFIX = "WindowsForms10.Window.8"
 MIN_DIALOG_WIDTH = 100
 MIN_DIALOG_HEIGHT = 100
 
+# A content element with at least this many words is PROSE - something written to be read by a human.
+# If it is not itself a recognised progress status, the window is not provably a progress dialog
+# however much progress text sits beside it. Mirrors `$MinPromptWords` in probe_desktop_credential.ps1.
+# The cost of it firing wrongly is one more exit 3, which is loud and recoverable.
+MIN_PROMPT_WORDS = 5
+
+# Classifier vocabulary, shared verbatim with the PowerShell arbiter's `Get-DialogClassification` so a
+# reader moving between the two detectors meets one set of words, not two.
+DIALOG_KIND_CREDENTIAL = "credential"
+DIALOG_KIND_NEEDS_HUMAN = "needs-human"
+DIALOG_KIND_MIXED_CONTENT = "mixed-content"
+DIALOG_KIND_BENIGN = "benign"
+DIALOG_KIND_BENIGN_TITLE_ONLY = "benign-title-only"
+DIALOG_KIND_UNREADABLE = "unreadable"
+DIALOG_KIND_UNRECOGNIZED = "unrecognized"
+
+# Machine-readable verdict tokens, also shared with the arbiter. `BLOCKED_BY_DIALOG` is deliberately
+# absent (issue #376): it is the token this module used to emit at exit 1 from a size-only test.
+VERDICT_CREDENTIAL_MISSING = "CREDENTIAL_MISSING"
+VERDICT_DIALOG_NEEDS_HUMAN = "DIALOG_NEEDS_HUMAN"
+VERDICT_DIALOG_UNREADABLE = "DIALOG_UNREADABLE"
+VERDICT_DIALOG_UNRECOGNIZED = "DIALOG_UNRECOGNIZED"
+VERDICT_REFRESH_IN_PROGRESS = "REFRESH_IN_PROGRESS"
+
+# kind -> the token a caller prints for it. The unreadable BAND (nothing readable, or a reassuring
+# CAPTION with no content behind it) is deliberately NOT folded into `unrecognized`: "we could not
+# establish it" is a weaker state of knowledge than "we read it and it did not match", and collapsing
+# the two is the bug this repo keeps finding (absent is not empty).
+DIALOG_KIND_VERDICTS = {
+    DIALOG_KIND_CREDENTIAL: VERDICT_CREDENTIAL_MISSING,
+    DIALOG_KIND_NEEDS_HUMAN: VERDICT_DIALOG_NEEDS_HUMAN,
+    DIALOG_KIND_UNREADABLE: VERDICT_DIALOG_UNREADABLE,
+    DIALOG_KIND_BENIGN_TITLE_ONLY: VERDICT_DIALOG_UNREADABLE,
+    DIALOG_KIND_MIXED_CONTENT: VERDICT_DIALOG_UNRECOGNIZED,
+    DIALOG_KIND_UNRECOGNIZED: VERDICT_DIALOG_UNRECOGNIZED,
+    DIALOG_KIND_BENIGN: VERDICT_REFRESH_IN_PROGRESS,
+}
+
+# Fold order for `dialog_verdict`, after `credential` (which short-circuits). It is not arbitrary:
+# `benign` is the ONLY kind carrying positive evidence of harmlessness, so it must never outrank a
+# window we could not account for - otherwise one progress dialog masks a real modal. The unreadable
+# band outranks `unrecognized` because it is the weaker state of knowledge, and the weaker state is
+# what must stay visible.
+DIALOG_KIND_PRECEDENCE = (
+    DIALOG_KIND_NEEDS_HUMAN,
+    DIALOG_KIND_UNREADABLE,
+    DIALOG_KIND_BENIGN_TITLE_ONLY,
+    DIALOG_KIND_MIXED_CONTENT,
+    DIALOG_KIND_UNRECOGNIZED,
+    DIALOG_KIND_BENIGN,
+)
+
 
 class Win32EnumerationError(RuntimeError):
     """Win32 window enumeration failed before a reliable modal verdict could be formed."""
@@ -165,31 +280,194 @@ def _winenumproc_type():
     return ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 
+def _compile_signature(path: Path) -> re.Pattern[str]:
+    """Compile one shared ``*_signature.regex`` resource."""
+    return re.compile(path.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+
+
 def credential_signature() -> re.Pattern[str]:
     """Compile the shared credential-dialog signature."""
-    return re.compile(SIGNATURE_PATH.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+    return _compile_signature(SIGNATURE_PATH)
 
 
-def match_credential_modal(windows: Iterable[DesktopWindow]) -> CredentialModal | None:
-    """Return the first window whose descendant text matches the shared credential signature."""
+def benign_dialog_signature() -> re.Pattern[str]:
+    """Compile the shared progress-dialog ("Power BI is working") signature.
+
+    ⚠️ This is the ONLY file that can cause a dialog to be dismissed, so a broad pattern in it is the
+    one way to hide a genuine blocker. Its alternatives are whole-element and anchored on purpose:
+    ``\\bLoading data\\b`` once matched inside *"Loading data requires authentication"*.
+    """
+    return _compile_signature(BENIGN_SIGNATURE_PATH)
+
+
+def blocking_prompt_signature() -> re.Pattern[str]:
+    """Compile the shared signature for KNOWN human-blocking prompts that are not sign-in prompts.
+
+    The native-database-query approval modal above all: migrated custom-SQL sources emit exactly the
+    shape that triggers it, and this bundle's own guidance says to check for it before concluding
+    anything about a data source. Matched BEFORE the benign signature, so one progress element in the
+    same window cannot erase it.
+    """
+    return _compile_signature(BLOCKING_SIGNATURE_PATH)
+
+
+def normalize_texts(texts: Iterable[str]) -> tuple[str, ...]:
+    """Whitespace-normalised, de-duplicated, order-preserving text (mirrors ``Get-NormalizedText``)."""
+    clean: list[str] = []
+    for text in texts:
+        if not text:
+            continue
+        normalized = re.sub(r"\s+", " ", str(text)).strip()
+        if normalized and normalized not in clean:
+            clean.append(normalized)
+    return tuple(clean)
+
+
+def dialog_text_set(window: DesktopWindow) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Return ``(title, all_texts, content_texts)`` for ``window``.
+
+    ``content`` is everything that is NOT the caption, and it is the ONLY view the benign signature may
+    read. A caption cannot establish that a dialog is harmless: a real owned WPF modal captioned
+    ``Refresh`` whose content read ``Enter your credentials`` was dismissed on exactly that mistake in
+    the arbiter's review. Dropping content that merely EQUALS the caption errs in the safe direction -
+    it can only make a window harder to dismiss, never easier.
+    """
+    title = re.sub(r"\s+", " ", window.title or "").strip()
+    all_texts = normalize_texts(window.texts)
+    content = tuple(text for text in all_texts if text != title)
+    return title, all_texts, content
+
+
+def _match_dialog_signatures(window: DesktopWindow, texts: Iterable[str]) -> DialogFinding | None:
+    """First ``credential`` then ``needs-human`` signature hit across ``texts``, or ``None``.
+
+    Order is load-bearing: a window can carry both, and the credential signature is the only one that
+    earns a hard stop. ``needs-human`` is tested BEFORE any benign scan so one progress element in the
+    same window cannot erase a known human-blocking prompt (the round-3 defect in #390).
+    """
+    all_texts = tuple(texts)
     signature = credential_signature()
-    for window in windows:
-        for text in window.texts:
-            if text and signature.search(text):
-                return CredentialModal(matched_text=text, window=window)
+    for text in all_texts:
+        if signature.search(text):
+            return _finding(DIALOG_KIND_CREDENTIAL, window, text)
+    blocking = blocking_prompt_signature()
+    for text in all_texts:
+        if blocking.search(text):
+            return _finding(DIALOG_KIND_NEEDS_HUMAN, window, text)
     return None
 
 
-def blocking_dialog_candidates(windows: Iterable[DesktopWindow]) -> list[BlockingDialog]:
-    """Visible non-main, non-zero-size windows that can block Desktop operations."""
-    candidates: list[BlockingDialog] = []
+def classify_dialog(window: DesktopWindow) -> DialogFinding:
+    """Classify ONE candidate window. Only ``benign`` is dismissible, and only it needs positive proof.
+
+    Kinds, in the order they are tested (see the module docstring for the divergences from
+    ``probe_desktop_credential.ps1``):
+
+    ``credential``        the credential signature matched a text element -> hard stop.
+    ``needs-human``       a KNOWN human-blocking prompt that is not a sign-in prompt. Tested BEFORE
+                          benign so a progress element in the same window cannot erase it.
+    ``mixed-content``     progress text AND unaccounted prose in the same window. A first-match-wins
+                          loop would let one benign element erase everything after it, which is how
+                          ``Evaluating`` beside *"Permission is required to run this native database
+                          query"* cleared the arbiter at exit 0.
+    ``benign``            every content element is either recognised progress status or too short to be
+                          a human-directed prompt, AND at least one IS progress status. The one
+                          dismissible kind.
+    ``benign-title-only`` the CAPTION matched the benign signature and no content did. A caption is not
+                          content, so this joins the unreadable band.
+    ``unreadable``        no readable text at all.
+    ``unrecognized``      readable text that matched no signature: we looked, and it is not a sign-in
+                          prompt. Distinct from ``unreadable`` on purpose - absent is not empty.
+    """
+    title, all_texts, content = dialog_text_set(window)
+    signature_hit = _match_dialog_signatures(window, all_texts)
+    if signature_hit is not None:
+        return signature_hit
+
+    benign = benign_dialog_signature()
+    benign_hit: str | None = None
+    unaccounted: str | None = None
+    for text in content:
+        if benign.search(text):
+            if benign_hit is None:
+                benign_hit = text
+            continue
+        if unaccounted is None and len(text.split()) >= MIN_PROMPT_WORDS:
+            unaccounted = text
+    if benign_hit is not None:
+        if unaccounted is not None:
+            return _finding(DIALOG_KIND_MIXED_CONTENT, window, unaccounted)
+        return _finding(DIALOG_KIND_BENIGN, window, benign_hit)
+    if title and benign.search(title):
+        return _finding(DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
+    if not all_texts:
+        return _finding(DIALOG_KIND_UNREADABLE, window, "")
+    return _finding(DIALOG_KIND_UNRECOGNIZED, window, all_texts[0])
+
+
+def _finding(kind: str, window: DesktopWindow, evidence: str) -> DialogFinding:
+    """Build a :class:`DialogFinding` with the verdict token this ``kind`` maps to."""
+    return DialogFinding(kind=kind, verdict=DIALOG_KIND_VERDICTS[kind], window=window, evidence=evidence)
+
+
+def dialog_candidates(windows: Iterable[DesktopWindow]) -> list[DesktopWindow]:
+    """Windows big enough, and of the right class, to be worth CLASSIFYING.
+
+    Size selects what to LOOK AT; it is not itself evidence of anything (issue #376). The old
+    ``blocking_dialog_candidates`` returned the first window past this filter as a blocking dialog,
+    which is why a Refresh progress dialog read as a credential wall at exit 1.
+    """
+    return [
+        window
+        for window in windows
+        if not window.class_name.startswith(DESKTOP_MAIN_CLASS_PREFIX)
+        and window.width >= MIN_DIALOG_WIDTH
+        and window.height >= MIN_DIALOG_HEIGHT
+    ]
+
+
+def dialog_verdict(
+    windows: Iterable[DesktopWindow],
+    *,
+    operation_in_flight: bool = False,
+) -> DialogFinding | None:
+    """Fold per-window classifications into ONE finding, or ``None`` when nothing needs reporting.
+
+    ``operation_in_flight`` is set only once THIS process has started the refresh/query it is waiting
+    on. There, a PROVEN-benign progress dialog is our own and is ignored - and nothing else is. At t=0
+    it is somebody else's, and stacking a second refresh on it is exactly what the 2026-08-28 field
+    report had to unpick by hand.
+    """
+    found: dict[str, DialogFinding] = {}
+    for window in dialog_candidates(windows):
+        finding = classify_dialog(window)
+        if finding.kind == DIALOG_KIND_CREDENTIAL:
+            return finding
+        found.setdefault(finding.kind, finding)
+    for kind in DIALOG_KIND_PRECEDENCE:
+        if kind not in found:
+            continue
+        if kind == DIALOG_KIND_BENIGN and operation_in_flight:
+            continue
+        return found[kind]
+    return None
+
+
+def match_credential_modal(windows: Iterable[DesktopWindow]) -> CredentialModal | None:
+    """First credential-signature match across EVERY window - any class, any size.
+
+    Deliberately NOT restricted to :func:`dialog_candidates` (issue #376). It used to be, and that
+    made the 100x100 filter gate the hard stop as well as the classification: a credential prompt in a
+    smaller window returned NO FINDING AT ALL, i.e. a silent false negative on the one verdict that
+    matters most. ``Test-CredentialModal`` in the arbiter has always scanned every window; this now
+    matches it.
+    """
+    signature = credential_signature()
     for window in windows:
-        if window.class_name.startswith(DESKTOP_MAIN_CLASS_PREFIX):
-            continue
-        if window.width < MIN_DIALOG_WIDTH or window.height < MIN_DIALOG_HEIGHT:
-            continue
-        candidates.append(BlockingDialog(window))
-    return candidates
+        for text in normalize_texts(window.texts):
+            if signature.search(text):
+                return CredentialModal(matched_text=text, window=window)
+    return None
 
 
 def _hwnd_value(hwnd) -> int:
@@ -323,20 +601,26 @@ def inspect_credential_modal(
     pid: int,
     enumerate_windows: WindowEnumerator = enumerate_pid_windows,
     process_is_alive: ProcessLivenessCheck = _process_alive,
+    *,
+    operation_in_flight: bool = False,
 ) -> CredentialDetection:
-    """Inspect ``pid`` for a credential modal, preserving indeterminate states."""
+    """Inspect ``pid`` for a credential modal, preserving indeterminate states.
+
+    Order is load-bearing and mirrors the arbiter's main flow: credential signature (every window, any
+    size) -> a classified dialog finding -> minimized owner -> zero windows. ``operation_in_flight``
+    is forwarded to :func:`dialog_verdict`; see :func:`inspect_credential_modal_in_flight`.
+    """
     # pylint: disable=too-many-return-statements
     try:
         windows = tuple(enumerate_windows(pid))
     except Win32EnumerationError as exc:
         return CredentialDetection(unknown_reason=f"window enumeration failed: {exc}")
-    candidates = blocking_dialog_candidates(windows)
-    candidate_windows = [candidate.window for candidate in candidates]
-    modal = match_credential_modal(candidate_windows)
+    modal = match_credential_modal(windows)
     if modal is not None:
         return CredentialDetection(modal=modal, windows=windows)
-    if candidates:
-        return CredentialDetection(blocking_dialog=candidates[0], windows=windows)
+    finding = dialog_verdict(windows, operation_in_flight=operation_in_flight)
+    if finding is not None:
+        return CredentialDetection(dialog=finding, windows=windows)
     minimized = [
         window for window in windows if window.minimized and window.class_name.startswith(DESKTOP_MAIN_CLASS_PREFIX)
     ]
@@ -382,12 +666,73 @@ def describe_modal(modal: CredentialModal, source_hint: str | None = None) -> st
     return f"{source} window title={title!r}, class={window.class_name!r}, size={size}, text={modal.excerpt!r}"
 
 
-def describe_blocking_dialog(dialog: BlockingDialog) -> str:
-    """Human-readable evidence for an unreadable/non-credential blocking dialog."""
-    window = dialog.window
+def describe_dialog_finding(finding: DialogFinding) -> str:
+    """Human-readable evidence for a dialog we could not dismiss."""
+    window = finding.window
     size = f"{window.width}x{window.height}" if window.width and window.height else "unknown size"
     title = window.title or "(empty title)"
-    return f"window title={title!r}, class={window.class_name!r}, size={size}, text=<unreadable or non-credential>"
+    return (
+        f"kind={finding.kind}, window title={title!r}, class={window.class_name!r}, "
+        f"size={size}, evidence={finding.excerpt!r}"
+    )
+
+
+# Per-kind operator guidance. Every string here is deliberately MARKER-FREE (issue #153): it must not
+# contain any `probe_live_source.CREDENTIAL_MARKERS` substring - "credential", "sign in", "signed in",
+# "authentication", "login", "oauth", "access token", "unauthorized" - because the parent classifier
+# scans a failing child's whole transcript as free text. These verdicts mean "we could not probe", and
+# prose that reads as a sign-on problem would relabel them the very hard stop they exist to avoid.
+# `tests/test_probe_live_source_verdict.py` drives the real emitters through the real classifier so
+# this property is gated rather than merely intended.
+DIALOG_KIND_GUIDANCE = {
+    DIALOG_KIND_NEEDS_HUMAN: (
+        "this is a KNOWN human-blocking prompt (e.g. the native database query approval), not a "
+        "data-source sign-on prompt - approve it at the Desktop screen; no account details are implied"
+    ),
+    DIALOG_KIND_MIXED_CONTENT: (
+        "it shows refresh progress AND prose that is not progress status - a progress dialog does not "
+        "explain the rest of this window; look at the Desktop screen"
+    ),
+    DIALOG_KIND_BENIGN_TITLE_ONLY: (
+        "its CAPTION looks like a progress dialog, but no content confirmed it - a caption is not "
+        "content; look at the Desktop screen"
+    ),
+    DIALOG_KIND_UNREADABLE: (
+        "this window exposes no readable text, so it could not be classified at all - look at the Desktop screen"
+    ),
+    DIALOG_KIND_UNRECOGNIZED: (
+        "its text matched no known prompt signature, so nothing here says a person must supply account "
+        "details - look at the Desktop screen"
+    ),
+    DIALOG_KIND_BENIGN: (
+        "a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack "
+        "a second refresh on it"
+    ),
+}
+
+
+def dialog_guidance(finding: DialogFinding) -> str:
+    """Operator guidance for ``finding``, or a safe generic line for an unmapped kind."""
+    return DIALOG_KIND_GUIDANCE.get(finding.kind, "look at the Desktop screen before continuing")
+
+
+def inspect_credential_modal_in_flight(
+    pid: int,
+    enumerate_windows: WindowEnumerator = enumerate_pid_windows,
+    process_is_alive: ProcessLivenessCheck = _process_alive,
+) -> CredentialDetection:
+    """:func:`inspect_credential_modal` for a poll running AFTER this process started the operation.
+
+    The only difference is that a PROVEN-benign progress dialog is ignored: at that point it is almost
+    certainly the refresh we ourselves triggered, and aborting on it would abort a healthy run. Nothing
+    else is ignored - an unreadable, caption-only, mixed or unrecognised dialog still surfaces.
+    """
+    return inspect_credential_modal(
+        pid,
+        enumerate_windows,
+        process_is_alive,
+        operation_in_flight=True,
+    )
 
 
 def source_hint_from_model(model_dir: Path | None) -> str | None:
@@ -493,12 +838,31 @@ def print_indeterminate_state_notice(pid: int, reason: str) -> None:
     )
 
 
+def print_dialog_observed_notice(pid: int, finding: DialogFinding) -> None:
+    """Loudly note the first time a bounded wait sees a dialog it could not dismiss (issue #376).
+
+    Latched rather than acted on: it is not a sign-on prompt, so it must not abort a refresh that is
+    otherwise healthy and may still finish - but it also means "no modal appeared" is no longer
+    established, so a quiet deadline must not erase it either. Marker-free, and not a ``REFRESH:``
+    verdict line, so the parent classifier cannot mistake it for a verdict (issue #153).
+    """
+    print(
+        f"PID {pid} has a dialog up that could not be shown to be harmless ({finding.kind}); latching "
+        f"it - {dialog_guidance(finding)}. The wait continues, because this is not a prompt for account "
+        "details and an otherwise healthy refresh must not be aborted by it.",
+        flush=True,
+    )
+
+
 def _raise_detection(pid: int, state: CredentialDetection, source_hint: str | None) -> None:
-    """Raise for a visible block or definitive local Desktop failure."""
+    """Raise for the two observations that end a bounded wait IMMEDIATELY.
+
+    Only a matched credential signature and a confirmed-dead process qualify. A :class:`DialogFinding`
+    deliberately does NOT (issue #376): it is latched by :func:`join_with_credential_poll` and surfaced
+    at the deadline, so a dialog we could not read cannot cut short a refresh that was going to succeed.
+    """
     if state.modal is not None:
         raise CredentialMissingError(pid, state.modal, source_hint)
-    if state.blocking_dialog is not None:
-        raise DialogBlockedError(pid, state.blocking_dialog)
     if state.process_gone is not None:
         raise DesktopGoneError(pid, state.process_gone)
 
@@ -512,14 +876,24 @@ def join_with_credential_poll(
     heartbeat_seconds: float,
     poll_seconds: float,
     source_hint: str | None = None,
-    detector: Callable[[int], CredentialDetection] = inspect_credential_modal,
+    detector: Callable[[int], CredentialDetection] = inspect_credential_modal_in_flight,
     initial_state: CredentialDetection | None = None,
 ) -> bool:
     """Wait for ``worker`` while polling for a late credential dialog.
 
     Returns True when the worker finished before the wall-clock deadline, False when the deadline
     elapsed with the dialog state observably HEALTHY throughout. Raises immediately when the shared
-    detector sees a credential modal or a blocking dialog.
+    detector matches the credential signature, or confirms Desktop is gone.
+
+    The default ``detector`` is the IN-FLIGHT variant: by the time this runs, the refresh being waited
+    on is ours, so a PROVEN-benign progress dialog is ours too and is ignored. Nothing else is.
+
+    A :class:`DialogFinding` - a dialog we could not dismiss - is LATCHED, not raised (issue #376). It
+    is not a prompt for account details, so it must not abort a refresh that may still finish; but it
+    also means "no modal appeared" is no longer established, so it surfaces at the deadline as
+    :class:`DialogFoundError` rather than as a bare timeout blaming a slow source. Before #376 this
+    raised at once, on a SIZE-ONLY test, at the same exit code as a real sign-on wall - so a Power BI
+    refresh progress dialog aborted the very refresh it was reporting on.
 
     Indeterminate (``unknown_reason``) observations are LATCHED, not ignored (issue #154). The owner
     window going iconic hides its owned modal dialogs from enumeration, and - measured 2026-08-14 -
@@ -549,10 +923,15 @@ def join_with_credential_poll(
     seeded from ``initial_state`` so an observation made only by the caller's t=0 pre-check cannot be
     lost before the first poll.
     """
+    # Waived, not shaved: the locals are eight injected parameters plus one latch per observation this
+    # wait must not lose (unknown / desktop-unready / dialog). Folding the latches into a container
+    # would hide exactly the thing this function exists to keep visible.
+    # pylint: disable=too-many-locals
     started = time.monotonic()
     next_heartbeat = heartbeat_seconds
     latched_unknown = initial_state.unknown_reason if initial_state else None
     latched_desktop_unready = initial_state.desktop_unready if initial_state else None
+    latched_dialog = initial_state.dialog if initial_state else None
     while worker.is_alive():
         elapsed = time.monotonic() - started
         remaining = max(0.0, total_timeout - elapsed)
@@ -562,6 +941,9 @@ def join_with_credential_poll(
         elapsed = time.monotonic() - started
         state = detector(pid)
         _raise_detection(pid, state, source_hint)
+        if state.dialog is not None and latched_dialog is None:
+            latched_dialog = state.dialog
+            print_dialog_observed_notice(pid, state.dialog)
         if state.desktop_unready and latched_desktop_unready is None:
             latched_desktop_unready = state.desktop_unready
         if state.unknown_reason and latched_unknown is None:
@@ -576,6 +958,9 @@ def join_with_credential_poll(
         latched_desktop_unready = latched_desktop_unready or state.desktop_unready
         if latched_desktop_unready is not None:
             raise DesktopUnreadyError(pid, latched_desktop_unready)
+        latched_dialog = latched_dialog or state.dialog
+        if latched_dialog is not None:
+            raise DialogFoundError(pid, latched_dialog)
         latched_unknown = latched_unknown or state.unknown_reason
         if latched_unknown is not None:
             raise CredentialUnknownError(pid, latched_unknown)

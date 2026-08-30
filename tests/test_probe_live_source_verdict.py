@@ -297,24 +297,74 @@ def test_free_text_credential_marker_without_a_verdict_line_still_stops() -> Non
     assert verdict == "NO_CREDENTIAL"
 
 
-def test_blocked_by_dialog_does_not_clear_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A generic Desktop dialog is a human-blocked source, not reachable data."""
-    probe_live_source = _import_probe_live_source()
-    monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            args=["refresh"],
-            returncode=1,
-            stdout="REFRESH: BLOCKED_BY_DIALOG pid=111; window title='(empty title)'\n",
-            stderr="",
-        ),
-    )
+def test_a_dialog_finding_keeps_the_gate_shut_without_claiming_a_credential_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#376: the child's dialog verdicts must keep the gate shut, but must NOT read as a sign-in wall.
 
-    assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (  # noqa: SLF001
-        1,
-        "NO_CREDENTIAL",
-    )
+    Master emitted ``BLOCKED_BY_DIALOG`` at exit 1 from a SIZE-ONLY test, and this matcher maps that
+    token to ``NO_CREDENTIAL`` - whose directive is "you may NOT build; a human must sign in;
+    TERMINATE THE RUN NOW". A Power BI Refresh progress dialog trips that, so a working refresh could
+    halt a migration and send someone to a screen showing nothing of the sort.
+
+    The child line is HARVESTED from the real emitter with a real classification, never hand-written:
+    that is the #152/#153 discipline, and it is the only way this test can notice if the emitted
+    wording drifts back into the classifier's free-text credential markers.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+
+    for texts in ((), ("Save changes?", "Discard"), ("Refresh",), ("Refresh", "Evaluating...")):
+        finding = credential_modal.classify_dialog(
+            credential_modal.DesktopWindow("Refresh" if "Refresh" in texts else "", "Cls", 702, 355, texts)
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            refresh_pbip_model._emit_dialog_finding(111, finding)
+        stdout = buffer.getvalue()
+        monkeypatch.setattr(
+            probe_live_source.subprocess,
+            "run",
+            lambda *_args, _out=stdout, **_kwargs: subprocess.CompletedProcess(
+                args=["refresh"], returncode=3, stdout=_out, stderr=""
+            ),
+        )
+
+        rc, verdict = probe_live_source._refresh_and_classify(  # noqa: SLF001
+            123, "Orders", 1, network_fault_observed=False
+        )
+
+        assert rc == 1, f"{finding.verdict} must keep the gate shut"
+        assert verdict != "DATA_OK"
+        assert verdict != "NO_CREDENTIAL", (
+            f"{finding.verdict} asserted a credential wall we never observed; emitted line: {stdout!r}"
+        )
+        assert not probe_live_source._has_credential_stop_verdict(stdout)
+
+
+def test_every_dialog_guidance_string_is_marker_free() -> None:
+    """#376 x #153: the guidance printed under a dialog verdict must not fabricate a credential stop.
+
+    The kinds are DISCOVERED from the detector's own table rather than listed here, so a kind added
+    later is covered without anyone editing this test - the same "catches a newly-added X" discipline
+    as ``_detector_unknown_reasons``. This matters because ``_classify_failure`` scans a failing
+    child's WHOLE transcript as free text: one stray "credential"/"sign in"/"authentication" in the
+    reassuring half of the message would relabel "we could not probe" as the hard stop it exists to
+    avoid, exactly as the #153 banner did.
+    """
+    probe_live_source = _import_probe_live_source()
+    _, _, credential_modal = _import_skill_modules()
+
+    guidance = credential_modal.DIALOG_KIND_GUIDANCE
+    assert len(guidance) >= 5, f"expected the detector's full guidance table; got {sorted(guidance)}"
+
+    offenders = {
+        kind: [marker for marker in probe_live_source.CREDENTIAL_MARKERS if marker in text.lower()]
+        for kind, text in guidance.items()
+        if any(marker in text.lower() for marker in probe_live_source.CREDENTIAL_MARKERS)
+    }
+
+    assert not offenders, f"guidance prose carries free-text credential markers: {offenders}"
 
 
 def _harvest_minimized_reason(credential_modal) -> str:

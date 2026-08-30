@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+import inspect
 import json
 import os
 import re
@@ -21,15 +22,16 @@ import _credential_modal
 import probe_desktop_query
 import refresh_pbip_model
 from _credential_modal import (
-    BlockingDialog,
     CredentialDetection,
     CredentialModal,
     CredentialUnknownError,
     DesktopGoneError,
     DesktopUnreadyError,
-    DialogBlockedError,
+    DialogFinding,
+    DialogFoundError,
     DesktopWindow,
     _enumerate_pid_windows_with_count,
+    classify_dialog,
     inspect_credential_modal,
     join_with_credential_poll,
 )
@@ -92,14 +94,34 @@ def modal_state() -> CredentialDetection:
     return CredentialDetection(modal=modal())
 
 
-def blocking_dialog() -> BlockingDialog:
-    """Unreadable owned dialog matching the live SQL credential-dialog shape."""
-    return BlockingDialog(DesktopWindow("", "WindowsForms10.Window.20008", 702, 355, ()))
+def unreadable_dialog_window() -> DesktopWindow:
+    """The live SQL credential-dialog shape: visible, owned, empty title, NO readable text at all."""
+    return DesktopWindow("", "WindowsForms10.Window.20008", 702, 355, ())
 
 
-def blocking_state() -> CredentialDetection:
-    """CredentialDetection containing an unreadable blocking dialog."""
-    return CredentialDetection(blocking_dialog=blocking_dialog())
+def progress_dialog_window() -> DesktopWindow:
+    """Power BI's own Refresh progress dialog: a caption AND content that positively reads as status.
+
+    This is the shape the size-only rule reported as a hard stop (issue #376) - >= 100x100, non-main
+    class, and therefore indistinguishable from a sign-in prompt to a detector that never read it.
+    """
+    return DesktopWindow(
+        "Refresh",
+        "WindowsForms10.Window.20008.app.0.33c0d9d",
+        702,
+        355,
+        ("Refresh", "Evaluating...", "Cancel"),
+    )
+
+
+def dialog_finding(window: DesktopWindow | None = None) -> DialogFinding:
+    """A real classification of ``window`` (default: the unreadable owned dialog)."""
+    return classify_dialog(window or unreadable_dialog_window())
+
+
+def dialog_state(window: DesktopWindow | None = None) -> CredentialDetection:
+    """CredentialDetection carrying a real dialog finding."""
+    return CredentialDetection(dialog=dialog_finding(window))
 
 
 def minimized_main_windows() -> list[DesktopWindow]:
@@ -116,10 +138,18 @@ def restored_main_windows() -> list[DesktopWindow]:
     ]
 
 
-def visible_blocking_windows() -> list[DesktopWindow]:
+def visible_unreadable_dialog_windows() -> list[DesktopWindow]:
     """A visible owned dialog (empty title, unreadable) alongside the healthy main window."""
     return [
         DesktopWindow("", "WindowsForms10.Window.20008.app.0.1a2b3c", 702, 355, ()),
+        DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 2011, 1298, ("Report",)),
+    ]
+
+
+def visible_progress_dialog_windows() -> list[DesktopWindow]:
+    """Power BI's own Refresh progress dialog alongside the healthy main window (issue #376)."""
+    return [
+        progress_dialog_window(),
         DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 2011, 1298, ("Report",)),
     ]
 
@@ -180,7 +210,7 @@ def real_detector_for_zero_windows(*, alive: bool):
     `CredentialDetection`.
     """
 
-    def detect(pid: int) -> CredentialDetection:
+    def detect(pid: int, **_kwargs) -> CredentialDetection:
         return inspect_credential_modal(pid, lambda _pid: [], process_is_alive=lambda _pid: alive)
 
     return detect
@@ -217,8 +247,11 @@ def test_win32_fixture_finds_owned_dialog_and_keeps_instances_separate() -> None
     assert miss.unknown_reason is None
 
 
-def test_unreadable_owned_dialog_reports_blocked_not_no_modal() -> None:
-    """Live SQL dialog shape: visible owned dialog, empty title, no readable text."""
+def test_unreadable_owned_dialog_reports_unreadable_not_no_modal() -> None:
+    """Live SQL dialog shape: visible owned dialog, empty title, no readable text.
+
+    Absence of text is its own finding - ``DIALOG_UNREADABLE`` - and must never decay into "healthy".
+    """
     windows_by_pid = {
         58104: [
             DesktopWindow("", "WindowsForms10.Window.20008.app.0.33c0d9d", 702, 355, ()),
@@ -231,10 +264,12 @@ def test_unreadable_owned_dialog_reports_blocked_not_no_modal() -> None:
     healthy = inspect_credential_modal(46256, lambda pid: windows_by_pid[pid])
 
     assert blocked.modal is None
-    assert blocked.blocking_dialog is not None
-    assert blocked.blocking_dialog.window.width == 702
+    assert blocked.dialog is not None
+    assert blocked.dialog.kind == "unreadable"
+    assert blocked.dialog.verdict == "DIALOG_UNREADABLE"
+    assert blocked.dialog.window.width == 702
     assert healthy.modal is None
-    assert healthy.blocking_dialog is None
+    assert healthy.dialog is None
 
 
 def test_zero_size_helper_window_does_not_block() -> None:
@@ -248,7 +283,7 @@ def test_zero_size_helper_window_does_not_block() -> None:
     )
 
     assert state.modal is None
-    assert state.blocking_dialog is None
+    assert state.dialog is None
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real Win32 EnumWindows callback is Windows-only")
@@ -291,7 +326,7 @@ def test_zero_windows_alive_reports_desktop_unready_not_no_dialog() -> None:
     state = inspect_credential_modal(111, lambda _pid: [], process_is_alive=lambda _pid: True)
 
     assert state.modal is None
-    assert state.blocking_dialog is None
+    assert state.dialog is None
     assert state.process_gone is None
     assert state.unknown_reason is None
     assert state.desktop_unready is not None
@@ -310,7 +345,7 @@ def test_zero_windows_dead_reports_process_gone_not_no_dialog() -> None:
     state = inspect_credential_modal(111, lambda _pid: [], process_is_alive=lambda _pid: False)
 
     assert state.modal is None
-    assert state.blocking_dialog is None
+    assert state.dialog is None
     assert state.unknown_reason is None
     assert state.process_gone is not None
     assert "no longer running" in state.process_gone
@@ -332,16 +367,22 @@ def test_direct_refresh_returns_credential_missing_fast_at_t0(monkeypatch) -> No
 
 
 @pytest.mark.timing
-def test_direct_refresh_returns_blocked_by_dialog_fast_at_t0(monkeypatch) -> None:
-    """Unreadable blocking dialog must stop immediately instead of waiting for XMLA."""
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: blocking_state())
+def test_direct_refresh_stops_at_t0_for_a_dialog_it_could_not_read(monkeypatch) -> None:
+    """An unreadable dialog present BEFORE we start anything must stop immediately, not wait for XMLA.
+
+    t=0 is the one moment a dialog finding is acted on rather than latched: nothing of ours is running,
+    the dialog is somebody else's, and stacking a refresh on an unclassified dialog is what the
+    2026-08-28 field report had to unpick by hand.
+    """
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: dialog_state())
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", explode("_load_adomd"))
 
     started = time.monotonic()
-    with pytest.raises(DialogBlockedError):
+    with pytest.raises(DialogFoundError) as excinfo:
         refresh(port=1234, tables=["Orders"], timeout_sec=5, desktop_pid=111)
     elapsed = time.monotonic() - started
 
+    assert excinfo.value.finding.verdict == "DIALOG_UNREADABLE"
     assert elapsed < 0.5
 
 
@@ -531,13 +572,18 @@ class _ScriptedEnumerator:
         return list(phase)
 
 
-def _real_detector(enumerator: _ScriptedEnumerator, process_is_alive=lambda _pid: True):
+def _real_detector(enumerator: _ScriptedEnumerator, process_is_alive=lambda _pid: True, *, in_flight: bool = False):
     """A detector that drives the REAL inspect_credential_modal through the scripted enumerator.
 
     ``process_is_alive`` is injected too (issue #158) so the zero-window liveness split is exercised
     deterministically without a live PID; it defaults to "alive" and is only consulted when the
-    enumerator yields an empty window list.
+    enumerator yields an empty window list. ``in_flight`` (issue #376) selects the variant
+    ``join_with_credential_poll`` uses by default, which ignores a positively-read progress dialog.
     """
+    if in_flight:
+        return lambda pid: _credential_modal.inspect_credential_modal_in_flight(
+            pid, enumerator, process_is_alive=process_is_alive
+        )
     return lambda pid: inspect_credential_modal(pid, enumerator, process_is_alive=process_is_alive)
 
 
@@ -594,18 +640,20 @@ def test_poll_loop_without_unknown_returns_false(monkeypatch) -> None:
     assert enumerator.calls >= 1
 
 
-def test_poll_loop_raises_blocked_on_visible_dialog(monkeypatch) -> None:
-    """A visible owned dialog is a hard block: the loop raises DialogBlockedError, not UNKNOWN.
+def test_poll_loop_latches_unreadable_dialog_and_raises_at_the_deadline(monkeypatch) -> None:
+    """#376: a dialog we could not read is LATCHED mid-wait and surfaced at the deadline, not raised.
 
-    Latching UNKNOWN must not swallow a genuinely visible blocking dialog - that is still a distinct,
-    immediately-raised verdict.
+    Before #376 this raised on the first poll, which meant a Power BI Refresh progress dialog aborted
+    the very refresh it was reporting on. It must not abort a run that may still finish - but it also
+    means "no modal appeared" is no longer established, so it cannot be erased by a quiet deadline
+    either. ``enumerator.calls >= 2`` is the part that fails if the raise is restored.
     """
     clock = _FakeClock()
     monkeypatch.setattr(_credential_modal, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
-    enumerator = _ScriptedEnumerator([visible_blocking_windows()])
+    enumerator = _ScriptedEnumerator([visible_unreadable_dialog_windows()])
 
-    with pytest.raises(DialogBlockedError):
+    with pytest.raises(DialogFoundError) as excinfo:
         join_with_credential_poll(
             worker,
             pid=111,
@@ -614,6 +662,49 @@ def test_poll_loop_raises_blocked_on_visible_dialog(monkeypatch) -> None:
             poll_seconds=0.1,
             detector=_real_detector(enumerator),
         )
+
+    assert excinfo.value.pid == 111
+    assert excinfo.value.finding.verdict == "DIALOG_UNREADABLE"
+    assert enumerator.calls >= 2, "a dialog finding is latch-and-wait, not terminal"
+
+
+def test_poll_loop_ignores_our_own_refresh_progress_dialog(monkeypatch) -> None:
+    """#376 core: Power BI's own progress dialog must not end the wait it is reporting on.
+
+    The fails-before/passes-after test for the size-only rule. Master returned this >= 100x100 non-main
+    window as a ``blocking_dialog`` and the loop raised at once; now its CONTENT is read, it classifies
+    ``benign``, and the in-flight detector ignores it - so the loop reaches its ordinary deadline and
+    returns ``False``.
+    """
+    clock = _FakeClock()
+    monkeypatch.setattr(_credential_modal, "time", clock)
+    worker = _ImmortalWorker(clock, step=0.4)
+    enumerator = _ScriptedEnumerator([visible_progress_dialog_windows()])
+
+    result = join_with_credential_poll(
+        worker,
+        pid=111,
+        total_timeout=1.0,
+        heartbeat_seconds=1000.0,
+        poll_seconds=0.1,
+        detector=_real_detector(enumerator, in_flight=True),
+    )
+
+    assert result is False
+    assert enumerator.calls >= 2
+
+
+def test_poll_loop_default_detector_is_the_in_flight_one() -> None:
+    """The in-flight variant must be the DEFAULT, not merely available (issue #376).
+
+    Every production caller relies on the default: `refresh()` passes no `detector`. A wiring test is
+    the only thing that catches "the right function exists but nothing calls it" - the shape #390 hit
+    when a payload validator was behaviourally tested but never pinned as wired in.
+    """
+    default = inspect.signature(join_with_credential_poll).parameters["detector"].default
+
+    assert default is _credential_modal.inspect_credential_modal_in_flight
+    assert default is not inspect_credential_modal
 
 
 def test_poll_loop_raises_desktop_gone_when_process_dead(monkeypatch) -> None:
@@ -699,6 +790,52 @@ def test_refresh_and_save_wires_credential_unknown_to_exit_3(monkeypatch, capsys
     assert exit_code == 3, "CREDENTIAL_UNKNOWN must be exit 3, distinct from blocked's exit 1"
     assert "REFRESH: CREDENTIAL_UNKNOWN pid=111" in out
     assert reason in out
+
+
+def test_refresh_and_save_wires_a_dialog_finding_to_exit_3(monkeypatch, capsys) -> None:
+    """#376 wiring: a DialogFoundError must surface at exit 3, never in the exit-1 hard-stop band.
+
+    Exit 1 is reserved for a matched credential signature. This module cannot establish that a dialog
+    BLOCKS anything, so nothing it observes about one may enter that band - and ``probe_live_source``
+    maps the exit-1 credential family to "you may NOT build; a person must sign in". The finding is a
+    real classification and the verdict line is the real emitter's, so this pins raise -> emit -> exit
+    code with no hand-written text.
+    """
+
+    def _raise_dialog(*_args, **_kwargs):
+        raise DialogFoundError(111, dialog_finding())
+
+    monkeypatch.setattr(refresh_pbip_model, "refresh", _raise_dialog)
+    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111", "--tables", "Orders"])
+
+    exit_code = refresh_pbip_model._refresh_and_save(111, 5000, None, args)
+    out = capsys.readouterr().out
+
+    assert exit_code == 3, "a dialog finding must not reuse the credential hard stop's exit 1"
+    assert "REFRESH: DIALOG_UNREADABLE pid=111" in out
+    assert "BLOCKED_BY_DIALOG" not in out
+
+
+def test_refresh_main_reports_a_t0_dialog_at_exit_3_before_any_mutation(monkeypatch, tmp_path: Path, capsys) -> None:
+    """#376: the MUTATING CLI stops at t=0 for a dialog it could not read - at exit 3, and before XMLA.
+
+    Two properties in one, and both matter: it must not stack a refresh on somebody else's dialog
+    (``discover_port`` explodes if it gets that far), and it must not call it a credential wall.
+    """
+    model_folder(tmp_path, "MyMigration")
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_bridge_status",
+        lambda: {"instances": [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}]},
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: dialog_state())
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 3
+    assert out.startswith("REFRESH: DIALOG_UNREADABLE")
 
 
 def test_refresh_and_save_wires_desktop_gone_to_exit_2(monkeypatch, capsys) -> None:
@@ -903,16 +1040,84 @@ def test_the_two_entry_points_get_an_explicit_desktop_state_baseline() -> None:
         )
 
 
-def test_probe_query_returns_blocked_by_dialog_fast_at_t0(monkeypatch, capsys) -> None:
-    """probe_desktop_query stops for an unreadable blocking dialog."""
-    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda _pid: blocking_state())
+def test_probe_query_stops_at_exit_3_for_a_dialog_it_could_not_read(monkeypatch, capsys) -> None:
+    """#376: an unreadable dialog stops the GATE OF RECORD at exit 3, never in the exit-1 hard-stop band.
+
+    Master emitted ``PREFLIGHT: BLOCKED_BY_DIALOG`` at exit 1 from a SIZE-ONLY test, which
+    ``probe_live_source`` maps to ``NO_CREDENTIAL`` ("you may NOT build; a person must sign in"). Exit 3
+    means "could not probe" and makes no claim about the source at all.
+    """
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda _pid, **_kw: dialog_state())
     monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
 
     exit_code = probe_desktop_query.main(["--pid", "111"])
     out = capsys.readouterr().out
 
-    assert exit_code == 1
-    assert out.startswith("PREFLIGHT: BLOCKED_BY_DIALOG")
+    assert exit_code == 3, "a dialog we could not read must not enter the exit-1 hard-stop band"
+    assert out.startswith("PREFLIGHT: DIALOG_UNREADABLE")
+    assert "BLOCKED_BY_DIALOG" not in out
+
+
+def test_probe_query_does_not_stop_for_power_bi_s_own_progress_dialog(monkeypatch, capsys) -> None:
+    """#376 acceptance 1: a Refresh progress dialog is not reported as a credential wall.
+
+    Driven through the REAL detector so the classification and the CLI branch on it are proven as one
+    chain. On master this window (>= 100x100, non-main class) produced ``BLOCKED_BY_DIALOG`` at exit 1;
+    now its content is read, it classifies ``benign``, and at t=0 it reports ``REFRESH_IN_PROGRESS`` at
+    exit 3 - Desktop is busy, so a one-row probe of a mid-refresh model would not be trustworthy anyway.
+    """
+    windows = visible_progress_dialog_windows()
+    monkeypatch.setattr(
+        probe_desktop_query,
+        "_credential_state",
+        lambda pid, **kw: inspect_credential_modal(pid, lambda _pid: windows, **kw),
+    )
+    monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
+
+    exit_code = probe_desktop_query.main(["--pid", "111"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 3
+    assert out.startswith("PREFLIGHT: REFRESH_IN_PROGRESS")
+    assert "CREDENTIAL_MISSING" not in out
+    assert "BLOCKED_BY_DIALOG" not in out
+
+
+def test_probe_query_poll_ignores_a_progress_dialog_while_the_query_runs(monkeypatch, capsys) -> None:
+    """#376: a progress dialog appearing DURING the read-only probe must not abort it.
+
+    The poll runs with ``in_flight=True``, so a positively-read progress dialog is ignored and the DAX
+    result - the gate of record - is what decides. On master the same window returned exit 1 on the
+    first poll and the probe's own answer was never heard.
+    """
+    windows = visible_progress_dialog_windows()
+    seen = {"in_flight": []}
+
+    def state(pid: int, *, in_flight: bool = False) -> CredentialDetection:
+        seen["in_flight"].append(in_flight)
+        # Healthy at t=0; the progress dialog appears once the probe is already running.
+        if not in_flight:
+            return CredentialDetection()
+        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=in_flight)
+
+    def fake_probe(_port: int, _tables: list[str] | None, emit=print) -> int:
+        time.sleep(0.15)
+        emit("PREFLIGHT: DATA_OK")
+        return 0
+
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", state)
+    monkeypatch.setattr(probe_desktop_query, "PREFLIGHT_CREDENTIAL_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(probe_desktop_query, "discover_port", lambda _pid: 52001)
+    monkeypatch.setattr(probe_desktop_query, "probe", fake_probe)
+
+    exit_code = probe_desktop_query._probe_with_credential_poll(111, 52001, ["Orders"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0, "a progress dialog must not abort a probe that was going to succeed"
+    assert "PREFLIGHT: DATA_OK" in out
+    assert seen["in_flight"][1:], "the poll must have run at least once"
+    assert all(seen["in_flight"][1:]), "every poll after t=0 must use the in-flight detector"
+    assert seen["in_flight"][0] is False, "the t=0 check must NOT be in-flight"
 
 
 def test_probe_query_returns_unknown_for_minimized_owner(monkeypatch, capsys) -> None:
@@ -951,7 +1156,7 @@ def test_probe_query_poll_catches_late_modal(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         probe_desktop_query,
         "_credential_state",
-        lambda pid: CredentialDetection(modal=late_modal(pid)),
+        lambda pid, **_kw: CredentialDetection(modal=late_modal(pid)),
     )
     monkeypatch.setattr(probe_desktop_query, "PREFLIGHT_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda _pid: 52001)
@@ -987,7 +1192,7 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
     monkeypatch.setattr(
         probe_desktop_query,
         "_credential_state",
-        lambda pid: CredentialDetection(modal=late_modal(pid)),
+        lambda pid, **_kw: CredentialDetection(modal=late_modal(pid)),
     )
     monkeypatch.setattr(probe_desktop_query, "PREFLIGHT_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda _pid: 52001)
@@ -1004,6 +1209,186 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
     assert first_out.startswith("PREFLIGHT: CREDENTIAL_MISSING")
     assert "DATA_OK_FROM_WORKER_AFTER_RELEASE" not in first_out
     assert later_out == ""
+
+
+# ==================================================================================================
+# _credential_modal.classify_dialog - the PYTHON detector's own dialog classifiers (issue #376)
+# ==================================================================================================
+#
+# The Python fast path had the same defect the PowerShell arbiter shed in #367, on a more dangerous
+# route: `inspect_credential_modal` returned the FIRST visible non-main window >= 100x100 as a
+# `blocking_dialog`, and both callers mapped that to `BLOCKED_BY_DIALOG` at exit 1 - which
+# `probe_live_source` classifies `NO_CREDENTIAL`. It feeds `probe_desktop_query.py`, the gate of
+# record, so a Power BI Refresh progress dialog could halt a migration and send an operator to a
+# sign-in screen that was never on show.
+#
+# These drive the REAL classifier against synthesised windows: no Desktop, no Win32, every platform.
+
+
+@pytest.mark.parametrize(
+    ("texts", "title", "kind", "verdict"),
+    [
+        # 1. A progress dialog is NOT a credential wall. The whole point of the issue.
+        (("Refresh", "Evaluating...", "Cancel"), "Refresh", "benign", "REFRESH_IN_PROGRESS"),
+        (("Refresh", "1,204 rows loaded"), "Refresh", "benign", "REFRESH_IN_PROGRESS"),
+        # 2. A genuine credential prompt still is - fixing the false positive must not break this.
+        (("Please specify how to connect",), "", "credential", "CREDENTIAL_MISSING"),
+        (("You aren't signed in",), "", "credential", "CREDENTIAL_MISSING"),
+        # 3. Could-not-determine is its own state, never folded into either of the first two.
+        ((), "", "unreadable", "DIALOG_UNREADABLE"),
+        (("Refresh",), "Refresh", "benign-title-only", "DIALOG_UNREADABLE"),
+        (("Save changes?", "Discard"), "Save changes?", "unrecognized", "DIALOG_UNRECOGNIZED"),
+        # 4. Known human-blocking prompts that are NOT sign-in prompts get their own verdict, and
+        #    outrank progress text in the same window (the round-3 defect in #390).
+        (
+            ("Permission is required to run this native database query",),
+            "",
+            "needs-human",
+            "DIALOG_NEEDS_HUMAN",
+        ),
+        (
+            ("Refresh", "Evaluating...", "Permission is required to run this native database query"),
+            "Refresh",
+            "needs-human",
+            "DIALOG_NEEDS_HUMAN",
+        ),
+        # 5. Progress text cannot account for prose nobody explained.
+        (
+            ("Refresh", "Evaluating...", "Your workbook contains unsaved changes that will be lost"),
+            "Refresh",
+            "mixed-content",
+            "DIALOG_UNRECOGNIZED",
+        ),
+    ],
+)
+def test_classify_dialog_reads_the_window_instead_of_measuring_it(texts, title, kind, verdict) -> None:
+    """Every one of these windows is 702x355 and non-main, so SIZE cannot separate them - text must."""
+    finding = classify_dialog(DesktopWindow(title, "WindowsForms10.Window.20008.app.0.x", 702, 355, texts))
+
+    assert (finding.kind, finding.verdict) == (kind, verdict)
+
+
+def test_only_the_credential_verdict_is_a_hard_stop() -> None:
+    """#376's failure direction: nothing but a matched credential signature may reach exit 1.
+
+    A false hard stop halts a migration and demands a human; a false clear lands on a verdict the repo
+    already treats as untrustworthy on its own. One direction has a backstop, the other does not - so
+    every non-credential kind is exit 3 by construction, not by each caller remembering to make it so.
+    """
+    hard_stop = {
+        kind
+        for kind, verdict in _credential_modal.DIALOG_KIND_VERDICTS.items()
+        if verdict == _credential_modal.VERDICT_CREDENTIAL_MISSING
+    }
+
+    assert hard_stop == {"credential"}, f"a non-credential kind reaches the hard-stop verdict: {hard_stop}"
+
+
+def test_a_caption_alone_can_never_dismiss_a_dialog() -> None:
+    """#390's round-1 lesson, ported: benign reads CONTENT only, never the caption.
+
+    Win32 child-HWND enumeration sees nothing inside a WPF dialog, so a caption is frequently all there
+    is. If the caption could dismiss, an owned WPF modal captioned `Refresh` whose real content asks
+    for a sign-in would be waved through in silence.
+    """
+    caption_only = classify_dialog(DesktopWindow("Refresh", "Cls", 702, 355, ("Refresh",)))
+    with_content = classify_dialog(DesktopWindow("Refresh", "Cls", 702, 355, ("Refresh", "Evaluating...")))
+
+    assert caption_only.kind == "benign-title-only"
+    assert caption_only.verdict == "DIALOG_UNREADABLE"
+    assert with_content.kind == "benign"
+
+
+def test_the_credential_scan_is_not_gated_by_the_size_filter() -> None:
+    """#376's silent false NEGATIVE: the 100x100 filter used to gate the HARD STOP as well.
+
+    `match_credential_modal` was fed only `blocking_dialog_candidates(...)`, so a credential prompt in
+    a smaller window produced NO finding at all - not even a dialog one. `Test-CredentialModal` in the
+    PowerShell arbiter has always scanned every window; the two now agree.
+    """
+    small = DesktopWindow("", "WindowsForms10.Window.20008.app.0.x", 80, 60, ("Enter your credentials",))
+    main = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",))
+
+    state = inspect_credential_modal(111, lambda _pid: [small, main])
+
+    assert state.modal is not None, "a credential prompt below the size filter must still be a hard stop"
+    assert state.modal.window.width == 80
+
+
+def test_benign_is_suppressed_only_while_our_own_operation_is_in_flight() -> None:
+    """The one asymmetry: at t=0 a progress dialog is somebody ELSE's refresh, so it is reported.
+
+    Stacking a second refresh on a running one is exactly what the 2026-08-28 field report had to
+    unpick by hand. Once we have started our own, the same dialog is ours and must not end the wait.
+    Nothing but `benign` is affected - an unreadable dialog surfaces either way.
+    """
+    windows = visible_progress_dialog_windows()
+
+    at_t0 = inspect_credential_modal(111, lambda _pid: windows)
+    in_flight = inspect_credential_modal(111, lambda _pid: windows, operation_in_flight=True)
+    unreadable_in_flight = inspect_credential_modal(
+        111, lambda _pid: visible_unreadable_dialog_windows(), operation_in_flight=True
+    )
+
+    assert at_t0.dialog is not None and at_t0.dialog.verdict == "REFRESH_IN_PROGRESS"
+    assert in_flight.dialog is None
+    assert unreadable_in_flight.dialog is not None, "in-flight must only ever dismiss a PROVEN-benign dialog"
+
+
+def test_a_window_we_could_not_account_for_outranks_a_progress_dialog() -> None:
+    """Precedence: `benign` carries the only positive evidence, so it must never mask another window.
+
+    Two dialogs up at once - one plainly a progress dialog, one unreadable. If `benign` won, a single
+    progress dialog would hide a real modal sitting beside it.
+    """
+    windows = [
+        progress_dialog_window(),
+        DesktopWindow("", "WindowsForms10.Window.20008.app.0.y", 702, 355, ()),
+    ]
+
+    finding = _credential_modal.dialog_verdict(windows)
+
+    assert finding is not None
+    assert finding.verdict == "DIALOG_UNREADABLE"
+
+
+def test_the_python_detector_cannot_emit_blocked_by_dialog_again(capsys) -> None:
+    """Anti-regression: the size-only rule and its verdict token must not come back (issue #376).
+
+    Checked BEHAVIOURALLY, not by grepping the source - the token is named in several docstrings on
+    purpose, because a reader who meets it in an old transcript needs to find out why it went. So this
+    drives every classifiable kind through both real emitters and asserts none of them prints it, and
+    pins that the size-only helper and its field are gone from the module's namespace.
+    """
+    windows = {
+        "unreadable": DesktopWindow("", "Cls", 702, 355, ()),
+        "unrecognized": DesktopWindow("Save?", "Cls", 702, 355, ("Save?", "Discard")),
+        "needs-human": DesktopWindow("", "Cls", 702, 355, ("Permission is required to run this native query",)),
+        "benign": progress_dialog_window(),
+        "benign-title-only": DesktopWindow("Refresh", "Cls", 702, 355, ("Refresh",)),
+        "mixed-content": DesktopWindow(
+            "Refresh", "Cls", 702, 355, ("Refresh", "Evaluating...", "This will discard all unsaved work")
+        ),
+    }
+    for window in windows.values():
+        finding = classify_dialog(window)
+        refresh_pbip_model._emit_dialog_finding(111, finding)
+        probe_desktop_query._emit_dialog_finding(111, finding)
+    out = capsys.readouterr().out
+
+    assert out.strip(), "the emitters printed nothing at all, so this test proved nothing"
+    assert "BLOCKED_BY_DIALOG" not in out, "an emitter still prints the size-only hard-stop token"
+    assert "BLOCKED_BY_DIALOG" not in set(_credential_modal.DIALOG_KIND_VERDICTS.values())
+    assert not hasattr(_credential_modal, "blocking_dialog_candidates"), "the size-only detector came back"
+    assert "blocking_dialog" not in CredentialDetection.__dataclass_fields__, "the size-only field came back"
+
+
+def test_every_finding_kind_has_operator_guidance() -> None:
+    """A verdict with no guidance is a stop with no next step - and every emitter prints this line."""
+    reportable = set(_credential_modal.DIALOG_KIND_PRECEDENCE)
+    documented = set(_credential_modal.DIALOG_KIND_GUIDANCE)
+
+    assert reportable <= documented, f"kinds with no guidance: {sorted(reportable - documented)}"
 
 
 # ==================================================================================================

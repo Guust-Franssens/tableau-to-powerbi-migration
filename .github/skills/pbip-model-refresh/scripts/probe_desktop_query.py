@@ -44,8 +44,10 @@ from typing import NoReturn
 from _credential_modal import (
     CredentialDetection,
     CredentialModal,
-    describe_blocking_dialog,
+    DialogFinding,
+    describe_dialog_finding,
     describe_modal,
+    dialog_guidance,
     inspect_credential_modal,
 )
 
@@ -371,11 +373,17 @@ def probe(port: int, tables: list[str] | None, emit=print) -> int:
         conn.Close()
 
 
-def _credential_state(pid: int) -> CredentialDetection:
-    """Return the credential-modal inspection state for ``pid``."""
+def _credential_state(pid: int, *, in_flight: bool = False) -> CredentialDetection:
+    """Return the credential-modal inspection state for ``pid``.
+
+    ``in_flight`` is set for the polls that run WHILE the DAX probe is executing. There a
+    positively-read progress dialog is ignored: Desktop working is not a reason to abandon a read-only
+    one-row query, and aborting on it is the false stop issue #376 removed. Everything else - including
+    a dialog we could not read - still surfaces.
+    """
     if os.name != "nt":
         return CredentialDetection()
-    return inspect_credential_modal(pid)
+    return inspect_credential_modal(pid, operation_in_flight=in_flight)
 
 
 def _emit_credential_missing(pid: int, modal: CredentialModal) -> None:
@@ -383,9 +391,17 @@ def _emit_credential_missing(pid: int, modal: CredentialModal) -> None:
     print(f"PREFLIGHT: CREDENTIAL_MISSING pid={pid}; {describe_modal(modal)}")
 
 
-def _emit_blocked_by_dialog(pid: int, dialog) -> None:
-    """Print the distinct generic blocking-dialog verdict."""
-    print(f"PREFLIGHT: BLOCKED_BY_DIALOG pid={pid}; {describe_blocking_dialog(dialog)}")
+def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
+    """Print the verdict for a dialog that could NOT be shown to be harmless (issue #376).
+
+    Replaces ``_emit_blocked_by_dialog``, whose ``BLOCKED_BY_DIALOG`` token sat at exit 1 - the
+    hard-stop band - and was reached from a SIZE-ONLY test, so a Power BI Refresh progress dialog
+    aborted THE GATE OF RECORD with a verdict the parent classifier reads as ``NO_CREDENTIAL``. The
+    token now names what was observed and every one of them is exit 3: "could not probe", never "a
+    person must supply account details". Both lines are marker-free (issue #153).
+    """
+    print(f"PREFLIGHT: {finding.verdict} pid={pid}; {describe_dialog_finding(finding)}")
+    print(f"  {dialog_guidance(finding)}")
 
 
 def _emit_credential_unknown(pid: int, reason: str) -> None:
@@ -408,13 +424,20 @@ def _emit_desktop_unready(pid: int, reason: str) -> None:
 
 
 def _credential_verdict(pid: int, state: CredentialDetection) -> int | None:
-    """Emit and return a terminal inspection verdict, or None when probing may continue."""
+    """Emit and return a terminal inspection verdict, or None when probing may continue.
+
+    Exit-code bands, and why a dialog finding is no longer in the first one (issue #376):
+      1  ``CREDENTIAL_MISSING`` - the credential signature matched. The ONLY hard stop.
+      2  ``DESKTOP_GONE`` / ``DESKTOP_UNREADY`` - local Desktop failure; the source was never tested.
+      3  a dialog finding, or ``UNKNOWN`` - we could not probe. Loud, recoverable, and no claim about
+         the data source or about anyone needing to supply account details.
+    """
     if state.modal is not None:
         _emit_credential_missing(pid, state.modal)
         return 1
-    if state.blocking_dialog is not None:
-        _emit_blocked_by_dialog(pid, state.blocking_dialog)
-        return 1
+    if state.dialog is not None:
+        _emit_dialog_finding(pid, state.dialog)
+        return 3
     if state.process_gone is not None:
         _emit_desktop_gone(pid, state.process_gone)
         return 2
@@ -452,7 +475,11 @@ def _probe_with_credential_poll(pid: int | None, port: int, tables: list[str] | 
     worker.start()
     while worker.is_alive():
         worker.join(PREFLIGHT_CREDENTIAL_POLL_SECONDS)
-        verdict = _credential_verdict(pid, _credential_state(pid))
+        # ACT on a finding here rather than latching it the way `join_with_credential_poll` does: this
+        # loop has NO deadline of its own (it runs until the probe thread returns), so a latched dialog
+        # behind a wedged query would wait for ever. The in-flight detector already ignores a
+        # positively-read progress dialog, so what reaches this point is something we could not read.
+        verdict = _credential_verdict(pid, _credential_state(pid, in_flight=True))
         if verdict is not None:
             return verdict
 

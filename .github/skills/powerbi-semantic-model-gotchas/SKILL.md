@@ -439,7 +439,11 @@ for an already-open data-source dialog are `status` reporting **"Host is not rea
 operations"** and `screenshot` reporting **"Print metadata is not available"**. That combination is
 not enough evidence for a bridge regression; run the bundled refresh/query probes, which check for
 visible non-main dialogs at t=0 and keep polling while the source wakes up. Text-readable credential
-prompts report `CREDENTIAL_MISSING`; unreadable/non-credential dialogs report `BLOCKED_BY_DIALOG`.
+prompts report `CREDENTIAL_MISSING` (exit 1, the only hard stop); a dialog whose content did not
+positively read as harmless reports `REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` /
+`DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE`, all **exit 3** — "could not probe", never "sign in".
+(`BLOCKED_BY_DIALOG` was retired in issues #367/#376: it came from a size-only test, so a Power BI
+Refresh progress dialog produced it.)
 
 **Independent confirmation is available and worth taking.** For a serverless warehouse, `STOPPED` with
 `num_active_sessions = 0` proves no query ever arrived, regardless of what any log claims. Prefer

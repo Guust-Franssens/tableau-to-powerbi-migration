@@ -132,10 +132,10 @@ stay byte-identical.
 > `powerbi-desktop status` -> **"Host is not ready to accept operations"** and
 > `powerbi-desktop screenshot` -> **"Print metadata is not available"** was measured on an otherwise
 > healthy Desktop/bridge when a data-source dialog was already open. Some connector dialogs expose no
-> readable text, so the fast check reports either `CREDENTIAL_MISSING` (signature text matched) or
-> `BLOCKED_BY_DIALOG` (visible non-main dialog, text unreadable/non-credential). In both cases a
-> human must look at Desktop before the run proceeds. Check this first before suspecting the bridge or
-> filing an upstream defect.
+> readable text, so the fast check reports either `CREDENTIAL_MISSING` (signature text matched) or one
+> of the `DIALOG_*` / `REFRESH_IN_PROGRESS` verdicts (a dialog is up whose content did not positively
+> read as harmless). In both cases a human must look at Desktop before the run proceeds. Check this
+> first before suspecting the bridge or filing an upstream defect.
 
 > ⚠️ **A big window is NOT evidence of a credential wall — the arbiter no longer says it is
 > (issue #367).** `probe_desktop_credential.ps1` used to decide "blocking" from geometry alone: any
@@ -275,10 +275,53 @@ stay byte-identical.
 > completed harvest. If you extend this probe — or write any other detector whose output can stop a
 > pipeline — that is the failure to look for first.
 >
-> The **Python** fast check (`_credential_modal.blocking_dialog_candidates`, used by
-> `refresh_pbip_model.py` and `probe_desktop_query.py`) still promotes any >= 100x100 non-main window
-> to `BLOCKED_BY_DIALOG` on a size-only test. That half was out of scope for #367 and is unchanged —
-> so the note above about `BLOCKED_BY_DIALOG` still describes the Python path exactly.
+> ✅ **The Python fast check now classifies too (issue #376).** `_credential_modal` had the same
+> size-only defect on a **more dangerous** path: `inspect_credential_modal` returned the first visible
+> non-main window >= 100x100 as a `blocking_dialog`, and `refresh_pbip_model.py` /
+> `probe_desktop_query.py` — **the gate of record** — printed `BLOCKED_BY_DIALOG` at **exit 1**, which
+> `probe_live_source` maps to `NO_CREDENTIAL` ("you may NOT build; a human must sign in; terminate the
+> run"). It now reads the window and speaks the **same vocabulary as the arbiter** — `CREDENTIAL_MISSING`
+> (exit 1, the only hard stop), `REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` / `DIALOG_UNRECOGNIZED` /
+> `DIALOG_UNREADABLE` (all **exit 3**). `BLOCKED_BY_DIALOG` is **retired** from the Python path.
+>
+> Measured before/after on the same synthesised windows, all 702x355 and non-main so size cannot
+> separate them:
+>
+> | window | before | after |
+> |---|---|---|
+> | `Refresh` + `Evaluating...` | `BLOCKED_BY_DIALOG`, **exit 1** | `REFRESH_IN_PROGRESS`, exit 3 (and **ignored** while our own refresh is in flight) |
+> | `Please specify how to connect` | `CREDENTIAL_MISSING`, exit 1 | unchanged |
+> | native-query approval | `BLOCKED_BY_DIALOG`, **exit 1** | `DIALOG_NEEDS_HUMAN`, exit 3 |
+> | no text at all | `BLOCKED_BY_DIALOG`, exit 1 | `DIALOG_UNREADABLE`, exit 3 |
+> | `Save changes?` | `BLOCKED_BY_DIALOG`, exit 1 | `DIALOG_UNRECOGNIZED`, exit 3 |
+> | credential text in an **80x60** window | **no finding at all** | `CREDENTIAL_MISSING`, exit 1 |
+>
+> That last row is the half nobody had noticed: the 100x100 filter gated the **hard stop** as well as
+> the classification, because `match_credential_modal` was fed only the size-filtered candidates. A
+> credential prompt in a smaller window produced **no finding at all** — a silent false negative on the
+> one verdict that matters most. It now scans **every window, any class, any size**, exactly as
+> `Test-CredentialModal` always has.
+>
+> **Three deliberate divergences from the arbiter**, each because Win32 child-HWND text is strictly less
+> evidence than a UIA harvest. Do not "fix" them by copying the arbiter:
+>
+> | arbiter mechanism | Python | why |
+> |---|---|---|
+> | prose **join** before the credential match | **not ported** | the join needs a control-type signal to skip an interposed `Cancel`; Win32 has none, so the only join available is the naive whole-window one the arbiter discarded — and a join can *manufacture* a phrase (`Account` + `Key` → `Account Key`). That error lands on the one verdict #376 says to err away from. Recall lost this way routes to `unrecognized`/`unreadable` (exit 3, loud), and the arbiter is the escalation path. |
+> | enabled-owner **exoneration** | **not ported** | it is a *suppression* path needing owner/enabled state this module does not harvest, and unverifiable here without a live Desktop. Omitting it costs one more exit 3. |
+> | `benign-unverified` (truncated harvest) | **not needed** | a text read that throws fails the whole enumeration (`Win32EnumerationError` → `unknown_reason`), so a partial read never reaches the classifier. |
+>
+> **One asymmetry, and it is deliberate:** a proven-benign progress dialog is reported at **t=0**
+> (`REFRESH_IN_PROGRESS` — it is somebody else's refresh; do not stack a second on it) and **ignored**
+> once our own operation is in flight. Nothing else is ever ignored. In the bounded refresh wait a
+> dialog finding is **latched** rather than raised, so it cannot abort a refresh that may still finish;
+> in `probe_desktop_query`'s poll it is **acted on**, because that loop has no deadline of its own and
+> a latched dialog behind a wedged query would wait for ever.
+>
+> **Downstream, honestly:** `scripts/_verdict_lines.py` does not recognise the new tokens, so
+> `probe_live_source` classifies them **`ERROR`** ("the probe itself could not run") — `rc != 0`, the
+> gate stays armed, and nothing claims a credential wall we never observed. That is the intended
+> outcome and it was verified end-to-end, not assumed.
 
 > ⚠️ **Do not wait blindly for `NO_BRIDGE` / `not_connected` — bound the bridge wait, then prove the
 > executable by PID.** Field report, 2026-08-18, two machines: a box with two Desktop versions
@@ -343,16 +386,14 @@ stay byte-identical.
 > Options UI, export again, diff. On MSIX, set it through the UI once per agent profile.
 >
 > **If the probe or a refresh stalls on a custom-SQL source, check for this modal before concluding
-> anything about credentials.** `blocking_dialog_candidates()` will report it as
-> `BLOCKED_BY_DIALOG` rather than a false `NO_CREDENTIAL`, which is honest but not yet specific —
-> capture the modal's exact title when you first hit one so it can be classified by name.
->
-> ✅ **`probe_desktop_credential.ps1` now classifies it by name.**
+> anything about credentials.** ✅ **Both detectors now classify it by name.**
 > `scripts/blocking_prompt_signature.regex` recognises `native database quer(y|ies)` /
-> `requires your approval`, and the arbiter reports **`VERDICT: DIALOG_NEEDS_HUMAN`, exit 3** — checked
-> *before* the progress signature and *before* the enabled-owner exoneration, so a refresh dialog in the
-> same window cannot suppress it. Round 3 of review found exactly that suppression and it exited 0;
-> see the verdict table above.
+> `requires your approval`, and both `probe_desktop_credential.ps1` (issue #367) and the Python
+> `_credential_modal.classify_dialog` (issue #376) report **`DIALOG_NEEDS_HUMAN`, exit 3** — checked
+> *before* the progress signature, so a refresh dialog in the same window cannot suppress it. Round 3
+> of #367's review found exactly that suppression and it exited 0; see the verdict table above.
+> Until #376 the Python path reported this as `BLOCKED_BY_DIALOG` at exit 1, i.e. as a sign-in wall,
+> which is the wrong remedy: this needs an **approval**, not an account.
 
 Read-only preflight (proves credentials + source reachability without changing anything):
 
