@@ -32,6 +32,10 @@ from typing import Any, NamedTuple
 
 _TABLE_DECL = re.compile(r"^\s*table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 
+# `Sum(Orders.csv.Sales)` - the engine wraps aggregated projections, and a rebind inside the wrapper
+# is invisible to a bare table-prefix test.
+_AGGREGATION = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\((.*)\)$")
+
 # Leaves whose value IS a model object name. Everything else under a query is query SHAPE.
 _NAME_LEAVES = frozenset({"Entity", "Property", "queryRef", "nativeQueryRef"})
 
@@ -50,6 +54,7 @@ SHAPE_BINARY = "BINARY_CHANGED"
 SHAPE_UNREADABLE_JSON = "UNPARSEABLE_JSON"
 SHAPE_UNREADABLE_TEXT = "UNREADABLE_TEXT"
 SHAPE_REVERTED = "REVERTED_TO_BASELINE"
+SHAPE_POST_ENGINE_CHANGE = "CHANGED_AFTER_ENGINE"
 
 # `.pbism` and `.pbip` are JSON documents despite their suffixes, so they get the structural diff
 # rather than being written off as binary.
@@ -169,6 +174,58 @@ def bound_model_tables(report_dir: Path) -> set[str] | None:
     return names
 
 
+def _split_on_known_table(value: str, tables: set[str]) -> tuple[str, str] | None:
+    """Split `Entity.Property` using the LONGEST table name that actually prefixes `value`.
+
+    ⚠️ **A table name can contain dots**, and splitting at the first one is what made this module
+    over-report. Measured on the estate corpus (blind review of PR #399): the bound model holds a
+    table literally called `HumanResources.csv`, so `partition(".")` read `HumanResources.csv.Status`
+    as entity `HumanResources` + property `csv.Status`, decided the property had changed, and
+    retained a textbook invalid -> valid rebind as an unexplained `MODEL_OBJECT_NAMES`. 562 of 574
+    retained `queryRef` leaves had more than one dot on some side.
+    """
+    best = ""
+    for table in tables:
+        if len(table) > len(best) and value.startswith(f"{table}."):
+            best = table
+    return (best, value[len(best) + 1 :]) if best else None
+
+
+def _unwrap_aggregation(value: str) -> tuple[str, str]:
+    """`Sum(Orders.csv.Sales)` -> (`Sum`, `Orders.csv.Sales`); anything else -> (``, value).
+
+    The engine emits aggregated projections wrapped this way, so a rebind inside the wrapper is
+    invisible to a bare table-prefix test.
+    """
+    match = _AGGREGATION.match(value)
+    return (match.group(1), match.group(2)) if match else ("", value)
+
+
+def _query_ref_shape(before: str, after: str, tables: set[str]) -> str:
+    """`BINDING_RESOLUTION` for a `queryRef` only when JUST the entity was replaced, invalid->valid.
+
+    Everything must line up: the same aggregation wrapper, an after-value that resolves against a
+    real table in the bound model, an unchanged property, and a before-entity that is NOT a table.
+    A projection that moves to a different table AND a different column (`Orders.Order_Date` ->
+    `Date.Year`, 97 of 574 on the estate) is a model-shape change and stays `MODEL_OBJECT_NAMES`.
+    """
+    before_wrapper, before_inner = _unwrap_aggregation(before)
+    after_wrapper, after_inner = _unwrap_aggregation(after)
+    if before_wrapper != after_wrapper:
+        return SHAPE_MODEL_NAMES
+    resolved = _split_on_known_table(after_inner, tables)
+    if resolved is None:
+        return SHAPE_MODEL_NAMES
+    after_entity, after_property = resolved
+    suffix = f".{after_property}"
+    if not before_inner.endswith(suffix) or len(before_inner) <= len(suffix):
+        return SHAPE_MODEL_NAMES
+    before_entity = before_inner[: -len(suffix)]
+    if before_entity == after_entity or before_entity in tables:
+        return SHAPE_MODEL_NAMES
+    return SHAPE_BINDING
+
+
 def name_change_shape(difference: Difference, tables: set[str] | None) -> str:
     """`BINDING_RESOLUTION` only when THIS leaf is demonstrably an invalid -> valid rebind.
 
@@ -186,12 +243,7 @@ def name_change_shape(difference: Difference, tables: set[str] | None) -> str:
     if leaf == "Entity":
         return SHAPE_BINDING if before not in tables and after in tables else SHAPE_MODEL_NAMES
     if leaf == "queryRef":
-        # `Entity.Property`; only the entity half can be checked, so the property half must be
-        # unchanged before the change as a whole counts as binding being resolved.
-        before_entity, _, before_rest = before.partition(".")
-        after_entity, _, after_rest = after.partition(".")
-        if before_rest == after_rest and before_entity not in tables and after_entity in tables:
-            return SHAPE_BINDING
+        return _query_ref_shape(before, after, tables)
     return SHAPE_MODEL_NAMES
 
 

@@ -84,12 +84,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from check_migration_progress import adjudicate_generated_drift, load_generated_artifact_baseline
-from harvest_gap_shapes import SHAPE_REVERTED, added_removed_shape, bound_model_tables, shapes_for_change
+from check_migration_progress import (
+    UnreadableDeclarations,
+    adjudicate_generated_drift,
+    load_generated_artifact_baseline,
+)
+from harvest_gap_report import DEFAULT_TOP, render, render_markdown
+from harvest_gap_shapes import (
+    SHAPE_POST_ENGINE_CHANGE,
+    SHAPE_REVERTED,
+    added_removed_shape,
+    bound_model_tables,
+    shapes_for_change,
+)
 from migration_bundle import ENGINE_RECEIPT, sha256_file
 
 REPORT_VERSION = 1
-
 EXIT_OK = 0
 EXIT_UNTRUSTWORTHY = 1
 EXIT_USAGE = 2
@@ -120,7 +130,6 @@ LAYER_MODEL = "model"
 # happen to agree, and collapsing them would hide the day one of them moves.
 GIT_READABLE_PATH_MAX = 259
 
-DEFAULT_TOP = 12
 
 # The two bundle trees the engine emits as a pristine reference, and the one the tier is allowed to
 # edit. Drift under a BASELINE root is refused outright; drift under the WORKING root is the evidence
@@ -131,6 +140,14 @@ WORKING_ROOT = "pbip/"
 DRIFT_CHANGED = "changed"
 DRIFT_MISSING = "missing"
 DRIFT_ADDED = "added"
+
+# `Path.relative_to` renders a tree's own root as ".", so a traversal failure AT the root carries
+# that as its relative path. It is not a file name; it means "everything here".
+TREE_ROOT = "."
+
+# Layer for an adjudicated working path that belongs to no `.Report`/`.SemanticModel` pair at all -
+# a `.pbip` project file, or anything under a unit the pairing could not reach.
+LAYER_BUNDLE = "bundle"
 
 
 class Pair(NamedTuple):
@@ -220,7 +237,14 @@ def _withdraw(keys: set[str], blocked: frozenset[str]) -> set[str]:
     visual.json`) stayed in the comparison and was counted as an addition. Measured (blind review of
     PR #399): an injected `PermissionError` on one baseline directory produced an unassessable record
     for the directory AND a fabricated `delta.added` entry beneath it.
+
+    ⚠️ A failure at the TREE ROOT relativises to `"."`, which no key is prefixed by, so the same
+    round-2 fix still let a blocked root through: the second review measured `status=incomplete` with
+    both working files nonetheless counted as additions and attributed `engine_internal`. `"."` means
+    the whole tree, and is handled as such.
     """
+    if TREE_ROOT in blocked:
+        return set()
     return {key for key in keys if key not in blocked and not any(key.startswith(f"{p}/") for p in blocked)}
 
 
@@ -333,6 +357,37 @@ def _unavailable(bundle: Path, reason: str, note: str) -> Evidence:
     return Evidence(bundle, None, None, [note], unavailable_reason=reason)
 
 
+def _unusable_baseline(generated: dict[str, Any] | None) -> tuple[str, str] | None:
+    """Why a loaded baseline cannot answer THIS module's question, or None when it can.
+
+    Separated from `_load_evidence` so the loader stays a short chain of I/O guards: these three are
+    policy, not I/O, and two of them are deliberately stricter than the tamper gate's own reading.
+    """
+    if generated is None:
+        return (
+            "no_usable_baseline",
+            "no usable generated_artifacts baseline in input_manifest.json - every difference is "
+            "reported as unattributed. The delta below is real; the claim about WHO caused it is "
+            "withheld, not guessed (issue #230).",
+        )
+    if generated.get("coverage") == "slice_only_backfill":
+        return (
+            "slice_only_backfill",
+            "baseline was backfilled by `run_estate.py --slice-only`, not recorded at the engine's own "
+            "run boundary. `--tamper` can still use it to prove nothing changed SINCE the backfill, but "
+            "THIS module asks who wrote a byte relative to the ENGINE boundary - and a backfill has no "
+            "engine boundary behind it. Attribution is therefore unavailable, not merely caveated.",
+        )
+    if not generated["files"]:
+        return (
+            "empty_inventory",
+            "generated_artifacts.files is EMPTY: the manifest claims the engine produced no artifacts "
+            "at all, so it cannot cover a single compared path. Reported as unavailable rather than "
+            "read as 'everything was added after the engine ran'.",
+        )
+    return None
+
+
 def _load_evidence(bundle: Path) -> Evidence:
     """Load the engine-time inventory and adjudicate drift, or say why it cannot be done.
 
@@ -352,33 +407,18 @@ def _load_evidence(bundle: Path) -> Evidence:
             "unavailable and every difference is reported as unattributed. This is NOT tamper evidence: "
             "an unreadable manifest and a rewritten baseline are different situations and exit differently.",
         )
-    if generated is None:
-        return _unavailable(
-            bundle,
-            "no_usable_baseline",
-            "no usable generated_artifacts baseline in input_manifest.json - every difference is "
-            "reported as unattributed. The delta below is real; the claim about WHO caused it is "
-            "withheld, not guessed (issue #230).",
-        )
-    if generated.get("coverage") == "slice_only_backfill":
-        return _unavailable(
-            bundle,
-            "slice_only_backfill",
-            "baseline was backfilled by `run_estate.py --slice-only`, not recorded at the engine's own "
-            "run boundary. `--tamper` can still use it to prove nothing changed SINCE the backfill, but "
-            "THIS module asks who wrote a byte relative to the ENGINE boundary - and a backfill has no "
-            "engine boundary behind it. Attribution is therefore unavailable, not merely caveated.",
-        )
-    if not generated["files"]:
-        return _unavailable(
-            bundle,
-            "empty_inventory",
-            "generated_artifacts.files is EMPTY: the manifest claims the engine produced no artifacts "
-            "at all, so it cannot cover a single compared path. Reported as unavailable rather than "
-            "read as 'everything was added after the engine ran'.",
-        )
+    unusable = _unusable_baseline(generated)
+    if unusable is not None:
+        return _unavailable(bundle, *unusable)
     try:
         adjudicated = adjudicate_generated_drift(bundle, generated)
+    except UnreadableDeclarations as exc:
+        return _unavailable(
+            bundle,
+            "unreadable_declarations",
+            f"{exc} Attribution is unavailable here rather than guessed: without the ledger this module "
+            "cannot tell a declared tier edit from an undeclared one.",
+        )
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return _unavailable(
             bundle,
@@ -402,7 +442,36 @@ def _unit_names(directory: Path, suffix: str) -> dict[str, Path]:
     return {p.name[: -len(suffix)]: p for p in directory.iterdir() if p.is_dir() and p.name.endswith(suffix)}
 
 
-def _working_artifacts(bundle: Path, suffix: str) -> list[tuple[str, str, Path]]:
+def _safe_iterdir(directory: Path, failures: list[dict[str, str]]) -> list[Path]:
+    """List a directory, recording an access failure instead of raising it.
+
+    ⚠️ Discovery used bare `iterdir()`. Measured (blind review of PR #399): injecting a
+    `PermissionError` while enumerating `pbip/` escaped `harvest()` as a traceback and exited 1 -
+    the code this module reserves for a positively detected tampered baseline. An estate we cannot
+    fully enumerate is `incomplete`, never a crash and never a clean result.
+    """
+    try:
+        return sorted(directory.iterdir())
+    except OSError as exc:
+        failures.append(
+            {
+                "path": _safe(str(directory)),
+                "reason": f"{type(exc).__name__}: {exc.strerror or exc}",
+                "scope": "discovery",
+            }
+        )
+        return []
+
+
+def _unit_names(directory: Path, suffix: str, failures: list[dict[str, str]]) -> dict[str, Path]:
+    if not directory.is_dir():
+        return {}
+    return {
+        p.name[: -len(suffix)]: p for p in _safe_iterdir(directory, failures) if p.is_dir() and p.name.endswith(suffix)
+    }
+
+
+def _working_artifacts(bundle: Path, suffix: str, failures: list[dict[str, str]]) -> list[tuple[str, str, Path]]:
     """Every shipping artifact of one kind under `pbip/`, as (artifact, unit, path).
 
     Returned as a LIST, not a dict: a shared published datasource is copied into every consuming
@@ -414,33 +483,38 @@ def _working_artifacts(bundle: Path, suffix: str) -> list[tuple[str, str, Path]]
     if not pbip.is_dir():
         return []
     found = []
-    for unit_dir in sorted(p for p in pbip.iterdir() if p.is_dir()):
-        for artifact_dir in sorted(p for p in unit_dir.iterdir() if p.is_dir() and p.name.endswith(suffix)):
-            found.append((artifact_dir.name[: -len(suffix)], unit_dir.name, artifact_dir))
+    for unit_dir in _safe_iterdir(pbip, failures):
+        if not unit_dir.is_dir():
+            continue
+        for artifact_dir in _safe_iterdir(unit_dir, failures):
+            if artifact_dir.is_dir() and artifact_dir.name.endswith(suffix):
+                found.append((artifact_dir.name[: -len(suffix)], unit_dir.name, artifact_dir))
     return found
 
 
-def discover_pairs(bundle: Path) -> list[Pair]:
-    """Every baseline/working pair in the bundle, for both layers.
+def discover_pairs(bundle: Path) -> tuple[list[Pair], list[dict[str, str]]]:
+    """Every baseline/working pair in the bundle, plus any directory it could not enumerate.
 
     A side that is missing is still returned, as None: an artifact with no engine baseline is a
-    FINDING (issue #179), not an artifact to drop from the denominator.
+    FINDING (issue #179), not an artifact to drop from the denominator. A directory that could not
+    be READ is a different finding again, and it is returned rather than raised.
     """
     pairs: list[Pair] = []
+    failures: list[dict[str, str]] = []
     for layer, baseline_dir, suffix in (
         (LAYER_REPORT, "reports", ".Report"),
         (LAYER_MODEL, "semantic_models", ".SemanticModel"),
     ):
-        baselines = _unit_names(bundle / baseline_dir, suffix)
+        baselines = _unit_names(bundle / baseline_dir, suffix, failures)
         matched: set[str] = set()
-        for artifact, unit, working in _working_artifacts(bundle, suffix):
+        for artifact, unit, working in _working_artifacts(bundle, suffix, failures):
             matched.add(artifact)
             pairs.append(
                 Pair(artifact=artifact, unit=unit, layer=layer, baseline=baselines.get(artifact), working=working)
             )
         for artifact in sorted(set(baselines) - matched):
             pairs.append(Pair(artifact=artifact, unit="", layer=layer, baseline=baselines[artifact], working=None))
-    return pairs
+    return pairs, failures
 
 
 def _base_record(pair: Pair, relative: str, kind: str, shapes: list[str], differences: int) -> dict[str, Any]:
@@ -579,6 +653,66 @@ def _post_engine_records(
             }
         )
     return records
+
+
+def _unpaired_pair(target: str) -> Pair:
+    """Describe an adjudicated `pbip/` path that belongs to no discovered pair.
+
+    `pbip/<unit>/<artifact>.Report/<rest>` still yields a usable unit/artifact/layer; a bare
+    `pbip/<unit>/<file>` (a `.pbip` project file, the shape the estate has 51 of) yields the unit and
+    a `bundle` layer. Either way the path is NAMED rather than dropped.
+    """
+    parts = target.split("/")
+    unit = parts[1] if len(parts) > 2 else ""
+    for index, part in enumerate(parts):
+        for suffix, layer in ((".Report", LAYER_REPORT), (".SemanticModel", LAYER_MODEL)):
+            if part.endswith(suffix):
+                return Pair(part[: -len(suffix)], unit, layer, None, None), "/".join(parts[index + 1 :])
+    return Pair(parts[-1], unit, LAYER_BUNDLE, None, None), "/".join(parts[2:]) or parts[-1]
+
+
+def _unmatched_drift_records(evidence: Evidence, represented: set[str]) -> tuple[list[dict[str, Any]], list[dict]]:
+    """Adjudicated drift no pair accounted for. NOTHING the gate found may silently disappear.
+
+    ⚠️ The gate adjudicates the COMPLETE generated-artifact inventory; the pair loop above only
+    consumes drift beneath a discovered `.Report`/`.SemanticModel`. Everything else fell on the
+    floor. Measured (blind review of PR #399): editing an engine-recorded `pbip/WB/WB.pbip` was
+    reported `changed` by `adjudicate_generated_drift` while the harvest returned `complete` with
+    zero differences and zero tier edits - and the real corpus holds **51** such `.pbip` files.
+    Deleting a whole working report did the same across several paths at once.
+
+    So this is the reconciliation, and it runs over EVERY adjudicated path. Anything under `pbip/`
+    becomes tier-edit evidence; anything else that is still unaccounted for is returned separately
+    and forces `incomplete` rather than being quietly absorbed.
+    """
+    records: list[dict[str, Any]] = []
+    unreconciled: list[dict] = []
+    for target, entry in sorted(evidence.drift.items()):
+        if target in represented:
+            continue
+        if not target.startswith(WORKING_ROOT):
+            unreconciled.append(dict(entry, target=target))
+            continue
+        pair, relative = _unpaired_pair(target)
+        kind = entry["kind"]
+        if kind == DRIFT_MISSING:
+            shapes, record_kind = [added_removed_shape(relative, False)], "removed_after_engine"
+        elif kind == DRIFT_ADDED:
+            shapes, record_kind = [added_removed_shape(relative, True)], "added_after_engine"
+        else:
+            shapes, record_kind = [SHAPE_POST_ENGINE_CHANGE], "changed_after_engine"
+        records.append(
+            _base_record(pair, relative, record_kind, shapes, 1)
+            | {
+                "baseline_path": None,
+                "working_path": target,
+                "provenance": evidence.verdict(None, target),
+                "post_engine": _post_engine(evidence, target),
+                "declared_by": entry["declared_by"],
+                "unpaired": True,
+            }
+        )
+    return records, unreconciled
 
 
 def _difference_records(
@@ -720,26 +854,86 @@ def _coverage(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _overall_status(
+class Scan(NamedTuple):
+    """Everything the per-pair loop produced, kept together so `harvest` stays readable."""
+
+    entries: list[dict[str, Any]]
+    records: list[dict[str, Any]]
+    unassessable: list[dict[str, str]]
+    git_blind: list[dict[str, Any]]
+
+
+def _incomplete_reasons(
     entries: list[dict[str, Any]],
-    tampered: list[dict[str, Any]],
     unassessable: list[dict[str, str]],
     evidence: Evidence,
     coverage: dict[str, Any],
-) -> str:
+    unreconciled: list[dict[str, Any]],
+) -> list[str]:
+    """Every reason this harvest does not cover the estate - NAMED, not collapsed into a boolean.
+
+    The predecessor was a six-term `or`, which answered "is it incomplete?" and never "why?". A
+    consumer reading `incomplete` had to re-derive the cause from the rest of the payload.
+    """
+    reasons = []
+    if not entries:
+        reasons.append("no baseline/working pair was discovered at all")
+    if unassessable:
+        reasons.append(f"{len(unassessable)} path(s) could not be read or enumerated")
+    if unreconciled:
+        reasons.append(f"{len(unreconciled)} adjudicated path(s) could not be placed")
+    if not evidence.usable:
+        reasons.append(f"attribution unavailable ({evidence.unavailable_reason})")
+    if not coverage["complete"]:
+        reasons.append(f"{coverage['paths_unattributed']} compared path(s) are unattributed")
+    partial = sorted(
+        {e["status"] for e in entries if e["status"] in {PAIR_NO_BASELINE, PAIR_NO_WORKING, PAIR_UNASSESSABLE}}
+    )
+    if partial:
+        reasons.append(f"partial pairing: {', '.join(partial)}")
+    return reasons
+
+
+def _overall_status(tampered: list[dict[str, Any]], incomplete_reasons: list[str]) -> str:
     """`untrustworthy` beats `incomplete` beats `complete`.
 
     A tampered baseline outranks everything: the delta is not merely partial, it is wrong. An
-    incomplete run is one whose numbers are real but do not cover the estate - unpaired artifacts,
-    unreadable paths, an unattributable bundle, or **any single difference this module could not
-    attribute**. Neither ever reports as clean.
+    incomplete run is one whose numbers are real but do not cover the estate. Neither is ever clean.
     """
     if tampered:
         return STATUS_UNTRUSTWORTHY
-    partial = any(e["status"] in {PAIR_NO_BASELINE, PAIR_NO_WORKING, PAIR_UNASSESSABLE} for e in entries)
-    if unassessable or not evidence.usable or not coverage["complete"] or partial or not entries:
-        return STATUS_INCOMPLETE
-    return STATUS_COMPLETE
+    return STATUS_INCOMPLETE if incomplete_reasons else STATUS_COMPLETE
+
+
+def _represented(records: list[dict[str, Any]], baseline_drift: list[dict[str, Any]]) -> set[str]:
+    """Every bundle-relative path already named somewhere in the report."""
+    named = {entry["target"] for entry in baseline_drift}
+    for record in records:
+        named |= {p for p in (record.get("working_path"), record.get("baseline_path")) if p}
+    return named
+
+
+def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
+    """Compare every discovered pair, collecting entries, records and access failures."""
+    pairs, discovery_failures = discover_pairs(bundle)
+    scan = Scan([], [], list(discovery_failures), [])
+    for pair in pairs:
+        delta = compare_trees(pair.baseline, pair.working) if pair.baseline and pair.working else None
+        if delta is not None:
+            scan.unassessable.extend(delta.unassessable)
+            if delta.longest_path > GIT_READABLE_PATH_MAX:
+                scan.git_blind.append(
+                    {
+                        "artifact": pair.artifact,
+                        "unit": pair.unit,
+                        "layer": pair.layer,
+                        "longest_path": delta.longest_path,
+                    }
+                )
+        pair_records = _difference_records(bundle, pair, delta, evidence) if delta is not None else []
+        scan.records.extend(pair_records)
+        scan.entries.append(_pair_entry(pair, delta, _pair_status(pair, delta, pair_records), pair_records))
+    return scan
 
 
 def harvest(bundle: Path) -> dict[str, Any]:
@@ -753,38 +947,27 @@ def harvest(bundle: Path) -> dict[str, Any]:
     # files and zero tampering, while `tamper_check()` on the same bundle returned DRIFT.
     baseline_drift = evidence.side_drift(BASELINE_ROOTS)
 
-    entries: list[dict[str, Any]] = []
-    records: list[dict[str, Any]] = []
-    unassessable: list[dict[str, str]] = []
-    git_blind: list[dict[str, Any]] = []
+    scan = _scan_pairs(bundle, evidence)
+    entries, records, unassessable, git_blind = scan
 
-    for pair in discover_pairs(bundle):
-        delta = compare_trees(pair.baseline, pair.working) if pair.baseline and pair.working else None
-        if delta is not None:
-            unassessable.extend(delta.unassessable)
-            if delta.longest_path > GIT_READABLE_PATH_MAX:
-                git_blind.append(
-                    {
-                        "artifact": pair.artifact,
-                        "unit": pair.unit,
-                        "layer": pair.layer,
-                        "longest_path": delta.longest_path,
-                    }
-                )
-        pair_records = _difference_records(bundle, pair, delta, evidence) if delta is not None else []
-        records.extend(pair_records)
-        entries.append(_pair_entry(pair, delta, _pair_status(pair, delta, pair_records), pair_records))
+    # The reconciliation that makes "no adjudicated path silently disappears" structural rather than
+    # aspirational: every path the gate found must be named by a record, by `baseline_drift`, or by
+    # `unreconciled_drift` - and the last of those forces a non-clean status.
+    unpaired_records, unreconciled = _unmatched_drift_records(evidence, _represented(records, baseline_drift))
+    records = records + unpaired_records
 
     provenance = Counter(record["provenance"] for record in records)
     tampered = [r for r in records if r["provenance"] == PROV_TAMPERED]
     coverage = _coverage(records)
-    status = _overall_status(entries, tampered or baseline_drift, unassessable, evidence, coverage)
+    reasons = _incomplete_reasons(entries, unassessable, evidence, coverage, unreconciled)
+    status = _overall_status(tampered or baseline_drift, reasons)
 
     return {
         "version": REPORT_VERSION,
         "generated_at": _utcnow(),
         "bundle": str(bundle),
         "status": status,
+        "incomplete_reasons": reasons,
         "engine": _engine_metadata(bundle),
         "attribution": {
             "usable": evidence.usable,
@@ -801,6 +984,9 @@ def harvest(bundle: Path) -> dict[str, Any]:
         "tier_edits": [r for r in records if r["provenance"] == PROV_TIER],
         "baseline_tampered": tampered,
         "baseline_drift": baseline_drift,
+        "baseline_roots": list(BASELINE_ROOTS),
+        "unpaired_drift_records": len(unpaired_records),
+        "unreconciled_drift": unreconciled,
         "pairs": entries,
         "unassessable": unassessable,
         "git_blind_spot": {
@@ -814,208 +1000,6 @@ def harvest(bundle: Path) -> dict[str, Any]:
             ),
         },
     }
-
-
-def _pct(part: int, whole: int) -> str:
-    return f"{part}/{whole} ({round(100 * part / whole):d}%)" if whole else f"{part}/0 (n/a)"
-
-
-def _layer_lines(report: dict[str, Any]) -> list[str]:
-    lines = []
-    for layer, summary in report["layers"].items():
-        if not summary["artifacts"]:
-            continue
-        lines.append(
-            f"  {layer + ' layer':<14}: {_pct(summary['pairs_assessed'], summary['artifacts'])} assessed"
-            f" | identical {summary['identical']}, differs {summary['differs']}"
-            f" | no baseline {summary['unpaired_no_baseline']},"
-            f" no working copy {summary['unpaired_no_working']},"
-            f" unassessable {summary['unassessable']}"
-        )
-        lines.append(
-            f"  {'':<14}  files: {summary['files_changed']} changed,"
-            f" {summary['files_added']} added, {summary['files_removed']} removed,"
-            f" {summary['files_post_engine_only']} post-engine only"
-        )
-        if summary["baseline_reference_checked"]:
-            lines.append(
-                f"  {'':<14}  baseline dataset reference resolves:"
-                f" {_pct(summary['baseline_reference_resolves'], summary['baseline_reference_checked'])}"
-            )
-    return lines
-
-
-def _finding_lines(report: dict[str, Any], top: int) -> list[str]:
-    """The sections that only appear when there is something to say."""
-    lines: list[str] = []
-    if report["shapes"]:
-        lines.append(f"  shapes (top {top})       :")
-        for row in report["shapes"][:top]:
-            share = f"{100 * row['share_of_differing_files']:.0f}%" if row["share_of_differing_files"] else "n/a"
-            lines.append(f"      {row['files']:>5} files / {row['artifacts']:>3} artifacts  {share:>5}  {row['shape']}")
-    if report["tier_edits"]:
-        lines.append(f"  TIER EDITS            : {len(report['tier_edits'])} file(s) changed after the engine ran")
-        for record in report["tier_edits"][:top]:
-            declared = record["declared_by"] or "UNDECLARED"
-            lines.append(
-                f"      [{record['unit'] or record['artifact']}] {record['path']} {record['shapes']} <- {declared}"
-            )
-    if report["baseline_drift"]:
-        lines.append(
-            f"  BASELINE DRIFT        : {len(report['baseline_drift'])} engine-baseline path(s) under"
-            f" {'/'.join(r.rstrip('/') for r in BASELINE_ROOTS)} moved after the engine ran."
-            " Those trees are never edited by anyone, so this delta cannot be read as engine behaviour."
-        )
-        for entry in report["baseline_drift"][:top]:
-            lines.append(f"      {entry['kind']:<8} {entry['target']}  ({entry['declared_by'] or 'undeclared'})")
-    if report["baseline_tampered"]:
-        lines.append(
-            f"  BASELINE TAMPERED     : {len(report['baseline_tampered'])} compared file(s) whose baseline side drifted"
-        )
-        for record in report["baseline_tampered"][:top]:
-            lines.append(f"      [{record['unit'] or record['artifact']}] {record['path']}")
-    if report["unassessable"]:
-        lines.append(f"  UNASSESSABLE (not passed): {len(report['unassessable'])} path(s) could not be read")
-        for record in report["unassessable"][:top]:
-            lines.append(f"      {record['reason']}  {record['path']}")
-    blind = report["git_blind_spot"]
-    if blind["count"]:
-        lines.append(
-            f"  git blind spot        : {blind['count']} pair(s) exceed {blind['path_max']} characters -"
-            " the AGENTS.md `git diff --no-index` form returns exit 1 with NO stat line for these."
-            " Assessed here anyway."
-        )
-        for record in blind["pairs"][:top]:
-            lines.append(f"      {record['longest_path']:>4}  [{record['layer']}] {record['unit']}")
-    return lines
-
-
-def render(report: dict[str, Any], top: int = DEFAULT_TOP) -> str:
-    """Human-readable console report."""
-    provenance = report["provenance"]
-    total = provenance["differing_files"]
-    coverage = report["attribution"]["coverage"]
-    lines = [
-        f"{report['status'].upper()}: {report['bundle']}",
-        f"  engine                : {report['engine'].get('version') or 'unknown'}"
-        f" (canonical={report['engine'].get('canonical')})",
-        f"  attribution           : {'hash-attributed' if report['attribution']['usable'] else 'NOT AVAILABLE'}"
-        f" from {report['attribution']['files_recorded']} recorded artifacts",
-    ]
-    lines += [f"      note              : {note}" for note in report["attribution"]["notes"]]
-    lines.append(
-        f"  attribution coverage  : {_pct(coverage['paths_attributed'], coverage['paths_compared'])}"
-        f" of compared paths{'' if coverage['complete'] else '  <- NOT complete; status cannot be `complete`'}"
-    )
-    lines.extend(_layer_lines(report))
-    lines.append(f"  differing files       : {total}")
-    lines += [f"      {name:<18}: {_pct(provenance[name], total)}" for name in PROVENANCES]
-    lines.append(
-        "      -> only `tier_edit` answers 'what did the engine get wrong?'."
-        " `engine_internal` is the engine's own reference-vs-bound difference."
-    )
-    lines.extend(_finding_lines(report, top))
-    return "\n".join(lines)
-
-
-def _markdown_shape_table(report: dict[str, Any], top: int) -> list[str]:
-    lines = ["| shape | files | artifacts | share of differing files |", "|---|---:|---:|---:|"]
-    for row in report["shapes"][:top]:
-        share = f"{100 * row['share_of_differing_files']:.0f}%" if row["share_of_differing_files"] else "n/a"
-        lines.append(f"| `{row['shape']}` | {row['files']} | {row['artifacts']} | {share} |")
-    return lines
-
-
-def render_markdown(report: dict[str, Any], top: int = DEFAULT_TOP) -> str:
-    """An upstream-fileable summary: frequencies with denominators, and explicit non-claims."""
-    provenance = report["provenance"]
-    total = provenance["differing_files"]
-    lines = [
-        "# Engine-gap harvest",
-        "",
-        f"- bundle: `{report['bundle']}`",
-        f"- engine: **{report['engine'].get('version') or 'unknown'}**"
-        f" (canonical: {report['engine'].get('canonical')})",
-        f"- harvested: {report['generated_at']}",
-        f"- status: **{report['status']}**",
-        f"- attribution: {'hash-attributed' if report['attribution']['usable'] else '**unavailable**'}"
-        f" from {report['attribution']['files_recorded']} recorded artifacts, adjudicated by"
-        " `check_migration_progress.adjudicate_generated_drift` (the `--tamper` gate's own machinery)",
-        f"- attribution coverage: {report['attribution']['coverage']['paths_attributed']}"
-        f"/{report['attribution']['coverage']['paths_compared']} compared paths"
-        f"{'' if report['attribution']['coverage']['complete'] else ' - **not complete**'}",
-        "",
-        "## Coverage, per layer",
-        "",
-        "| layer | artifacts | assessed | identical | differs | no baseline | no working copy | unassessable |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for layer, summary in report["layers"].items():
-        lines.append(
-            f"| {layer} | {summary['artifacts']} | {summary['pairs_assessed']} | {summary['identical']} |"
-            f" {summary['differs']} | {summary['unpaired_no_baseline']} |"
-            f" {summary['unpaired_no_working']} | {summary['unassessable']} |"
-        )
-    lines += [
-        "",
-        "## Who wrote the difference",
-        "",
-        "| provenance | files | share |",
-        "|---|---:|---:|",
-    ]
-    for name in PROVENANCES:
-        share = f"{round(100 * provenance[name] / total)}%" if total else "n/a"
-        lines.append(f"| `{name}` | {provenance[name]} | {share} |")
-    lines += [
-        "",
-        "> `engine_internal` means the engine wrote **both** sides - its reference-only emission and"
-        " its bound working copy. That is a by-design difference and is **not** evidence of an engine"
-        ' defect. Only `tier_edit` answers *"what did a human or agent have to change?"*.',
-        "",
-        "## What changed",
-        "",
-    ]
-    lines += _markdown_shape_table(report, top)
-    if report["tier_edits"]:
-        lines += ["", "## Tier edits (the engine-gap evidence)", ""]
-        lines += ["| unit | layer | file | shapes | declared by |", "|---|---|---|---|---|"]
-        for record in report["tier_edits"][:top]:
-            lines.append(
-                f"| {record['unit']} | {record['layer']} | `{record['path']}` |"
-                f" {', '.join(record['shapes'])} | {record['declared_by'] or '**undeclared**'} |"
-            )
-    else:
-        lines += [
-            "",
-            "## Tier edits (the engine-gap evidence)",
-            "",
-            "**None.** Every differing byte in this bundle is still hash-identical to what the engine"
-            " itself recorded, so nothing here shows work a human or agent had to do. A bundle with no"
-            " fix pass cannot answer issue #274's question, and this report does not pretend it can.",
-        ]
-    if report["baseline_drift"]:
-        lines += ["", "## Engine baseline drift (why this report is untrustworthy)", ""]
-        lines += ["| kind | path | declared by |", "|---|---|---|"]
-        for entry in report["baseline_drift"][:top]:
-            lines.append(f"| {entry['kind']} | `{entry['target']}` | {entry['declared_by'] or '**undeclared**'} |")
-        lines += [
-            "",
-            "> `reports/` and `semantic_models/` are the engine's pristine reference emission and are"
-            " **never edited, by anyone** (AGENTS.md). A declaration makes such an edit visible, not"
-            " legitimate, so drift here is refused whether declared or not.",
-        ]
-    lines += ["", "## What this does not say", ""]
-    lines += [
-        "- **Not effort.** File and line counts are not hours; a reformat and a fidelity fix count the same.",
-        "- **Not why.** Provenance says who, shape says what; the reason lives in the handover and"
-        " `limitations_encountered`.",
-        "- **Not a defect list.** `engine_internal` differences are by construction not defect evidence.",
-    ]
-    if report["unassessable"]:
-        lines.append(
-            f"- **{len(report['unassessable'])} path(s) could not be read** and are excluded from every count above."
-        )
-    return "\n".join(lines) + "\n"
 
 
 def _emit(text: str, stream) -> None:

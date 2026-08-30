@@ -322,6 +322,78 @@ def test_tamper_allows_a_generated_edit_declared_by_a_fix_script(tmp_path):
     assert any("fix_orders_navigation.py" in note for note in notes)
 
 
+# --- the declaration ledger is evidence ABOUT drift, so it is loaded only when there IS drift ------
+
+
+def _corrupt_both_declaration_locations(bundle: Path) -> None:
+    """Invalid UTF-8 in the legacy ledger AND in the append-only directory."""
+    legacy = bundle / "_build" / "generated-edit-declarations.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(b'{"version": 1, "\xff\xfe": 1}')
+    appended = bundle / "_build" / "generated-edit-declarations"
+    appended.mkdir(parents=True, exist_ok=True)
+    (appended / "record.json").write_bytes(b'{"version": 1, "\xff\xfe": 1}')
+
+
+def test_a_pristine_bundle_stays_clean_when_the_declaration_ledger_is_undecodable(tmp_path):
+    """⚠️ Regression guard for the delegation seam (blind review round 3 of PR #399).
+
+    Extracting `adjudicate_generated_drift` moved the ledger load AHEAD of the drift computation, so
+    a bundle whose generated artifacts were entirely pristine began depending on data that could not
+    change its verdict: `CLEAN` became an uncaught `UnicodeDecodeError` and a CLI traceback exiting
+    1 - the same code as a real `DRIFT`. Nothing about a clean bundle may consult the ledger.
+    """
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    _write_manifest(tmp_path, {"M.SemanticModel/definition/tables/Orders.tmdl": cmp_mod.sha256_file(generated)})
+    _corrupt_both_declaration_locations(tmp_path)
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "CLEAN"
+    assert "pristine" in notes[0]
+    assert cmp_mod.run_tamper_mode(tmp_path, as_json=False) == 0
+
+
+def test_drift_with_an_unreadable_ledger_is_not_reported_as_undeclared_drift(tmp_path):
+    """ "Cannot read the exonerating evidence" and "there is none" are different findings."""
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    target = "M.SemanticModel/definition/tables/Orders.tmdl"
+    _write_manifest(tmp_path, {target: cmp_mod.sha256_file(generated)})
+    generated.write_text("changed in place", encoding="utf-8")
+    _corrupt_both_declaration_locations(tmp_path)
+
+    state, notes = cmp_mod.tamper_check(tmp_path)
+
+    assert state == "UNREADABLE_DECLARATIONS"
+    assert "NOT the same as undeclared drift" in notes[0]
+    code = cmp_mod.run_tamper_mode(tmp_path, as_json=False)
+    assert code == 4
+    assert code != 1, "must be distinguishable from a positively detected DRIFT"
+
+
+def test_adjudicate_raises_a_named_error_rather_than_a_bare_decode_error(tmp_path):
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    target = "M.SemanticModel/definition/tables/Orders.tmdl"
+    _write_manifest(tmp_path, {target: cmp_mod.sha256_file(generated)})
+    generated.write_text("changed in place", encoding="utf-8")
+    _corrupt_both_declaration_locations(tmp_path)
+
+    with pytest.raises(cmp_mod.UnreadableDeclarations):
+        cmp_mod.adjudicate_generated_drift(tmp_path, cmp_mod.load_generated_artifact_baseline(tmp_path))
+
+
+def test_adjudicating_a_pristine_bundle_never_touches_the_ledger(tmp_path, monkeypatch):
+    """The ordering stated behaviourally, so it cannot regress into "works because it parses"."""
+    generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
+    _write_manifest(tmp_path, {"M.SemanticModel/definition/tables/Orders.tmdl": cmp_mod.sha256_file(generated)})
+
+    def explode(_bundle):
+        raise AssertionError("the declaration ledger was read for a bundle with no drift")
+
+    monkeypatch.setattr(cmp_mod, "load_generated_edit_declarations", explode)
+    assert cmp_mod.adjudicate_generated_drift(tmp_path, cmp_mod.load_generated_artifact_baseline(tmp_path)) == []
+
+
 def test_tamper_reads_append_only_declaration_files(tmp_path):
     generated = _touch(tmp_path / "M.SemanticModel" / "definition" / "tables" / "Orders.tmdl")
     baseline_hash = cmp_mod.sha256_file(generated)

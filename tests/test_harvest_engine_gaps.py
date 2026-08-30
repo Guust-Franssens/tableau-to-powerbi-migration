@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_migration_progress as cmp_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_engine_gaps as heg  # noqa: E402  # pylint: disable=wrong-import-position
+import harvest_gap_report as hgr  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_gap_shapes as hgs  # noqa: E402  # pylint: disable=wrong-import-position
 
 VISUAL = "definition/pages/page-1/visuals/v1/visual.json"
@@ -551,7 +552,7 @@ def test_json_is_written_before_the_console_render(tmp_path, monkeypatch):
 def test_markdown_states_plainly_when_there_are_no_tier_edits(tmp_path):
     """A bundle nobody edited cannot answer issue #274, and the report must say so."""
     report = heg.harvest(_bundle(tmp_path, entity_working="Renamed"))
-    markdown = heg.render_markdown(report)
+    markdown = hgr.render_markdown(report)
     assert "**None.**" in markdown
     assert "engine_internal" in markdown
 
@@ -559,7 +560,7 @@ def test_markdown_states_plainly_when_there_are_no_tier_edits(tmp_path):
 def test_markdown_lists_tier_edits_when_they_exist(tmp_path):
     bundle = _bundle(tmp_path)
     _write(bundle / "pbip" / "WB" / "WB.Report" / VISUAL, _visual("Orders", position=99))
-    markdown = heg.render_markdown(heg.harvest(bundle))
+    markdown = hgr.render_markdown(heg.harvest(bundle))
     assert "Tier edits (the engine-gap evidence)" in markdown
     assert "**undeclared**" in markdown
 
@@ -639,6 +640,26 @@ def _mutate_stale_declaration(bundle: Path) -> None:
     _write(bundle / WORKING_VISUAL, _visual("Orders", position=99))
 
 
+def _mutate_pbip_project_file(bundle: Path) -> None:
+    _write(bundle / "pbip" / "WB" / "WB.pbip", {"version": "2.0", "artifacts": []})
+
+
+def _mutate_whole_working_report_deleted(bundle: Path) -> None:
+    shutil.rmtree(bundle / "pbip" / "WB" / "WB.Report")
+
+
+def _mutate_unpaired_working_report_added(bundle: Path) -> None:
+    _write(bundle / "pbip" / "Extra" / "Extra.Report" / "definition/pages/p1/page.json", {"name": "p1"})
+
+
+def _bundle_with_project_file(tmp_path: Path) -> Path:
+    """A bundle carrying a `pbip/<unit>/<unit>.pbip` - the estate has 51 of them, none paired."""
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / "pbip" / "WB" / "WB.pbip", {"version": "1.0", "artifacts": []})
+    _record_baseline(bundle)
+    return bundle
+
+
 MUTATIONS = {
     "baseline_rewritten_from_working": (_differing_bundle, _mutate_baseline_rewritten),
     "baseline_file_added": (_identical_bundle, _mutate_baseline_file_added),
@@ -647,6 +668,9 @@ MUTATIONS = {
     "working_file_deleted": (_identical_bundle, _mutate_working_file_deleted),
     "working_file_changed": (_identical_bundle, _mutate_working_file_changed),
     "stale_declaration": (_identical_bundle, _mutate_stale_declaration),
+    "pbip_project_file_changed": (_bundle_with_project_file, _mutate_pbip_project_file),
+    "whole_working_report_deleted": (_identical_bundle, _mutate_whole_working_report_deleted),
+    "unpaired_working_report_added": (_identical_bundle, _mutate_unpaired_working_report_added),
 }
 
 
@@ -1152,3 +1176,222 @@ def test_a_declaration_invalidated_by_a_later_edit_is_not_credited(tmp_path):
 
     assert cmp_mod.tamper_check(bundle)[0] == "DRIFT"
     assert report["tier_edits"][0]["declared_by"] is None
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-3 review. Three of these four defects were reachable while all 98 tests stayed green, so
+# each one below is written to fail against the code that shipped, not merely to pass against the
+# code that fixed it. The mutation table in the PR description names which test catches which.
+# ---------------------------------------------------------------------------------------------
+
+
+def _dotted_model(root: Path, *tables: str) -> None:
+    """A `.SemanticModel` whose table names may themselves contain dots (`HumanResources.csv`)."""
+    for table in tables:
+        _write(root / "definition" / "tables" / f"{table}.tmdl", f"table '{table}'\n\n\tcolumn A\n")
+    _write(root / "definition.pbism", {"version": "4.0"})
+
+
+DOTTED_TABLES = {"Date", "HumanResources.csv", "Orders", "Orders.csv", "Customers.csv", "Returns", "_Measures"}
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected", "why"),
+    [
+        # ⚠️ The bound model really does hold a table called `HumanResources.csv`. Splitting a
+        # queryRef at the FIRST dot read this as entity `HumanResources` + property `csv.Status`,
+        # decided the property had changed, and retained a textbook rebind as unexplained.
+        ("HumanResources.Status", "HumanResources.csv.Status", hgs.SHAPE_BINDING, "dotted table name"),
+        ("Extract.State", "HumanResources.csv.State", hgs.SHAPE_BINDING, "invalid entity -> dotted table"),
+        ("Customers.csv_110301F4.Country", "Customers.csv.Country", hgs.SHAPE_BINDING, "hashed extract name"),
+        ("Sum(Orders.csv_AB12.Sales)", "Sum(Orders.csv.Sales)", hgs.SHAPE_BINDING, "aggregation wrapper"),
+        # Still retained, and these are the true positives the whole refinement exists to keep.
+        ("Orders.Order_Date", "Date.Year", hgs.SHAPE_MODEL_NAMES, "different table AND column"),
+        ("Orders.Amount", "Returns.Amount", hgs.SHAPE_MODEL_NAMES, "valid -> valid substitution"),
+        ("Sum(Orders.csv_AB.Sales)", "Avg(Orders.csv.Sales)", hgs.SHAPE_MODEL_NAMES, "aggregation changed"),
+        ("Extract.A", "Nowhere.A", hgs.SHAPE_MODEL_NAMES, "after-entity is not a table"),
+        ("Orders.csv.Sales", "Orders.csv.Margin", hgs.SHAPE_MODEL_NAMES, "property changed"),
+        ("Orders.csv.Sales", "Orders.csv.Sales", hgs.SHAPE_MODEL_NAMES, "no entity change at all"),
+        # `Orders` and `Orders.csv` are BOTH tables: the longest prefix is the right split, and the
+        # shortest would resolve `Orders.csv.Sales` to entity `Orders` + property `csv.Sales`.
+        ("Extract.Sales", "Orders.csv.Sales", hgs.SHAPE_BINDING, "longest matching table wins"),
+    ],
+)
+def test_query_ref_resolves_against_real_table_names_not_the_first_dot(before, after, expected, why):
+    difference = hgs.Difference("/visual/query/x/projections[]/queryRef", "value", before, after)
+    assert hgs.name_change_shape(difference, DOTTED_TABLES) == expected, why
+
+
+def test_a_rebind_onto_a_dotted_table_is_not_reported_as_unexplained(tmp_path):
+    """End-to-end shape of the estate's dominant false positive: 574 -> 100 retained queryRef leaves."""
+    bundle = tmp_path / "bundle"
+    _write(
+        bundle / "reports" / "WB.Report" / "definition.pbir",
+        {"version": "4.0", "datasetReference": {"byPath": {"path": "../HR.SemanticModel"}}},
+    )
+    _write(bundle / "reports" / "WB.Report" / VISUAL, _visual("Extract"))
+    _write(
+        bundle / "pbip" / "WB" / "WB.Report" / "definition.pbir",
+        {"version": "4.0", "datasetReference": {"byPath": {"path": "../HR.SemanticModel"}}},
+    )
+    _write(bundle / "pbip" / "WB" / "WB.Report" / VISUAL, _visual("HumanResources.csv"))
+    _dotted_model(bundle / "pbip" / "WB" / "HR.SemanticModel", "HumanResources.csv")
+    _dotted_model(bundle / "semantic_models" / "HR.SemanticModel", "HumanResources.csv")
+    _record_baseline(bundle)
+
+    shapes = {row["shape"] for row in heg.harvest(bundle)["shapes"]}
+
+    assert hgs.SHAPE_BINDING in shapes
+    assert hgs.SHAPE_MODEL_NAMES not in shapes, "the whole rebind is explained; nothing should be retained"
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 3: no adjudicated path may disappear just because it sits outside a discovered pair.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_changed_pbip_project_file_is_reported_as_a_tier_edit(tmp_path):
+    """⚠️ The gate adjudicates the WHOLE inventory; the pair loop only sees `.Report`/`.SemanticModel`.
+
+    Measured (blind review round 3): editing an engine-recorded `pbip/WB/WB.pbip` was reported
+    `changed` by `adjudicate_generated_drift` while the harvest returned `complete` with **zero**
+    differences and zero tier edits. The real corpus holds 51 such files.
+    """
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / "pbip" / "WB" / "WB.pbip", {"version": "1.0", "artifacts": []})
+    _record_baseline(bundle)
+    _mutate_pbip_project_file(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert report["provenance"][heg.PROV_TIER] == 1
+    assert report["unpaired_drift_records"] == 1
+    edit = report["tier_edits"][0]
+    assert edit["working_path"] == "pbip/WB/WB.pbip"
+    assert edit["layer"] == heg.LAYER_BUNDLE
+    assert edit["unit"] == "WB"
+    assert edit["unpaired"] is True
+
+
+def test_deleting_a_whole_working_report_reports_every_lost_file(tmp_path):
+    bundle = _identical_bundle(tmp_path)
+    _mutate_whole_working_report_deleted(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert report["provenance"][heg.PROV_TIER] == 2
+    assert {r["working_path"] for r in report["tier_edits"]} == {
+        "pbip/WB/WB.Report/definition.pbir",
+        "pbip/WB/WB.Report/" + VISUAL,
+    }
+    assert all(r["layer"] == "report" and r["artifact"] == "WB" for r in report["tier_edits"])
+
+
+def test_an_adjudicated_path_that_cannot_be_placed_is_listed_and_forces_incomplete(tmp_path):
+    """A `.pbip` at the BUNDLE root is under neither a baseline root nor `pbip/`.
+
+    It must not be silently absorbed: it is named in `unreconciled_drift`, and while anything is
+    there the run cannot be `complete`. That guard is what makes "nothing disappears" structural
+    rather than a property of the cases we happened to enumerate.
+    """
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / "Estate.pbip", {"version": "1.0"})
+    _record_baseline(bundle)
+    _write(bundle / "Estate.pbip", {"version": "2.0"})
+
+    report = heg.harvest(bundle)
+
+    assert [e["target"] for e in report["unreconciled_drift"]] == ["Estate.pbip"]
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE
+
+
+def test_no_adjudicated_path_is_ever_left_unreported(tmp_path):
+    """The invariant, asserted directly rather than inferred from the cases above."""
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / "pbip" / "WB" / "WB.pbip", {"version": "1.0"})
+    _write(bundle / "Estate.pbip", {"version": "1.0"})
+    _record_baseline(bundle)
+    _mutate_pbip_project_file(bundle)
+    _mutate_working_file_changed(bundle)
+    _write(bundle / "Estate.pbip", {"version": "9.9"})
+
+    generated = cmp_mod.load_generated_artifact_baseline(bundle)
+    adjudicated = {item["target"] for item in cmp_mod.adjudicate_generated_drift(bundle, generated)}
+    report = heg.harvest(bundle)
+    reported = _moved_paths(report) | {e["target"] for e in report["unreconciled_drift"]}
+
+    assert len(adjudicated) == 3
+    assert adjudicated <= reported, f"unreported: {sorted(adjudicated - reported)}"
+
+
+# ---------------------------------------------------------------------------------------------
+# Finding 4: access failures outside descendant hashing.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_directory_that_cannot_be_enumerated_is_a_finding_not_a_traceback(tmp_path, monkeypatch):
+    """Discovery used a bare `iterdir()`; a `PermissionError` on `pbip/` escaped `harvest()` entirely."""
+    bundle = _identical_bundle(tmp_path)
+    real_iterdir = Path.iterdir
+
+    def blocked(self):
+        if self.name == "pbip":
+            raise PermissionError(13, "injected: cannot enumerate")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", blocked)
+    report = heg.harvest(bundle)
+
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert any(record.get("scope") == "discovery" for record in report["unassessable"])
+
+
+def test_a_blocked_tree_root_withdraws_the_whole_tree_from_every_count(tmp_path, monkeypatch):
+    """⚠️ A failure at the tree ROOT relativises to `"."`, which no key is prefixed by.
+
+    Measured (blind review round 3): the round-2 prefix fix still let this through - `incomplete`,
+    but both working files were counted as additions AND attributed `engine_internal`, contradicting
+    this module's documented promise that unreadable content is excluded from every count.
+    """
+    bundle = _identical_bundle(tmp_path)
+    real_walk = heg.os.walk
+
+    def walk(top, onerror=None, **kwargs):
+        if Path(top).name == "WB.Report" and "reports" in Path(top).parts:
+            if onerror is not None:
+                failure = PermissionError(13, "injected: cannot enter tree root")
+                failure.filename = str(top)
+                onerror(failure)
+            return
+        yield from real_walk(top, onerror=onerror, **kwargs)
+
+    monkeypatch.setattr(heg.os, "walk", walk)
+    report = heg.harvest(bundle)
+    entry = _pair(report, "report", "WB")
+
+    assert entry["files"]["added"] == 0
+    assert entry["files"]["removed"] == 0
+    assert entry["provenance"] == {}
+    assert entry["status"] == heg.PAIR_UNASSESSABLE
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+def test_withdraw_treats_the_tree_root_as_covering_everything():
+    assert heg._withdraw({"a", "a/b", "c"}, frozenset({heg.TREE_ROOT})) == set()  # pylint: disable=protected-access
+    assert heg._withdraw({"a", "a/b", "c"}, frozenset({"a"})) == {"c"}  # pylint: disable=protected-access
+
+
+def test_an_unreadable_declaration_ledger_makes_the_harvest_incomplete_not_untrustworthy(tmp_path):
+    """Exit 3, never the exit 1 that means a tampered baseline was positively detected."""
+    bundle = _identical_bundle(tmp_path)
+    _mutate_working_file_changed(bundle)
+    ledger = bundle / "_build" / "generated-edit-declarations.json"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(b'{"version": 1, "\xff\xfe": 1}')
+
+    report = heg.harvest(bundle)
+
+    assert report["attribution"]["unavailable_reason"] == "unreadable_declarations"
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE

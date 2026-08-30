@@ -92,6 +92,25 @@ Two policy divergences from the tamper gate, both **stricter**, both deliberate:
 * drift under `reports/` + `semantic_models/` is `untrustworthy` **even when declared**. Those trees
   are "NEVER edited, by anyone" (AGENTS.md); a declaration makes an edit visible, not legitimate.
 
+⚠️ **Changing a trusted gate to serve a new caller has its own failure mode, and this one landed.**
+The first extraction loaded the declaration ledger *before* computing drift, so a bundle whose
+artifacts were entirely **pristine** began depending on data that could not affect its verdict:
+invalid UTF-8 in either declaration location turned `CLEAN` into an uncaught `UnicodeDecodeError`
+and a CLI traceback exiting **1** — the same code as a real `DRIFT`. Drift is computed first now, and
+the ledger is read only when there is drift to adjudicate. Two lessons worth carrying:
+
+* *"no output change"* is only ever true **over the inputs you tried**. The original disclosure said
+  the extra read changed nothing; it changed nothing **when the ledger parsed**.
+* the gate gained a fifth verdict, `UNREADABLE_DECLARATIONS` (**exit 4**), for drift that cannot be
+  adjudicated because the exonerating evidence is corrupt. That is not `DRIFT`: one says *"an
+  artifact moved and nobody declared it"*, the other says *"an artifact moved and the ledger that
+  might exonerate it is unreadable"*. The new code can only replace a situation that previously died
+  with a traceback, so no bundle that produced one of the five existing verdicts produces a different
+  one now — verified by running the gate's CLI at `4ad5415` and at HEAD over clean / undeclared-drift
+  / declared-drift / no-baseline / by-design bundles in both text and `--json` mode: **10 of 10
+  byte-identical, exit codes included.** In the harvest the same condition is unavailable attribution,
+  `incomplete`, exit 3.
+
 When a bundle carries no usable baseline (`check_migration_progress.py --tamper` → `NO_BASELINE`),
 **every** difference is `unattributed` and the run is `incomplete`. The delta is still printed,
 because it is still real; what is withheld is the claim about who caused it. The same applies to an
@@ -142,27 +161,45 @@ before-value is absent from the bound model while its after-value is present. `P
 `nativeQueryRef` can never be demonstrated (only TABLE names are read from the bound model), so they
 always stay `MODEL_OBJECT_NAMES` — the direction that over-reports rather than the one that excuses.
 
-**Re-measured on the estate after the correction, and it is not a rounding difference.** Files
-carrying at least one *unexplained* name change went from **27 → 270**, because a genuine rebind was
-excusing real substitutions in the same file. The retained leaves, counted:
+### ⚠️ A table name can contain dots, and assuming otherwise sent the pendulum too far
 
-| retained `MODEL_OBJECT_NAMES` leaf | changes |
-|---|---:|
-| `queryRef` (e.g. `Orders.Order_Date` → `Date.Year`) | 574 |
-| `nativeQueryRef` (e.g. `Order_Date` → `Year`) | 99 |
-| `Property` (e.g. `Order_Date` → `Month`) | 78 |
-| `Entity` between two tables both valid in the model (e.g. `Orders` → `Date`) | 9 |
+The per-leaf rule above first shipped with `queryRef` split at the **first** dot. That was wrong, and
+the second blind review caught it: the estate's bound model holds a table literally called
+`HumanResources.csv`, so `HumanResources.csv.Status` parsed as entity `HumanResources` + property
+`csv.Status`, the property looked changed, and a textbook invalid → valid rebind was retained as
+unexplained. **562 of 574 retained `queryRef` leaves had more than one dot on some side.**
 
-That top row is the point: a projection moving to a **different table *and* column** is a model-shape
-change, not a binding being resolved, and the whole-file rule was reporting 265 files as "by design"
-partly on its strength. Excusing them would have been the easy and wrong move.
+`queryRef` is now resolved against the **actual table names** in the bound model — longest matching
+prefix, aggregation wrappers (`Sum(...)`) unwrapped and required to be unchanged, property suffix
+required to be unchanged — and only then is a replaced invalid entity called a rebind.
+
+**The three measurements, in order, on the same corpus.** The middle column is the number this
+document previously published; publishing it is how it got checked.
+
+| retained `MODEL_OBJECT_NAMES` leaf | whole-file rule | first-dot per-leaf | table-resolved per-leaf |
+|---|---:|---:|---:|
+| `queryRef` | — | 574 | **100** |
+| `nativeQueryRef` | — | 99 | 99 |
+| `Property` | — | 78 | 78 |
+| `Entity` (both tables valid) | — | 9 | 9 |
+| **files carrying an unexplained name change** | **27** | **270** | **87** |
+
+So the first correction was right in direction and wrong in size: of the 243-file swing, **183 files
+were false positives** and 60 were real. 474 leaves moved back to `BINDING_RESOLUTION`; the reviewer
+independently counted 477 by a slightly different criterion (unchanged prefix + unchanged
+property/aggregation suffix), and the three-leaf gap is the difference between the two definitions,
+not a disagreement about the corpus.
+
+What is left in the 100 is the true positive the refinement exists to keep: `Orders.Order_Date` →
+`Date.Year`, a projection that moves to a different table **and** a different column. That is a
+model-shape change, not a binding being resolved.
 
 ### Shape distribution, estate run 2.339.0 (500 differing files)
 
 | shape | files | artifacts | share |
 |---|---:|---:|---:|
 | `BINDING_RESOLUTION` | 273 | 22 | 55 % |
-| `MODEL_OBJECT_NAMES` | 270 | 19 | 54 % |
+| `MODEL_OBJECT_NAMES` | 87 | 16 | 17 % |
 | `VISUAL_ADDED` | 79 | 13 | 16 % |
 | `QUERY_SHAPE` | 38 | 13 | 8 % |
 | `LAYOUT` | 29 | 3 | 6 % |
@@ -242,13 +279,37 @@ reads all three: **UNASSESSABLE falls from 3 to 0 while every git-reachable verd
 exactly.** The blind spot is still reported (`git_blind_spot`) because it is evidence about the
 mandated command, and the artifacts it names are the same ones `check_path_ceiling.py` blocks on.
 
-⚠️ `UNASSESSABLE` remains a real, retained state. A file the harvest cannot read is counted, listed,
-withdrawn from **both** sides of the comparison — **together with every descendant**, because
-`os.walk` reports only the *directory* it could not enter — so it can never masquerade as an addition
-or a removal, and it forces a non-zero exit. Blind-review probe: exact-path withdrawal produced an
-unassessable record for the blocked directory *and* a fabricated `delta.added` entry beneath it.
+⚠️ `UNASSESSABLE` remains a real, retained state, and it now covers **three** distinct access
+failures, because each of the first two shipped with the next one still open:
+
+| failure | what it used to do | what it does now |
+|---|---|---|
+| a file that cannot be hashed | counted, listed, withdrawn from both sides | unchanged |
+| a **directory** that cannot be entered | withdrew its own exact path only, so every descendant visible on the other side was counted as an addition | withdrawn **with every descendant** |
+| the **tree root** itself | relativises to `"."`, which prefixes no key — measured `incomplete`, yet both working files were still counted as additions and attributed `engine_internal` | `"."` means the whole tree, and withdraws it |
+| a directory that cannot be **enumerated** during discovery | bare `iterdir()`, so a `PermissionError` on `pbip/` escaped `harvest()` as a traceback exiting 1 | recorded as an unassessable coverage finding with `scope: discovery` |
+
 A traversal failure whose relative path cannot be computed at all cannot be scoped, so every
 difference record for that pair is suppressed rather than reported as a subset that looks complete.
+
+### Nothing the gate adjudicates may disappear
+
+The gate adjudicates the **complete** generated-artifact inventory; the pair loop only consumes drift
+beneath a discovered `.Report` / `.SemanticModel`. Everything else fell on the floor — measured,
+editing an engine-recorded `pbip/WB/WB.pbip` was reported `changed` by
+`adjudicate_generated_drift()` while the harvest returned `complete` with **zero** differences, and
+the corpus holds **51** such `.pbip` files.
+
+So the harvest now **reconciles every adjudicated path** after the pairs are processed:
+
+| where the adjudicated path lives | outcome |
+|---|---|
+| already named by a record or by `baseline_drift` | nothing to do |
+| elsewhere under `pbip/` | a tier-edit record, `unpaired: true`, unit/artifact/layer recovered from the path (`bundle` layer for a `.pbip`) |
+| anywhere else | listed in `unreconciled_drift`, and the run **cannot be `complete`** while any remain |
+
+That last row is the point: it is a structural guard, not an enumeration of the cases anyone thought
+of. `unpaired_drift_records` and `unreconciled_drift` are both in the JSON and the console output.
 
 ---
 
