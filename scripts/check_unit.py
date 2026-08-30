@@ -14,7 +14,8 @@ JSON payload:
 
 The command is a facade, not a merge: the existing gates remain independently runnable and their
 native statuses/exit codes are recorded under ``checks[].native_*``. Page parity and oracle coverage
-live here because no existing gate owned those questions.
+live here because no existing gate owned those questions; path ceiling lives here because remembering
+a nineteenth ``check_*.py`` by name is the problem this facade exists to remove.
 """
 
 # Unit gate, brownfield inventory, and CLI rendering intentionally live together as one facade.
@@ -91,7 +92,7 @@ MODEL_CHECK_IDS = frozenset(
 REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
 INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings", "connection-fidelity"})
 ALL_ONLY_CHECK_IDS = frozenset(
-    {"engine-receipt", "desktop-orphans", "visual-layer-done", "visual-comparison-done", "finalized"}
+    {"engine-receipt", "desktop-orphans", "path-ceiling", "visual-layer-done", "visual-comparison-done", "finalized"}
 )
 
 OWNER_HINTS = {
@@ -115,6 +116,7 @@ OWNER_HINTS = {
     "occlusion": "report",
     "engine-receipt": "orchestrator",
     "desktop-orphans": "orchestrator",
+    "path-ceiling": "orchestrator (install root length + engine-side name duplication; not a layer defect)",
 }
 
 
@@ -239,6 +241,23 @@ GATES = (
         frozenset({0}),
         frozenset({"STUBS"}),
         frozenset({1}),
+    ),
+    # Whole-unit shippability, so `all` scope only (see ALL_ONLY_CHECK_IDS): the scan walks the entire
+    # target tree and cannot be attributed to a layer - a model-scoped run would be judging report
+    # paths and vice versa. Kept GATING because the native gate already exits 1 and the facade must
+    # never be the one place a bundle Desktop cannot open reads as done; "not fixable by the persona
+    # that hit it" is answered by the orchestrator owner hint, not by silence. Its statuses are
+    # lowercase, unlike every other gate here - that is the native contract, not a typo.
+    Gate(
+        "path-ceiling",
+        "check_path_ceiling.py",
+        (),
+        frozenset({"ok"}),
+        frozenset({0}),
+        frozenset({"over_ceiling"}),
+        frozenset({1}),
+        frozenset({"unknown_paths", "no_paths", "ERROR"}),
+        frozenset({2, 3}),
     ),
 )
 
@@ -1025,6 +1044,93 @@ def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) ->
     return check
 
 
+def _path_ceiling_verdict_clause(payload: dict[str, Any], budget: Any, root_length: Any) -> str:
+    """The status-aware half of the summary: which direction this bundle breaks in.
+
+    A passing scan and a breaching one need OPPOSITE sentences. "A shorter install root may pass" is
+    true only of a breach; said of a pass it is vacuous, and it leaves the fact that a LONGER root
+    will breach unstated - which is exactly the risk a passing row has to carry.
+    """
+    if not isinstance(budget, int):
+        return "root budget unknown, so relocation safety is unknown"
+    if budget < 0:
+        return f"NO installation root can hold this tree - its path tails alone exceed the ceiling by {-budget}"
+    if payload.get("status") == "ok":
+        return (
+            f"fits here with {budget} characters of headroom: any installation root LONGER than "
+            f"{budget} characters WILL breach"
+        )
+    return (
+        f"needs an installation root of at most {budget} characters and this one is {root_length}, "
+        f"so a shorter installation root may pass"
+    )
+
+
+def _annotate_path_ceiling(check: dict[str, Any]) -> dict[str, Any]:
+    """Carry the numbers that make a path-ceiling verdict judgeable into the facade row.
+
+    The native gate prints them; with ``--quiet`` (how the facade runs every gate) it prints only a
+    verdict line, so without this the row is a bare verdict with no way to tell a genuinely fragile
+    bundle from a deep checkout. ``root_budget`` is the portable number - the longest installation
+    root this tree still tolerates - and the verdict is measured against THIS checkout root, which is
+    stated rather than left for the reader to infer.
+
+    The numbers matter MOST on a PASS, which is why ``root_budget`` is also surfaced in the row
+    headline (``_path_ceiling_budget_note``): ``_render_actionable_detail`` renders ``detail`` for
+    non-clean rows only, so a passing bundle that breaks the moment it is relocated would otherwise
+    print nothing but "PASS" and exit 0. Measured on a byte-identical tree: root length 65 -> ``ok``
+    with budget 79; root length 94 -> ``over_ceiling``.
+    """
+    payload = check.get("payload")
+    if not isinstance(payload, dict):
+        return check
+    counted = payload.get("counted")
+    if not isinstance(counted, dict):
+        # No census means the scan never ran (a usage error, an unwritable JSON). Synthesizing
+        # "0 of 0 paths over ceiling" here would read as reassurance for a check that failed.
+        return check
+    longest = payload.get("longest") if isinstance(payload.get("longest"), dict) else {}
+    budget = payload.get("root_budget")
+    root_length = payload.get("root_length", "unknown")
+    parts = [
+        f"{counted.get('over_ceiling', 0)} of {counted.get('measured', 0)} paths over ceiling",
+        f"longest {longest.get('length', 'unknown')}",
+        f"root budget {budget if budget is not None else 'unknown'} at root length {root_length}",
+    ]
+    if counted.get("unknown"):
+        parts.append(f"{counted['unknown']} unmeasurable")
+    summary = "; ".join(parts) + " - " + _path_ceiling_verdict_clause(payload, budget, root_length)
+    existing = check.get("detail")
+    check["detail"] = f"{existing}; {summary}" if existing else summary
+    check["root_budget"] = budget
+    check["root_budget_is_tight"] = bool(payload.get("root_budget_is_tight"))
+    check["shipping_root_budget_advisory"] = payload.get("shipping_root_budget_advisory")
+    return check
+
+
+def _path_ceiling_budget_note(check: dict[str, Any]) -> str:
+    """The headline clause for a path-ceiling row, rendered at EVERY status including PASS.
+
+    Always shown rather than only when ``root_budget_is_tight``, for three measured reasons.
+    (1) For this gate the budget IS the result: PASS means "it fits HERE", and the budget is the only
+    portable number in the row, so suppressing it makes the row say less than the scan found.
+    (2) The tight flag would not have fired on the case that motivated this: a tree measured at root
+    length 65 passed with budget 79 (``root_budget_is_tight`` False, advisory threshold 40) and
+    breached at root length 94 - a 29-character relocation. A threshold tuned for "alarming" cannot
+    also mean "safe to relocate".
+    (3) A conditional number is unreadable in its absence: nothing printed cannot be told apart from
+    a comfortable budget, a dropped annotation, or a gate that never ran. A number always present is
+    self-verifying. The cost is one clause on one row of one gate, in ``all`` scope only.
+    """
+    budget = check.get("root_budget")
+    if not isinstance(budget, int):
+        return ""
+    if budget < 0:
+        return f"root budget {budget} - NO installation root can hold this tree"
+    tight = " TIGHT" if check.get("root_budget_is_tight") else ""
+    return f"root budget {budget}{tight} - breaches above a {budget}-char installation root"
+
+
 def _run_simple(argv: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
     """Run a native checker in a fresh process and capture its exact exit code."""
     return subprocess.run(
@@ -1352,6 +1458,8 @@ def _append_cli_checks(
             check = _run_cli_gate(gate, target, output_dir)
             if gate.check_id == "stub-measures":
                 check = _apply_stub_exemptions(check, exemptions)
+            if gate.check_id == "path-ceiling":
+                check = _annotate_path_ceiling(check)
             checks.append(check)
         if _in_scope("occlusion", scope):
             checks.append(check_occlusion(target, output_dir))
@@ -1494,7 +1602,7 @@ def _payload_findings(payload: Any, limit: int = 5) -> list[str]:
             identity = _compact_identity(value)
             if identity and any(key in value for key in ("severity", "kind", "category", "reason", "path")):
                 findings.append(identity)
-            for child_key in ("findings", "unresolved", "skipped", "models", "reports"):
+            for child_key in ("findings", "unresolved", "skipped", "models", "reports", "worst_offenders"):
                 child = value.get(child_key)
                 if isinstance(child, list):
                     walk(child)
@@ -1648,6 +1756,57 @@ def _render_brownfield(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+# One guard-clause per bespoke row format; 8 formats means 8 returns, and the flat chain reads better
+# than the nested elif it replaced (same rationale as _run_cli_gate above).
+def _render_check_headline(check: dict[str, Any]) -> list[str]:  # pylint: disable=too-many-return-statements
+    """The one-or-more headline lines for a single check row.
+
+    Extracted from ``render`` because the per-gate special cases are a growing if/elif chain: adding
+    the path-ceiling row pushed ``render`` to 13 branches against pylint's limit of 12 (R0912). This
+    keeps each gate's bespoke headline in one named place instead of buying a waiver.
+    """
+    check_id = check["id"]
+    status = check["status"]
+    if check_id == "oracle-coverage" and "pages" in check:
+        pages = check["pages"]
+        return [
+            f"  oracle coverage:  {check['visual_present']} of {pages} pages have a visual oracle"
+            f"{_count_suffix(pages - check['visual_present'])}",
+            f"                    {check['numeric_present']} of {pages} pages have a numeric oracle"
+            f"{_count_suffix(pages - check['numeric_present'])}",
+            f"                    grade: {check['grade']}  [{status}]",
+        ]
+    if check_id == "page-parity" and "expected_count" in check:
+        lines = [
+            f"  page-count parity: {check['actual_count']} PBIR page(s) for "
+            f"{check['effective_expected_count']} expected Tableau dashboard(s)  [{status}]"
+        ]
+        if check.get("exemptions"):
+            lines.append(f"                    exemptions accepted: {len(check['exemptions'])}")
+        return lines
+    native = f"native {check.get('native_status')} exit {check.get('native_exit')}"
+    if check_id == "stub-measures" and "stub_exemptions" in check:
+        return [
+            f"  {check_id}: {status} ({native}; "
+            f"{check['stub_exemptions']} exempted, {check['unexempted_stubs']} unexempted)"
+        ]
+    if check_id == "connection-fidelity" and _declared_downgrade_count(check):
+        return [
+            f"  {check_id}: {status} ({native}; {_declared_downgrade_count(check)} declared downgrade compromise(s))"
+        ]
+    if check_id == "scaffold-partitions" and "scaffold_exemptions" in check:
+        return [
+            f"  {check_id}: {status} ({check['scaffold_exemptions']} exempted, "
+            f"{check['unexempted_scaffolds']} unexempted)"
+        ]
+    if check_id == "path-ceiling" and _path_ceiling_budget_note(check):
+        return [f"  {check_id}: {status} ({native}; {_path_ceiling_budget_note(check)})"]
+    if "native_exit" in check:
+        return [f"  {check_id}: {status} ({native})"]
+    detail = f" - {check['detail']}" if check.get("detail") else ""
+    return [f"  {check_id}: {status}{detail}"]
+
+
 def render(report: dict[str, Any]) -> str:
     """Human-readable unit verdict."""
     scope = report.get("scope", SCOPE_ALL)
@@ -1659,48 +1818,7 @@ def render(report: dict[str, Any]) -> str:
     if report.get("stopped_after"):
         lines.append(f"  stopped after failed precondition: {report['stopped_after']}")
     for check in report["checks"]:
-        check_id = check["id"]
-        status = check["status"]
-        if check_id == "oracle-coverage" and "pages" in check:
-            pages = check["pages"]
-            visual_missing = pages - check["visual_present"]
-            numeric_missing = pages - check["numeric_present"]
-            lines.append(
-                f"  oracle coverage:  {check['visual_present']} of {pages} pages have a visual oracle"
-                f"{_count_suffix(visual_missing)}"
-            )
-            lines.append(
-                f"                    {check['numeric_present']} of {pages} pages have a numeric oracle"
-                f"{_count_suffix(numeric_missing)}"
-            )
-            lines.append(f"                    grade: {check['grade']}  [{status}]")
-        elif check_id == "page-parity" and "expected_count" in check:
-            lines.append(
-                f"  page-count parity: {check['actual_count']} PBIR page(s) for "
-                f"{check['effective_expected_count']} expected Tableau dashboard(s)  [{status}]"
-            )
-            if check.get("exemptions"):
-                lines.append(f"                    exemptions accepted: {len(check['exemptions'])}")
-        elif check_id == "stub-measures" and "stub_exemptions" in check:
-            lines.append(
-                f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']}; "
-                f"{check['stub_exemptions']} exempted, {check['unexempted_stubs']} unexempted)"
-            )
-        elif check_id == "connection-fidelity" and _declared_downgrade_count(check):
-            lines.append(
-                f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']}; "
-                f"{_declared_downgrade_count(check)} declared downgrade compromise(s))"
-            )
-        elif check_id == "scaffold-partitions" and "scaffold_exemptions" in check:
-            lines.append(
-                f"  {check_id}: {status} ({check['scaffold_exemptions']} exempted, "
-                f"{check['unexempted_scaffolds']} unexempted)"
-            )
-        elif "native_exit" in check:
-            lines.append(f"  {check_id}: {status} (native {check['native_status']} exit {check['native_exit']})")
-        else:
-            detail = f" - {check['detail']}" if check.get("detail") else ""
-            lines.append(f"  {check_id}: {status}{detail}")
+        lines.extend(_render_check_headline(check))
         lines.extend(_render_actionable_detail(check))
     ex = report["exemptions"]
     if ex["accepted"] or ex["invalid"]:
