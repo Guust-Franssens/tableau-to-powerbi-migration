@@ -179,6 +179,7 @@ check_path_ceiling.py
 check_pbir_layout.py
 check_pbir_valid.py
 check_relationship_health.py
+check_running_total_axis.py
 check_sqlproxy_connections.py
 check_stub_measures.py
 check_unit.py

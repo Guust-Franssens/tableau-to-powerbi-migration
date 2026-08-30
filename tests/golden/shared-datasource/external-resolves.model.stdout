@@ -8,6 +8,7 @@ UNIT CHECK (model scope): NOT_CHECKED - <UNIT>
       suspected owner: integration (model placeholder referenced by report)
       rerun: <PY> <REPO>/scripts/check_blank_placeholders.py <UNIT>
   field-bindings: PASS (native OK exit 0)
+  running-total-axis: PASS (native NOT_APPLICABLE exit 0)
   connection-fidelity: NOT_CHECKED (native SKIPPED exit 3)
       suspected owner: integration (spec connection target vs emitted model M)
       rerun: <PY> <REPO>/scripts/check_connection_fidelity.py <UNIT>
