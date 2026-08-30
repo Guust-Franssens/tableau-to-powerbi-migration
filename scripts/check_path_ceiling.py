@@ -526,6 +526,28 @@ def _nonneg(raw: str) -> int:
     return value
 
 
+def _make_stdout_lossy() -> bool:
+    """Let `print` degrade an unencodable path instead of raising. Returns True if reconfigured.
+
+    Every path in the report comes from the filesystem, so it can contain anything the filesystem
+    allows - including characters this console's codec cannot represent. On a Windows cp1252 console
+    a legal filename carrying a combining character (`e` + U+0301) made `print(render(report))` raise
+    `UnicodeEncodeError` and take the whole run down.
+
+    Escaping the paths inside `render` would fix that too, but it would mangle every non-ASCII path
+    on the UTF-8 terminals where they display perfectly well. Degrading only at the point of output
+    keeps readable consoles readable and unreadable ones merely ugly.
+
+    Not every stdout is a real stream - pytest's capture and `contextlib.redirect_stdout` replace it
+    with objects that have no `reconfigure` - so the failure to reconfigure is not an error.
+    """
+    try:
+        sys.stdout.reconfigure(errors="backslashreplace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -583,13 +605,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         for target in args.targets
     ]
-    for report in reports:
-        print(render(report) if not args.quiet else f"{report['status']}: {report['root']}")
 
+    # The machine-readable artifact is written BEFORE anything is printed. Console rendering can
+    # fail on a path this terminal cannot encode (a legal filename carrying a combining character
+    # is not representable in cp1252), and an ordering that printed first destroyed the very output
+    # an automated consumer asked for: measured, `--json out.json` on such a tree exited 1 with NO
+    # file written. `--json` is a contract; it must not depend on the console's codec.
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         payload = reports[0] if len(reports) == 1 else {"version": REPORT_VERSION, "roots": reports}
         args.json.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    _make_stdout_lossy()
+    for report in reports:
+        print(render(report) if not args.quiet else f"{report['status']}: {report['root']}")
 
     if args.warn_only:
         return EXIT_OK

@@ -21,16 +21,27 @@ damaging change anyone could make to this file.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = REPO_ROOT / "scripts" / "check_path_ceiling.py"
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
+
+# `e` + COMBINING ACUTE ACCENT. A perfectly ordinary filename that cp1252 cannot encode, so it
+# reproduces the console hazard WITHOUT being an invalid or unrepresentable name on any filesystem
+# under test. Deliberately used only in a fixture's LEAF name - never in a directory the test itself
+# has to print - so the test cannot become the thing it is testing.
+COMBINING_NAME = "cafe\u0301.json"
 
 
 def _tree(root: Path, *, filename: str = "visual.json", subdir: str = "visuals") -> Path:
@@ -557,6 +568,129 @@ def test_json_report_is_written_and_machine_readable(tmp_path, capsys):
     assert payload["file_ceiling"] == len(str(target)) - 1
     assert "host_long_paths_enabled" in payload
     capsys.readouterr()
+
+
+# --------------------------------------------------------------------------------------------
+# `--json` is a MACHINE-READABLE CONTRACT and must not depend on the console's codec.
+#
+# Measured before the fix: on a Windows cp1252 console, a tree containing a legal filename with a
+# combining character made `print(render(report))` raise UnicodeEncodeError. The run exited 1 - which
+# is also the "findings" code, so a consumer could not even tell a crash from a real finding - and
+# because the artifact was written AFTER printing, `--json out.json` produced NO FILE AT ALL.
+# --------------------------------------------------------------------------------------------
+
+
+def _make_combining_fixture(root: Path) -> Path | None:
+    """Create `<root>/visuals/cafe<combining-acute>.json`, or None if this filesystem refuses it."""
+    directory = root / "visuals"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / COMBINING_NAME
+    try:
+        target.write_text("{}", encoding="utf-8")
+    except (OSError, UnicodeError):  # pragma: no cover - only on an ASCII-locale filesystem
+        return None
+    # A filesystem may normalise the name (HFS+ does). Only proceed if it round-trips unchanged.
+    return target if target.exists() and COMBINING_NAME in os.listdir(directory) else None
+
+
+def test_json_is_written_before_the_console_is_touched(tmp_path):
+    """The ordering fix, proven without needing a hostile console.
+
+    If rendering runs first, an exception from it destroys the requested artifact. Making `render`
+    raise is a deterministic stand-in for `UnicodeEncodeError` and works identically on every OS.
+    """
+    _tree(tmp_path)
+    out = tmp_path / "reports" / "path-ceiling.json"
+
+    def boom(_report):
+        raise RuntimeError("console exploded")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cpc, "render", boom)
+        with pytest.raises(RuntimeError):
+            cpc.main([str(tmp_path), "--json", str(out)])
+
+    assert out.exists(), "the JSON contract must survive a rendering failure"
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == cpc.STATUS_OK
+
+
+def test_cp1252_console_still_produces_json_and_the_expected_exit_code(tmp_path):
+    """End-to-end, in a real subprocess with a cp1252 stdout - the shape that actually broke.
+
+    Runs on Windows AND Linux: the codec is available on every platform, and the fixture name is
+    valid on both. It is skipped only if the filesystem genuinely will not store the name, which is
+    reported rather than silently passing.
+    """
+    if _make_combining_fixture(tmp_path) is None:
+        pytest.skip("filesystem will not store a combining-character filename unchanged")
+    out = tmp_path / "out.json"
+
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    env.pop("PYTHONUTF8", None)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(tmp_path), "--json", str(out)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == cpc.EXIT_OK, f"expected a clean verdict, got {result.returncode}:\n{result.stderr}"
+    assert "UnicodeEncodeError" not in result.stderr
+    assert out.exists(), "`--json` produced no artifact on a console that cannot encode the path"
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == cpc.STATUS_OK
+    assert payload["counted"]["files"] >= 1
+
+
+def test_cp1252_console_preserves_a_finding_exit_code(tmp_path):
+    """The degraded console must not change the verdict, only how it is spelled."""
+    if _make_combining_fixture(tmp_path) is None:
+        pytest.skip("filesystem will not store a combining-character filename unchanged")
+    out = tmp_path / "out.json"
+
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    env.pop("PYTHONUTF8", None)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(tmp_path), "--ceiling", "10", "--json", str(out)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+
+    assert result.returncode == cpc.EXIT_OVER_CEILING, result.stderr
+    assert out.exists()
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == cpc.STATUS_OVER_CEILING
+
+
+def test_stdout_without_reconfigure_is_a_no_op_not_an_error(tmp_path, monkeypatch, capsys):
+    """A substituted stdout (StringIO, `redirect_stdout`) has no `reconfigure`; that is fine.
+
+    Note pytest's own captured stdout IS a real TextIOWrapper and DOES reconfigure - so an explicit
+    stand-in is needed to exercise the fallback rather than assuming the harness provides one.
+    """
+    _tree(tmp_path)
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    assert cpc._make_stdout_lossy() is False  # pylint: disable=protected-access
+    assert cpc.main([str(tmp_path)]) == cpc.EXIT_OK
+    capsys.readouterr()
+
+
+def test_make_stdout_lossy_sets_backslashreplace_on_a_real_stream(tmp_path, monkeypatch):
+    stream = open(tmp_path / "console.txt", "w", encoding="cp1252")  # pylint: disable=consider-using-with
+    try:
+        monkeypatch.setattr(sys, "stdout", stream)
+        assert cpc._make_stdout_lossy() is True  # pylint: disable=protected-access
+        assert stream.errors == "backslashreplace"
+        print("cafe\u0301")  # would raise under the default 'strict'
+    finally:
+        stream.close()
+    assert "cafe" in (tmp_path / "console.txt").read_text(encoding="cp1252")
 
 
 def test_multiple_targets_are_all_reported_and_the_worst_decides_the_exit(tmp_path, capsys):
