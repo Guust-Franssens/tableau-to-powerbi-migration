@@ -159,7 +159,7 @@ the best provider *for the requested purpose* and records which it used and why.
 
 | Provider | Typical role | Status |
 |---|---|---|
-| **Server/Cloud REST** (`/views/{id}/image?resolution=high`, `?vf_<field>=<value>` for state) | Canonical when the published view *is* the source and revision/state can be pinned | ⚠️ **transport implemented and live-tested** in [`scripts/capture_tableau_oracle.py`](../scripts/capture_tableau_oracle.py) `--images` (same endpoint, with `401002` re-auth + backoff); **not wired into this provider chain** — no provenance manifest, no state-pinning. See #194 |
+| **Server/Cloud REST** (`/views/{id}/image?resolution=high`, `?format=svg` for vector, `?vf_<field>=<value>` for state) | Canonical when the published view *is* the source and revision/state can be pinned | ⚠️ **transport implemented and live-tested** in [`scripts/capture_tableau_oracle.py`](../scripts/capture_tableau_oracle.py) `--images` / `--svg` (same endpoint, with `401002` re-auth + backoff); **not wired into this provider chain** — no provenance manifest, no state-pinning. See #194, and the route survey below for what each query actually returns |
 | **Authenticated browser** (Playwright w/ session) | States/actions/extensions REST can't reproduce | ❌ specified-only |
 | **Public Playwright** | Tableau **Public** only, after capture QA | ⚠️ works (this repo's demos); hardening TODO |
 | **Guided manual export from the exact `.twbx`** (Tableau Desktop/Reader) | Extract-only workbooks with no live Server view — can be *validation-grade* | ❌ specified-only (guided prompts) |
@@ -187,6 +187,102 @@ an engagement-specific file rather than the repository default); the unwired pro
 it yet. A requested Server capture still halts instead of degrading. `--structural-only` is the
 explicit exception: it may bypass that halt, but its manifest cannot support a visual-fidelity claim
 or normal sign-off.
+
+## Route survey — what the server can actually give you for a DASHBOARD (issue #403)
+
+Measured 2026-08-30 against site `fabric-migration-lab`, REST **3.29**, over **60 dashboards** located
+via the Metadata API (`/api/metadata/graphql`), of which **52 were capturable** and 8 were blocked. The
+REST `/views` list **does not carry `sheetType` at 3.29** — every one of 360 views returned the same
+seven keys and no type — so *the GraphQL Metadata API is the only route that tells you a view is a
+dashboard*. That is a prerequisite for everything below: you cannot prefer a dashboard route without
+first knowing which views are dashboards.
+
+| route | resolution | vector? | credential | live connection | dashboards | survives disconnected sources |
+|---|---|---|---|---|---|---|
+| `.twb`/`.twbx` embedded thumbnail | **192×192, always** | no | **none** | **none** | yes (composite) | **yes** (it is offline) |
+| `/views/{id}/image` | dashboard's declared size (650×800 … 1500×850) | no | PAT | yes | yes | no |
+| `/views/{id}/image?resolution=high` | **exactly 2× declared, 52/52** | no | PAT | yes | yes | no |
+| **`/views/{id}/image?format=svg`** (3.29+) | **unbounded** (vector) | **yes** | PAT | yes | yes | no |
+| `/views/{id}/pdf?type=Unspecified` | unbounded (vector) | yes | PAT | yes | yes | no |
+| `/views/{id}/crosstab/excel`, `/data` | n/a (numbers) | n/a | PAT | yes | yes | no |
+
+### The raster ceiling is real, and it is not a dial
+
+`resolution` is a **strict enum of one**: `high` is accepted, `standard` → HTTP 400, `veryhigh` → 400,
+and even `HIGH` → 400 (it is case-**sensitive**, unlike `format`). `vizWidth`/`vizHeight` are accepted
+without complaint and **silently ignored** — byte-identical responses (728,498 B with and without).
+`maxAge=1` likewise changes nothing about size. So the maximum raster the REST API will ever return is
+**2× the dashboard's declared size**, and the author of the dashboard, not the caller, sets that
+ceiling. Worst observed: `Section 11 - Actions` dashboards are 650×800 → **1300×1600 maximum, forever**.
+
+That is why "high resolution" and "legible" are not the same claim. `Superstore | Order Details` is an
+800×800 dashboard carrying **410 text labels**; at its 1600×1600 ceiling it is structurally legible and
+content-illegible at the same time — exactly the failure mode #403 describes.
+
+### `?format=svg` is the answer, and it costs one extra call
+
+New in **REST 3.29** (`format` accepts `PNG` or `SVG`, case-insensitively — the server names both
+values in its own rejection text). Measured on the captured files:
+
+- **Real text.** `<text>` elements hold the literal strings — `Active Employees`, `7,984`, `Hired`,
+  `8,950`. A consumer can read the dashboard's **content** without rendering a pixel. Counts ranged
+  21 → 410 per dashboard (median 69).
+- **Self-contained.** Raster sub-elements (maps, logos) arrive as `data:` URIs; **external refs = 0**
+  on every file measured. It is durable offline evidence, unlike an embed URL.
+- **Exact geometry.** `round(mm × 96 / 25.4)` is the declared size **+1 px per axis**, 52/52. Use
+  `round`, never `int` — the true value lands at 1400.99, so truncation is off by one erratically
+  (three different offsets across the same 52).
+- **Rasterises with tooling this repo already has.** Chromium via Playwright at `deviceScaleFactor: 3`
+  turned the 1400×800 `HR | Summary` SVG into a 4203×2403 PNG, layout-identical to the REST PNG and
+  with no page margin. **No new Python dependency.**
+- **Degrades loudly below 3.29.** On 3.21 / 3.24 / 3.28 the server returns HTTP 400 *"SVG export
+  requires API version 3.29 or later"*. It never silently returns a PNG, so a `.svg` file can never
+  contain PNG bytes. ⚠️ `capture_tableau_oracle.py` still defaults to **3.21**; set
+  `TABLEAU_REST_API_VERSION=3.29` in `.env`.
+- **It is not free.** SVG bytes ranged 39 KB → 5.0 MB per dashboard (PNG: 48 KB → 897 KB). A
+  crosstab-shaped *worksheet* produced a **21 MB** SVG with 37,439 `<text>` elements against a 4.5 MB
+  PNG. Prefer `--svg` for dashboards; think before sweeping it across every worksheet in an estate.
+
+### `/pdf` also works, and is the second choice
+
+`/pdf` returns real vector for a dashboard: embedded `/FontFile` programs, hex-encoded `Tj` glyph runs
+(792 of them on `HR | Summary`), and thousands of path operators — one measured file carried **1.1 MB
+of inflated vector content stream in a 37 KB PDF**. Two things make it second, not first:
+
+- **The default page is US Letter portrait** (`MediaBox [0 0 612 792]`), which squeezes a 1.75:1
+  dashboard onto a 0.77:1 page. **`?type=Unspecified` is the fix**: the page becomes
+  `0.75 × declared_px + 72 pt` in *both* axes, 52/52 — i.e. the dashboard at 1:1 CSS scale plus a
+  0.5-inch margin per side. `type=A3|Tabloid|Ledger|A4|Letter` + `orientation` all work and all
+  distort. `vizWidth`/`vizHeight` are ignored here too.
+- **Rendering it needs a new dependency.** No PDF rasteriser is present (`pypdfium2`, `pymupdf`,
+  Ghostscript, poppler, ImageMagick all absent); the SVG route needs none. Its one genuine advantage
+  is **embedded fonts**, so the PDF is the more faithful choice when the reviewing machine lacks the
+  workbook's typefaces — SVG names fonts (`Trebuchet MS`, `Arial`) and does not embed them.
+
+### What kills every server route, identically
+
+`global_superstores_db` (and `RESTAPISample`, `filtering`) fail on **`image`, `image?format=svg`,
+`pdf` *and* `data`** with the same HTTP 400:
+
+```
+ExportViewException: Error: data sources not connected
+```
+
+The failure is in VizQL, **upstream of the output format**, so no format choice rescues it. It is a
+final answer that names a human action — connect the sources on the Tableau site — and must never be
+retried. Only the offline `.twb` thumbnail path survives this, at 192×192.
+
+### Practical consequence
+
+**Best available: `--images --svg` together.** The PNG is the immediately-viewable artifact; the SVG is
+the resolution-independent one that also carries the content as text. Both are one call each on the
+same endpoint with the same credential, so the marginal cost of the SVG is one REST call and some
+bytes. Where the site is unreachable or its sources are disconnected, the 192×192 thumbnail is still
+the only thing left and a verdict signed off on it is **layout-grade, never validation-grade**.
+
+⚠️ **One PAT = one live session.** Two concurrent probes against the same PAT invalidated each other
+mid-run (`401002` on the older token, then a hard 401 on every later call). Do not run two Tableau
+captures in parallel with one PAT.
 
 ## State-locking (the single-image trap)
 

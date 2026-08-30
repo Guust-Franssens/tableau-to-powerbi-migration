@@ -544,6 +544,15 @@ pinning), so they are **layout- and text-grade only**. Say so in the brief, and 
 log that ceiling in `limitations_encountered`: a visual PASS signed off on oracle imagery alone is
 overstated (issue #194). Do not quietly drop this, and do not inflate it.
 
+**Add `--svg` to any oracle run that covers dashboards** (needs `TABLEAU_REST_API_VERSION=3.29`; the
+script still defaults to 3.21). `?resolution=high` is measured to be **exactly 2× the dashboard's
+declared size, with no parameter that raises it** — a 650×800 dashboard tops out at 1300×1600 forever —
+so a label-dense page can be structurally legible and content-illegible at once. The SVG from the same
+endpoint is resolution-independent and its `<text>` elements carry the literal labels, so content is
+readable without rendering. It does **not** upgrade the grade: still default-state, still outside
+`reference/`. It raises the ceiling *within* text-grade, nothing more. Route survey and the numbers:
+[`docs/reference-capture.md`](docs/reference-capture.md) (issue #403).
+
 > **Running the pipeline by hand, or standing behind someone who is?**
 > [`docs/operator-runbook.md`](docs/operator-runbook.md) is the command-by-command version of this
 > section: the day-before checklist, expected timings, the failure playbook (the `estate_survey.py`

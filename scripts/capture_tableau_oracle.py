@@ -1,7 +1,7 @@
 """
 purpose: capture Tableau's OWN computed values per view (the numeric oracle) plus a durable
          view-identity manifest keyed by view LUID, from a live Tableau Cloud/Server site.
-usage:   python scripts/capture_tableau_oracle.py --out _oracle [--workbook "Superstore"] [--images]
+usage:   python scripts/capture_tableau_oracle.py --out _oracle [--workbook "Superstore"] [--images] [--svg]
 
 Why this exists
 ---------------
@@ -47,6 +47,27 @@ A missing credential is **not** transient: no number of retries conjures one, so
 named host and remedy and sets exit code 2. Every recovery is **recorded** in the manifest
 (``reauths``, ``retries``, ``retry_reasons``) -- a capture that silently healed itself looks identical
 to one that never had a problem, which is exactly how a truncated result comes to be trusted.
+
+Reference RENDERS: two routes, one endpoint (issue #403)
+--------------------------------------------------------
+``--images`` and ``--svg`` both call ``/views/{id}/image``; only the query differs. Measured across
+all 52 capturable dashboards on the trial site, with no exception:
+
+* ``?resolution=high`` returns **exactly 2x the dashboard's declared size** -- 1300x1600 for a 650x800
+  dashboard, 2800x1600 for a 1400x800 one. There is no parameter that raises it: ``resolution`` accepts
+  only ``high`` (``standard``, ``veryhigh`` and even ``HIGH`` are HTTP 400), and ``vizWidth``/
+  ``vizHeight`` are silently ignored (byte-identical responses). **That is a hard raster ceiling**, and
+  it is why a text-dense dashboard -- ``Superstore | Order Details`` carries 410 labels in 1600x1600 --
+  can be structurally legible and content-illegible at the same time.
+* ``?format=svg`` (REST **3.29+**) returns vector: resolution-independent, self-contained (raster
+  sub-elements arrive as ``data:`` URIs, external refs measured 0), and its ``<text>`` elements hold
+  the literal label strings, so a consumer can read the dashboard's CONTENT without rendering at all.
+  Below 3.29 the server refuses with an explicit ``SVG export requires API version 3.29 or later``
+  400 -- it never silently downgrades to PNG.
+
+Neither survives a workbook whose data sources are not connected: ``image``, ``image?format=svg``,
+``pdf`` and ``data`` all return the same HTTP 400 ``ExportViewException: Error: data sources not
+connected``. That failure is upstream of the output format, and only a human can clear it.
 """
 
 from __future__ import annotations
@@ -103,6 +124,13 @@ TRANSIENT_STATUSES = frozenset({NETWORK_ERROR_STATUS, 429, 500, 502, 503, 504})
 _PERCENT = re.compile(r"^-?[\d,.]+%$")
 _CURRENCY = re.compile(r"^-?[$£€¥]\s?[\d,.]+$")
 _THOUSANDS = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
+
+# SVG export is gated by REST version. Below 3.29 the server refuses with this phrase and a 400 --
+# it does NOT silently fall back to PNG (measured on 3.21 / 3.24 / 3.28), so the sniff is safe.
+SVG_MIN_API_VERSION = "3.29"
+SVG_VERSION_MARKER = "SVG export requires API version"
+_SVG_ROOT_MM = re.compile(r'width="([\d.]+)mm"\s+height="([\d.]+)mm"')
+_SVG_HREF = re.compile(r'(?:xlink:)?href="([^"]{0,120})')
 
 
 class ExportFailed(RuntimeError):
@@ -416,8 +444,69 @@ def safe_slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_")[:60] or "view"
 
 
-def capture_view(session: TableauSession, view: dict[str, Any], out_dir: Path, want_images: bool) -> dict[str, Any]:
-    """Capture one view's data (and optionally its rendered image), keyed by view LUID."""
+def png_dimensions(payload: bytes) -> dict[str, int] | None:
+    """Width/height from the IHDR chunk. Recorded so the manifest states the reference's RESOLUTION.
+
+    ``resolution=high`` is not an open-ended quality dial: measured over all 52 capturable dashboards
+    on the trial site it returns **exactly 2x the dashboard's declared size**, with no exception and
+    no parameter that raises it. A 650x800 dashboard therefore tops out at 1300x1600 forever. Writing
+    the number down is what lets a consumer judge whether the reference can carry a content-level
+    verdict, instead of inferring it from the fact that a PNG exists (issue #403).
+    """
+    if len(payload) < 24 or payload[:8] != b"\x89PNG\r\n\x1a\n" or payload[12:16] != b"IHDR":
+        return None
+    return {"width": int.from_bytes(payload[16:20], "big"), "height": int.from_bytes(payload[20:24], "big")}
+
+
+def svg_facts(payload: bytes) -> dict[str, Any]:
+    """Geometry and machine-readable-text census for a REST SVG export.
+
+    Two properties make this the higher-fidelity reference, and both are asserted here rather than
+    assumed. (1) The root carries the dashboard's size in millimetres at 96 dpi, so the vector can be
+    rasterised at any scale with no geometry guess. Measured over all 52 capturable dashboards on the
+    trial site, ``round(mm * 96 / 25.4)`` is the dashboard's declared pixel size **plus exactly 1 px
+    in each axis** (a 1400x800 dashboard reports 370.681x211.931mm -> 1401x801) -- 52/52, no
+    exception. ``round`` and not ``int``: the true value lands just under the integer (1400.99), so
+    truncation is off by one for some dashboards and not others (measured: three different offsets
+    across the same 52), which is exactly the kind of silent inconsistency that makes a geometry field
+    untrustworthy.
+
+    ``width_px``/``height_px`` are the SVG's **own viewport**, not a restated ``/image`` size. For a
+    DASHBOARD that is ``/image?resolution=high`` / 2 + 1 per axis. Do not carry the +1 over to a
+    worksheet: one measured worksheet (``BAN Hired``, PNG 1584x1584) reported 792x792, i.e. offset 0,
+    and a single sample is not a law. Compare with the offset in mind rather than assuming equality.
+
+    (2) Labels arrive as real ``<text>`` elements holding the literal strings ("7,984", "Active
+    Employees"), so a consumer can read the dashboard's CONTENT without rendering anything at all.
+    ``text_elements`` is also the cost signal: a crosstab-shaped worksheet measured 37,439 of them in
+    a 21 MB SVG against a 4.5 MB PNG, so ``--svg`` is not free on text-dense views.
+
+    ``external_refs`` is the self-containment check: Tableau inlines raster sub-elements (maps, logos)
+    as ``data:`` URIs, so a non-zero count means the file needs the server to render and must not be
+    treated as durable offline evidence.
+    """
+    text = payload.decode("utf-8", "replace")
+    facts: dict[str, Any] = {
+        "text_elements": text.count("<text"),
+        "image_elements": text.count("<image"),
+        "path_elements": text.count("<path"),
+        "external_refs": len([h for h in _SVG_HREF.findall(text) if not h.startswith(("data:", "#"))]),
+    }
+    match = _SVG_ROOT_MM.search(text[:2000])
+    if match:
+        facts["width_px"] = round(float(match.group(1)) * 96 / 25.4)
+        facts["height_px"] = round(float(match.group(2)) * 96 / 25.4)
+    return facts
+
+
+def capture_view(
+    session: TableauSession,
+    view: dict[str, Any],
+    out_dir: Path,
+    want_images: bool,
+    want_svg: bool = False,
+) -> dict[str, Any]:
+    """Capture one view's data (and optionally its rendered image and/or SVG), keyed by view LUID."""
     view_luid = view["id"]
     workbook = view.get("workbook", {}) or {}
     stem = f"{safe_slug(view.get('name', ''))}__{view_luid[:8]}"
@@ -451,22 +540,51 @@ def capture_view(session: TableauSession, view: dict[str, Any], out_dir: Path, w
     }
 
     if want_images:
-        image_path = out_dir / "images" / f"{stem}.png"
-        image_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            png, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/image?resolution=high")
-        except ExportFailed as exc:
-            record["image"] = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
-            return record
-        image_path.write_bytes(png)
-        record["image"] = {
-            "status": "ok",
-            "path": str(image_path.relative_to(out_dir)).replace("\\", "/"),
-            "bytes": len(png),
-            "sha256": hashlib.sha256(png).hexdigest(),
-            "elapsed_sec": round(elapsed, 2),
-            **stats,
-        }
+        record["image"] = _capture_render(session, view_luid, out_dir / "images" / f"{stem}.png", "png")
+    if want_svg:
+        record["svg"] = _capture_render(session, view_luid, out_dir / "images" / f"{stem}.svg", "svg")
+    return record
+
+
+def _capture_render(session: TableauSession, view_luid: str, path: Path, kind: str) -> dict[str, Any]:
+    """Fetch one rendered form of a view and describe what was actually obtained.
+
+    Both forms come from the SAME ``/views/{id}/image`` endpoint and the same VizQL render, so neither
+    survives a workbook whose data sources are not connected -- measured, both return HTTP 400
+    ``ExportViewException: Error: data sources not connected``. What differs is the CEILING: the PNG
+    is capped at 2x the dashboard's declared size, the SVG is resolution-independent.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    query = "?format=svg" if kind == "svg" else "?resolution=high"
+    try:
+        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/image{query}")
+    except ExportFailed as exc:
+        record = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
+        if kind == "svg" and SVG_VERSION_MARKER in exc.detail:
+            # A version gate is a CONFIGURATION fault, not a broken view: retrying cannot fix it and
+            # neither can a Tableau-side credential, so say which knob to turn rather than filing it
+            # under the generic failure bucket a reader will chase into the data source.
+            record["status"] = "unsupported_api_version"
+            record["remedy"] = f"set TABLEAU_REST_API_VERSION={SVG_MIN_API_VERSION} or later in .env"
+        return record
+    path.write_bytes(payload)
+    record = {
+        "status": "ok",
+        "format": kind,
+        "path": str(path.relative_to(path.parent.parent)).replace("\\", "/"),
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "elapsed_sec": round(elapsed, 2),
+        **stats,
+    }
+    if kind == "svg":
+        record.update(svg_facts(payload))
+        record["vector"] = True
+    else:
+        record["vector"] = False
+        dimensions = png_dimensions(payload)
+        if dimensions:
+            record["dimensions_px"] = dimensions
     return record
 
 
@@ -485,6 +603,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--images", action="store_true", help="also capture /image?resolution=high per view")
+    parser.add_argument(
+        "--svg",
+        action="store_true",
+        help=(
+            f"also capture /image?format=svg per view -- resolution-independent, and its <text> "
+            f"elements carry the dashboard's literal labels. Requires REST API >= {SVG_MIN_API_VERSION}"
+        ),
+    )
     parser.add_argument("--limit", type=int, default=0, help="stop after N views (0 = all)")
     parser.add_argument(
         "--max-attempts",
@@ -543,6 +669,17 @@ def log_progress(index: int, total: int, record: dict[str, Any]) -> None:
         LOG.warning("  %2d/%d  %-34s FAILED (%s): %s", index, total, name, status, data.get("detail"))
 
 
+def _render_statuses(record: dict[str, Any]) -> tuple[str, ...]:
+    """Status of every RENDER leg that was actually requested for this view.
+
+    An absent key means the leg was not asked for, which must read as ``ok`` -- otherwise a plain
+    data-only capture (no ``--images``, no ``--svg``) would count itself as failed. Returning a tuple
+    keeps the three aggregate sets below reading the same legs, so adding a fourth output format
+    cannot silently be counted by one of them and missed by the others.
+    """
+    return tuple(record.get(leg, {"status": "ok"}).get("status") for leg in ("image", "svg"))
+
+
 def write_manifest(
     records: list[dict[str, Any]], session: TableauSession, env: dict[str, str], out_dir: Path, started: float
 ) -> int:
@@ -554,19 +691,15 @@ def write_manifest(
     ok = [r for r in records if r.get("data", {}).get("status") == "ok"]
     empty = [r for r in ok if r["data"]["row_count"] == 0]
     complete = [
-        r
-        for r in records
-        if r.get("data", {}).get("status") == "ok" and r.get("image", {"status": "ok"}).get("status") == "ok"
+        r for r in records if r.get("data", {}).get("status") == "ok" and all(s == "ok" for s in _render_statuses(r))
     ]
-    blocked = [
-        r for r in records if "source_credential" in {r.get("data", {}).get("status"), r.get("image", {}).get("status")}
-    ]
+    blocked = [r for r in records if "source_credential" in {r.get("data", {}).get("status"), *(_render_statuses(r))}]
     failed = [
         r
         for r in records
         if any(
             status not in {"ok", "source_credential"}
-            for status in (r.get("data", {}).get("status"), r.get("image", {"status": "ok"}).get("status"))
+            for status in (r.get("data", {}).get("status"), *_render_statuses(r))
         )
     ]
     manifest = {
@@ -579,6 +712,8 @@ def write_manifest(
         "captured_complete": len(complete),
         "data_ok": len(ok),
         "data_empty": len(empty),
+        "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
+        "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
         "credential_blocked": len(blocked),
         "failed": len(failed),
         "total_reauths": session.reauth_count,
@@ -608,8 +743,24 @@ def write_manifest(
             len(blocked),
         )
         for record in blocked:
-            blocked_detail = record.get("data", {}).get("detail") or record.get("image", {}).get("detail")
+            blocked_detail = (
+                record.get("data", {}).get("detail")
+                or record.get("image", {}).get("detail")
+                or record.get("svg", {}).get("detail")
+            )
             LOG.warning("  - %s (%s): %s", record["view_name"], record["workbook_name"], blocked_detail)
+    stale_api = [r for r in records if r.get("svg", {}).get("status") == "unsupported_api_version"]
+    if stale_api:
+        # Loud and separate from `blocked`: this one is fixed by an .env line, not by a human
+        # reauthorizing a data source in Tableau, and conflating the two sends the reader hunting
+        # in the wrong system.
+        LOG.warning(
+            "\n%d view(s) could not produce SVG: this site's REST API version is below %s. "
+            "Set TABLEAU_REST_API_VERSION=%s in .env and re-run; the PNG capture is unaffected.",
+            len(stale_api),
+            SVG_MIN_API_VERSION,
+            SVG_MIN_API_VERSION,
+        )
     if not records:
         return 4
     if failed:
@@ -676,7 +827,7 @@ def main() -> int:
 
     records, started = [], time.perf_counter()
     for index, view in enumerate(views, 1):
-        record = capture_view(session, view, out_dir, args.images)
+        record = capture_view(session, view, out_dir, args.images, args.svg)
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
         records.append(record)
         log_progress(index, len(views), record)
