@@ -514,6 +514,13 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/capture_tableau_oracle.py", "reflected_credential"): {"payload"},
     ("scripts/capture_tableau_oracle.py", "redact_text"): {"text"},
     ("scripts/capture_tableau_oracle.py", "_redact_response"): {"text"},
+    # ⚠️ `view` is a dict straight off `list_views()` -> `get_json`, so every string in it is response
+    # data: the name, the url name, the content url, the project. Seeded because WITHOUT it the gate
+    # was measurably blind to the round-6 defect itself -- reintroducing
+    # `safe_slug(view["name"])` as the filename produced ZERO findings, and only the runtime battery
+    # caught it. A static gate that cannot see the escape it was written for is worth saying out loud.
+    ("scripts/capture_tableau_oracle.py", "capture_view"): {"view"},
+    ("scripts/capture_tableau_oracle.py", "log_progress"): {"record"},
     ("scripts/tableau_render_capability.py", "format_matches"): {"body", "content_type"},
     ("scripts/tableau_render_capability.py", "classify_probe"): {"body", "content_type"},
     ("scripts/tableau_render_capability.py", "looks_like_svg"): {"body"},
@@ -543,6 +550,17 @@ CATEGORIES = (
     "FIXED-VOCABULARY:",
     "SCRUBBED-AT-SINK:",
     "OUTBOUND:",  # our own request, travelling to Tableau -- not a response coming back
+    "SHAPE-VERIFIED:",  # response-derived, but constrained to a shape that cannot carry a credential
+)
+
+_LUID_OK = (
+    "SHAPE-VERIFIED: the view LUID, anchored to a full UUID regex by `artifact_stem` and additionally "
+    "refused if it equals one of our own credentials, so it is the one response-derived string allowed "
+    "to reach a filename"
+)
+_INTO_THE_MANIFEST = (
+    "SCRUBBED-AT-SINK: Tableau metadata copied into the manifest record; `scrub_tree` covers it, "
+    "values and keys, immediately before serialisation -- and it never reaches a path or a raw log line"
 )
 
 CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
@@ -556,8 +574,38 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/capture_tableau_oracle.py", "_request"): {
         "body": "OUTBOUND: the request entity WE send to Tableau, serialised on its way out",
+        "path": "OUTBOUND: the REST path we are requesting, built from the site id and a verified LUID",
+    },
+    ("scripts/capture_tableau_oracle.py", "capture_view"): {
+        "view_luid": _LUID_OK,
+        "view.get('name')": _INTO_THE_MANIFEST,
+        "view.get('viewUrlName')": _INTO_THE_MANIFEST,
+        "view.get('contentUrl')": _INTO_THE_MANIFEST,
+        "view.get('updatedAt')": _INTO_THE_MANIFEST,
+        "(view.get('project') or {}).get('name')": _INTO_THE_MANIFEST,
+        "workbook.get('id')": _INTO_THE_MANIFEST,
+        "_capture_data(session, view_luid, out_dir / 'data' / f'{stem}.csv', out_dir)": (
+            "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_data; "
+            "the PATH argument is built from `stem`, which comes only from `artifact_stem`"
+        ),
+        "_capture_render(session, view_luid, out_dir / 'images' / f'{stem}.{_RENDER_EXTENSIONS[kind]}', kind, api=(api_overrides or {}).get(kind))": (
+            "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_render; "
+            "the PATH argument is built from `stem`, which comes only from `artifact_stem`"
+        ),
+    },
+    ("scripts/capture_tableau_oracle.py", "artifact_stem"): {
+        "len(view_luid or '')": "NOT-A-STRING: a character count, reported instead of the rejected identifier",
+    },
+    ("scripts/capture_tableau_oracle.py", "log_progress"): {
+        "status": "FIXED-VOCABULARY: one of classify_export_error's status literals",
+        "data.get('detail')": "REDACTED-UPSTREAM: classify_export_error builds every detail from `safe`",
+        "data['row_count']": "NOT-A-STRING: an integer row count",
+        "data['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
+        "data['reauths']": "NOT-A-STRING: an integer counter",
+        "data['retries']": "NOT-A-STRING: an integer counter",
     },
     ("scripts/capture_tableau_oracle.py", "_capture_data"): {
+        "view_luid": _LUID_OK,
         "payload": (
             "REFUSED-AT-SEAM: writing the customer's own CSV IS the capture. What must never be in it "
             "is OUR credential, and `export()` refuses a 200 carrying the PAT secret or session token "
@@ -574,6 +622,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
     },
     ("scripts/capture_tableau_oracle.py", "_capture_render"): {
+        "view_luid": _LUID_OK,
         "payload": (
             "REFUSED-AT-SEAM: writing the rendered reference IS the capture; the seam refuses a 200 "
             "echoing the PAT secret or session token before these bytes reach a file"
@@ -594,6 +643,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "status": "NOT-A-STRING: an HTTP status integer",
     },
     ("scripts/capture_tableau_oracle.py", "export"): {
+        "path": "OUTBOUND: the REST path we are requesting, built from the site id and a verified LUID",
         "status": "NOT-A-STRING: an HTTP status integer",
         "delay": "NOT-A-STRING: a float backoff delay",
         "kind": "FIXED-VOCABULARY: one of classify_export_error's five status literals",
@@ -726,6 +776,14 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
                 if callee is None:
                     continue
                 params = _param_names(callee)
+                # A bound method call passes `self` implicitly, so argument 0 lands on parameter 1.
+                # Without this the analyser mapped a tainted argument onto `self` and then treated the
+                # whole receiver as response data -- which over-taints loudly (measured: `attempt`,
+                # `self.retry.max_attempts` and friends all flagged) and, worse, silently shifts every
+                # later argument by one, so a genuinely tainted third argument was checked against the
+                # second parameter's name.
+                if isinstance(node.func, ast.Attribute) and params and params[0] == "self":
+                    params = params[1:]
                 for index, arg in enumerate(node.args):
                     if _roots(arg) & local and index < len(params):
                         tainted[callee.name].add(params[index])
@@ -966,6 +1024,43 @@ def test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed(
         f"{module} passes response-derived data across a module boundary into a parameter with no "
         f"declared taint seed, so it arrives untracked: {sorted(set(undeclared))}. Add it to TAINT_SEEDS."
     )
+
+
+def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path):
+    """⚠️ Round 6 was caught only by the RUNTIME battery. The static gate was blind to it.
+
+    Measured before `view` was seeded: reintroducing `safe_slug(view["name"])` as the artifact stem
+    produced **zero** findings. That is a gate that could not see the escape it exists to prevent, so
+    `view` -- a dict straight off `list_views()` -> `get_json` -- is now a declared taint seed, and the
+    same regression reaches the `write-path` exit at both write sites.
+    """
+    _ = tmp_path
+    module = "scripts/capture_tableau_oracle.py"
+    source = (REPO / module).read_text(encoding="utf-8")
+    anchor = "        stem = artifact_stem(view_luid)"
+    assert source.count(anchor) == 1, "the anchor moved; this test would otherwise mutate nothing"
+    regressed = source.replace(
+        anchor, '        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", view.get("name", "")).strip("_")[:60]'
+    )
+    new = set(uncertified_sinks(regressed, module)) - set(uncertified_sinks(source, module))
+    assert {"_capture_data() write-path: path", "_capture_render() write-path: path"} <= new, sorted(new)
+
+
+def test_a_bound_method_call_maps_argument_0_onto_parameter_1_not_onto_self():
+    """Found by over-seeding: `x.m(tainted)` was mapping onto the callee's `self`.
+
+    It over-taints loudly -- the whole receiver becomes response data -- but the dangerous half is
+    silent: every later argument shifts by one, so a genuinely tainted third argument was checked
+    against the second parameter's name and could pass unflagged.
+    """
+    source = (
+        "class S:\n"
+        "    def sink(self, first, second):\n"
+        '        return f"{second}"\n'
+        "    def summarise_csv(self, payload):\n"
+        "        return self.sink('constant', payload)\n"
+    )
+    assert uncertified_sinks(source, "scripts/tableau_payload_facts.py") == ["sink() f-string: second"]
 
 
 @pytest.mark.parametrize("module", MODULES)
