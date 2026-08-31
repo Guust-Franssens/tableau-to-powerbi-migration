@@ -449,6 +449,9 @@ def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-
     fixed-cutoff bucket measure and this gate has no standing over it - exactly as it has none over
     `<= DATE(2024,12,31)`. Whether the bound moves is therefore NOT a property of the DAX alone; it
     is decided here, against the visual, which is why `AsOfCall` carries the removed references.
+    That acquittal is itself conditional on the FIRST question: with the addressed date projected,
+    the bound is already pinned to one day and the removal changes nothing, so the partition reading
+    wins. Found by auditing the fix rather than by the reviewer - measured, it was a silent `ok`.
     """
     same_table = [ref for ref in survivors if ref.entity.casefold() == (compared.table or "").casefold()]
     # Keyed by the casefolded (table, column) tuple, NOT by the FieldRef: `check_field_bindings`'
@@ -460,8 +463,13 @@ def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-
         for ref in same_table
     }
     proven = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] in (GRAIN_DATE, GRAIN_DERIVED)]
-    pinned = [r for r in proven if call.pins(r.entity, r.prop)]
-    moving = [r for r in proven if not call.pins(r.entity, r.prop)]
+    # A bound removal only acquits when the addressed date is NOT itself projected. When it IS, the
+    # bound is still the current row's date - removing the coarser column's filter cannot change a
+    # MAX already pinned to one day - so the accumulation runs inside each bucket and the partition
+    # reading below is the right one, whatever the bound removes.
+    pinned = [] if anchor_projected else [r for r in proven if call.pins(r.entity, r.prop)]
+    pinned_keys = {ColumnRef(r.entity, r.prop).key() for r in pinned}
+    moving = [r for r in proven if ColumnRef(r.entity, r.prop).key() not in pinned_keys]
     if moving:
         named = ", ".join(f"'{r.entity}'[{r.prop}] ({graded[ColumnRef(r.entity, r.prop).key()]})" for r in moving)
         if anchor_projected:

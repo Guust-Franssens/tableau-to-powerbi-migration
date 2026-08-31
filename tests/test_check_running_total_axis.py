@@ -1463,6 +1463,31 @@ def test_f1_a_removal_that_does_not_cover_the_axis_still_catches_the_defect(tmp_
     assert codes(report) == ["axis_grain_not_cleared"]
 
 
+def test_f1_the_bound_acquittal_does_not_survive_the_addressed_date_being_projected(tmp_path: Path) -> None:
+    """Found by auditing the F1 fix, not by the reviewer, and the fix's own boundary. With
+    `'Orders'[Order_Date]` ALSO on the visual, `MAX('Orders'[Order_Date])` is already pinned to the
+    current day, so `REMOVEFILTERS('Orders'[Order Month Label])` changes nothing about it: the
+    accumulation still runs inside each month and RESTARTS at the boundary. Reading the removal as an
+    acquittal here would have turned the round-2 finding-5 partition case back into a silent pass -
+    the same "the fix moved the failure boundary" shape this whole round is about."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", R4_BOUND_REMOVES_THE_AXIS)),
+        {
+            "Category": {
+                "projections": [
+                    _column_projection("Orders", "Order_Date"),
+                    _column_projection("Orders", "Order Month Label"),
+                ]
+            },
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert codes(report) == ["axis_partitions_accumulation"]
+
+
 @pytest.mark.parametrize(
     ("label", "expression"), [("hoisted into two VARs", R4_TWO_MAX_VARS), ("inlined", R4_TWO_MAX_INLINE)]
 )

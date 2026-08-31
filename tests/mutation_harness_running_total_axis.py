@@ -629,6 +629,16 @@ assert dg.AsOfCall.pins is not _orig
 """,
         "test_f1_a_removal_that_does_not_cover_the_axis_still_catches_the_defect",
     ),
+    "r4f1-bound-acquittal-survives-the-anchor-being-projected": (
+        """
+_orig = crta._judge_same_table_survivors
+def survivors(items, compared, call, facts, axis, anchor_projected):
+    return _orig(items, compared, call, facts, axis, False)
+crta._judge_same_table_survivors = survivors
+assert crta._judge_same_table_survivors is not _orig
+""",
+        "test_f1_the_bound_acquittal_does_not_survive_the_addressed_date_being_projected",
+    ),
     "r4f2-first-max-call-decides-the-bound": (
         """
 _orig = dg._context_bound_kinds
@@ -924,6 +934,12 @@ assert dg._bound_removals(kit.AXIS_REMOVAL) == ([], [])
 """,
     "r4f1-every-grain-reads-as-pinned-by-the-bound": """
 assert dg.AsOfCall(compared=kit.ANCHOR).pins("Nowhere", "Nothing") is True
+""",
+    "r4f1-bound-acquittal-survives-the-anchor-being-projected": """
+survivor = [kit.field_ref("Orders", "Order Month Label")]
+call = dg.AsOfCall(compared=kit.ANCHOR, cleared_columns=[kit.ANCHOR])
+verdict = crta._judge_same_table_survivors(survivor, kit.ANCHOR, call, kit.facts(), "axis", True)
+assert verdict is not None and verdict["code"] == "axis_grain_not_cleared"
 """,
     "r4f2-first-max-call-decides-the-bound": """
 assert dg._context_bound_kinds(kit.TWO_MAX_BOUND, kit.ANCHOR) == [dg.BOUND_CONTEXT]
