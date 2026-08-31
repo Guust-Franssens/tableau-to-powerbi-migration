@@ -405,15 +405,43 @@ truncate first, because truncation lives inside the function, after the redactor
 | 3 | the HTTP-200 wrong-format diagnostic | the message was built and **returned** first |
 | 3 | `format_matches` Content-Type | `.lower()` |
 | 4 | `format_matches` body head | `.lstrip()`, a 256-byte window, `[:8]` |
-| 4 | `classify_probe`'s `<detail>` extraction | the capture group was pulled from the **raw** body, splitting a secret that straddled `</detail>` |
+| 4 | `classify_probe`'s `<detail>` extraction | the capture group was pulled from the **raw** body |
+| **5** | **`data.columns`, and `data/<view>.csv` itself** | **nothing — it was never a diagnostic** |
 
-The last row was found by writing the gate, not by a reviewer. `tests/test_diagnostic_redaction.py`
-holds the whole inventory of diagnostic-producing sites and runs each against a battery of secret
-shapes (leading/trailing whitespace, longer-than-any-window, mixed case, embedded `</detail>`, quote
-and backslash, non-ASCII, semicolon), asserting on the **written `oracle-manifest.json`** where one
-exists. A second gate fails on any f-string interpolation in these two modules that is not on a
-hand-certified list, so a *fifth* site cannot be added silently — only certified deliberately, with a
-one-line reason it cannot carry a credential.
+⚠️ **Round 5 is why the guarantee is stated about the ARTIFACT, not about diagnostics.** A successful
+`/data` response is a CSV: `summarise_csv()` copies its first row into `data.columns`, and
+`_capture_data` writes the bytes to `data/<view>.csv`. Neither is a diagnostic, so four rounds of
+diagnostic rules could not see it, and 334 tests passed. The invariant is therefore:
+
+> **Nothing reaches a persisted artifact unredacted, regardless of how it got there.**
+
+Two mechanisms enforce it, and they are **not** redundant — they cover disjoint artifacts:
+
+1. **Refuse at the seam.** `TableauSession.export()` screens every **successful** body and raises
+   `credential_reflected` if it echoes the PAT **secret** or the live **session token**. Nothing is
+   written: no `.csv`, no `.svg`, no derived field. This is the only mechanism that can protect a file
+   — the bytes hit disk before any manifest exists, so no manifest-side scrub could ever reach them.
+   A `/data` response carrying our own credential is not evidence worth keeping.
+2. **Scrub at the sink.** `write_manifest()` walks the whole manifest through the session redactor
+   immediately before serialising, and **records which fields it had to scrub** in
+   `credential_scrubbed_at_sink`. A sink that cleans up silently is indistinguishable from one that
+   had nothing to clean, which is precisely how a source defect survives.
+
+⚠️ **The PAT *name* is redacted, never refused — a deliberate asymmetry.** The secret and token are
+machine-generated, so a match is a reflection and their exposure is unrecoverable: refusing costs one
+view. The name is human-chosen, visible in Tableau's own UI, does not authenticate on its own, and a
+PAT called `Migration` colliding with a real column heading would refuse a legitimate estate. So it is
+scrubbed from the manifest and **knowingly left in the `.csv` on disk**; `test_the_pat_name_is_KNOWN_to
+_survive_in_the_csv_on_disk` pins that as a decision rather than an oversight.
+
+`tests/test_diagnostic_redaction.py` holds the whole inventory of sites — now including the
+**successful** `/data` and `?format=svg` routes, asserted against the manifest *and the bytes of every
+file written* — and runs each against a battery of secret shapes. A second gate tracks **provenance**:
+response data is tainted at the parameters it arrives on, propagated through assignments, cleared only
+by `redacted_note()`, and every sink (f-string, dict value, `**` unpack, log/exception argument) is
+checked against the tainted set of **its own function**, with certification keyed per occurrence and
+required to name one of five categories. That replaces a global, expression-keyed, f-string-only gate
+that a reviewer showed could be satisfied by reusing a certified name in a new function.
 
 ⚠️ **What `redact()` still does NOT cover, and why that is deliberate.** Percent-encoded, base64,
 NFD-normalised and case-changed copies of a secret survive it. Every one of those requires a **third

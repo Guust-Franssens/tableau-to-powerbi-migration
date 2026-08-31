@@ -60,13 +60,13 @@ def _png(width: int, height: int) -> bytes:
 class _Session(oracle.TableauSession):
     """Scripted HTTP layer keyed by the query string, so leg ordering cannot silently change."""
 
-    def __init__(self, responses: dict[str, tuple[int, bytes]]):
+    def __init__(self, responses: dict[str, tuple[int, bytes]], *, pat_secret: str = "a-long-enough-secret"):
         super().__init__(
             oracle.SiteCredentials(
                 base="https://example.online.tableau.com",
                 site="site",
                 pat_name="name",
-                pat_secret="a-long-enough-secret",
+                pat_secret=pat_secret,
                 version="3.29",
             )
         )
@@ -201,8 +201,21 @@ def test_a_disconnected_source_keeps_its_own_classification_and_is_not_relabelle
 
 
 class _Counter:
+    """Stands in for `run.session`. It carries a REAL redactor, not a pass-through.
+
+    `write_manifest` scrubs the whole manifest through `run.session.redact_text` immediately before
+    serialising (the round-5 sink), so a double without one would switch that guard off silently in
+    every test here.
+    """
+
     reauth_count = 0
     retry_count = 0
+
+    def __init__(self, secret: str = "a-long-enough-secret"):
+        self._session = _Session({}, pat_secret=secret)
+
+    def redact_text(self, text: str) -> str:
+        return self._session.redact_text(text)
 
 
 def _manifest(records, tmp_path, run_kwargs=None, capability=None):
@@ -403,14 +416,22 @@ REFLECTED_SECRET = "SECRET42-the-rest-of-a-real-pat"
 def test_a_format_mismatch_detail_is_redacted_before_it_reaches_the_manifest(tmp_path):
     """`_capture_render` serialised `format_matches`' diagnostic, which quotes the response's own
     leading bytes, with no redactor at all. A source whose export begins with credential-shaped text
-    -- or a proxy reflecting one -- wrote it into `oracle-manifest.json` verbatim."""
+    -- or a proxy reflecting one -- wrote it into `oracle-manifest.json` verbatim.
+
+    ⚠️ Planted as the PAT **name**, not the secret. Round 5 added a seam that REFUSES a successful body
+    echoing the PAT secret or session token, which would retire this test by making its route
+    unreachable. The name is deliberately redacted rather than refused (`reflected_credential`), so it
+    is what keeps the round-3 diagnostic fix under test.
+    """
     body = f"{REFLECTED_SECRET} is what a reflecting export returned".encode()
-    session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (200, body)})
+    session = _Session(
+        {"/data": (200, b"a\n1\n"), "image?format=svg": (200, body)}, pat_secret="an-unrelated-long-secret"
+    )
     session._creds = oracle.SiteCredentials(  # pylint: disable=protected-access
         base="https://example.online.tableau.com",
         site="site",
-        pat_name="a-long-enough-pat-name",
-        pat_secret=REFLECTED_SECRET,
+        pat_name=REFLECTED_SECRET,
+        pat_secret="an-unrelated-long-secret",
         version="3.29",
     )
     record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
@@ -418,6 +439,18 @@ def test_a_format_mismatch_detail_is_redacted_before_it_reaches_the_manifest(tmp
     serialized = json.dumps(record)
     assert "SECRET42" not in serialized
     assert "[REDACTED]" in serialized
+
+
+def test_a_successful_body_echoing_the_pat_secret_is_refused_not_persisted(tmp_path):
+    """Round 5's seam, on the render leg: nothing is written, and the status names the cause."""
+    session = _Session(
+        {"/data": (200, b"a\n1\n"), "image?format=svg": (200, f"<svg>{REFLECTED_SECRET}</svg>".encode())},
+        pat_secret=REFLECTED_SECRET,
+    )
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
+    assert record["svg"]["status"] == oracle.CREDENTIAL_REFLECTED
+    assert not list((tmp_path / "images").glob("*")) if (tmp_path / "images").exists() else True
+    assert "SECRET42" not in json.dumps(record)
 
 
 # ---------------------------- #405 round 3, finding 3: a credential block is not a hard failure

@@ -91,12 +91,24 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import pat_secret, redact, redacted_note, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
+    pat_secret,
+    redact,
+    redacted_note,
+    require,
+    resolve_env,
+    scrub_tree,
+    secret_forms,
+)
 
 LOG = logging.getLogger("tableau-oracle")
 
 REST_TIMEOUT_SEC = 180
 SESSION_LOST_CODE = "401002"
+# A **successful** response that echoes our own credential is refused outright rather than persisted.
+# It is not a diagnostic status: nothing is written, because the alternative is a live credential in a
+# `.csv` or `.svg` on disk, which no downstream redaction can reach.
+CREDENTIAL_REFLECTED = "credential_reflected"
 MAX_REAUTH_PER_VIEW = 2
 DEFAULT_MAX_ATTEMPTS = 5
 BACKOFF_BASE_SEC = 1.0
@@ -368,6 +380,25 @@ class TableauSession:
         """Public scrubber for anything derived from a response body that will be persisted."""
         return self._redact_response(text)
 
+    def reflected_credential(self, payload: bytes) -> str | None:
+        """Which AUTHENTICATING credential a **successful** body echoed back, or ``None``.
+
+        Searched as bytes, so it costs one substring scan and works for a CSV and a PNG alike, and
+        covers the same wire spellings :func:`tableau_env.redact` knows about.
+
+        ⚠️ **The PAT *name* is deliberately NOT grounds for refusal**, and that asymmetry is the whole
+        design. The secret and the session token are machine-generated and high-entropy, so a match is
+        a reflection rather than a coincidence, and their exposure is unrecoverable -- refusing costs
+        one view, keeping it costs a credential in a file. The PAT name is human-chosen, visible in
+        Tableau's own UI, does not authenticate on its own, and a name like ``Migration`` colliding
+        with a real column heading would refuse a legitimate estate. It is handled one layer down
+        instead, by the manifest-boundary scrub: a mangled label, not a refused capture.
+        """
+        for label, secret in (("PAT secret", self._creds.pat_secret), ("session token", self.token or "")):
+            if secret and any(form.encode("utf-8") in payload for form in secret_forms(secret)):
+                return label
+        return None
+
     def get_json(self, path: str) -> dict[str, Any]:
         """GET a metadata endpoint as JSON, retrying transient failures."""
         for attempt in range(1, self.retry.max_attempts + 1):
@@ -409,6 +440,23 @@ class TableauSession:
             status, payload, headers = self._request("GET", path, api=api)
             elapsed = time.perf_counter() - started
             if status == 200:
+                # A SUCCESSFUL body is the one thing this class hands back for PERSISTING -- to
+                # `data/<view>.csv`, to `images/<view>.svg`, and to every field derived from it. It is
+                # therefore the seam, and the only place a reflected credential can be stopped before
+                # it becomes a file. Redacting here instead would be wrong twice over: it would
+                # corrupt the customer's own data, and a manifest-boundary scrub (which we also do)
+                # structurally cannot reach a `.csv` already written to disk.
+                reflected = self.reflected_credential(payload)
+                if reflected:
+                    raise ExportFailed(
+                        f"GET {path} -> HTTP 200, but the response body echoed our {reflected}",
+                        CREDENTIAL_REFLECTED,
+                        f"the {reflected} was found in a SUCCESSFUL response. Nothing was written: a "
+                        f"payload carrying our own credential is not evidence worth keeping, and "
+                        f"persisting it would put the credential in a .csv/.svg on disk. Something "
+                        f"between this process and Tableau is reflecting request data -- investigate "
+                        f"the proxy/WAF in front of the site, and rotate the credential.",
+                    )
                 return payload, elapsed, {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
             raw = payload.decode("utf-8", "replace")
             # ONE call, with the redactor inside. `classify_export_error` classifies on the raw text
@@ -967,7 +1015,28 @@ def write_manifest(
         "views": records,
     }
     manifest_path = run.out_dir / "oracle-manifest.json"
+    # THE SINK. Everything above this line is a source, and five review rounds went one source at a
+    # time: `raw_get`, the 200-mismatch diagnostic, a case-folded Content-Type, a truncated body quote,
+    # a `<detail>` capture group -- and then a field that was never a diagnostic at all, a successful
+    # CSV's own header row copied into `data.columns`. Guarding sources one at a time cannot terminate,
+    # because the next leak is by definition the one nobody enumerated. So the manifest is scrubbed as
+    # a WHOLE, immediately before it is serialised, and every string in it is covered regardless of
+    # how it got there.
+    manifest, sink_hits = scrub_tree(manifest, run.session.redact_text)
+    # Firing is itself a defect report: it means a source let something reach the sink. Recorded IN
+    # the artifact, and named, so the finding survives the terminal scrollback.
+    manifest["credential_scrubbed_at_sink"] = sink_hits
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    if sink_hits:
+        LOG.error(
+            "\nThe manifest sink had to redact %d field(s) -- %s. A credential reached the manifest "
+            "through a path that should have scrubbed it upstream; the file is safe, the code is not. "
+            "The AUTHENTICATING halves (PAT secret, session token) cannot reach here at all -- a "
+            "successful body carrying one is refused outright -- so this is most likely the PAT NAME "
+            "matching real content, which is cosmetic. Verify which, then fix the source.",
+            len(sink_hits),
+            ", ".join(sink_hits[:8]),
+        )
 
     LOG.info(
         "\n%d/%d captured (%d empty), %d credential-blocked, %d failed, %d re-auth(s), %d retr(ies), %.0fs -> %s",

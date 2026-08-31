@@ -380,6 +380,17 @@ def redact(text: str, *secrets: str) -> str:
     return "".join(out)
 
 
+def secret_forms(secret: str) -> list[str]:
+    """Every on-the-wire spelling of ``secret`` that :func:`redact` knows how to find.
+
+    Public because a *detector* needs the same vocabulary as the redactor. ``capture_tableau_oracle``
+    refuses a SUCCESSFUL response body that echoes an authenticating credential, and a detector that
+    knew fewer spellings than the scrubber would pass a payload the scrubber would then have had to
+    clean -- which is the wrong order of defence, and unreachable anyway once the bytes are a file.
+    """
+    return _wire_forms(secret)
+
+
 def redacted_note(value: str | bytes | None, redactor=None, *, limit: int, quote: bool = False) -> str:
     """THE ONE WAY attacker-influenced text may enter a diagnostic that is printed, raised or persisted.
 
@@ -425,6 +436,45 @@ def redacted_note(value: str | bytes | None, redactor=None, *, limit: int, quote
         text = redactor(text)
     text = text.strip()[:limit]
     return ascii(text) if quote else text
+
+
+def scrub_tree(value, redactor, trail: str = "") -> tuple[object, list[str]]:
+    """Redact every string in a JSON-shaped tree, returning ``(scrubbed, the paths that changed)``.
+
+    A **SINK-side** guard, and deliberately unconditional: it does not know or care which field it is
+    looking at, because the field nobody thought about is the one that leaks. Five rounds of review on
+    #405 each fixed one SOURCE -- an unredacted error body, a diagnostic returned before redaction, a
+    case-folded header, a truncated body quote, a capture group taken from raw text -- and the sixth
+    escape was not a diagnostic at all: a successful CSV's own first row, copied into ``data.columns``.
+    Guarding sources one at a time cannot terminate, because the next one is by definition the one
+    nobody enumerated.
+
+    It returns the changed paths rather than scrubbing silently. A sink that quietly cleans up is
+    indistinguishable from a sink that never had anything to clean, and that is exactly how a source
+    defect survives: the artifact looks perfect either way.
+
+    ⚠️ It is a **backstop, and cannot be the guarantee.** Bytes reach ``data/<view>.csv`` and
+    ``images/<view>.svg`` before any manifest exists, so a scrub here would leave a credential in a
+    file it can never reach. Refusing the payload at the seam is what covers those; the two mechanisms
+    are not redundant, they cover disjoint artifacts.
+    """
+    if isinstance(value, str):
+        scrubbed = redactor(value)
+        return scrubbed, ([trail or "<root>"] if scrubbed != value else [])
+    if isinstance(value, dict):
+        out, hits = {}, []
+        for key, item in value.items():
+            out[key], found = scrub_tree(item, redactor, f"{trail}.{key}" if trail else str(key))
+            hits.extend(found)
+        return out, hits
+    if isinstance(value, list):
+        out_list, hits = [], []
+        for index, item in enumerate(value):
+            scrubbed, found = scrub_tree(item, redactor, f"{trail}[{index}]")
+            out_list.append(scrubbed)
+            hits.extend(found)
+        return out_list, hits
+    return value, []
 
 
 def engine_child_env(env: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:

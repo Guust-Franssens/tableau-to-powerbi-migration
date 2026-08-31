@@ -146,30 +146,45 @@ ENV = {"TABLEAU_SERVER_URL": "https://s", "TABLEAU_SITE": "site", "TABLEAU_REST_
 
 
 class _Counter:
+    """A `run.session` stand-in. It carries a REAL redactor on purpose.
+
+    `write_manifest` scrubs the whole manifest through `run.session.redact_text` immediately before
+    serialising, so a double with a pass-through redactor would silently switch the sink off in every
+    test that uses it -- and the sink is the thing under test here.
+    """
+
     reauth_count = 0
     retry_count = 0
+
+    def __init__(self, secret: str = ""):
+        self._redact = _Session(secret).redact_text if secret else (lambda text: text)
+
+    def redact_text(self, text: str) -> str:
+        return self._redact(text)
 
 
 class _Session(oracle.TableauSession):
     """A session whose PAT secret IS the planted value, so the real redactor is under test."""
 
-    def __init__(self, secret: str, reply=(200, b"", {})):
+    def __init__(self, secret: str, reply=(200, b"", {}), *, data_reply=None, pat_name="a-long-enough-pat-name"):
         super().__init__(
             oracle.SiteCredentials(
                 base="https://example.online.tableau.com",
                 site="site",
-                pat_name="a-long-enough-pat-name",
+                pat_name=pat_name,
                 pat_secret=secret,
                 version="3.29",
             ),
             oracle.RetryPolicy(max_attempts=1, budget_sec=1),
         )
-        self.reply = reply
+        self.reply = reply if len(reply) == 3 else (*reply, {})
+        # A clean `/data` by default, so a render-leg test is not masked by its own prerequisite.
+        self.data_reply = (*data_reply, {}) if data_reply and len(data_reply) == 2 else data_reply
         self.token, self.site_id = "tok", "sid"
 
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
         if path.endswith("/data"):
-            return 200, b"a\n1\n", {}
+            return self.data_reply or (200, b"a\n1\n", {})
         return self.reply
 
 
@@ -284,22 +299,69 @@ def site_capture_render_record(secret, tmp_path, _mp):
     return json.dumps(oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"})))
 
 
-def site_written_manifest(secret, tmp_path, _mp):
-    """THE level the leak keeps escaping at: the bytes of `oracle-manifest.json` on disk."""
-    session = _Session(secret, (200, (secret + " and then some html").encode(), {}))
-    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
+def _capture_and_read_everything(secret, tmp_path, reply, wants, data_reply=None, session=None):
+    """Run one capture and return the manifest text PLUS the bytes of every file it wrote.
+
+    ⚠️ Reading the FILES, not only the manifest, is the round-5 lesson. A successful `/data` body is
+    written verbatim to `data/<view>.csv`, and a successful `?format=svg` body to `images/<view>.svg`,
+    both BEFORE any manifest exists -- so a manifest-only assertion is blind to the larger artifact,
+    and a manifest-boundary scrub could never have reached it either.
+    """
+    session = session or _Session(secret, reply, data_reply=data_reply)
+    record = oracle.capture_view(session, VIEW, tmp_path, wants)
     record["workbook_name"] = "W"
-    oracle.write_manifest([record], oracle.CaptureRun(_Counter(), ENV, tmp_path, 0.0, frozenset({"svg"})))
-    return (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+    counter = _Counter()
+    counter._redact = session.redact_text  # pylint: disable=protected-access
+    oracle.write_manifest([record], oracle.CaptureRun(counter, ENV, tmp_path, 0.0, wants))
+    written = [
+        path.read_bytes().decode("utf-8", "replace")
+        for path in sorted(tmp_path.rglob("*"))
+        if path.is_file() and path.name != "oracle-manifest.json"
+    ]
+    return "\n".join([(tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"), *written])
+
+
+def site_written_manifest(secret, tmp_path, _mp):
+    """A 200 in the WRONG format: the diagnostic route, plus whatever it wrote."""
+    return _capture_and_read_everything(
+        secret, tmp_path, (200, (secret + " and then some html").encode()), frozenset({"svg"})
+    )
 
 
 def site_written_manifest_from_a_failed_data_leg(secret, tmp_path, _mp):
     """The other manifest route: `_capture_data`'s ExportFailed detail."""
-    session = _Session(secret, (400, _reflected(secret), {}))
-    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
-    record["workbook_name"] = "W"
-    oracle.write_manifest([record], oracle.CaptureRun(_Counter(), ENV, tmp_path, 0.0, frozenset({"svg"})))
-    return (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+    return _capture_and_read_everything(secret, tmp_path, (400, _reflected(secret)), frozenset({"svg"}))
+
+
+def site_successful_csv(secret, tmp_path, _mp):
+    """⚠️ ROUND 5. A perfectly successful `/data`, HTTP 200, whose body echoes the credential.
+
+    `summarise_csv` copied its first row into `data.columns` and `_capture_data` wrote the bytes to
+    `data/<view>.csv`. Neither is a diagnostic, so four rounds of source-side diagnostic rules could
+    not see it, and 334 tests passed. This is the route that must never leave the battery again.
+    """
+    return _capture_and_read_everything(
+        secret, tmp_path, (200, b""), frozenset(), data_reply=(200, f"{secret}\nv\n".encode())
+    )
+
+
+def site_successful_svg(secret, tmp_path, _mp):
+    """The same shape one leg over: a VALID svg whose text content echoes the credential."""
+    body = f'<?xml version="1.0"?><svg width="1mm" height="1mm"><text>{secret}</text></svg>'.encode()
+    return _capture_and_read_everything(secret, tmp_path, (200, body), frozenset({"svg"}))
+
+
+def site_successful_csv_reflecting_the_session_token(secret, tmp_path, _mp):
+    """The seam must cover BOTH authenticating halves, not just the PAT secret.
+
+    ⚠️ Added because a mutation SURVIVED: dropping the session-token arm of `reflected_credential`
+    broke nothing, since every other site in this inventory plants its value as the PAT *secret*. The
+    live token authorises the same session and is the half a reflecting proxy is most likely to echo,
+    because it travels in a header on every single request.
+    """
+    session = _Session("an-unrelated-long-pat-secret", (200, b""), data_reply=(200, f"{secret}\nv\n".encode()))
+    session.token = secret
+    return _capture_and_read_everything(secret, tmp_path, (200, b""), frozenset(), session=session)
 
 
 def site_capability_report(secret, _tmp, monkeypatch):
@@ -336,6 +398,9 @@ SITES = {
     "capture_view record": site_capture_render_record,
     "written manifest (render)": site_written_manifest,
     "written manifest (data)": site_written_manifest_from_a_failed_data_leg,
+    "written artifacts (successful /data)": site_successful_csv,
+    "written artifacts (successful svg)": site_successful_svg,
+    "written artifacts (session token reflected)": site_successful_csv_reflecting_the_session_token,
     "render_capability report": site_capability_report,
     "pin warning": site_pin_warning,
 }
@@ -364,142 +429,354 @@ def test_every_site_still_produces_a_usable_diagnostic(site, tmp_path, monkeypat
     assert len(output.strip()) > 10, f"{site} produced nothing diagnosable: {output!r}"
 
 
-# --------------------------------------------------------------------------- gate 3: certification
+# ------------------------------------------------ gate 3: PROVENANCE, per occurrence, all sinks
+#
+# ⚠️ Rewritten after round 5 found two holes in the first version, which keyed certification on
+# `ast.unparse()` text GLOBALLY and looked only at f-strings:
+#
+#   * a name certified in one function certified the same name everywhere, so
+#     `def leak(body): why = body.decode(...); return f"{why}"` passed with an EMPTY uncertified set;
+#   * non-f-string sinks were invisible entirely -- including dict values, which is exactly how a
+#     successful CSV's header row reached `data.columns`.
+#
+# So this version tracks PROVENANCE rather than spelling. Response-derived data is tainted at the
+# parameters it arrives on, propagated through assignments to a fixpoint, cleared only by
+# `redacted_note(...)`, and every sink -- f-string, dict value, dict `**` unpack, log/exception
+# argument, `%` operand -- is checked against the tainted set of ITS OWN function.
 
-# Every f-string interpolation in the two modules, with the reason it cannot carry a credential.
-# A new one FAILS BY DEFAULT: a fifth site cannot be added silently, only certified deliberately.
-_SAFE_BY_CONSTRUCTION = "redacted through tableau_env.redacted_note, or derived from something that was"
-_NOT_RESPONSE_DATA = "our own request/config data -- never derived from a Tableau response body"
-_FIXED_VOCABULARY = "resolves to one of a fixed set of literals in this module"
-_CLIENT_EXCEPTION = "an http/urllib exception's own text; carries the transport reason, not our credential"
+RESPONSE_PARAMS = {"body", "payload", "content_type", "raw_type", "text", "raw"}
+UNTAINTING = {"redacted_note"}
+TAINTING_CALLS = {"_request", "export", "raw_get", "read", "decode"}
+LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "format"}
 
-CERTIFIED: dict[str, dict[str, str]] = {
-    "scripts/capture_tableau_oracle.py": {
-        "', '.join(marks)": _FIXED_VOCABULARY,
-        "DEFAULT_MAX_ATTEMPTS": _NOT_RESPONSE_DATA,
-        "DEFAULT_RETRY_BUDGET_SEC": _NOT_RESPONSE_DATA,
-        "REST_TIMEOUT_SEC": _NOT_RESPONSE_DATA,
-        "SVG_MIN_API_VERSION": _NOT_RESPONSE_DATA,
-        "_RENDER_EXTENSIONS[kind]": _FIXED_VOCABULARY,
-        "api or self._creds.version": _NOT_RESPONSE_DATA,
-        "data['reauths']": "an integer counter",
-        "data['retries']": "an integer counter",
-        "endpoint": _FIXED_VOCABULARY,
-        "exc": _CLIENT_EXCEPTION,
-        "label": _FIXED_VOCABULARY,
-        "last": _SAFE_BY_CONSTRUCTION,
-        "match.group(1)": _SAFE_BY_CONSTRUCTION + " (the regex runs on `safe`, not on `text`)",
-        "match.group(2).strip()": _SAFE_BY_CONSTRUCTION + " (the regex runs on `safe`, not on `text`)",
-        "path": _NOT_RESPONSE_DATA,
-        "query": _FIXED_VOCABULARY,
-        "read_exc": _CLIENT_EXCEPTION,
-        "redacted_note(payload, self._redact_response, limit=200)": _SAFE_BY_CONSTRUCTION,
-        "safe[:150]": _SAFE_BY_CONSTRUCTION,
-        "safe[:200]": _SAFE_BY_CONSTRUCTION,
-        "safe_slug(view.get('name', ''))": _NOT_RESPONSE_DATA + " (a view name, filesystem-sanitised)",
-        "self._creds.base.rstrip('/')": _NOT_RESPONSE_DATA,
-        "self.retry.max_attempts": _NOT_RESPONSE_DATA,
-        "session.site_id": _NOT_RESPONSE_DATA + " (a site LUID, not a credential)",
-        "status": "an HTTP status integer",
-        "stem": _NOT_RESPONSE_DATA,
-        "type(exc).__name__": _CLIENT_EXCEPTION,
-        "type(read_exc).__name__": _CLIENT_EXCEPTION,
-        "view_luid": _NOT_RESPONSE_DATA,
-        "view_luid[:8]": _NOT_RESPONSE_DATA,
+# A certification must state WHICH justification applies. Free prose lets "it's fine" stand in for an
+# argument; a category has to be one of these, and each is independently checkable by a reader.
+CATEGORIES = (
+    "NOT-A-STRING:",  # an int/float/bool -- cannot carry a credential at all
+    "REDACTED-UPSTREAM:",  # already through the redactor; every transform here happens after
+    "REFUSED-AT-SEAM:",  # response-derived text, but `export()` refuses a 200 carrying a credential
+    "DERIVED-IRREVERSIBLY:",  # a one-way digest of the payload, not the payload
+    "FIXED-VOCABULARY:",  # resolves to one of a fixed set of literals in this module
+)
+
+CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
+    ("scripts/capture_tableau_oracle.py", "classify_export_error"): {
+        "match.group(1)": "REDACTED-UPSTREAM: the regex runs on `safe`, the redacted copy, never on `text`",
+        "match.group(2).strip()": "REDACTED-UPSTREAM: same match, and `.strip()` runs after redaction",
+        "safe[:150]": "REDACTED-UPSTREAM: `safe` is `redactor(text)`; the slice is after",
+        "safe[:200]": "REDACTED-UPSTREAM: `safe` is `redactor(text)`; the slice is after",
     },
-    "scripts/tableau_render_capability.py": {
-        "', '.join(blocked)": _FIXED_VOCABULARY + " (tier names)",
-        "SERVERINFO_PROBE_VERSION": _NOT_RESPONSE_DATA,
-        "_identify(head)": _FIXED_VOCABULARY + " -- `_identify` returns one of four literals",
-        "api": _NOT_RESPONSE_DATA,
-        "api_version": _NOT_RESPONSE_DATA,
-        "base.rstrip('/')": _NOT_RESPONSE_DATA,
-        "chosen": _FIXED_VOCABULARY + " (a tier name)",
-        "endpoint": _FIXED_VOCABULARY,
-        "exc": _CLIENT_EXCEPTION,
-        "expected": _FIXED_VOCABULARY + " (a MIME type from CONTENT_TYPES)",
-        "kind": _FIXED_VOCABULARY,
-        "note": _SAFE_BY_CONSTRUCTION,
-        "query": _FIXED_VOCABULARY,
-        "received": _SAFE_BY_CONSTRUCTION,
-        "reprobe['detail'][:80]": _SAFE_BY_CONSTRUCTION + " (a classify_probe detail, truncated after)",
-        "reprobe['verdict']": _FIXED_VOCABULARY,
-        "session.site_id": _NOT_RESPONSE_DATA,
-        "site_id": _NOT_RESPONSE_DATA,
-        "status": "an HTTP status integer",
-        "tier.min_api": _NOT_RESPONSE_DATA,
-        "tier.name": _FIXED_VOCABULARY,
-        "type(exc).__name__": _CLIENT_EXCEPTION,
-        "version": _NOT_RESPONSE_DATA,
-        "versions.advertised": "the server's own version string from /serverinfo, an unauthenticated call",
-        "versions.configured": _NOT_RESPONSE_DATA,
-        "view_luid": _NOT_RESPONSE_DATA,
-        "why": _SAFE_BY_CONSTRUCTION + " (format_matches' return, whose parts are redacted_note'd)",
+    ("scripts/capture_tableau_oracle.py", "summarise_csv"): {
+        # ⚠️ THE ROUND-5 LEAK, now certified rather than invisible. A CSV header row IS response text
+        # and this gate must keep saying so; what makes it safe is the seam, not this function.
+        "header": (
+            "REFUSED-AT-SEAM: a successful body carrying the PAT secret or session token never reaches "
+            "here -- `export()` raises `credential_reflected` before anything is parsed or written -- "
+            "and the manifest sink scrubs the residual PAT-name case"
+        ),
+        "len(body)": "NOT-A-STRING: an integer byte count",
+    },
+    ("scripts/capture_tableau_oracle.py", "png_dimensions"): {
+        "int.from_bytes(payload[16:20], 'big')": "NOT-A-STRING: an integer read from the IHDR",
+        "int.from_bytes(payload[20:24], 'big')": "NOT-A-STRING: an integer read from the IHDR",
+    },
+    ("scripts/capture_tableau_oracle.py", "svg_facts"): {
+        "text.count('<text')": "NOT-A-STRING: an integer element count",
+        "text.count('<path')": "NOT-A-STRING: an integer element count",
+        "text.count('<image')": "NOT-A-STRING: an integer element count",
+        "len([h for h in _SVG_HREF.findall(text) if not h.startswith(('data:', '#'))])": (
+            "NOT-A-STRING: an integer count of external references"
+        ),
+    },
+    ("scripts/capture_tableau_oracle.py", "pdf_facts"): {
+        "len(re.findall(b'/FontFile\\\\d?', payload))": "NOT-A-STRING: an integer count of embedded fonts",
+        "len(re.findall(b'/Subtype\\\\s*/Image', payload))": "NOT-A-STRING: an integer count of image XObjects",
+        "round(float(parts[2]))": "NOT-A-STRING: an integer page width in points",
+        "round(float(parts[3]))": "NOT-A-STRING: an integer page height in points",
+    },
+    ("scripts/capture_tableau_oracle.py", "_capture_data"): {
+        "summarise_csv(payload)": (
+            "REFUSED-AT-SEAM: this unpack is what put a credential in `data.columns`; `export()` now "
+            "refuses a 200 carrying one before `_capture_data` sees the payload at all"
+        ),
+        "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
+        "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
+        "len(payload)": "NOT-A-STRING: an integer byte count",
+        "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
+    },
+    ("scripts/capture_tableau_oracle.py", "_capture_render"): {
+        "why": "REDACTED-UPSTREAM: `format_matches` builds it entirely from `redacted_note` output",
+        "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
+        "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
+        "len(payload)": "NOT-A-STRING: an integer byte count",
+        "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
+    },
+    ("scripts/capture_tableau_oracle.py", "sign_in"): {
+        "status": "NOT-A-STRING: an HTTP status integer",
+    },
+    ("scripts/capture_tableau_oracle.py", "get_json"): {
+        "status": "NOT-A-STRING: an HTTP status integer",
+    },
+    ("scripts/capture_tableau_oracle.py", "export"): {
+        "status": "NOT-A-STRING: an HTTP status integer",
+        "delay": "NOT-A-STRING: a float backoff delay",
+        "kind": "FIXED-VOCABULARY: one of classify_export_error's five status literals",
+        "reflected": "FIXED-VOCABULARY: one of the two literal labels reflected_credential can return",
+        "detail": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`",
+        "detail[:60]": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`; the slice is after",
+        "detail or redacted_note(payload, self._redact_response, limit=200)": (
+            "REDACTED-UPSTREAM: both arms are redacted -- `detail` from `safe`, the fallback by the chokepoint"
+        ),
+    },
+    ("scripts/tableau_render_capability.py", "format_matches"): {
+        "_identify(head)": "FIXED-VOCABULARY: `_identify` returns one of four literals and never quotes bytes",
+    },
+    ("scripts/tableau_render_capability.py", "classify_probe"): {
+        "why": "REDACTED-UPSTREAM: `format_matches` builds it entirely from `redacted_note` output",
     },
 }
 
 
-def _interpolations(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    found: set[str] = set()
-    for node in ast.walk(tree):
+def _roots(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _called(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Call):
+        return None
+    return node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
+
+
+def tainted_names(func: ast.AST) -> set[str]:
+    """Names in ``func`` holding data that came off the wire. Fixpoint over assignments."""
+    args = func.args
+    tainted = {a.arg for a in args.args + args.kwonlyargs if a.arg in RESPONSE_PARAMS}
+    for _ in range(8):
+        before = set(tainted)
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if _called(value) in UNTAINTING:
+                continue  # the chokepoint is the ONE thing that clears taint
+            if not (_roots(value) & tainted or _called(value) in TAINTING_CALLS):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    tainted.add(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    tainted.update(e.id for e in target.elts if isinstance(e, ast.Name))
+        if tainted == before:
+            break
+    return tainted
+
+
+def sink_expressions(func: ast.AST) -> list[tuple[str, ast.AST]]:
+    """Every place a value in ``func`` becomes text that is printed, raised or persisted."""
+    out: list[tuple[str, ast.AST]] = []
+    for node in ast.walk(func):
         if isinstance(node, ast.JoinedStr):
-            for part in node.values:
-                if isinstance(part, ast.FormattedValue):
-                    found.add(ast.unparse(part.value))
-    return found
+            out += [("f-string", p.value) for p in node.values if isinstance(p, ast.FormattedValue)]
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if not isinstance(value, ast.Constant):
+                    out.append(("dict-**" if key is None else "dict-value", value))
+        elif isinstance(node, ast.Call) and _called(node) in LOG_AND_RAISE:
+            out += [("call-arg", a) for a in node.args if not isinstance(a, (ast.Constant, ast.JoinedStr))]
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            out.append(("percent", node.right))
+    return out
 
 
-@pytest.mark.parametrize("module", sorted(CERTIFIED))
-def test_no_interpolation_reaches_a_diagnostic_without_certification(module):
-    """A FIFTH site cannot be added silently -- only certified deliberately.
+def uncertified_sinks(source: str, module: str) -> list[str]:
+    """Response-derived expressions reaching a sink with no certification for THAT function."""
+    findings = []
+    for func in [n for n in ast.walk(ast.parse(source)) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        tainted = tainted_names(func)
+        if not tainted:
+            continue
+        certified = CERTIFIED.get((module, func.name), {})
+        for kind, expr in sink_expressions(func):
+            if _called(expr) in UNTAINTING or not (_roots(expr) & tainted):
+                continue
+            text = ast.unparse(expr)
+            if text not in certified:
+                findings.append(f"{func.name}() {kind}: {text}")
+    return sorted(set(findings))
 
-    Certification is by EXPRESSION, not by variable name. `_identify(head)` is certified; a bare
-    `{head}` is a different expression and fails, which is the whole point: the four historical
-    escapes were all a familiar name wearing a new transformation.
-    """
-    actual = _interpolations(REPO / module)
-    uncertified = sorted(actual - set(CERTIFIED[module]))
+
+@pytest.mark.parametrize("module", sorted({m for m, _ in CERTIFIED}))
+def test_no_response_derived_value_reaches_a_sink_without_certification(module):
+    """A SIXTH escape cannot be added silently -- only certified deliberately, per function."""
+    uncertified = uncertified_sinks((REPO / module).read_text(encoding="utf-8"), module)
     assert not uncertified, (
-        f"{module} interpolates {uncertified} into an f-string with no certification. Either route the "
-        f"value through tableau_env.redacted_note(), or add the exact expression to CERTIFIED with a "
-        f"one-line reason it cannot carry a Tableau credential."
+        f"{module} lets response-derived data reach a sink with no certification:\n  "
+        + "\n  ".join(uncertified)
+        + "\nEither route it through tableau_env.redacted_note(), or certify the exact expression under "
+        f"CERTIFIED[({module!r}, '<function>')] with a reason starting with one of {CATEGORIES}."
     )
 
 
-@pytest.mark.parametrize("module", sorted(CERTIFIED))
+def test_the_gate_catches_the_reviewers_own_counterexample():
+    """The hole that made this rewrite necessary: a certified NAME reused in a different function.
+
+    `why` is legitimately certified inside `classify_probe`. Under the old global, expression-keyed
+    gate that certified `why` EVERYWHERE, so this leak produced an empty uncertified set.
+    """
+    leak = 'def reachable_leak(body):\n    why = body.decode("utf-8", "replace")\n    return f"diagnostic: {why}"\n'
+    findings = uncertified_sinks(leak, "scripts/tableau_render_capability.py")
+    assert findings == ["reachable_leak() f-string: why"], findings
+
+
+def test_the_gate_sees_a_non_f_string_sink():
+    """The other hole: round 5 escaped through a DICT VALUE, which the old gate never looked at."""
+    leak = "def build(payload):\n    columns = payload.decode().split(',')\n    return {'columns': columns}\n"
+    assert uncertified_sinks(leak, "scripts/capture_tableau_oracle.py") == ["build() dict-value: columns"]
+
+
+def test_the_chokepoint_is_the_only_thing_that_clears_taint():
+    """Otherwise a certification could be earned by laundering a value through any helper."""
+    clean = 'def f(body):\n    note = redacted_note(body, None, limit=8)\n    return f"{note}"\n'
+    assert uncertified_sinks(clean, "scripts/tableau_render_capability.py") == []
+    laundered = 'def f(body):\n    note = str(body)\n    return f"{note}"\n'
+    assert uncertified_sinks(laundered, "scripts/tableau_render_capability.py") == ["f() f-string: note"]
+
+
+@pytest.mark.parametrize("module", sorted({m for m, _ in CERTIFIED}))
 def test_the_certification_list_has_no_stale_entries(module):
-    """A certification for an expression that no longer exists is a claim about nothing."""
-    stale = sorted(set(CERTIFIED[module]) - _interpolations(REPO / module))
-    assert not stale, f"{module}: certified expressions that are no longer in the source: {stale}"
+    """A certification for an expression that no longer reaches a sink is a claim about nothing."""
+    source = (REPO / module).read_text(encoding="utf-8")
+    live: set[tuple[str, str]] = set()
+    for func in [n for n in ast.walk(ast.parse(source)) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        tainted = tainted_names(func)
+        for _kind, expr in sink_expressions(func):
+            if _roots(expr) & tainted:
+                live.add((func.name, ast.unparse(expr)))
+    stale = sorted(
+        f"{name}(): {expr}"
+        for (mod, name), entries in CERTIFIED.items()
+        if mod == module
+        for expr in entries
+        if (name, expr) not in live
+    )
+    assert not stale, f"{module}: certified expressions no longer reaching a sink: {stale}"
 
 
-def test_every_certification_carries_a_reason():
-    for module, entries in CERTIFIED.items():
+def test_every_certification_names_a_category_rather_than_arguing_in_prose():
+    for (module, func), entries in CERTIFIED.items():
         for expression, reason in entries.items():
-            assert len(reason) > 15, f"{module}: {expression!r} is certified with no real reason"
+            assert reason.startswith(CATEGORIES), f"{module}:{func} {expression!r} -> {reason!r}"
+            assert len(reason) > 30, f"{module}:{func} {expression!r} is certified with no real reason"
+
+
+# ---------------------------------------------- the manifest SINK, on the one path that reaches it
+
+
+def _pat_name_capture(planted, tmp_path, wants=frozenset()):
+    """A capture whose PAT NAME appears in a SUCCESSFUL CSV. Returns (manifest dict, csv text)."""
+    session = _Session("an-unrelated-long-pat-secret", (200, b""), pat_name=planted)
+    session.data_reply = (200, f"{planted}\nvalue\n".encode(), {})
+    record = oracle.capture_view(session, VIEW, tmp_path, wants)
+    record["workbook_name"] = "W"
+    counter = _Counter()
+    counter._redact = session.redact_text  # pylint: disable=protected-access
+    oracle.write_manifest([record], oracle.CaptureRun(counter, ENV, tmp_path, 0.0, wants))
+    manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+    csv_text = next(iter(tmp_path.glob("data/*.csv"))).read_text(encoding="utf-8")
+    return manifest, csv_text
+
+
+def test_the_manifest_sink_scrubs_the_one_credential_the_seam_lets_through(tmp_path):
+    """⚠️ Written because FOUR mutations survived: nothing drove a value through the sink at all.
+
+    A backstop with no test is the "unkillable defence in depth" this review already rejected once.
+    The path that reaches it is real and reachable: the PAT **name** is deliberately redacted rather
+    than refused (`reflected_credential`), so a successful CSV whose header matches it produces
+    `data.columns` containing it -- through a dict, through the `views` LIST, and through the
+    `columns` LIST -- and the sink is the only thing standing between that and the manifest.
+    """
+    planted = "SYNTHETIC_PAT_NAME_42"
+    manifest, _csv = _pat_name_capture(planted, tmp_path)
+    assert manifest["views"][0]["data"]["status"] == "ok", "the seam must NOT refuse a mere PAT name"
+    assert manifest["views"][0]["data"]["columns"] == ["[REDACTED]"]
+    assert planted not in json.dumps(manifest)
+
+
+def test_the_sink_reports_which_field_it_had_to_scrub(tmp_path):
+    """Scrubbing silently is how a source defect survives: the artifact looks perfect either way."""
+    manifest, _csv = _pat_name_capture("SYNTHETIC_PAT_NAME_42", tmp_path)
+    assert manifest["credential_scrubbed_at_sink"] == ["views[0].data.columns[0]"]
+
+
+def test_a_clean_capture_reports_no_sink_redactions(tmp_path):
+    """Otherwise the report above would be noise rather than a signal."""
+    _capture_and_read_everything("an-unrelated-long-pat-secret", tmp_path, (200, b""), frozenset())
+    manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["credential_scrubbed_at_sink"] == []
+
+
+def test_the_pat_name_is_KNOWN_to_survive_in_the_csv_on_disk(tmp_path):
+    """The deliberate residual, pinned so it is a decision rather than an oversight.
+
+    The PAT name is not refused at the seam (a human-chosen name like `Migration` would refuse a
+    legitimate estate), so the bytes are written. It does not authenticate on its own and is visible
+    in Tableau's own UI. If that trade ever stops being acceptable the fix is in
+    `reflected_credential`, and this test is the thing that will fail and say so.
+    """
+    planted = "SYNTHETIC_PAT_NAME_42"
+    _manifest, csv_text = _pat_name_capture(planted, tmp_path)
+    assert planted in csv_text
 
 
 # ------------------------------------------------- the reviewer's two round-4 reproductions, named
 
 
 def test_a_secret_with_leading_whitespace_never_reaches_the_written_manifest(tmp_path):
-    """Measured before the fix: `.lstrip()` ran first, so the literal redactor no longer matched and
-    `oracle-manifest.json` carried `expected an <svg> root, got unrecognised bytes ('SYNTHETIC_SECRET')`."""
+    """Round 4's reproduction, re-verified after the round-5 seam. `.lstrip()` used to run before the
+    redactor, so the manifest carried `got unrecognised bytes ('SYNTHETIC_SECRET')`.
+
+    The outcome is now STRONGER than redaction: a successful body echoing the PAT secret is refused
+    outright, so nothing is written at all. The chokepoint that fixed round 4 is still what protects
+    the value the seam deliberately allows through -- see the PAT-name test below."""
     secret = " SYNTHETIC_SECRET_42"
-    manifest = site_written_manifest(secret, tmp_path, None)
-    assert "SYNTHETIC_SECRET" not in manifest
-    assert "[REDACTED]" in manifest
-    assert json.loads(manifest)["views"][0]["svg"]["status"] == "format_mismatch"
+    out = site_written_manifest(secret, tmp_path, None)
+    assert longest_surviving_run(secret, out) == ""
+    assert '"credential_reflected"' in out
 
 
 def test_a_secret_longer_than_any_window_never_reaches_the_written_manifest(tmp_path):
-    """Measured before the fix: a 321-character secret was cut by the 256-byte window, so the
+    """Round 4's other reproduction: a 321-character secret was cut by the 256-byte window, so the
     redactor's literal was absent and the first 16 characters persisted verbatim."""
     secret = "S" + "YNTHETIC_SECRET_" * 20
-    manifest = site_written_manifest(secret, tmp_path, None)
-    assert longest_surviving_run(secret, manifest) == ""
-    assert "[REDACTED]" in manifest
+    out = site_written_manifest(secret, tmp_path, None)
+    assert longest_surviving_run(secret, out) == ""
+    assert '"credential_reflected"' in out
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_the_diagnostic_chokepoint_still_covers_what_the_seam_deliberately_allows(shape, tmp_path):
+    """The PAT NAME is redacted, never refused -- so round 4's diagnostic path is still LIVE, and this
+    is the test that keeps it proven now that the authenticating halves never reach it.
+
+    Without this, the round-5 seam would have silently retired every end-to-end check of the round-4
+    fix: refusing the payload makes the diagnostic unreachable for a secret, and a fix whose only
+    coverage has become unreachable is a fix nobody is testing.
+    """
+    planted = SHAPES[shape]
+    session = _Session("a-different-long-pat-secret", (200, (planted + " and then html").encode()), pat_name=planted)
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
+    record["workbook_name"] = "W"
+    counter = _Counter()
+    counter._redact = session.redact_text  # pylint: disable=protected-access
+    oracle.write_manifest([record], oracle.CaptureRun(counter, ENV, tmp_path, 0.0, frozenset({"svg"})))
+    out = (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+    control = "ZZQQWVVBBN_MMKKJ_77"
+    assert leaked_run(planted, out, control) == ""
+    assert record["svg"]["status"] == "format_mismatch", "the diagnostic route must still be reached"
+    assert "[REDACTED]" in out
 
 
 # --------------------------------------------------------------------------- the chokepoint itself
