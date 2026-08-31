@@ -61,6 +61,13 @@ START_THEN_ASOF = "'Orders'[Order_Date] >= DATE(2024,1,1) && 'Orders'[Order_Date
 ASOF_THEN_START = "'Orders'[Order_Date] <= MAX('Orders'[Order_Date]) && 'Orders'[Order_Date] >= DATE(2024,1,1)"
 UNRELATED_REMOVAL = "CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'[Region]))"
 WHOLE_TABLE_REMOVAL = "MAXX(ALL('Orders'), 'Orders'[Order_Date])"
+# Round 4: the bound clears the VISUAL'S OWN grain, so the cutoff is fixed across axis buckets.
+AXIS_REMOVAL = "CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'[Order Month Label]))"
+# Round 4: one moving and one foreign MAX-like call in a single bound - `_context_bound_kinds` must
+# yield one kind for each, never stop at the first.
+TWO_MAX_BOUND = "MIN(MAX('Orders'[Order_Date]), MAX('Cutoff'[Date]))"
+# Round 4: the arguments of a window call carrying two ORDERBY clauses, already split.
+TWO_ORDERBY_ARGS = ["1", "ABS", "0", "REL", "ORDERBY('Orders'[Order_Date], ASC)", "ORDERBY('Orders'[Region], ASC)"]
 
 
 def facts() -> dg.ModelFacts:

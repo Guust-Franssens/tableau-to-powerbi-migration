@@ -593,6 +593,97 @@ assert crta._worst is not _orig
 """,
         "test_worst_verdict_wins_is_one_shared_rule_not_four_copies",
     ),
+    # --- mutations that reinstate each of the three ROUND-4 review findings -------------------
+    "r4f3-enclosing-parens-not-stripped": (
+        """
+_orig = dg._strip_enclosing_parens
+dg._strip_enclosing_parens = lambda text: text.strip()
+assert dg._strip_enclosing_parens is not _orig
+""",
+        "test_f3_parenthesising_a_predicate_cannot_disable_the_gate",
+    ),
+    "r4f3-residue-dropped-in-silence": (
+        """
+_orig = dg._read_conjunct
+def conjunct(fragment):
+    bound, _unread = _orig(fragment)
+    return bound, ""
+dg._read_conjunct = conjunct
+assert dg._read_conjunct is not _orig
+""",
+        "test_a_predicate_this_gate_cannot_read_is_never_clean",
+    ),
+    "r4f1-bound-removals-not-carried-to-the-judge": (
+        """
+_orig = dg._bound_removals
+dg._bound_removals = lambda text: ([], [])
+assert dg._bound_removals is not _orig
+""",
+        "test_f1_a_bound_that_clears_the_visuals_own_grain_is_not_a_mismatch",
+    ),
+    "r4f1-every-grain-reads-as-pinned-by-the-bound": (
+        """
+_orig = dg.AsOfCall.pins
+dg.AsOfCall.pins = lambda self, table, column: True
+assert dg.AsOfCall.pins is not _orig
+""",
+        "test_f1_a_removal_that_does_not_cover_the_axis_still_catches_the_defect",
+    ),
+    "r4f2-first-max-call-decides-the-bound": (
+        """
+_orig = dg._context_bound_kinds
+dg._context_bound_kinds = lambda text, compared: _orig(text, compared)[:1]
+assert dg._context_bound_kinds is not _orig
+""",
+        "test_f2_a_bound_over_two_max_calls_reads_every_one_of_them",
+    ),
+    "r4-abandoned-var-chase-reads-as-pinned": (
+        """
+import re
+_orig = dg._read_bound
+def bound(text, compared, variables, depth=0):
+    stripped = text.strip()
+    referenced = [b for n, b in variables.items() if re.search(r"\\b" + re.escape(n) + r"\\b", stripped, re.I)]
+    if referenced and depth >= dg._VAR_DEPTH:
+        # The pre-round-4 fall-through: the chase stops, and a bare identifier carries no column
+        # reference, so the bound was read as "pinned" and the measure was dropped.
+        pinned = not (dg._column_refs(stripped) or "[" in stripped)
+        return dg.BoundReading(kind=dg.BOUND_CONSTANT if pinned else dg.BOUND_UNRESOLVED)
+    return _orig(text, compared, variables, depth)
+dg._read_bound = bound
+assert dg._read_bound is not _orig
+""",
+        "test_a_var_chase_that_is_abandoned_is_unassessable_not_pinned",
+    ),
+    "r4-only-a-left-hand-column-is-bounded": (
+        """
+_orig = dict(dg._UPPER_BOUND_OPERATORS)
+dg._UPPER_BOUND_OPERATORS = {"<": False, "<=": False}
+assert dg._UPPER_BOUND_OPERATORS != _orig
+""",
+        "test_reversed_comparison_operands_are_the_same_upper_bound",
+    ),
+    "r4-second-orderby-clause-assumed-away": (
+        """
+_orig = dg._clause_bodies
+dg._clause_bodies = lambda args, name: _orig(args, name)[:1]
+assert dg._clause_bodies is not _orig
+""",
+        "test_a_second_orderby_clause_is_unassessable_rather_than_assumed_away",
+    ),
+    "r4-unreadable-period-to-date-dropped": (
+        """
+_orig = dg._read_period_call
+def period(func, index, body):
+    call = _orig(func, index, body)
+    call.assessable = True
+    call.anchor = call.anchor or dg.ColumnRef("Date", "Date")
+    return call
+dg._read_period_call = period
+assert dg._read_period_call is not _orig
+""",
+        "test_a_period_to_date_call_that_cannot_be_read_is_not_dropped",
+    ),
 }
 
 # name -> a snippet that CALLS the patched object and asserts a result the unmutated code does not
@@ -821,6 +912,34 @@ assert dg._fold_bound_kinds({dg.BOUND_CONSTANT, dg.BOUND_CONTEXT}) == dg.BOUND_C
 clean = crta._verdict("ok", "o", "")
 mismatch = crta._verdict("mismatch", "m", "")
 assert crta._worst([clean, mismatch])["verdict"] == "ok"
+""",
+    "r4f3-enclosing-parens-not-stripped": """
+assert dg._strip_enclosing_parens("('Orders'[Order_Date] <= MAX('Orders'[Order_Date]))").startswith("(")
+""",
+    "r4f3-residue-dropped-in-silence": """
+assert dg._read_conjunct("NOT('Orders'[Order_Date] > MAX('Orders'[Order_Date]))") == (None, "")
+""",
+    "r4f1-bound-removals-not-carried-to-the-judge": """
+assert dg._bound_removals(kit.AXIS_REMOVAL) == ([], [])
+""",
+    "r4f1-every-grain-reads-as-pinned-by-the-bound": """
+assert dg.AsOfCall(compared=kit.ANCHOR).pins("Nowhere", "Nothing") is True
+""",
+    "r4f2-first-max-call-decides-the-bound": """
+assert dg._context_bound_kinds(kit.TWO_MAX_BOUND, kit.ANCHOR) == [dg.BOUND_CONTEXT]
+""",
+    "r4-abandoned-var-chase-reads-as-pinned": """
+assert dg._read_bound("_f", kit.ANCHOR, {"_f": "_e"}, dg._VAR_DEPTH).kind == dg.BOUND_CONSTANT
+""",
+    "r4-only-a-left-hand-column-is-bounded": """
+assert dg._read_conjunct("MAX('Orders'[Order_Date]) >= 'Orders'[Order_Date]") == (None, "")
+""",
+    "r4-second-orderby-clause-assumed-away": """
+assert len(dg._clause_bodies(kit.TWO_ORDERBY_ARGS, "ORDERBY")) == 1
+""",
+    "r4-unreadable-period-to-date-dropped": """
+call = dg._read_period_call("TOTALYTD", 1, "SUM('Orders'[Sales])")
+assert call.assessable is True and call.anchor == dg.ColumnRef("Date", "Date")
 """,
 }
 
