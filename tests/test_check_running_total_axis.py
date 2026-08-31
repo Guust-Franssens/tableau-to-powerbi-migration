@@ -396,7 +396,214 @@ def test_a_relation_on_a_LATER_window_call_still_makes_it_unassessable(tmp_path:
     assert verdicts(crta.scan(bundle)) == ["unassessable"]
 
 
+# --- restored after round 5: behaviours the narrowing KEPT, whose covering tests were --------
+# --- collateral damage of deleting the as-of section. Every one of these was a SURVIVED -----
+# --- mutation until it came back, which is the harness earning its keep. ---------------------
+
+
+def _aggregated_projection(entity: str, prop: str, function: int = 3) -> dict:
+    """A PBIR projection whose `field` IS an `Aggregation` - the shape 377 estate projections use."""
+    return {
+        "field": {
+            "Aggregation": {
+                "Expression": {"Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}},
+                "Function": function,
+            }
+        },
+        "queryRef": f"Max({entity}.{prop})",
+    }
+
+
+@pytest.mark.parametrize("role", ["Category", "Rows", "Columns", "Series", "Details"])
+def test_every_projected_column_is_examined_not_a_curated_axis_list(tmp_path: Path, role: str) -> None:
+    """A curated axis-role list is a PROXY for "does this column group the query", and it omitted
+    the pivotTable's real `Columns` role: measured on the estate's Section 12 pivot, the identical
+    `dateTime` bin exited 1 under `Rows` and 0 under `Columns`. Safety is decided from EVERY
+    projected column. `AXIS_ROLES` survives for the finding's prose only."""
+    bundle = build_bundle(
+        tmp_path,
+        WINDOW_MEASURE,
+        {
+            role: {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["ok"], f"{role}: " + crta.render(report)
+    assert codes(report) == ["orderby_projected"]
+
+
+def test_an_aggregated_projection_does_not_group_the_query(tmp_path: Path) -> None:
+    """`Max('Orders'[Order_Date])` on a visual is a VALUE, not a grouping key, so it cannot satisfy
+    an ORDERBY. Measured across the estate + `examples/`: 709 visuals carry **377** top-level
+    `Aggregation` nodes, every one wrapping a `Column`, so reusing the generic reference walk here
+    counted 377 aggregated values as grouping columns and blocked correct reports."""
+    bundle = build_bundle(
+        tmp_path,
+        WINDOW_MEASURE,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Region")]},
+            "Tooltips": {"projections": [_aggregated_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert "'Orders'[Order_Date]" in report["pairs"][0]["findings"][0]["detail"]
+
+
+def test_a_visual_whose_only_column_is_aggregated_has_no_grouping_column(tmp_path: Path) -> None:
+    """The other half: with nothing left that groups, the honest answer is `unassessable`, never
+    "the axis is cleared". An empty projection list read as safety is how a real defect passed."""
+    bundle = build_bundle(
+        tmp_path,
+        WINDOW_MEASURE,
+        {
+            "Category": {"projections": [_aggregated_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert codes(report) == ["no_grouping_column"], crta.render(report)
+
+
+def test_an_unreadable_window_call_cannot_suppress_a_readable_one(tmp_path: Path) -> None:
+    """Round 2 unioned every window call's ORDERBY columns, which closed the false negative but left
+    an UNREADABLE call returning early: an explicit-relation `WINDOW` beside
+    `WINDOW(... ORDERBY('Orders'[Region]))` exited 3 where the defective call alone exits 1. Never a
+    pass, but the wrong verdict - worst must win, not first."""
+    relation_first = _measures_tmdl(
+        _measure(
+            "Mixed",
+            "MAXX(WINDOW(1, ABS, 0, REL, ALLSELECTED('Orders'), ORDERBY('Orders'[Order_Date], ASC)), 1) "
+            "+ MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Region], ASC)), 1)",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        relation_first,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Mixed")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert "'Orders'[Region]" in report["pairs"][0]["findings"][0]["detail"]
+
+
+def test_a_second_orderby_clause_is_unassessable_rather_than_assumed_away(tmp_path: Path) -> None:
+    """The documented grammars give ONE `ORDERBY` slot per window call, and blind review confirmed
+    that reading. `_clause_bodies` VERIFIES it rather than relying on it, because "audited, not
+    assumed" is only true while someone re-audits it."""
+    measures = _measures_tmdl(
+        _measure(
+            "Two Orderings",
+            "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC), ORDERBY('Orders'[Region], ASC)), 1)",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        measures,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Two Orderings")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert codes(report) == ["window_orderby"]
+
+
+def test_worst_verdict_wins_is_one_shared_rule_not_four_copies(tmp_path: Path) -> None:
+    """The rule itself, asserted directly, because rounds of the same bug are evidence that
+    re-deriving precedence per mechanism does not hold."""
+    assert crta._VERDICT_PRECEDENCE == ("mismatch", "unassessable", "ok")  # pylint: disable=protected-access
+    mismatch = crta._verdict("mismatch", "m", "")  # pylint: disable=protected-access
+    unassessable = crta._verdict("unassessable", "u", "")  # pylint: disable=protected-access
+    clean = crta._verdict("ok", "o", "")  # pylint: disable=protected-access
+    for order in ([clean, unassessable, mismatch], [mismatch, clean, unassessable], [unassessable, mismatch, clean]):
+        assert crta._worst(order)["verdict"] == "mismatch"  # pylint: disable=protected-access
+    assert crta._worst([clean, unassessable])["verdict"] == "unassessable"  # pylint: disable=protected-access
+    assert crta._worst([clean])["code"] == "o"  # pylint: disable=protected-access
+    assert crta._worst([])["code"] == "unreadable_grain"  # pylint: disable=protected-access
+    assert tmp_path.exists()
+
+
 # --- review finding #5: period-to-date is judged, not excused -------------------------------
+
+
+def test_every_period_to_date_call_is_judged_not_the_first_in_dict_order(tmp_path: Path) -> None:
+    """`_classify_period_to_date` returned after the first match found while walking
+    `_PERIOD_TO_DATE_FUNCTIONS` - so not even the first in the TEXT. Measured: a safe `TOTALYTD` on
+    the marked date table beside a defective fact-table `DATESYTD` exited **0**
+    (`date_table_marked`), while the `DATESYTD` term alone exits 3."""
+    both = _measures_tmdl(
+        _measure(
+            "Two Periods",
+            "TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date]) "
+            "+ CALCULATE(SUM('Orders'[Sales]), DATESYTD('Orders'[Order_Date]))",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        both,
+        {
+            "Category": {"projections": [_column_projection("Date", "Month Start")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Two Periods")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert codes(report) == ["period_to_date_grain_unproven"]
+
+
+@pytest.mark.parametrize(
+    ("label", "expression"),
+    [
+        ("no <dates> argument at all", "TOTALYTD(SUM('Orders'[Sales]))"),
+        (
+            "several columns in <dates>",
+            "CALCULATE(SUM('Orders'[Sales]), DATESYTD(DATESBETWEEN('Date'[Date], "
+            "MIN('Orders'[Order_Date]), MAX('Orders'[Order_Date]))))",
+        ),
+    ],
+)
+def test_a_period_to_date_call_that_cannot_be_read_is_not_dropped(tmp_path: Path, label: str, expression: str) -> None:
+    """A dropped call is indistinguishable from "this model has no period-to-date measure" - the
+    same silence every round of this review has been about, one mechanism over. Period-to-date keeps
+    its residue because reading one argument's column is STRUCTURAL; it is the as-of BOUND, not the
+    as-of call, that round 5 found undecidable."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Ytd", expression)),
+        {
+            "Category": {"projections": [_column_projection("Date", "Month Start")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Ytd")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert report["status"] == crta.STATUS_UNASSESSABLE, f"{label}: " + crta.render(report)
+    assert codes(report) == ["period_to_date"], f"{label}: " + crta.render(report)
+
+
+def test_a_date_named_column_with_no_proof_is_unassessable_not_clean(tmp_path: Path) -> None:
+    """`ModelFacts.grain_of`'s third rung, which only period-to-date still consumes: a column named
+    like a date part, with neither a declared date type nor calculated lineage back to the anchor,
+    is a GUESS. A guess may reach `unassessable`; it may never reach a mismatch, and it may never
+    reach clean."""
+    measures = _measures_tmdl(_measure("YTD Sales", "TOTALYTD(SUM('Orders'[Sales]), 'Orders'[Order_Date])"))
+    bundle = build_bundle(
+        tmp_path,
+        measures,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Fiscal Period")]},
+            "Y": {"projections": [_measure_projection("_Measures", "YTD Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert report["mismatches"] == 0
 
 
 def test_fact_table_period_to_date_on_a_coarse_axis_is_unassessable(tmp_path: Path) -> None:
@@ -717,26 +924,35 @@ def test_every_mutation_declares_a_probe_that_proves_it_executes() -> None:
         assert harness.probe_is_trivial(probe) is None, f"control probe {name} proves nothing"
 
 
-@pytest.mark.parametrize(
-    ("label", "output", "expected"),
-    [
-        ("a real failure", "FAILED tests/t.py::test_a - AssertionError", ["test_a"]),
-        ("a parametrised failure", "FAILED tests/t.py::test_a[Order Quarter] - X", ["test_a"]),
-        ("a COLLECTION error is not a catch", "ERROR tests/t.py::TestThing", []),
-        ("an error line plus a summary", "ERROR tests/t.py\n2 errors in 0.1s", []),
-        ("a non-anchored mention is not a catch", "  see FAILED tests/t.py::test_a", []),
-    ],
-)
-def test_only_anchored_FAILED_lines_count_as_a_catch(label: str, output: str, expected: list[str]) -> None:
-    """`ERROR path::TestName` is a COLLECTION failure - no test ran - and scoring it as a catch is
-    the exact bug blind review found in `tests/mutation_harness.py`, which credited any non-zero
-    pytest exit. Its mirror image, a dying `xdist` worker printing `FAILED path::test_name` for a
-    test that never ran, is refused a level up by the harness's broken-run markers instead, because
-    at this line it is genuinely indistinguishable from a real failure."""
+def test_the_running_total_harness_scores_from_pytests_lifecycle_not_from_text() -> None:
+    """Round 5, and a REPLACEMENT rather than a repair. This test used to pin a text rule -
+    "only anchored FAILED lines count" - and #409 retired that rule for the whole repo: a
+    call-phase `NameError` inside a mutant emits a named `FAILED` line, so text scoring credits a
+    crash-kill as a semantic catch. The running-total harness now delegates to the shared module's
+    lifecycle record, and this asserts the delegation rather than re-implementing the check that
+    `tests/test_mutation_harness_scoring.py` already owns.
+
+    The negative half is the load-bearing one: a private text scanner reappearing here is exactly
+    how the retired rule would come back, silently, in a file nobody re-reads."""
+    import inspect  # pylint: disable=import-outside-toplevel
+
+    import mutation_harness as shared  # pylint: disable=import-outside-toplevel
     import mutation_harness_running_total_axis as harness  # pylint: disable=import-outside-toplevel
 
-    assert harness._named_failures(output) == expected, label  # pylint: disable=protected-access
-    assert any(marker in "worker gw0 crashed while running 'x'" for marker in harness._BROKEN_RUN_MARKERS)  # pylint: disable=protected-access
+    assert harness.shared is shared
+    source = inspect.getsource(harness.run)
+    for delegated in ("shared.OUTCOME_HOOKS", "shared.read_outcomes", "shared.observed_mutation"):
+        assert delegated in source, f"the harness no longer delegates {delegated}"
+    assert "shared.session_is_trustworthy" in source, "SURVIVED would be unearned without a complete session"
+    assert "shared.VERDICT_BEARING_EXITS" in source, "an outcome beside exit 2/3/4/5 is not a verdict"
+    assert not hasattr(harness, "_named_failures"), "the retired text rule is back"
+    assert not hasattr(harness, "_BROKEN_RUN_MARKERS"), "the retired text rule's helper is back"
+
+    # The shared record shapes, exercised here so this test cannot pass on delegation alone.
+    crash_kill = {"call_failed": ["tests/t.py::test_a"], "setup_failed": []}
+    assert shared.observed_mutation(crash_kill) is True
+    assert shared.observed_mutation({"call_failed": [], "setup_failed": []}) is False
+    assert 2 not in shared.VERDICT_BEARING_EXITS and 0 in shared.VERDICT_BEARING_EXITS
 
 
 # --------------------------------------------------------------------------------------------

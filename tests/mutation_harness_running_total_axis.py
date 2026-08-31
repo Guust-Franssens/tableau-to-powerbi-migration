@@ -47,26 +47,16 @@ Read the PR for #218 for the result table.
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import sys
 from pathlib import Path
+
+import mutation_harness as shared
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 TARGET = "tests/test_check_running_total_axis.py"
 SENTINEL = ROOT / "tests" / "_mutation_applied.txt"
-
-# Markers that mean pytest itself fell over rather than reporting a test outcome. `xdist` is listed
-# because a dying worker prints `FAILED path::test_name` for a test that never ran, which is the one
-# failure line shape this harness DOES trust.
-_BROKEN_RUN_MARKERS = (
-    "Error importing plugin",
-    "INTERNALERROR",
-    "crashed while running",
-    "Replacing crashed worker",
-    "node down",
-)
 
 # name -> (patch source, the test expected to catch it). The expectation is checked, not trusted:
 # a mutation caught by a DIFFERENT test is reported as such, because that usually means the test
@@ -110,7 +100,7 @@ _orig = dg.ModelFacts.grain_of
 dg.ModelFacts.grain_of = lambda self, ref, anchor: dg.GRAIN_DATE
 assert dg.ModelFacts.grain_of is not _orig
 """,
-        "test_as_of_non_date_axis_is_deliberately_not_flagged",
+        "test_period_to_date_with_no_date_grain_on_the_visual_is_clean",
     ),
     "every-blank-stub-claimed": (
         """
@@ -364,6 +354,48 @@ assert dg._read_period_call is not _orig
 """,
         "test_a_period_to_date_call_that_cannot_be_read_is_not_dropped",
     ),
+    # --- round 5: the narrowed contract ------------------------------------------------------
+    "r5-strings-are-executed-as-dax": (
+        """
+_orig = dg.mask_noncode
+dg.mask_noncode = lambda text: text
+assert dg.mask_noncode is not _orig
+""",
+        "test_a_string_literal_is_never_executed_as_dax",
+    ),
+    "r5-identifier-mask-skipped-in-the-detector": (
+        """
+_orig = dg._mask_identifiers
+dg._mask_identifiers = lambda text: text
+assert dg._mask_identifiers is not _orig
+""",
+        "test_an_operator_inside_an_identifier_is_not_a_comparison",
+    ),
+    "r5-as-of-not-detected-at-all": (
+        """
+_orig = dg._detect_as_of
+dg._detect_as_of = lambda expr: []
+assert dg._detect_as_of is not _orig
+""",
+        "test_an_as_of_measure_is_disclosed_not_dropped",
+    ),
+    "r5-as-of-disclosed-as-clean": (
+        """
+_orig = crta._judge_as_of
+crta._judge_as_of = lambda c, v, f: crta._verdict("ok", "as_of_filter", "mutated")
+assert crta._judge_as_of is not _orig
+""",
+        "test_an_as_of_measure_can_only_ever_be_unassessable",
+    ),
+    "r5-not-equal-read-as-an-ordering-operator": (
+        """
+import re
+_orig = dg._ORDERING_COMPARISON_RE
+dg._ORDERING_COMPARISON_RE = re.compile(r"[<>]")
+assert dg._ORDERING_COMPARISON_RE is not _orig
+""",
+        "test_an_equality_only_filter_is_not_an_accumulation",
+    ),
 }
 
 # name -> a snippet that CALLS the patched object and asserts a result the unmutated code does not
@@ -503,6 +535,22 @@ assert len(dg._clause_bodies(kit.TWO_ORDERBY_ARGS, "ORDERBY")) == 1
 call = dg._read_period_call("TOTALYTD", 1, "SUM('Orders'[Sales])")
 assert call.assessable is True and call.anchor == dg.ColumnRef("Date", "Date")
 """,
+    "r5-strings-are-executed-as-dax": """
+assert dg.mask_noncode('X = "FILTER(" & 1') == 'X = "FILTER(" & 1'
+""",
+    "r5-identifier-mask-skipped-in-the-detector": """
+assert dg._mask_identifiers("'a<b'[X]") == "'a<b'[X]"
+""",
+    "r5-as-of-not-detected-at-all": """
+assert dg._detect_as_of(kit.AS_OF) == []
+""",
+    "r5-as-of-disclosed-as-clean": """
+found = kit.cumulative(as_of_calls=[dg.AsOfCall(predicate="p", reason="r")])
+assert crta._judge_as_of(found, kit.visual(), kit.facts())["verdict"] == "ok"
+""",
+    "r5-not-equal-read-as-an-ordering-operator": """
+assert dg._ORDERING_COMPARISON_RE.search("a <> b") is not None
+""",
 }
 
 # Patches that change NO observable behaviour. They must SURVIVE; if one is reported as caught, the
@@ -563,22 +611,6 @@ else:
 """
 
 
-def _named_failures(output: str) -> list[str]:
-    """The tests pytest reported as FAILED, and ONLY those.
-
-    Two look-alike lines are deliberately excluded, both measured elsewhere in this repo:
-
-    * ``ERROR path::TestName`` is a **collection** failure - no test ran - and counting it is the
-      exact bug blind review found in ``tests/mutation_harness.py``, which scored ``CAUGHT`` for any
-      non-zero exit including a collection error (4) or an interrupt (2).
-    * a dying ``xdist`` worker prints ``FAILED path::test_name`` for a test that never ran, which is
-      indistinguishable HERE - so it is caught upstream by `_BROKEN_RUN_MARKERS` instead.
-    """
-    return sorted(
-        {line.split("::")[-1].split("[")[0].split(" ")[0] for line in output.splitlines() if line.startswith("FAILED")}
-    )
-
-
 def probe_is_trivial(probe: str) -> str | None:
     """Why this probe proves nothing, or None when it at least calls something and asserts.
 
@@ -600,13 +632,28 @@ def probe_is_trivial(probe: str) -> str | None:
 
 
 def run(name: str, code: str, probe: str) -> tuple[int, list[str], str]:
-    """Apply one mutation in a child interpreter, PROBE it, and re-run the gate's suite."""
+    """Apply one mutation in a child interpreter, PROBE it, and re-run the gate's suite.
+
+    Scoring comes from **pytest's own lifecycle**, not from the terminal summary. That is #409's
+    fix, adopted here: a call-phase `NameError` inside a mutant emits a named `FAILED` line, so a
+    text rule scores a crash-kill as a semantic catch. `shared.observed_mutation` reads the
+    plugin's `call_failed`/`setup_failed` record instead, `shared.session_is_trustworthy` refuses
+    to call anything SURVIVED unless a complete session ran, and `VERDICT_BEARING_EXITS` rejects
+    an outcome recorded alongside an exit that means something happened TO the run.
+
+    The probe guard stays ON TOP of that, because the two answer different questions: the
+    lifecycle record proves a TEST observed something, the probe proves the MUTATION did what its
+    table entry claims rather than merely crashing (review finding 6).
+    """
     SENTINEL.unlink(missing_ok=True)
+    outcomes_file = ROOT / "tests" / "_mutation_outcomes_rta.json"
+    outcomes_file.unlink(missing_ok=True)
     plugin = ROOT / "tests" / "_mutation_plugin_rta.py"
     plugin.write_text(
         _PLUGIN_HEAD.format(scripts=ROOT / "scripts", tests=ROOT / "tests", name=name, sentinel=SENTINEL)
         + code
-        + _PLUGIN_TAIL.format(probe=probe),
+        + _PLUGIN_TAIL.format(probe=probe)
+        + shared.OUTCOME_HOOKS.format(outcome_path=str(outcomes_file)),
         encoding="utf-8",
     )
     proc = subprocess.run(
@@ -615,18 +662,15 @@ def run(name: str, code: str, probe: str) -> tuple[int, list[str], str]:
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT / "scripts")])},
+        env=shared.sanitized_env(),
     )
     plugin.unlink(missing_ok=True)
+    outcomes = shared.read_outcomes(outcomes_file)
+    outcomes["process_returncode"] = proc.returncode
+    outcomes_file.unlink(missing_ok=True)
     output = proc.stdout + proc.stderr
-    broken = next((marker for marker in _BROKEN_RUN_MARKERS if marker in output), None)
-    if broken is not None:
-        raise SystemExit(f"{name}: pytest fell over ({broken!r}) - a FALSE 'CAUGHT' was about to be reported\n{output}")
-    if not proc.stdout.strip():
-        # A crash exits non-zero exactly like a test failure. The discriminator is that a crashing
-        # run prints nothing on stdout - the same signal that caught the unhashable-FieldRef bug in
-        # the gate itself.
-        raise SystemExit(f"{name}: pytest produced NO stdout, so exit {proc.returncode} is a crash, not a verdict")
+    if not outcomes.get("recorded"):
+        raise SystemExit(f"{name}: the lifecycle plugin wrote no record, so no verdict is readable\n{output}")
     applied = SENTINEL.read_text(encoding="utf-8").split() if SENTINEL.exists() else []
     SENTINEL.unlink(missing_ok=True)
     if name not in applied:
@@ -637,9 +681,20 @@ def run(name: str, code: str, probe: str) -> tuple[int, list[str], str]:
             f"'CAUGHT' here would be the review-finding-6 vacuity mode - a crash inside the mutant "
             f"reported as a semantic catch\n{output}"
         )
-    # ONLY `FAILED` lines - see `_named_failures`.
-    failed = _named_failures(output)
-    return proc.returncode, failed, output.strip().splitlines()[-1][:110]
+    tail = (output.strip().splitlines() or ["(no output)"])[-1][:110]
+    if shared.observed_mutation(outcomes):
+        if proc.returncode not in shared.VERDICT_BEARING_EXITS:
+            raise SystemExit(
+                f"{name}: a test outcome was recorded alongside exit {proc.returncode}, which means "
+                f"something happened TO the run rather than in it\n{output}"
+            )
+        names = sorted(
+            {node.split("::")[-1].split("[")[0] for node in outcomes["call_failed"] + outcomes["setup_failed"]}
+        )
+        return 1, names, tail
+    if not shared.session_is_trustworthy(outcomes):
+        raise SystemExit(f"{name}: no complete session ran, so SURVIVED would be unearned\n{output}")
+    return 0, [], tail
 
 
 def _check_controls() -> None:
