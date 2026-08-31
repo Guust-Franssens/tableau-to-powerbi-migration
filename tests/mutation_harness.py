@@ -216,6 +216,8 @@ _RECORD = {{
     "session_finished": False,
     "exitstatus": None,
     "saw_call_phase": False,
+    "runtest_loop_completed": False,
+    "synthetic_failed": [],
 }}
 
 
@@ -229,11 +231,31 @@ def pytest_runtest_logreport(report):
     # finished session with a report and exit 0 while stdout said `no tests ran`.
     if report.when == "call":
         _RECORD["saw_call_phase"] = True
-    if report.outcome == "failed":
-        # `when` is the discriminator terminal text throws away.
+    if report.outcome != "failed":
+        _flush()
+        return
+    # ONLY real lifecycle phases count as an observation. xdist synthesises a crash report
+    # for a dead worker with `when="???"`, and that names a test which never executed --
+    # filtering here is what lets a genuine failure from a LIVING worker stay durable
+    # instead of being erased wholesale by a `node_down` flag.
+    if report.when in ("call", "setup", "teardown"):
         name = report.nodeid.split("::")[-1]
         _RECORD["call_failed" if report.when == "call" else "setup_failed"].append(name)
+    else:
+        _RECORD["synthetic_failed"].append(f"{{report.nodeid}}::{{report.when}}")
     _flush()
+
+
+@_pytest.hookimpl(hookwrapper=True)
+def pytest_runtestloop(session):
+    # The ONLY evidence the selected suite ran to the end. `pytest_sessionfinish` fires even
+    # after `pytest.exit()`, and one completed call phase proves one test body ran, not that
+    # the run finished: measured, `pytest.exit()` from teardown after the first passing test
+    # gave session_finished, saw_call_phase and exit 0 -- and scored SURVIVED.
+    outcome = yield
+    if outcome.excinfo is None:
+        _RECORD["runtest_loop_completed"] = True
+        _flush()
 
 
 def pytest_collectreport(report):
@@ -350,7 +372,9 @@ def read_outcomes(path: Path) -> dict:
         "node_down": False,
         "session_finished": False,
         "exitstatus": None,
-        "saw_report": False,
+        "saw_call_phase": False,
+        "runtest_loop_completed": False,
+        "synthetic_failed": [],
         "recorded": False,
     }
     try:
@@ -369,34 +393,39 @@ def observed_mutation(outcomes: dict) -> bool:
     cost of the opposite rule -- a real assertion failure followed by ``KeyboardInterrupt`` in
     teardown exits 2, and erasing the detection turned a genuine CAUGHT into a HARNESS-ERROR.
 
-    ``node_down`` is the exception and not an inconsistency: a dying xdist worker emits
-    ``FAILED path::test_name`` for a test that **never executed**, so that record is synthetic
-    rather than observed.
+    ``node_down`` is deliberately **not** consulted here. Round-4 review showed a global flag
+    is too blunt: a genuine call failure emitted by a LIVING worker, or by the dying worker
+    before it died, is still real evidence. The synthetic crash report xdist fabricates
+    carries ``when="???"`` and is filtered at record time instead, so only actual
+    ``call``/``setup``/``teardown`` failures ever reach these lists.
     """
-    if outcomes.get("node_down"):
-        return False
     return bool(outcomes.get("call_failed") or outcomes.get("setup_failed"))
 
 
 def session_is_trustworthy(outcomes: dict) -> bool:
-    """True when a COMPLETE, coherent session ran to a verdict.
+    """True when a COMPLETE, coherent session ran the whole selected suite to a clean verdict.
 
     Required before concluding SURVIVED, because absence of evidence is only evidence of
-    absence when the run actually finished. Three measured shapes that pass a naive check:
+    absence when the run actually finished. Four measured shapes that pass a naive check:
 
     * ``pytest.exit(returncode=0)`` from ``pytest_sessionstart`` -- exit 0, a valid record
       written at plugin import, no tests at all;
     * the same from ``pytest_runtest_call`` -- ``session_finished``, ``exitstatus=0`` and a
-      setup-phase report present, while stdout says ``no tests ran``;
+      setup-phase report, while stdout says ``no tests ran``;
+    * the same from **teardown after the first passing test** -- ``session_finished``,
+      ``saw_call_phase`` and exit 0, having run 1 of 14 tests. Hence
+      ``runtest_loop_completed``, which is the only evidence the suite ran to the end;
     * a call failure then ``KeyboardInterrupt`` -- exit 2, session incoherent.
 
-    Hence ``saw_call_phase``: a test BODY must have run, not merely a setup report.
+    ``exitstatus == 0`` specifically: exit 1 means tests failed, and a failure we did not
+    record as an observation cannot prove anything survived.
     """
     return (
         bool(outcomes.get("recorded"))
         and bool(outcomes.get("session_finished"))
+        and bool(outcomes.get("runtest_loop_completed"))
         and bool(outcomes.get("saw_call_phase"))
-        and outcomes.get("exitstatus") in VERDICT_BEARING_EXITS
+        and outcomes.get("exitstatus") == 0
         and not outcomes.get("collect_error")
         and not outcomes.get("internal_error", False)
         and not outcomes.get("node_down", False)
@@ -406,10 +435,17 @@ def session_is_trustworthy(outcomes: dict) -> bool:
 def session_ended_abnormally(outcomes: dict) -> bool:
     """True when something happened TO the run, as opposed to the run reaching a verdict.
 
-    Deliberately narrower than ``not session_is_trustworthy``: a session in which every test
-    errored in **setup** has no call phase and is therefore not "trustworthy" for concluding
-    SURVIVED -- but nothing went wrong with it, and annotating that as abnormal would fire on
-    every legitimate ``CAUGHT*`` and train the reader to ignore the warning.
+    Deliberately narrower than ``not session_is_trustworthy``, twice over:
+
+    * a session in which every test errored in **setup** has no call phase, so it cannot prove
+      SURVIVED -- but nothing went wrong with it;
+    * mutations run under ``-x``, so pytest raises ``Interrupted`` from the runtest loop the
+      moment one is caught. ``runtest_loop_completed`` is therefore ``False`` for **every**
+      legitimate CAUGHT, and including it here annotated all of them.
+
+    Both would fire on every valid case, and a warning that always fires is one nobody reads.
+    ``runtest_loop_completed`` still gates ``session_is_trustworthy``, where it is the only
+    evidence the selected suite ran to the end.
     """
     return (
         not outcomes.get("recorded")
@@ -418,6 +454,7 @@ def session_ended_abnormally(outcomes: dict) -> bool:
         or bool(outcomes.get("collect_error"))
         or outcomes.get("internal_error", False)
         or outcomes.get("node_down", False)
+        or bool(outcomes.get("synthetic_failed"))
     )
 
 

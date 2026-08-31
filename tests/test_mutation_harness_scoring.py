@@ -28,15 +28,18 @@ pytest never ran.
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import mutation_harness  # noqa: E402
 from mutation_harness import (  # noqa: E402
     is_harness_error,
     observed_mutation,
     read_outcomes,
+    session_ended_abnormally,
     session_is_trustworthy,
 )
 
@@ -57,6 +60,8 @@ def record(**kwargs) -> dict:
         "session_finished": True,
         "exitstatus": 0,
         "saw_call_phase": True,
+        "runtest_loop_completed": True,
+        "synthetic_failed": [],
         "recorded": True,
     }
     base.update(kwargs)
@@ -81,13 +86,20 @@ def test_a_collection_error_is_a_harness_error_even_though_it_names_a_node() -> 
     assert is_harness_error(record(collect_error=["tests/test_x.py::TestSynthetic"])) is True
 
 
-def test_a_dead_xdist_worker_is_a_harness_error_despite_a_failed_line() -> None:
-    """Reviewer's reproduction: ``[gw0] node down`` then ``FAILED path::test_name``.
+def test_a_dead_worker_alone_cannot_prove_survival() -> None:
+    """Round 2 asserted this record was a harness error outright; round 4 refined it.
 
-    That FAILED line names a test which never executed, so the terminal summary is actively
-    misleading here -- ``call_failed`` is populated AND the run is still a harness error.
+    ``[gw0] node down`` then ``FAILED path::test_name`` -- that FAILED line names a test which
+    never executed. But the fix is to filter the synthetic report **at record time** by its
+    ``when="???"`` phase, not to veto every recorded failure whenever a worker died. So with
+    no genuine report, this is still a harness error; the discriminating case is
+    ``test_a_genuine_failure_survives_a_dead_sibling_worker``.
     """
-    assert is_harness_error(record(node_down=True, call_failed=["test_never_ran"])) is True
+    outcomes = record(node_down=True, synthetic_failed=["tests/x.py::test_never_ran::???"])
+
+    assert observed_mutation(outcomes) is False
+    assert session_is_trustworthy(outcomes) is False
+    assert is_harness_error(outcomes) is True
 
 
 def test_an_internal_error_is_a_harness_error() -> None:
@@ -99,7 +111,40 @@ def test_no_record_at_all_is_a_harness_error() -> None:
     assert is_harness_error(record(recorded=False)) is True
 
 
+def test_the_generated_plugin_renders_and_parses(tmp_path: Path) -> None:
+    """The hooks are a ``.format()`` TEMPLATE, so every literal brace must be doubled.
+
+    Caught only by an end-to-end run: an f-string added to the template as
+    ``f"{report.nodeid}"`` had its braces consumed by ``.format()``, raising
+    ``KeyError: 'report'`` for every mutation. The predicate unit tests above cannot see this
+    -- they never render the template -- so this is the test that would have.
+    """
+    src = mutation_harness.OUTCOME_HOOKS.format(outcome_path=str(tmp_path / "o.json"))
+
+    ast.parse(src)
+    assert "{report.nodeid}" in src, "literal braces must survive .format()"
+    assert "{{" not in src, "no doubled brace should remain after rendering"
+
+
+def test_every_hook_the_verdict_depends_on_is_present() -> None:
+    """Each field the predicates read must actually be written by some hook."""
+    src = mutation_harness.OUTCOME_HOOKS
+
+    for hook in (
+        "pytest_runtest_logreport",
+        "pytest_collectreport",
+        "pytest_internalerror",
+        "pytest_testnodedown",
+        "pytest_sessionfinish",
+        "pytest_runtestloop",
+    ):
+        assert f"def {hook}(" in src, f"{hook} is read by a predicate but never defined"
+    # xdist-only, and pytest rejects the whole plugin if it is not declared optional.
+    assert "optionalhook=True" in src
+
+
 def test_a_missing_outcome_file_reads_as_unrecorded(tmp_path: Path) -> None:
+    """Absence is not innocence: no record means pytest never started."""
     outcomes = read_outcomes(tmp_path / "nope.json")
 
     assert outcomes["recorded"] is False
@@ -166,15 +211,57 @@ def test_an_unfinished_session_cannot_prove_survival_but_keeps_its_detection() -
 
 
 def test_a_dead_worker_failure_is_synthetic_and_never_counts() -> None:
-    """The one exception, and it is not an inconsistency.
+    """The synthetic report is filtered AT RECORD TIME, not by a global flag.
 
-    A dying xdist worker emits ``FAILED path::test_name`` for a test that **never executed**,
-    so that ``call_failed`` entry is fabricated rather than observed.
+    Round 4 showed a global `node_down` veto is too blunt: a genuine call failure emitted by a
+    living worker -- or by the dying one before it died -- is still real evidence. xdist's
+    fabricated crash report carries ``when="???"``, so it lands in ``synthetic_failed`` and
+    never reaches ``call_failed``.
     """
-    outcomes = record(node_down=True, call_failed=["test_never_ran"])
+    outcomes = record(node_down=True, synthetic_failed=["tests/x.py::test_never_ran::???"])
 
     assert observed_mutation(outcomes) is False
     assert is_harness_error(outcomes) is True
+
+
+def test_a_genuine_failure_survives_a_dead_sibling_worker() -> None:
+    """Round-4 finding: a real call failure must NOT be erased because some worker died."""
+    outcomes = record(call_failed=["test_x"], node_down=True)
+
+    assert observed_mutation(outcomes) is True
+    assert is_harness_error(outcomes) is False
+    assert session_is_trustworthy(outcomes) is False
+
+
+def test_one_completed_call_phase_does_not_prove_the_suite_ran() -> None:
+    """Round-4 finding: ``pytest.exit()`` from teardown after the FIRST passing test.
+
+    Measured on the 14-test scoring file: ``1 passed`` then the Exit message, with
+    ``session_finished``, ``saw_call_phase`` and ``exitstatus=0`` -- and it scored SURVIVED
+    having run 1 of 14. Only ``runtest_loop_completed`` distinguishes it.
+    """
+    outcomes = record(runtest_loop_completed=False)
+
+    assert session_is_trustworthy(outcomes) is False
+    assert is_harness_error(outcomes) is True
+
+
+def test_an_interrupted_loop_after_a_catch_is_not_annotated_as_abnormal() -> None:
+    """Mutations run under ``-x``, so a CAUGHT always interrupts the loop.
+
+    ``runtest_loop_completed`` is therefore False for every legitimate detection. Including it
+    in the abnormal-session predicate annotated all of them, which is a warning nobody reads.
+    """
+    caught_under_x = record(call_failed=["test_x"], runtest_loop_completed=False, exitstatus=1)
+
+    assert observed_mutation(caught_under_x) is True
+    assert session_ended_abnormally(caught_under_x) is False
+    assert is_harness_error(caught_under_x) is False
+
+
+def test_exit_one_without_a_recorded_detection_cannot_prove_survival() -> None:
+    """Exit 1 means tests failed. A failure we did not record cannot prove anything survived."""
+    assert session_is_trustworthy(record(exitstatus=1)) is False
 
 
 def test_a_setup_report_alone_does_not_prove_a_test_body_ran() -> None:
