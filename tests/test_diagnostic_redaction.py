@@ -1425,38 +1425,57 @@ def _one_request_server(status: int, reason: str, body: bytes):
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("planted", ["pat_secret", "pat_name"])
 def test_the_signin_reason_phrase_never_carries_a_credential(shape, planted):
-    """Measured before the fix: `HTTPError: HTTP Error 403: SYNTHETIC_PAT_SECRET_REASON_42`."""
+    """Measured before the fix: `HTTPError: HTTP Error 403: SYNTHETIC_PAT_SECRET_REASON_42`.
+
+    ⚠️ Catches BaseException rather than using `pytest.raises(RuntimeError)`, and the mutation harness
+    is why. With `pytest.raises`, deleting the `except` clause let the raw `HTTPError` propagate --
+    a genuine kill -- but the test then died of an unexpected EXCEPTION rather than an assertion, and
+    a harness that (correctly) refuses to score crashes as kills reported INVALID. That is a false
+    INVALID: the mirror of the false CAUGHT the rule exists to prevent, and it hid a working
+    regression test behind a scoring artefact.
+
+    The deeper point is that the question was wrong. This test is not "does a RuntimeError come out";
+    it is "can a credential escape by ANY path". Asking the second makes the leak an assertion
+    failure whatever the exception type, and the intended type is still pinned below.
+    """
     secret = SHAPES[shape].replace("\n", " ").strip() or "SYNTHETIC_SECRET_42"
     # An HTTP reason phrase is a single header line; CR/LF and non-latin-1 cannot travel in one.
     reason = "".join(ch for ch in secret if ch.isprintable() and ord(ch) < 256) or "SYNTHETIC_SECRET_42"
     pat_secret_value = reason if planted == "pat_secret" else "an-unrelated-long-pat-secret"
     pat_name = reason if planted == "pat_name" else "an-unrelated-long-pat-name"
     server = _one_request_server(403, reason, b"")
+    raised: BaseException | None = None
     try:
-        with pytest.raises(RuntimeError) as excinfo:
-            cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", pat_name, pat_secret_value, "3.29")
+        cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", pat_name, pat_secret_value, "3.29")
+    except BaseException as exc:  # noqa: BLE001  # ANY escape is in scope -- that is the finding
+        raised = exc
     finally:
         server.shutdown()
         server.server_close()
-    message = str(excinfo.value)
+    assert raised is not None, "sign_in must not report success for an HTTP 403"
+    message = f"{type(raised).__name__}: {raised}"
     assert longest_surviving_run(reason, message) == "", message
     assert "403" in message, "the status must survive; redaction that destroys the diagnostic is not a fix"
+    assert isinstance(raised, RuntimeError), f"the sanitised failure must be a RuntimeError, got {message}"
 
 
 def test_the_signin_error_BODY_is_redacted_too_and_the_reason_still_reads():
     """Both surfaces, and the non-secret half of each must still be legible."""
     secret = "SYNTHETIC_PAT_SECRET_REASON_42"
     server = _one_request_server(403, "Forbidden", secret.encode())
+    raised: BaseException | None = None
     try:
-        with pytest.raises(RuntimeError) as excinfo:
-            cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", "a-long-pat-name", secret, "3.29")
+        cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", "a-long-pat-name", secret, "3.29")
+    except BaseException as exc:  # noqa: BLE001
+        raised = exc
     finally:
         server.shutdown()
         server.server_close()
-    message = str(excinfo.value)
-    assert secret not in message
+    message = f"{type(raised).__name__}: {raised}"
+    assert secret not in message, message
     assert "Forbidden" in message and "403" in message
     assert "[REDACTED]" in message
+    assert isinstance(raised, RuntimeError), message
 
 
 # ------------------------------------------------- the reviewer's two round-4 reproductions, named
