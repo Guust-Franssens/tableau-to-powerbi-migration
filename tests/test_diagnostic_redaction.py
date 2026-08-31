@@ -429,34 +429,74 @@ def test_every_site_still_produces_a_usable_diagnostic(site, tmp_path, monkeypat
     assert len(output.strip()) > 10, f"{site} produced nothing diagnosable: {output!r}"
 
 
-# ------------------------------------------------ gate 3: PROVENANCE, per occurrence, all sinks
+# ------------------------------------ gate 3: INTER-procedural taint, declared seeds, all exits
 #
-# ⚠️ Rewritten after round 5 found two holes in the first version, which keyed certification on
-# `ast.unparse()` text GLOBALLY and looked only at f-strings:
+# ⚠️ Third rewrite, because round 6 found four bypasses in the second one. It keyed taint off six
+# parameter NAMES and looked at f-strings, dict values and log/raise args. All four of these produced
+# an empty finding list:
 #
-#   * a name certified in one function certified the same name everywhere, so
-#     `def leak(body): why = body.decode(...); return f"{why}"` passed with an EMPTY uncertified set;
-#   * non-f-string sinks were invisible entirely -- including dict values, which is exactly how a
-#     successful CSV's header row reached `data.columns`.
+#     def f(payload):  return {payload.decode(): "percent"}   # a dict KEY
+#     def f(body):     return "diagnostic: " + body.decode()  # CONCATENATION
+#     def f(response): return f"{response}"                   # a renamed parameter
+#     def f(payload):  out = {}; out["k"] = payload.decode()  # a SUBSCRIPT store
 #
-# So this version tracks PROVENANCE rather than spelling. Response-derived data is tainted at the
-# parameters it arrives on, propagated through assignments to a fixpoint, cleared only by
-# `redacted_note(...)`, and every sink -- f-string, dict value, dict `**` unpack, log/exception
-# argument, `%` operand -- is checked against the tainted set of ITS OWN function.
+# Two changes fix the class rather than the four instances:
+#
+#   * taint is SEEDED per (module, function) from a declared table and then PROPAGATED ACROSS CALLS
+#     within the module, so a parameter's spelling is irrelevant -- `def f(response)` is tainted
+#     because something taints it at a call site, not because of what it is called;
+#   * the sink list is derived from the EXITS a value can leave through, which the language closes:
+#     write_bytes/write_text (content AND the path they are called on), LOG.*, print, raise, and every
+#     construction that can carry a value into one -- f-strings, dict values, dict KEYS, `**` unpacks,
+#     `+`, `%`, subscript and attribute stores, and `/` path joins.
+#
+# That is the answer to "why will round 8 differ": rounds 2-7 enumerated SOURCES, which is an open set
+# nobody can finish. Exits are closed by Python itself.
 
-RESPONSE_PARAMS = {"body", "payload", "content_type", "raw_type", "text", "raw"}
-UNTAINTING = {"redacted_note"}
-TAINTING_CALLS = {"_request", "export", "raw_get", "read", "decode"}
-LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "format"}
+MODULES = (
+    "scripts/capture_tableau_oracle.py",
+    "scripts/tableau_render_capability.py",
+    "scripts/tableau_payload_facts.py",
+)
 
-# A certification must state WHICH justification applies. Free prose lets "it's fine" stand in for an
-# argument; a category has to be one of these, and each is independently checkable by a reader.
+# Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
+# Small on purpose: everything else is reached by propagation, and a new entry point has to be added
+# here deliberately. `test_the_declared_seeds_all_exist` fails if one goes stale.
+TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
+    ("scripts/capture_tableau_oracle.py", "_request"): set(),  # the origin: its RETURN is tainted
+    ("scripts/capture_tableau_oracle.py", "classify_export_error"): {"text"},
+    ("scripts/capture_tableau_oracle.py", "reflected_credential"): {"payload"},
+    ("scripts/capture_tableau_oracle.py", "redact_text"): {"text"},
+    ("scripts/capture_tableau_oracle.py", "_redact_response"): {"text"},
+    ("scripts/tableau_render_capability.py", "format_matches"): {"body", "content_type"},
+    ("scripts/tableau_render_capability.py", "classify_probe"): {"body", "content_type"},
+    ("scripts/tableau_render_capability.py", "looks_like_svg"): {"body"},
+    ("scripts/tableau_render_capability.py", "_identify"): {"head"},
+    ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
+    ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
+    ("scripts/tableau_payload_facts.py", "png_dimensions"): {"payload"},
+    ("scripts/tableau_payload_facts.py", "svg_facts"): {"payload"},
+    ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
+}
+
+# Calls whose RESULT is response data wherever they appear.
+TAINTING_CALLS = {"_request", "export", "raw_get", "get_json", "read", "decode", "loads"}
+# The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
+UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
+LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
+WRITE_CALLS = {"write_bytes", "write_text", "print", "dumps"}
+# Container stores: `record.update(svg_facts(payload))` puts response-derived data into a manifest
+# record just as surely as a dict literal does.
+CONTAINER_STORES = {"update", "append", "extend", "setdefault"}
+
 CATEGORIES = (
-    "NOT-A-STRING:",  # an int/float/bool -- cannot carry a credential at all
-    "REDACTED-UPSTREAM:",  # already through the redactor; every transform here happens after
-    "REFUSED-AT-SEAM:",  # response-derived text, but `export()` refuses a 200 carrying a credential
-    "DERIVED-IRREVERSIBLY:",  # a one-way digest of the payload, not the payload
-    "FIXED-VOCABULARY:",  # resolves to one of a fixed set of literals in this module
+    "NOT-A-STRING:",
+    "REDACTED-UPSTREAM:",
+    "REFUSED-AT-SEAM:",
+    "DERIVED-IRREVERSIBLY:",
+    "FIXED-VOCABULARY:",
+    "SCRUBBED-AT-SINK:",
+    "OUTBOUND:",  # our own request, travelling to Tableau -- not a response coming back
 )
 
 CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
@@ -465,39 +505,22 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "match.group(2).strip()": "REDACTED-UPSTREAM: same match, and `.strip()` runs after redaction",
         "safe[:150]": "REDACTED-UPSTREAM: `safe` is `redactor(text)`; the slice is after",
         "safe[:200]": "REDACTED-UPSTREAM: `safe` is `redactor(text)`; the slice is after",
+        "label": "FIXED-VOCABULARY: either 'network error' or an f-string of the HTTP status integer",
+        "status": "NOT-A-STRING: an HTTP status integer",
     },
-    ("scripts/capture_tableau_oracle.py", "summarise_csv"): {
-        # ⚠️ THE ROUND-5 LEAK, now certified rather than invisible. A CSV header row IS response text
-        # and this gate must keep saying so; what makes it safe is the seam, not this function.
-        "header": (
-            "REFUSED-AT-SEAM: a successful body carrying the PAT secret or session token never reaches "
-            "here -- `export()` raises `credential_reflected` before anything is parsed or written -- "
-            "and the manifest sink scrubs the residual PAT-name case"
-        ),
-        "len(body)": "NOT-A-STRING: an integer byte count",
-    },
-    ("scripts/capture_tableau_oracle.py", "png_dimensions"): {
-        "int.from_bytes(payload[16:20], 'big')": "NOT-A-STRING: an integer read from the IHDR",
-        "int.from_bytes(payload[20:24], 'big')": "NOT-A-STRING: an integer read from the IHDR",
-    },
-    ("scripts/capture_tableau_oracle.py", "svg_facts"): {
-        "text.count('<text')": "NOT-A-STRING: an integer element count",
-        "text.count('<path')": "NOT-A-STRING: an integer element count",
-        "text.count('<image')": "NOT-A-STRING: an integer element count",
-        "len([h for h in _SVG_HREF.findall(text) if not h.startswith(('data:', '#'))])": (
-            "NOT-A-STRING: an integer count of external references"
-        ),
-    },
-    ("scripts/capture_tableau_oracle.py", "pdf_facts"): {
-        "len(re.findall(b'/FontFile\\\\d?', payload))": "NOT-A-STRING: an integer count of embedded fonts",
-        "len(re.findall(b'/Subtype\\\\s*/Image', payload))": "NOT-A-STRING: an integer count of image XObjects",
-        "round(float(parts[2]))": "NOT-A-STRING: an integer page width in points",
-        "round(float(parts[3]))": "NOT-A-STRING: an integer page height in points",
+    ("scripts/capture_tableau_oracle.py", "_request"): {
+        "body": "OUTBOUND: the request entity WE send to Tableau, serialised on its way out",
     },
     ("scripts/capture_tableau_oracle.py", "_capture_data"): {
+        "payload": (
+            "REFUSED-AT-SEAM: writing the customer's own CSV IS the capture. What must never be in it "
+            "is OUR credential, and `export()` refuses a 200 carrying the PAT secret or session token "
+            "before this line runs -- the file is the artifact a manifest scrub could never reach"
+        ),
         "summarise_csv(payload)": (
-            "REFUSED-AT-SEAM: this unpack is what put a credential in `data.columns`; `export()` now "
-            "refuses a 200 carrying one before `_capture_data` sees the payload at all"
+            "REFUSED-AT-SEAM: this unpack is what put a credential in `data.columns`; `export()` "
+            "refuses a 200 carrying one before `_capture_data` sees the payload, and the sink scrubs "
+            "the residual PAT-name case in both the values and the `format_hints` KEYS"
         ),
         "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
@@ -505,11 +528,18 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
     },
     ("scripts/capture_tableau_oracle.py", "_capture_render"): {
+        "payload": (
+            "REFUSED-AT-SEAM: writing the rendered reference IS the capture; the seam refuses a 200 "
+            "echoing the PAT secret or session token before these bytes reach a file"
+        ),
         "why": "REDACTED-UPSTREAM: `format_matches` builds it entirely from `redacted_note` output",
         "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
         "len(payload)": "NOT-A-STRING: an integer byte count",
         "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
+        "dimensions": "NOT-A-STRING: the two integers png_dimensions read from the IHDR chunk",
+        "svg_facts(payload)": "NOT-A-STRING: element counts and millimetre geometry, no payload text",
+        "pdf_facts(payload)": "NOT-A-STRING: page geometry and font/image counts, no payload text",
     },
     ("scripts/capture_tableau_oracle.py", "sign_in"): {
         "status": "NOT-A-STRING: an HTTP status integer",
@@ -521,9 +551,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "status": "NOT-A-STRING: an HTTP status integer",
         "delay": "NOT-A-STRING: a float backoff delay",
         "kind": "FIXED-VOCABULARY: one of classify_export_error's five status literals",
-        "reflected": "FIXED-VOCABULARY: one of the two literal labels reflected_credential can return",
+        "reflected": "FIXED-VOCABULARY: one of the two literal labels reflected_credential returns",
         "detail": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`",
         "detail[:60]": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`; the slice is after",
+        "detail[:80]": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`; the slice is after",
         "detail or redacted_note(payload, self._redact_response, limit=200)": (
             "REDACTED-UPSTREAM: both arms are redacted -- `detail` from `safe`, the fallback by the chokepoint"
         ),
@@ -533,6 +564,47 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/tableau_render_capability.py", "classify_probe"): {
         "why": "REDACTED-UPSTREAM: `format_matches` builds it entirely from `redacted_note` output",
+    },
+    ("scripts/tableau_payload_facts.py", "summarise_csv"): {
+        "header": (
+            "SCRUBBED-AT-SINK: a CSV header row IS response text and this gate must keep saying so. "
+            "The seam refuses a 200 carrying the PAT secret or session token, and `scrub_tree` cleans "
+            "the residual PAT-name case out of the manifest -- values AND keys -- before it is written"
+        ),
+        "hints": (
+            "SCRUBBED-AT-SINK: keyed by column name, which is why `scrub_tree` scrubs dict KEYS; a "
+            "values-only walk put the PAT name in `format_hints` while redacting it in `columns`"
+        ),
+        "name": (
+            "SCRUBBED-AT-SINK: THE round-6 finding-2 site -- a column name becoming a dict KEY. It is "
+            "left as data on purpose (a column heading is the customer's, not ours) and scrubbed at "
+            "the manifest boundary, keys included, with collisions disambiguated rather than dropped"
+        ),
+        "fmt": "FIXED-VOCABULARY: one of 'percent', 'currency', 'thousands_separated' or None",
+        "len(body)": "NOT-A-STRING: an integer row count",
+    },
+    ("scripts/tableau_payload_facts.py", "png_dimensions"): {
+        "int.from_bytes(payload[16:20], 'big')": "NOT-A-STRING: an integer read from the IHDR",
+        "int.from_bytes(payload[20:24], 'big')": "NOT-A-STRING: an integer read from the IHDR",
+    },
+    ("scripts/tableau_payload_facts.py", "svg_facts"): {
+        "text.count('<text')": "NOT-A-STRING: an integer element count",
+        "text.count('<path')": "NOT-A-STRING: an integer element count",
+        "text.count('<image')": "NOT-A-STRING: an integer element count",
+        "len([h for h in _SVG_HREF.findall(text) if not h.startswith(('data:', '#'))])": (
+            "NOT-A-STRING: an integer count of external references"
+        ),
+        "round(float(match.group(1)) * 96 / 25.4)": "NOT-A-STRING: an integer pixel width",
+        "round(float(match.group(2)) * 96 / 25.4)": "NOT-A-STRING: an integer pixel height",
+    },
+    ("scripts/tableau_payload_facts.py", "pdf_facts"): {
+        "len(re.findall(b'/FontFile\\\\d?', payload))": "NOT-A-STRING: an integer count of embedded fonts",
+        "len(re.findall(b'/Subtype\\\\s*/Image', payload))": "NOT-A-STRING: an integer count of image XObjects",
+        "round(float(parts[2]))": "NOT-A-STRING: an integer page width in points",
+        "round(float(parts[3]))": "NOT-A-STRING: an integer page height in points",
+        "{'width': round(float(parts[2])), 'height': round(float(parts[3]))}": (
+            "NOT-A-STRING: a two-integer page geometry, stored under a constant key"
+        ),
     },
 }
 
@@ -547,60 +619,124 @@ def _called(node: ast.AST) -> str | None:
     return node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
 
 
-def tainted_names(func: ast.AST) -> set[str]:
-    """Names in ``func`` holding data that came off the wire. Fixpoint over assignments."""
-    args = func.args
-    tainted = {a.arg for a in args.args + args.kwonlyargs if a.arg in RESPONSE_PARAMS}
-    for _ in range(8):
-        before = set(tainted)
-        for node in ast.walk(func):
-            if isinstance(node, ast.Assign):
-                targets, value = node.targets, node.value
-            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
-                targets, value = [node.target], node.value
-            else:
-                continue
-            if _called(value) in UNTAINTING:
-                continue  # the chokepoint is the ONE thing that clears taint
-            if not (_roots(value) & tainted or _called(value) in TAINTING_CALLS):
-                continue
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    tainted.add(target.id)
-                elif isinstance(target, (ast.Tuple, ast.List)):
-                    tainted.update(e.id for e in target.elts if isinstance(e, ast.Name))
+def _functions(tree: ast.AST) -> list[ast.AST]:
+    return [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _param_names(func: ast.AST) -> list[str]:
+    return [a.arg for a in func.args.posonlyargs + func.args.args + func.args.kwonlyargs]
+
+
+def _assignments(func: ast.AST):
+    """(targets, value) for every binding form that can carry taint, INCLUDING subscript stores."""
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            yield node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            yield [node.target], node.value
+        elif isinstance(node, ast.For):
+            yield [node.target], node.iter
+        elif isinstance(node, (ast.comprehension,)):
+            yield [node.target], node.iter
+
+
+def _bind(targets, tainted: set[str]) -> None:
+    for target in targets:
+        if isinstance(target, ast.Name):
+            tainted.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                if isinstance(element, ast.Name):
+                    tainted.add(element.id)
+        elif isinstance(target, (ast.Subscript, ast.Attribute)):
+            # `out["k"] = payload.decode()` taints the CONTAINER, not a new name.
+            base = target
+            while isinstance(base, (ast.Subscript, ast.Attribute)):
+                base = base.value
+            if isinstance(base, ast.Name):
+                tainted.add(base.id)
+
+
+def taint_module(source: str, module: str) -> dict[str, set[str]]:
+    """Tainted names per function, propagated ACROSS calls within the module to a fixpoint."""
+    tree = ast.parse(source)
+    functions = {f.name: f for f in _functions(tree)}
+    tainted = {name: set(TAINT_SEEDS.get((module, name), set())) for name in functions}
+    returns_taint = {name for name in functions if (module, name) in TAINT_SEEDS and name == "_request"}
+    for _ in range(12):
+        before = {k: set(v) for k, v in tainted.items()}
+        for name, func in functions.items():
+            local = tainted[name]
+            for targets, value in _assignments(func):
+                if _called(value) in UNTAINTING:
+                    continue
+                if _roots(value) & local or _called(value) in TAINTING_CALLS or _called(value) in returns_taint:
+                    _bind(targets, local)
+            # Inter-procedural: a call passing a tainted argument taints the callee's parameter.
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Call):
+                    continue
+                callee = functions.get(_called(node) or "")
+                if callee is None:
+                    continue
+                params = _param_names(callee)
+                for index, arg in enumerate(node.args):
+                    if _roots(arg) & local and index < len(params):
+                        tainted[callee.name].add(params[index])
+                for keyword in node.keywords:
+                    if keyword.arg and _roots(keyword.value) & local:
+                        tainted[callee.name].add(keyword.arg)
         if tainted == before:
             break
     return tainted
 
 
 def sink_expressions(func: ast.AST) -> list[tuple[str, ast.AST]]:
-    """Every place a value in ``func`` becomes text that is printed, raised or persisted."""
+    """Every place a value can leave this function as persisted or emitted text.
+
+    Derived from the EXITS -- write/log/print/raise -- and from every construction that can carry a
+    value into one. `+` and dict KEYS are here because round 6 escaped through exactly those.
+    """
     out: list[tuple[str, ast.AST]] = []
     for node in ast.walk(func):
         if isinstance(node, ast.JoinedStr):
             out += [("f-string", p.value) for p in node.values if isinstance(p, ast.FormattedValue)]
         elif isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values):
+                if key is not None and not isinstance(key, ast.Constant):
+                    out.append(("dict-key", key))
                 if not isinstance(value, ast.Constant):
                     out.append(("dict-**" if key is None else "dict-value", value))
-        elif isinstance(node, ast.Call) and _called(node) in LOG_AND_RAISE:
-            out += [("call-arg", a) for a in node.args if not isinstance(a, (ast.Constant, ast.JoinedStr))]
-        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
-            out.append(("percent", node.right))
-    return out
+        elif isinstance(node, ast.Call) and _called(node) in LOG_AND_RAISE | WRITE_CALLS | CONTAINER_STORES:
+            kind = "container-store" if _called(node) in CONTAINER_STORES else "call-arg"
+            out += [(kind, a) for a in node.args if not isinstance(a, (ast.Constant, ast.JoinedStr))]
+            if _called(node) in WRITE_CALLS and isinstance(node.func, ast.Attribute):
+                out.append(("write-path", node.func.value))
+        elif isinstance(node, ast.BinOp):
+            if isinstance(node.op, ast.Mod):
+                out.append(("percent", node.right))
+            elif isinstance(node.op, ast.Add):
+                out += [("concat", node.left), ("concat", node.right)]
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and not isinstance(node.value, ast.Constant):
+                    out.append(("subscript-store", node.value))
+                    if not isinstance(target.slice, ast.Constant):
+                        out.append(("subscript-key", target.slice))
+    return [(kind, expr) for kind, expr in out if not isinstance(expr, ast.Constant)]
 
 
 def uncertified_sinks(source: str, module: str) -> list[str]:
-    """Response-derived expressions reaching a sink with no certification for THAT function."""
+    """Response-derived expressions reaching an exit with no certification for THAT function."""
+    tainted = taint_module(source, module)
     findings = []
-    for func in [n for n in ast.walk(ast.parse(source)) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        tainted = tainted_names(func)
-        if not tainted:
+    for func in _functions(ast.parse(source)):
+        local = tainted.get(func.name, set())
+        if not local:
             continue
         certified = CERTIFIED.get((module, func.name), {})
         for kind, expr in sink_expressions(func):
-            if _called(expr) in UNTAINTING or not (_roots(expr) & tainted):
+            if _called(expr) in UNTAINTING or not (_roots(expr) & local):
                 continue
             text = ast.unparse(expr)
             if text not in certified:
@@ -608,52 +744,95 @@ def uncertified_sinks(source: str, module: str) -> list[str]:
     return sorted(set(findings))
 
 
-@pytest.mark.parametrize("module", sorted({m for m, _ in CERTIFIED}))
-def test_no_response_derived_value_reaches_a_sink_without_certification(module):
-    """A SIXTH escape cannot be added silently -- only certified deliberately, per function."""
+@pytest.mark.parametrize("module", MODULES)
+def test_no_response_derived_value_reaches_an_exit_without_certification(module):
+    """A SEVENTH escape cannot be added silently -- only certified deliberately, per function."""
     uncertified = uncertified_sinks((REPO / module).read_text(encoding="utf-8"), module)
     assert not uncertified, (
-        f"{module} lets response-derived data reach a sink with no certification:\n  "
+        f"{module} lets response-derived data reach an exit with no certification:\n  "
         + "\n  ".join(uncertified)
-        + "\nEither route it through tableau_env.redacted_note(), or certify the exact expression under "
-        f"CERTIFIED[({module!r}, '<function>')] with a reason starting with one of {CATEGORIES}."
+        + "\nEither route it through tableau_env.redacted_note(), build it from a verified identifier "
+        f"(artifact_stem), or certify the exact expression with a reason starting with one of {CATEGORIES}."
     )
 
 
-def test_the_gate_catches_the_reviewers_own_counterexample():
-    """The hole that made this rewrite necessary: a certified NAME reused in a different function.
+@pytest.mark.parametrize(
+    ("label", "source", "expected"),
+    [
+        (
+            "dict-key",
+            'def summarise_csv(payload):\n    return {payload.decode(): "percent"}\n',
+            ["summarise_csv() dict-key: payload.decode()"],
+        ),
+        (
+            "concatenation",
+            'def summarise_csv(payload):\n    return "diagnostic: " + payload.decode()\n',
+            ["summarise_csv() concat: payload.decode()"],
+        ),
+        (
+            "subscript store",
+            'def summarise_csv(payload):\n    out = {}\n    out["k"] = payload.decode()\n    return out\n',
+            ["summarise_csv() subscript-store: payload.decode()"],
+        ),
+        (
+            "a write path built from response text",
+            'def summarise_csv(payload, out_dir):\n    (out_dir / payload.decode()).write_bytes(b"x")\n',
+            ["summarise_csv() write-path: out_dir / payload.decode()"],
+        ),
+    ],
+)
+def test_the_gate_catches_each_bypass_round_6_reported(label, source, expected):
+    """All four produced an EMPTY finding list against the round-5 gate.
 
-    `why` is legitimately certified inside `classify_probe`. Under the old global, expression-keyed
-    gate that certified `why` EVERYWHERE, so this leak produced an empty uncertified set.
+    The fourth is round 6's finding 1 in miniature: a filename built from response text. It is caught
+    at the `write-path` exit -- the receiver of `write_bytes` -- rather than by inspecting `/` operands,
+    because `/` is also arithmetic and flagging it produced false positives on `mm * 96 / 25.4`.
     """
-    leak = 'def reachable_leak(body):\n    why = body.decode("utf-8", "replace")\n    return f"diagnostic: {why}"\n'
-    findings = uncertified_sinks(leak, "scripts/tableau_render_capability.py")
-    assert findings == ["reachable_leak() f-string: why"], findings
+    assert uncertified_sinks(source, "scripts/tableau_payload_facts.py") == sorted(expected), label
 
 
-def test_the_gate_sees_a_non_f_string_sink():
-    """The other hole: round 5 escaped through a DICT VALUE, which the old gate never looked at."""
-    leak = "def build(payload):\n    columns = payload.decode().split(',')\n    return {'columns': columns}\n"
-    assert uncertified_sinks(leak, "scripts/capture_tableau_oracle.py") == ["build() dict-value: columns"]
+def test_a_renamed_parameter_is_tainted_by_its_CALLER_not_by_its_spelling():
+    """The round-5 gate keyed off six parameter names, so `def f(response)` was invisible."""
+    source = (
+        "def leak(response):\n"
+        '    return f"{response}"\n'
+        "def summarise_csv(payload):\n"
+        "    return leak(payload.decode())\n"
+    )
+    assert uncertified_sinks(source, "scripts/tableau_payload_facts.py") == ["leak() f-string: response"]
 
 
 def test_the_chokepoint_is_the_only_thing_that_clears_taint():
     """Otherwise a certification could be earned by laundering a value through any helper."""
-    clean = 'def f(body):\n    note = redacted_note(body, None, limit=8)\n    return f"{note}"\n'
-    assert uncertified_sinks(clean, "scripts/tableau_render_capability.py") == []
-    laundered = 'def f(body):\n    note = str(body)\n    return f"{note}"\n'
-    assert uncertified_sinks(laundered, "scripts/tableau_render_capability.py") == ["f() f-string: note"]
+    clean = 'def summarise_csv(payload):\n    note = redacted_note(payload, None, limit=8)\n    return f"{note}"\n'
+    assert uncertified_sinks(clean, "scripts/tableau_payload_facts.py") == []
+    laundered = 'def summarise_csv(payload):\n    note = str(payload)\n    return f"{note}"\n'
+    assert uncertified_sinks(laundered, "scripts/tableau_payload_facts.py") == ["summarise_csv() f-string: note"]
 
 
-@pytest.mark.parametrize("module", sorted({m for m, _ in CERTIFIED}))
+@pytest.mark.parametrize("module", MODULES)
+def test_the_declared_seeds_all_exist(module):
+    """A seed naming a function or parameter that is gone is a claim about nothing."""
+    tree = ast.parse((REPO / module).read_text(encoding="utf-8"))
+    functions = {f.name: set(_param_names(f)) for f in _functions(tree)}
+    for (mod, func), params in TAINT_SEEDS.items():
+        if mod != module:
+            continue
+        assert func in functions, f"{module}: declared taint seed for missing function {func}()"
+        missing = params - functions[func]
+        assert not missing, f"{module}:{func}() declared seed parameters that do not exist: {missing}"
+
+
+@pytest.mark.parametrize("module", MODULES)
 def test_the_certification_list_has_no_stale_entries(module):
-    """A certification for an expression that no longer reaches a sink is a claim about nothing."""
+    """A certification for an expression that no longer reaches an exit is a claim about nothing."""
     source = (REPO / module).read_text(encoding="utf-8")
+    tainted = taint_module(source, module)
     live: set[tuple[str, str]] = set()
-    for func in [n for n in ast.walk(ast.parse(source)) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        tainted = tainted_names(func)
+    for func in _functions(ast.parse(source)):
+        local = tainted.get(func.name, set())
         for _kind, expr in sink_expressions(func):
-            if _roots(expr) & tainted:
+            if _roots(expr) & local:
                 live.add((func.name, ast.unparse(expr)))
     stale = sorted(
         f"{name}(): {expr}"
@@ -662,7 +841,7 @@ def test_the_certification_list_has_no_stale_entries(module):
         for expr in entries
         if (name, expr) not in live
     )
-    assert not stale, f"{module}: certified expressions no longer reaching a sink: {stale}"
+    assert not stale, f"{module}: certified expressions no longer reaching an exit: {stale}"
 
 
 def test_every_certification_names_a_category_rather_than_arguing_in_prose():

@@ -30,6 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
 
 FEDERATED_401 = (
     "<?xml version='1.0'?><tsResponse><error code='401002'><summary>Unauthorized Access</summary></error></tsResponse>"
@@ -262,7 +263,11 @@ def test_reflected_session_token_is_redacted_from_exceptions_and_manifest(tmp_pa
 
         record = oracle.capture_view(
             session,
-            {"id": "view-id-12345678", "name": "Echo", "workbook": {"id": "wb", "name": "Workbook"}},
+            {
+                "id": "eb00995d-1ff1-4a42-9ac9-28846f861d31",
+                "name": "Echo",
+                "workbook": {"id": "wb", "name": "Workbook"},
+            },
             tmp_path,
             frozenset(),
         )
@@ -299,7 +304,7 @@ def test_reflected_session_token_is_redacted_from_exceptions_and_manifest(tmp_pa
 )
 def test_display_formatting_is_detected(values, expected):
     """/views/{id}/data returns display-formatted text, so a naive numeric diff would be garbage."""
-    assert oracle.detect_format(values) == expected
+    assert payload_facts.detect_format(values) == expected
 
 
 def test_csv_summary_proves_a_capture_is_non_empty():
@@ -313,8 +318,25 @@ def test_empty_csv_reports_zero_rows_rather_than_failing():
     assert oracle.summarise_csv(b"")["row_count"] == 0
 
 
-def test_slug_is_filesystem_safe():
-    assert "/" not in oracle.safe_slug("Superstore/sheets/Overview")
+def test_artifact_paths_are_built_only_from_a_verified_luid(tmp_path):
+    """Replaces `test_slug_is_filesystem_safe`, because `safe_slug` is gone rather than fixed.
+
+    A view NAME is response data. Slugging one into a filename truncated a reflected session token
+    into a prefix no redactor could then match (#405 round 6), so the name no longer reaches a path at
+    all: the only input is a LUID, whose UUID shape is verifiable in full. An identifier that is not a
+    LUID is refused rather than sanitised -- sanitising is the screen this replaces.
+    """
+    assert oracle.artifact_stem("EB00995D-1FF1-4A42-9AC9-28846F861D31") == "eb00995d-1ff1-4a42-9ac9-28846f861d31"
+    for bad in ("view-id-12345678", "", "../../etc/passwd", "eb00995d-1ff1-4a42-9ac9-28846f861d3"):
+        with pytest.raises(ValueError):
+            oracle.artifact_stem(bad)
+
+
+def test_a_view_whose_identifier_is_not_a_luid_is_refused_not_named(tmp_path):
+    session = FakeSession([(200, "a\n1\n", {})])
+    record = oracle.capture_view(session, {"id": "not-a-luid", "name": "V"}, tmp_path, frozenset())
+    assert record["data"]["status"] == "failed"
+    assert not list(tmp_path.rglob("*.csv"))
 
 
 # ------------------ #405 round 3, finding 2: the api override changed a signature every double copies

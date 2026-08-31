@@ -439,32 +439,45 @@ def redacted_note(value: str | bytes | None, redactor=None, *, limit: int, quote
 
 
 def scrub_tree(value, redactor, trail: str = "") -> tuple[object, list[str]]:
-    """Redact every string in a JSON-shaped tree, returning ``(scrubbed, the paths that changed)``.
+    """Redact every string in a JSON-shaped tree -- **keys included** -- returning ``(scrubbed, paths)``.
 
     A **SINK-side** guard, and deliberately unconditional: it does not know or care which field it is
-    looking at, because the field nobody thought about is the one that leaks. Five rounds of review on
-    #405 each fixed one SOURCE -- an unredacted error body, a diagnostic returned before redaction, a
-    case-folded header, a truncated body quote, a capture group taken from raw text -- and the sixth
-    escape was not a diagnostic at all: a successful CSV's own first row, copied into ``data.columns``.
-    Guarding sources one at a time cannot terminate, because the next one is by definition the one
-    nobody enumerated.
+    looking at, because the field nobody thought about is the one that leaks. Six rounds of review on
+    #405 each fixed one SOURCE, and each time the next escape was somewhere nobody had enumerated --
+    a successful CSV's first row, then an artifact FILENAME, then a dict KEY.
+
+    Three properties are load-bearing, and the key one was missing until round 6:
+
+    1. **Keys are scrubbed too.** ``format_hints`` is keyed by CSV column name, so a column matching
+       the PAT name became a key, and a values-only walk put it in the manifest while dutifully
+       redacting the identical string one field over in ``columns``.
+    2. **A redaction-induced key COLLISION is resolved and reported, never silently dropped.** Two
+       distinct keys can scrub to the same string; ``dict`` would keep the last and lose the rest,
+       turning a redaction into data loss.
+    3. **The reported path uses the SCRUBBED key.** Building it from the raw key would put the
+       credential back into ``credential_scrubbed_at_sink`` -- the guard re-emitting what it caught.
 
     It returns the changed paths rather than scrubbing silently. A sink that quietly cleans up is
-    indistinguishable from a sink that never had anything to clean, and that is exactly how a source
+    indistinguishable from one that never had anything to clean, and that is exactly how a source
     defect survives: the artifact looks perfect either way.
 
-    ⚠️ It is a **backstop, and cannot be the guarantee.** Bytes reach ``data/<view>.csv`` and
-    ``images/<view>.svg`` before any manifest exists, so a scrub here would leave a credential in a
-    file it can never reach. Refusing the payload at the seam is what covers those; the two mechanisms
-    are not redundant, they cover disjoint artifacts.
+    ⚠️ It is a **backstop, and cannot be the guarantee.** Bytes reach ``data/<luid>.csv`` and
+    ``images/<luid>.svg`` before any manifest exists, so a scrub here would leave a credential in a
+    file it can never reach. Refusing the payload at the seam, and building paths only from a verified
+    LUID, are what cover those; the mechanisms are not redundant, they cover disjoint artifacts.
     """
     if isinstance(value, str):
         scrubbed = redactor(value)
         return scrubbed, ([trail or "<root>"] if scrubbed != value else [])
     if isinstance(value, dict):
-        out, hits = {}, []
+        out: dict = {}
+        hits: list[str] = []
         for key, item in value.items():
-            out[key], found = scrub_tree(item, redactor, f"{trail}.{key}" if trail else str(key))
+            safe_key, key_hit = _scrub_key(key, redactor, out)
+            here = f"{trail}.{safe_key}" if trail else str(safe_key)
+            if key_hit:
+                hits.append(f"{here} (key)")
+            out[safe_key], found = scrub_tree(item, redactor, here)
             hits.extend(found)
         return out, hits
     if isinstance(value, list):
@@ -475,6 +488,19 @@ def scrub_tree(value, redactor, trail: str = "") -> tuple[object, list[str]]:
             hits.extend(found)
         return out_list, hits
     return value, []
+
+
+def _scrub_key(key, redactor, taken: dict) -> tuple[object, bool]:
+    """Redact one dict key, disambiguating a collision rather than letting a field vanish."""
+    if not isinstance(key, str):
+        return key, False
+    scrubbed = redactor(key)
+    if scrubbed == key:
+        return key, False
+    unique, suffix = scrubbed, 2
+    while unique in taken:
+        unique, suffix = f"{scrubbed}#{suffix}", suffix + 1
+    return unique, True
 
 
 def engine_child_env(env: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:

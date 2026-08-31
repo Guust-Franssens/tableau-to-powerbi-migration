@@ -73,10 +73,8 @@ connected``. That failure is upstream of the output format, and only a human can
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import http.client
-import io
 import json
 import logging
 import random
@@ -91,6 +89,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_payload_facts import (  # noqa: E402  # pylint: disable=wrong-import-position
+    pdf_facts,
+    png_dimensions,
+    summarise_csv,
+    svg_facts,
+)
 from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
     pat_secret,
     redact,
@@ -134,17 +138,14 @@ DEFAULT_RETRY_BUDGET_SEC = 2.0 * REST_TIMEOUT_SEC
 NETWORK_ERROR_STATUS = 0
 TRANSIENT_STATUSES = frozenset({NETWORK_ERROR_STATUS, 429, 500, 502, 503, 504})
 
-_PERCENT = re.compile(r"^-?[\d,.]+%$")
-_CURRENCY = re.compile(r"^-?[$£€¥]\s?[\d,.]+$")
-_THOUSANDS = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
 
 # SVG export is gated by REST version. Below 3.29 the server refuses with this phrase and a 400 --
 # it does NOT silently fall back to PNG (measured on 3.21 / 3.24 / 3.28), so the sniff is safe.
 SVG_MIN_API_VERSION = "3.29"
 SVG_VERSION_MARKER = "SVG export requires API version"
-_SVG_ROOT_MM = re.compile(r'width="([\d.]+)mm"\s+height="([\d.]+)mm"')
-_SVG_HREF = re.compile(r'(?:xlink:)?href="([^"]{0,120})')
-_PDF_MEDIABOX = re.compile(rb"/MediaBox\s*\[([^\]]*)\]")
+# A Tableau LUID is a UUID. Checkable in full, so a value matching it is provably not a credential --
+# which is what lets `artifact_stem` be an allowlist rather than one more screen.
+_LUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 class ExportFailed(RuntimeError):
@@ -508,93 +509,30 @@ def list_views(session: TableauSession) -> list[dict[str, Any]]:
     return payload.get("views", {}).get("view", [])
 
 
-def detect_format(values: list[str]) -> str | None:
-    """Advisory hint: does this column arrive display-formatted rather than as a raw number?"""
-    sample = [v for v in values if v][:50]
-    if not sample:
-        return None
-    if all(_PERCENT.match(v) for v in sample):
-        return "percent"
-    if all(_CURRENCY.match(v) for v in sample):
-        return "currency"
-    if all(_THOUSANDS.match(v) for v in sample):
-        return "thousands_separated"
-    return None
+def artifact_stem(view_luid: str) -> str:
+    """The ONLY way an artifact filename is built, and it takes a LUID and nothing else.
 
+    ⚠️ This is a **closed allowlist**, and it replaces ``safe_slug(view["name"])`` -- deleted rather
+    than fixed. The name is response data: a reflected session token arriving as a view NAME was
+    slugged and truncated into ``data/<60-char-token-prefix>__<luid>.csv``, and because the truncated
+    prefix is no longer the literal the redactor searches for, no downstream scrub could recognise it.
+    Redacting before slugging would have fixed that one site; six review rounds say the next site is
+    the problem, not this one.
 
-def summarise_csv(payload: bytes) -> dict[str, Any]:
-    """Row/column shape plus per-column format hints, so a capture can be proven non-empty."""
-    text = payload.decode("utf-8-sig", "replace")
-    rows = list(csv.reader(io.StringIO(text)))
-    if not rows:
-        return {"row_count": 0, "columns": [], "format_hints": {}}
-    header, body = rows[0], rows[1:]
-    hints = {}
-    for idx, name in enumerate(header):
-        fmt = detect_format([r[idx] for r in body if idx < len(r)])
-        if fmt:
-            hints[name] = fmt
-    return {"row_count": len(body), "columns": header, "format_hints": hints}
+    So nothing is screened here. A filename is composed of a value whose shape we can VERIFY -- a
+    Tableau LUID is a UUID, checkable in full, and cannot contain a credential -- plus our own
+    constants. A response-derived string cannot reach a path because there is no longer any code that
+    puts one there.
 
-
-def safe_slug(text: str) -> str:
-    """Filesystem-safe stem. Lossy by design, which is why the LUID is appended by the caller."""
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_")[:60] or "view"
-
-
-def png_dimensions(payload: bytes) -> dict[str, int] | None:
-    """Width/height from the IHDR chunk. Recorded so the manifest states the reference's RESOLUTION.
-
-    ``resolution=high`` is not an open-ended quality dial: measured over all 52 capturable dashboards
-    on the trial site it returns **exactly 2x the dashboard's declared size**, with no exception and
-    no parameter that raises it. A 650x800 dashboard therefore tops out at 1300x1600 forever. Writing
-    the number down is what lets a consumer judge whether the reference can carry a content-level
-    verdict, instead of inferring it from the fact that a PNG exists (issue #403).
+    The cost is real and is the right trade: ``_oracle/data/`` now lists LUIDs rather than view names.
+    The manifest still maps ``view_name`` -> ``path`` for every view, so the readable index moved one
+    file over instead of disappearing.
     """
-    if len(payload) < 24 or payload[:8] != b"\x89PNG\r\n\x1a\n" or payload[12:16] != b"IHDR":
-        return None
-    return {"width": int.from_bytes(payload[16:20], "big"), "height": int.from_bytes(payload[20:24], "big")}
-
-
-def svg_facts(payload: bytes) -> dict[str, Any]:
-    """Geometry and machine-readable-text census for a REST SVG export.
-
-    Two properties make this the higher-fidelity reference, and both are asserted here rather than
-    assumed. (1) The root carries the dashboard's size in millimetres at 96 dpi, so the vector can be
-    rasterised at any scale with no geometry guess. Measured over all 52 capturable dashboards on the
-    trial site, ``round(mm * 96 / 25.4)`` is the dashboard's declared pixel size **plus exactly 1 px
-    in each axis** (a 1400x800 dashboard reports 370.681x211.931mm -> 1401x801) -- 52/52, no
-    exception. ``round`` and not ``int``: the true value lands just under the integer (1400.99), so
-    truncation is off by one for some dashboards and not others (measured: three different offsets
-    across the same 52), which is exactly the kind of silent inconsistency that makes a geometry field
-    untrustworthy.
-
-    ``width_px``/``height_px`` are the SVG's **own viewport**, not a restated ``/image`` size. For a
-    DASHBOARD that is ``/image?resolution=high`` / 2 + 1 per axis. Do not carry the +1 over to a
-    worksheet: one measured worksheet (``BAN Hired``, PNG 1584x1584) reported 792x792, i.e. offset 0,
-    and a single sample is not a law. Compare with the offset in mind rather than assuming equality.
-
-    (2) Labels arrive as real ``<text>`` elements holding the literal strings ("7,984", "Active
-    Employees"), so a consumer can read the dashboard's CONTENT without rendering anything at all.
-    ``text_elements`` is also the cost signal: a crosstab-shaped worksheet measured 37,439 of them in
-    a 21 MB SVG against a 4.5 MB PNG, so ``--svg`` is not free on text-dense views.
-
-    ``external_refs`` is the self-containment check: Tableau inlines raster sub-elements (maps, logos)
-    as ``data:`` URIs, so a non-zero count means the file needs the server to render and must not be
-    treated as durable offline evidence.
-    """
-    text = payload.decode("utf-8", "replace")
-    facts: dict[str, Any] = {
-        "text_elements": text.count("<text"),
-        "image_elements": text.count("<image"),
-        "path_elements": text.count("<path"),
-        "external_refs": len([h for h in _SVG_HREF.findall(text) if not h.startswith(("data:", "#"))]),
-    }
-    match = _SVG_ROOT_MM.search(text[:2000])
-    if match:
-        facts["width_px"] = round(float(match.group(1)) * 96 / 25.4)
-        facts["height_px"] = round(float(match.group(2)) * 96 / 25.4)
-    return facts
+    if not _LUID_RE.match(view_luid or ""):
+        raise ValueError(
+            f"refusing to build an artifact path from a non-LUID view identifier ({len(view_luid or '')} chars)"
+        )
+    return view_luid.lower()
 
 
 def capture_view(
@@ -616,7 +554,6 @@ def capture_view(
     """
     view_luid = view["id"]
     workbook = view.get("workbook", {}) or {}
-    stem = f"{safe_slug(view.get('name', ''))}__{view_luid[:8]}"
     record: dict[str, Any] = {
         "view_luid": view_luid,
         "view_name": view.get("name"),
@@ -627,6 +564,13 @@ def capture_view(
         "updated_at": view.get("updatedAt"),
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    try:
+        stem = artifact_stem(view_luid)
+    except ValueError as exc:
+        # A view whose identifier is not a LUID is not one we will invent a filename for. Every other
+        # candidate string on this record came out of a Tableau response.
+        record["data"] = {"status": "failed", "error": str(exc), "detail": "unusable view identifier"}
+        return record
 
     record["data"] = _capture_data(session, view_luid, out_dir / "data" / f"{stem}.csv", out_dir)
     if record["data"]["status"] != "ok":
@@ -675,31 +619,6 @@ _RENDER_ROUTES = {
     "pdf": ("pdf", "?type=Unspecified"),
 }
 _RENDER_EXTENSIONS = {"png": "png", "svg": "svg", "pdf": "pdf"}
-
-
-def pdf_facts(payload: bytes) -> dict[str, Any]:
-    """Page geometry and vector-ness of a REST PDF export, stdlib only.
-
-    ``/pdf`` reaches back to **API 2.8 / Tableau Server 10.5**, which is why it is the portable rung of
-    the ladder -- but "it returned a PDF" is not the same as "it returned the page I asked for", and
-    ``type=Unspecified`` is undocumented. Recording the ``MediaBox`` is what distinguishes the two: a
-    server that ignored the value falls back to a paper size (measured default **612x792 = Letter
-    portrait**, notwithstanding the docs' claim that the default is ``Legal`` = 612x1008).
-
-    ``fontfile_count`` is the fidelity note: unlike the SVG, a Tableau PDF **embeds** its fonts, so it
-    renders with the workbook's real typefaces on a machine that does not have them installed.
-    """
-    facts: dict[str, Any] = {
-        "vector": True,
-        "fontfile_count": len(re.findall(rb"/FontFile\d?", payload)),
-        "image_xobjects": len(re.findall(rb"/Subtype\s*/Image", payload)),
-    }
-    boxes = sorted({m.decode().strip() for m in _PDF_MEDIABOX.findall(payload)})
-    if boxes:
-        parts = boxes[0].split()
-        if len(parts) >= 4:
-            facts["page_pt"] = {"width": round(float(parts[2])), "height": round(float(parts[3]))}
-    return facts
 
 
 def _capture_render(
@@ -850,10 +769,16 @@ def select_views(
     return views, names
 
 
-def log_progress(index: int, total: int, record: dict[str, Any]) -> None:
-    """One line per view: proof of rows captured, or a loud, classified failure."""
+def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) -> None:
+    """One line per view: proof of rows captured, or a loud, classified failure.
+
+    ⚠️ The console is the THIRD artifact, after the manifest and the files. A view NAME is response
+    data -- a reflected token can arrive as one -- and this line used to slice it to 34 characters
+    before anything scrubbed it, which is the round-4 defect at a boundary round 4 never looked at.
+    CI keeps its logs, so "only the terminal" is not a mitigation.
+    """
     data = record.get("data", {})
-    name = (record.get("view_name") or "")[:34]
+    name = redacted_note(record.get("view_name"), redactor, limit=34)
     status = data.get("status")
     if status == "ok":
         marks = []
@@ -1031,9 +956,9 @@ def write_manifest(
         LOG.error(
             "\nThe manifest sink had to redact %d field(s) -- %s. A credential reached the manifest "
             "through a path that should have scrubbed it upstream; the file is safe, the code is not. "
-            "The AUTHENTICATING halves (PAT secret, session token) cannot reach here at all -- a "
-            "successful body carrying one is refused outright -- so this is most likely the PAT NAME "
-            "matching real content, which is cosmetic. Verify which, then fix the source.",
+            "Do NOT assume which credential: a reflected SESSION TOKEN can arrive as a view name from "
+            "an authenticated metadata call, which the export seam never sees. Find the source before "
+            "deciding this is the cosmetic PAT-name case.",
             len(sink_hits),
             ", ".join(sink_hits[:8]),
         )
@@ -1050,7 +975,7 @@ def write_manifest(
         manifest["elapsed_sec"],
         manifest_path,
     )
-    _log_blocked_and_stale(records, blocked, capability_report)
+    _log_blocked_and_stale(records, blocked, capability_report, run.session.redact_text)
     if reference_missing:
         LOG.error(
             "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
@@ -1079,9 +1004,14 @@ def write_manifest(
 
 
 def _log_blocked_and_stale(
-    records: list[dict[str, Any]], blocked: list[dict[str, Any]], capability_report: dict[str, Any] | None
+    records: list[dict[str, Any]], blocked: list[dict[str, Any]], capability_report: dict[str, Any] | None, redactor
 ) -> None:
-    """The two loud, differently-actionable warning classes, plus the probe's own warnings."""
+    """The two loud, differently-actionable warning classes, plus the probe's own warnings.
+
+    Every response-derived name goes through the chokepoint: these lines run BEFORE `scrub_tree` has
+    been applied to anything (it returns a scrubbed copy, it does not mutate `records`), so the
+    console would otherwise print the one thing the manifest was careful not to.
+    """
     if blocked:
         LOG.warning(
             "\n%d view(s) need a credential ON THE TABLEAU SIDE - no retry can fix this, a human must "
@@ -1097,7 +1027,12 @@ def _log_blocked_and_stale(
                 ),
                 None,
             )
-            LOG.warning("  - %s (%s): %s", record["view_name"], record.get("workbook_name"), detail)
+            LOG.warning(
+                "  - %s (%s): %s",
+                redacted_note(record.get("view_name"), redactor, limit=60),
+                redacted_note(record.get("workbook_name"), redactor, limit=60),
+                redacted_note(detail, redactor, limit=200),
+            )
     stale_api = [r for r in records if r.get("svg", {}).get("status") == "unsupported_api_version"]
     if stale_api:
         # Loud and separate from `blocked`: this one is fixed by an .env line, not by a human
@@ -1185,7 +1120,7 @@ def main() -> int:
         record = capture_view(session, view, out_dir, frozenset(wants), api_overrides)
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
         records.append(record)
-        log_progress(index, len(views), record)
+        log_progress(index, len(views), record, session.redact_text)
 
     exit_code = write_manifest(
         records,
