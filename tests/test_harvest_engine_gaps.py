@@ -2079,6 +2079,13 @@ def test_an_unscoped_race_leaves_no_pair_row_attributed(tmp_path, monkeypatch):
 
     assert any(not m.get("scoped", True) for m in report["snapshot_race"]["moved"]), "unscoped branch not reached"
     assert report["provenance"][heg.PROV_ENGINE] == 0
+    # ⚠️ Asserting only "no engine attribution" is too weak, and a mutation proved it: strip the
+    # unscoped rule and the unpaired record survives as a `tier_edit`, which violates neither that
+    # clause nor "no pair row claims the engine". The point of an unscoped race is that NO authorship
+    # claim stands, so the tier edit must have been withdrawn too.
+    assert report["provenance"][heg.PROV_TIER] == 0, "an unscoped race must withdraw tier claims as well"
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+    assert report["tier_edits"] == []
     assert not any(e["provenance"].get(heg.PROV_ENGINE, 0) for e in report["pairs"])
     assert not any(e["provenance"].get(heg.PROV_TIER, 0) for e in report["pairs"])
     assert _reconciles(report)
