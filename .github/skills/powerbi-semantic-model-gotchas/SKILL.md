@@ -382,6 +382,23 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
     as wrong and a type-only check waves it through. Only `*_Start` bins (`Year Start`,
     `Month Start`) are date-typed. Judge by **lineage back to the anchor date column**, which the
     gate now does; when neither type nor lineage proves it, treat it as unassessable, not clean.
+  - ⚠️ **It is a RECOGNISER, not a DAX parser — and that only became safe in round 4 of review.**
+    Its whole failure history is one shape: a spelling it did not recognise fell out of the analysis
+    in silence and the measure came back CLEAN. Measured 2026-08-31, all three by exit code:
+    `('Orders'[Order_Date] <= MAX('Orders'[Order_Date]))` — the same predicate, **parenthesised** —
+    exited **0** where the bare form exits 1; `MAX(t[c]) >= t[c]` exited **0**; a six-hop `VAR` chain
+    exited **0**. Any fragment it cannot fully account for is now **residue**, and residue can only
+    reach `unassessable`/exit 3. So when you hand it DAX outside its grammar — a negated bound
+    `NOT(t[c] > MAX(t[c]))`, a comparison inside `SWITCH`, a `FILTER` over a relation that clears
+    nothing — expect exit 3 and run the `EVALUATE` probe. That is the honest answer, not a gate bug.
+  - ⚠️ **Whether an as-of bound moves is NOT a property of the DAX alone — it depends on the visual.**
+    `CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'[Order Month Label]))` moves along
+    `Order_Date` and is **pinned** along `Order Month Label`, so on a month-label axis the measure is
+    an ordinary fixed-cutoff bucket measure whose per-bucket totals are its point. Its numbers are
+    identical to the collapsed accumulation this gate exists to catch; only the `REMOVEFILTERS`
+    argument tells them apart. Read the removal's argument before concluding a running total is
+    broken — the gate reported MISMATCH on that measure until round 4 (exit 1, against exit 0 for
+    the whole-table `REMOVEFILTERS('Orders')` spelling).
   - **It does NOT replace the `EVALUATE` probe, and says so in its own output.** An explicit relation
     argument, a cross-table as-of axis, a hierarchy projection, `ALLEXCEPT`, a measure-only visual, a
     column merely *named* like a date part, and any period-to-date measure whose date table is not
