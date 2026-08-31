@@ -463,6 +463,28 @@ def mask_noncode(text: str) -> str:
     return "".join(out)
 
 
+def _mask_identifiers(text: str) -> str:
+    """Blank the CONTENTS of quoted table names and bracketed column names as well.
+
+    `mask_noncode` deliberately preserves them - they carry the references this module reads. The
+    as-of DETECTOR reads no references at all, only whether an ordering operator is present, so it
+    gets the stricter mask: a table legally named `'a<b'` must not be read as a comparison.
+    """
+    out = list(text)
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] in "'[":
+            closer = "'" if text[index] == "'" else "]"
+            end = text.find(closer, index + 1)
+            end = length if end < 0 else end
+            _blank(out, index + 1, end)
+            index = end + 1
+            continue
+        index += 1
+    return "".join(out)
+
+
 def _blank(out: list[str], start: int, end: int) -> None:
     """Overwrite a span with spaces, keeping every later offset where it was."""
     for position in range(start, end):
@@ -648,7 +670,7 @@ def _detect_as_of(expr: str) -> list[AsOfCall]:
     """
     calls: list[AsOfCall] = []
     for body in _call_bodies(expr, "FILTER"):
-        if _ORDERING_COMPARISON_RE.search(body):
+        if _ORDERING_COMPARISON_RE.search(_mask_identifiers(body)):
             calls.append(
                 AsOfCall(
                     predicate=" ".join(body.split())[:160],

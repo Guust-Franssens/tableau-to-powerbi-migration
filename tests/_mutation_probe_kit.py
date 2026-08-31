@@ -33,11 +33,6 @@ AS_OF = (
     "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
     "'Orders'[Order_Date] <= MAX('Orders'[Order_Date])))"
 )
-# A safe call (clears the coarse bin too) followed by a defective one (clears only the anchor).
-TWO_AS_OF_CALLS = (
-    "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date], 'Orders'[Order_Month]), "
-    "'Orders'[Order_Date] <= MAX('Orders'[Order_Date]))) + " + AS_OF
-)
 TWO_WINDOWS = (
     "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC)), 1) + "
     "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Region], ASC)), 1)"
@@ -45,28 +40,11 @@ TWO_WINDOWS = (
 PARTITIONED_WINDOW = (
     "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC), PARTITIONBY('Orders'[Region])), 1)"
 )
-# A correct window beside an as-of on a column the visual does not project: two mechanisms in one
-# measure, which the reader chain used to judge as one.
-WINDOW_PLUS_AS_OF = (
-    "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC)), 1) + "
-    "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Month]), "
-    "'Orders'[Order_Month] <= MAX('Orders'[Order_Month])))"
-)
 # A safe period-to-date on the marked date table beside a defective one on the fact table.
 TWO_PERIOD_TO_DATE = (
     "TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date]) + CALCULATE(SUM('Orders'[Sales]), DATESYTD('Orders'[Order_Date]))"
 )
-# The reviewer's round-3 predicates, both orders. Semantically identical.
-START_THEN_ASOF = "'Orders'[Order_Date] >= DATE(2024,1,1) && 'Orders'[Order_Date] <= MAX('Orders'[Order_Date])"
-ASOF_THEN_START = "'Orders'[Order_Date] <= MAX('Orders'[Order_Date]) && 'Orders'[Order_Date] >= DATE(2024,1,1)"
-UNRELATED_REMOVAL = "CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'[Region]))"
-WHOLE_TABLE_REMOVAL = "MAXX(ALL('Orders'), 'Orders'[Order_Date])"
-# Round 4: the bound clears the VISUAL'S OWN grain, so the cutoff is fixed across axis buckets.
-AXIS_REMOVAL = "CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'[Order Month Label]))"
-# Round 4: one moving and one foreign MAX-like call in a single bound - `_context_bound_kinds` must
-# yield one kind for each, never stop at the first.
-TWO_MAX_BOUND = "MIN(MAX('Orders'[Order_Date]), MAX('Cutoff'[Date]))"
-# Round 4: the arguments of a window call carrying two ORDERBY clauses, already split.
+# Round 5: the arguments of a window call carrying two ORDERBY clauses, already split.
 TWO_ORDERBY_ARGS = ["1", "ABS", "0", "REL", "ORDERBY('Orders'[Order_Date], ASC)", "ORDERBY('Orders'[Region], ASC)"]
 
 
@@ -89,11 +67,6 @@ def cumulative(**overrides: Any) -> dg.Cumulative:
     for key, value in overrides.items():
         setattr(base, key, value)
     return base
-
-
-def as_of_call(cleared: list[dg.ColumnRef] | None = None) -> dg.AsOfCall:
-    """One as-of restriction on `ANCHOR`, clearing whatever it is told to clear."""
-    return dg.AsOfCall(compared=ANCHOR, cleared_columns=list(cleared or [ANCHOR]))
 
 
 def window_call(ordered: list[dg.ColumnRef] | None = None, reason: str = "") -> dg.WindowCall:

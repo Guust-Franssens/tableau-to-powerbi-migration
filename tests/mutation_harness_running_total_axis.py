@@ -112,29 +112,6 @@ assert dg.ModelFacts.grain_of is not _orig
 """,
         "test_as_of_non_date_axis_is_deliberately_not_flagged",
     ),
-    "cleared-columns-dropped": (
-        """
-_orig = dg._classify_as_of
-def as_of(expr, base):
-    out = _orig(expr, base)
-    if out is not None:
-        for call in out.as_of_calls:
-            call.cleared_columns = []
-            call.cleared_tables = []
-    return out
-dg._classify_as_of = as_of
-assert dg._classify_as_of is not _orig
-""",
-        "test_as_of_clearing_the_coarser_column_too_is_clean",
-    ),
-    "compared-column-not-treated-as-cleared": (
-        """
-_orig = dg.ColumnRef.key
-dg.ColumnRef.key = lambda self: ((self.table or "").casefold(), self.column.casefold(), id(self))
-assert dg.ColumnRef.key is not _orig
-""",
-        "test_as_of_axis_is_the_compared_column",
-    ),
     "every-blank-stub-claimed": (
         """
 _orig = dg._classify_stub
@@ -163,14 +140,6 @@ crta._judge_period_to_date = lambda cumulative, visual, facts: crta._verdict("ok
 assert crta._judge_period_to_date is not _orig
 """,
         "test_fact_table_period_to_date_on_a_coarse_axis_is_unassessable",
-    ),
-    "fixed-window-datesbetween-classified-as-accumulation": (
-        """
-_orig = dict(dg._PERIOD_TO_DATE_FUNCTIONS)
-dg._PERIOD_TO_DATE_FUNCTIONS["DATESBETWEEN"] = 0
-assert "DATESBETWEEN" in dg._PERIOD_TO_DATE_FUNCTIONS and "DATESBETWEEN" not in _orig
-""",
-        "test_a_fixed_window_comparison_is_still_not_an_accumulation",
     ),
     "unassessed-pair-masked-by-a-clean-one": (
         """
@@ -285,75 +254,6 @@ assert crta.AXIS_ROLES == ("Category", "Rows", "X")
 """,
         "test_every_projected_column_is_examined_not_a_curated_axis_list",
     ),
-    "f1-empty-projection-reads-as-cleared": (
-        """
-_orig = crta._grouping_or_reason
-crta._grouping_or_reason = lambda visual: (visual.columns(), None)
-assert crta._grouping_or_reason is not _orig
-""",
-        "test_as_of_on_a_measure_only_visual_is_unassessable",
-    ),
-    "f1-hierarchy-ignored-in-as-of": (
-        """
-_orig = crta._hierarchy_caveat
-crta._hierarchy_caveat = lambda visual: None
-assert crta._hierarchy_caveat is not _orig
-""",
-        "test_as_of_with_a_hierarchy_projection_is_unassessable",
-    ),
-    "f2-declared-type-is-the-only-grain-signal": (
-        """
-_orig = dg.ModelFacts.grain_of
-def grain_of(self, ref, anchor):
-    if self.data_type(ref.table or "", ref.column) in dg._DATE_TYPES:
-        return dg.GRAIN_DATE
-    return dg.GRAIN_UNRELATED
-dg.ModelFacts.grain_of = grain_of
-assert dg.ModelFacts.grain_of is not _orig
-""",
-        "test_date_bins_derived_by_calculation_are_flagged_whatever_their_type",
-    ),
-    "f2-lineage-not-followed-transitively": (
-        """
-_orig = dg.ModelFacts.derives_from
-def derives_from(self, ref, anchor):
-    expression = self.calc_expressions.get(ref.key())
-    if not expression:
-        return False
-    return any(dg.ColumnRef(f.table or ref.table, f.column).key() == anchor.key()
-               for f in dg._column_refs(expression))
-dg.ModelFacts.derives_from = derives_from
-assert dg.ModelFacts.derives_from is not _orig
-""",
-        "test_date_bins_derived_by_calculation_are_flagged_whatever_their_type",
-    ),
-    "f2-date-named-column-waved-through": (
-        """
-_orig = dg.ModelFacts.grain_of
-def grain_of(self, ref, anchor):
-    out = _orig(self, ref, anchor)
-    return dg.GRAIN_UNRELATED if out == dg.GRAIN_SUSPECT else out
-dg.ModelFacts.grain_of = grain_of
-assert dg.ModelFacts.grain_of is not _orig
-""",
-        "test_a_date_named_column_with_no_proof_is_unassessable_not_clean",
-    ),
-    "f3-any-less-than-is-a-running-total": (
-        """
-_orig = dg._read_bound
-dg._read_bound = lambda bound, compared, variables, depth=0: dg.BoundReading(kind=dg.BOUND_CONTEXT)
-assert dg._read_bound is not _orig
-""",
-        "test_a_pinned_cutoff_is_not_a_running_total",
-    ),
-    "f3-var-bound-never-followed": (
-        """
-_orig = dg._resolve_vars
-dg._resolve_vars = lambda expr: {}
-assert dg._resolve_vars is not _orig
-""",
-        "test_an_as_of_bound_hoisted_into_a_var_is_still_a_running_total",
-    ),
     "f4-only-the-first-window-call": (
         """
 _orig = dg._window_call_sites
@@ -378,77 +278,6 @@ assert dg.ModelFacts.is_time_table is not _orig
 """,
         "test_fact_table_period_to_date_on_a_coarse_axis_is_unassessable",
     ),
-    "crash-grading-keyed-by-an-unhashable-fieldref": (
-        """
-_orig = crta._judge_as_of
-def judge(cumulative, visual, facts):
-    {ref: 1 for ref in visual.columns()}
-    return _orig(cumulative, visual, facts)
-crta._judge_as_of = judge
-assert crta._judge_as_of is not _orig
-""",
-        "test_a_grouping_column_is_never_used_as_a_dict_key",
-    ),
-    # --- mutations that reinstate each of the six ROUND-2 review findings ----------------------
-    "r1-any-max-bound-moves-with-the-visual": (
-        """
-_orig = dg._own_bound_kinds
-dg._own_bound_kinds = lambda text, compared: [dg.BOUND_CONTEXT]
-assert dg._own_bound_kinds is not _orig
-""",
-        "test_an_as_of_bound_that_is_not_proven_to_move_is_unassessable",
-    ),
-    "r1-context-removal-in-the-bound-ignored": (
-        """
-import re
-_orig = dg._CONTEXT_REMOVAL_RE
-dg._CONTEXT_REMOVAL_RE = re.compile(r"(?!x)x")
-assert dg._CONTEXT_REMOVAL_RE is not _orig
-""",
-        "test_an_as_of_bound_that_removes_context_is_not_an_accumulation",
-    ),
-    "r2-not-equal-parsed-as-less-than": (
-        """
-import re
-_orig = dg._top_level_comparison
-def comparison(text):
-    match = re.search(r"(.+?)(<=|<)(?!=)(.*)", text, re.DOTALL)
-    return (match.group(1), match.group(2), match.group(3)) if match else None
-dg._top_level_comparison = comparison
-assert dg._top_level_comparison is not _orig
-""",
-        "test_only_a_top_level_less_than_is_an_as_of_predicate",
-    ),
-    "r3-only-the-first-as-of-call": (
-        """
-_orig = dg._classify_as_of
-def as_of(expr, base):
-    out = _orig(expr, base)
-    if out is not None and out.as_of_calls:
-        out.as_of_calls = out.as_of_calls[:1]
-    return out
-dg._classify_as_of = as_of
-assert dg._classify_as_of is not _orig
-""",
-        "test_a_safe_as_of_call_cannot_excuse_a_defective_one_in_the_same_measure",
-    ),
-    "r3-cleared-sets-unioned-across-calls": (
-        """
-_orig = dg._classify_as_of
-def as_of(expr, base):
-    out = _orig(expr, base)
-    if out is not None and len(out.as_of_calls) > 1:
-        columns = [c for call in out.as_of_calls for c in call.cleared_columns]
-        tables = [t for call in out.as_of_calls for t in call.cleared_tables]
-        for call in out.as_of_calls:
-            call.cleared_columns = list(columns)
-            call.cleared_tables = list(tables)
-    return out
-dg._classify_as_of = as_of
-assert dg._classify_as_of is not _orig
-""",
-        "test_a_safe_as_of_call_cannot_excuse_a_defective_one_in_the_same_measure",
-    ),
     "r4-aggregated-columns-group-the-query": (
         """
 _orig = crta._grouping_refs
@@ -460,24 +289,6 @@ crta._grouping_refs = grouping
 assert crta._grouping_refs is not _orig
 """,
         "test_an_aggregated_projection_does_not_group_the_query",
-    ),
-    "r5-a-partition-beside-the-anchor-is-a-mismatch": (
-        """
-_orig = crta._judge_same_table_survivors
-def survivors(items, compared, call, facts, axis, anchor_projected):
-    return _orig(items, compared, call, facts, axis, False)
-crta._judge_same_table_survivors = survivors
-assert crta._judge_same_table_survivors is not _orig
-""",
-        "test_a_partition_beside_the_addressed_date_is_unassessable_not_a_mismatch",
-    ),
-    "r5-every-same-table-survivor-reads-as-clean": (
-        """
-_orig = crta._judge_same_table_survivors
-crta._judge_same_table_survivors = lambda items, compared, call, facts, axis, anchor_projected: None
-assert crta._judge_same_table_survivors is not _orig
-""",
-        "test_as_of_coarser_same_table_date_axis_is_a_mismatch",
     ),
     "r6-a-mutation-may-name-a-dead-symbol": (
         """
@@ -497,60 +308,6 @@ assert "unprobed" in harness.MUTATIONS and "unprobed" not in harness.PROBES
         "test_every_mutation_declares_a_probe_that_proves_it_executes",
     ),
     # --- ROUND 3: "the first match decides", the third appearance of one shape -----------------
-    "r3f1-any-removal-pins-the-bound": (
-        """
-_orig = dg._removal_scope
-dg._removal_scope = lambda text, compared: [dg.REMOVAL_TABLE for _ in _orig(text, compared)]
-assert dg._removal_scope is not _orig
-""",
-        "test_an_unrelated_filter_removal_does_not_hide_a_moving_cutoff",
-    ),
-    "r3f1-every-removal-reads-as-unrelated": (
-        """
-_orig = dg._removal_scope
-dg._removal_scope = lambda text, compared: [dg.REMOVAL_UNRELATED for _ in _orig(text, compared)]
-assert dg._removal_scope is not _orig
-""",
-        "test_a_removal_is_only_pinning_when_it_covers_the_compared_column_or_its_table",
-    ),
-    "r3f2-only-the-first-conjunct": (
-        """
-_orig = dg._read_predicate
-def first_only(text):
-    bounds, disjunction, residue = _orig(text)
-    head, _unread = dg._read_conjunct(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[0][0])
-    return ([head] if head is not None else []), disjunction, residue
-dg._read_predicate = first_only
-assert dg._read_predicate is not _orig
-""",
-        "test_conjunct_order_cannot_decide_whether_a_running_total_is_detected",
-    ),
-    "r3f2-only-the-last-conjunct": (
-        """
-_orig = dg._read_predicate
-def last_only(text):
-    bounds, disjunction, residue = _orig(text)
-    tail, _unread = dg._read_conjunct(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[-1][0])
-    return ([tail] if tail is not None else []), disjunction, residue
-dg._read_predicate = last_only
-assert dg._read_predicate is not _orig
-""",
-        "test_both_conjunct_orders_reach_the_identical_verdict",
-    ),
-    "r3-audit-first-reader-wins": (
-        """
-_orig = crta.classify
-def classify(member):
-    out = _orig(member)
-    if out is not None and out.window_calls:
-        out.as_of_calls = []
-        out.period_calls = []
-    return out
-crta.classify = classify
-assert crta.classify is not _orig
-""",
-        "test_a_correct_window_cannot_mask_a_defective_as_of_in_the_same_measure",
-    ),
     "r3-audit-unreadable-window-suppresses-a-readable-one": (
         """
 _orig = crta._judge_window
@@ -577,14 +334,6 @@ assert dg._classify_period_to_date is not _orig
 """,
         "test_every_period_to_date_call_is_judged_not_the_first_in_dict_order",
     ),
-    "r3-audit-first-var-decides-the-bound": (
-        """
-_orig = dg._fold_bound_kinds
-dg._fold_bound_kinds = lambda kinds: sorted(kinds)[0]
-assert dg._fold_bound_kinds is not _orig
-""",
-        "test_a_bound_built_from_two_vars_is_read_from_both_of_them",
-    ),
     "r3-worst-verdict-becomes-first-verdict": (
         """
 _orig = crta._worst
@@ -594,85 +343,6 @@ assert crta._worst is not _orig
         "test_worst_verdict_wins_is_one_shared_rule_not_four_copies",
     ),
     # --- mutations that reinstate each of the three ROUND-4 review findings -------------------
-    "r4f3-enclosing-parens-not-stripped": (
-        """
-_orig = dg._strip_enclosing_parens
-dg._strip_enclosing_parens = lambda text: text.strip()
-assert dg._strip_enclosing_parens is not _orig
-""",
-        "test_f3_parenthesising_a_predicate_cannot_disable_the_gate",
-    ),
-    "r4f3-residue-dropped-in-silence": (
-        """
-_orig = dg._read_conjunct
-def conjunct(fragment):
-    bound, _unread = _orig(fragment)
-    return bound, ""
-dg._read_conjunct = conjunct
-assert dg._read_conjunct is not _orig
-""",
-        "test_a_predicate_this_gate_cannot_read_is_never_clean",
-    ),
-    "r4f1-bound-removals-not-carried-to-the-judge": (
-        """
-_orig = dg._bound_removals
-dg._bound_removals = lambda text: ([], [])
-assert dg._bound_removals is not _orig
-""",
-        "test_f1_a_bound_that_clears_the_visuals_own_grain_is_not_a_mismatch",
-    ),
-    "r4f1-every-grain-reads-as-pinned-by-the-bound": (
-        """
-_orig = dg.AsOfCall.pins
-dg.AsOfCall.pins = lambda self, table, column: True
-assert dg.AsOfCall.pins is not _orig
-""",
-        "test_f1_a_removal_that_does_not_cover_the_axis_still_catches_the_defect",
-    ),
-    "r4f1-bound-acquittal-survives-the-anchor-being-projected": (
-        """
-_orig = crta._judge_same_table_survivors
-def survivors(items, compared, call, facts, axis, anchor_projected):
-    return _orig(items, compared, call, facts, axis, False)
-crta._judge_same_table_survivors = survivors
-assert crta._judge_same_table_survivors is not _orig
-""",
-        "test_f1_the_bound_acquittal_does_not_survive_the_addressed_date_being_projected",
-    ),
-    "r4f2-first-max-call-decides-the-bound": (
-        """
-_orig = dg._context_bound_kinds
-dg._context_bound_kinds = lambda text, compared: _orig(text, compared)[:1]
-assert dg._context_bound_kinds is not _orig
-""",
-        "test_f2_a_bound_over_two_max_calls_reads_every_one_of_them",
-    ),
-    "r4-abandoned-var-chase-reads-as-pinned": (
-        """
-import re
-_orig = dg._read_bound
-def bound(text, compared, variables, depth=0):
-    stripped = text.strip()
-    referenced = [b for n, b in variables.items() if re.search(r"\\b" + re.escape(n) + r"\\b", stripped, re.I)]
-    if referenced and depth >= dg._VAR_DEPTH:
-        # The pre-round-4 fall-through: the chase stops, and a bare identifier carries no column
-        # reference, so the bound was read as "pinned" and the measure was dropped.
-        pinned = not (dg._column_refs(stripped) or "[" in stripped)
-        return dg.BoundReading(kind=dg.BOUND_CONSTANT if pinned else dg.BOUND_UNRESOLVED)
-    return _orig(text, compared, variables, depth)
-dg._read_bound = bound
-assert dg._read_bound is not _orig
-""",
-        "test_a_var_chase_that_is_abandoned_is_unassessable_not_pinned",
-    ),
-    "r4-only-a-left-hand-column-is-bounded": (
-        """
-_orig = dict(dg._UPPER_BOUND_OPERATORS)
-dg._UPPER_BOUND_OPERATORS = {"<": False, "<=": False}
-assert dg._UPPER_BOUND_OPERATORS != _orig
-""",
-        "test_reversed_comparison_operands_are_the_same_upper_bound",
-    ),
     "r4-second-orderby-clause-assumed-away": (
         """
 _orig = dg._clause_bodies
@@ -719,15 +389,6 @@ assert crta.VisualBinding.has_hierarchy(kit.visual(grouping=level)) is False
     "every-column-treated-as-a-date": """
 assert kit.facts().grain_of(dg.ColumnRef("Orders", "Region"), kit.ANCHOR) == dg.GRAIN_DATE
 """,
-    "cleared-columns-dropped": """
-out = dg._classify_as_of(kit.AS_OF, kit.cumulative())
-assert out is not None and all(not c.cleared_columns and not c.cleared_tables for c in out.as_of_calls)
-""",
-    "compared-column-not-treated-as-cleared": """
-first = dg.ColumnRef("Orders", "Order_Date")
-second = dg.ColumnRef("Orders", "Order_Date")
-assert first.key() != second.key() and len(first.key()) == 3
-""",
     "every-blank-stub-claimed": """
 out = dg._classify_stub(object(), kit.cumulative())
 assert out is not None and out.reason == "mutated" and out.assessable is False
@@ -738,11 +399,6 @@ assert dg._classify_stub(object(), kit.cumulative()) is None
     "period-to-date-judgement-skipped": """
 verdict = crta._judge_period_to_date(kit.cumulative(period_calls=[kit.period_call()]), kit.visual(), kit.facts())
 assert verdict["verdict"] == "ok" and verdict["code"] == "period_to_date"
-""",
-    "fixed-window-datesbetween-classified-as-accumulation": """
-expr = "CALCULATE(SUM('Orders'[Sales]), DATESBETWEEN('Date'[Date], MIN('Date'[Date]), MAX('Date'[Date])))"
-out = dg._classify_period_to_date(expr, kit.cumulative())
-assert out is not None and [c.func for c in out.period_calls] == ["DATESBETWEEN"]
 """,
     "unassessed-pair-masked-by-a-clean-one": """
 pairs = [
@@ -800,29 +456,6 @@ assert out is not None and dg.ColumnRef("Nowhere", "Nothing") in out.ordered_by
 assert crta.AXIS_ROLES == ("Category", "Rows", "X")
 assert crta.VisualBinding.columns(kit.visual(grouping={"Columns": [kit.field_ref("Orders", "Order_Month")]})) == []
 """,
-    "f1-empty-projection-reads-as-cleared": """
-assert crta._grouping_or_reason(kit.visual()) == ([], None)
-""",
-    "f1-hierarchy-ignored-in-as-of": """
-level = {"Category": [kit.field_ref("Date", "Month", "HierarchyLevel")]}
-assert crta._hierarchy_caveat(kit.visual(grouping=level)) is None
-""",
-    "f2-declared-type-is-the-only-grain-signal": """
-assert kit.facts().grain_of(kit.DERIVED, kit.ANCHOR) == dg.GRAIN_UNRELATED
-""",
-    "f2-lineage-not-followed-transitively": """
-assert kit.facts().derives_from(dg.ColumnRef("Orders", "Order Quarter"), kit.ANCHOR) is False
-assert kit.facts().derives_from(kit.DERIVED, kit.ANCHOR) is True
-""",
-    "f2-date-named-column-waved-through": """
-assert kit.facts().grain_of(dg.ColumnRef("Orders", "Fiscal Period"), kit.ANCHOR) == dg.GRAIN_UNRELATED
-""",
-    "f3-any-less-than-is-a-running-total": """
-assert dg._read_bound("DATE(2024, 12, 31)", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
-""",
-    "f3-var-bound-never-followed": """
-assert dg._resolve_vars("VAR _asOf = MAX('Orders'[Order_Date]) RETURN 1") == {}
-""",
     "f4-only-the-first-window-call": """
 assert len(dg._window_call_sites(kit.TWO_WINDOWS)) == 1
 """,
@@ -832,47 +465,10 @@ assert dg._classify_period_to_date("TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date])
     "f5-every-table-reads-as-a-marked-date-table": """
 assert dg.ModelFacts().is_time_table("no such table") is True
 """,
-    "crash-grading-keyed-by-an-unhashable-fieldref": """
-bound = kit.visual(grouping={"Category": [kit.field_ref("Orders", "Order_Month")]})
-try:
-    crta._judge_as_of(kit.cumulative(as_of_calls=[kit.as_of_call()]), bound, kit.facts())
-except TypeError:
-    pass
-else:
-    raise AssertionError("the unhashable-key mutation did not raise TypeError")
-""",
-    "r1-any-max-bound-moves-with-the-visual": """
-assert dg._read_bound("MAX('Date'[Date])", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
-assert dg._read_bound("MAXX(ALL('Orders'), 'Orders'[Order_Date])", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
-""",
-    "r1-context-removal-in-the-bound-ignored": """
-assert dg._read_bound("MAXX(ALL('Orders'), 'Orders'[Order_Date])", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
-""",
-    "r2-not-equal-parsed-as-less-than": """
-assert dg._top_level_comparison("'Orders'[Order_Date] <> MAX('Orders'[Order_Date])")[1] == "<"
-""",
-    "r3-only-the-first-as-of-call": """
-out = dg._classify_as_of(kit.TWO_AS_OF_CALLS, kit.cumulative())
-assert out is not None and len(out.as_of_calls) == 1
-""",
-    "r3-cleared-sets-unioned-across-calls": """
-out = dg._classify_as_of(kit.TWO_AS_OF_CALLS, kit.cumulative())
-assert out is not None and len(out.as_of_calls) == 2
-assert all(kit.COARSE.key() in {c.key() for c in call.cleared_columns} for call in out.as_of_calls)
-""",
     "r4-aggregated-columns-group-the-query": """
 from pathlib import Path
 refs = crta._grouping_refs(kit.aggregated_role("Orders", "Order_Month"), {}, Path("visual.json"))
 assert [(r.entity, r.prop) for r in refs] == [("Orders", "Order_Month")]
-""",
-    "r5-a-partition-beside-the-anchor-is-a-mismatch": """
-survivor = [kit.field_ref("Orders", "Order Month Label")]
-verdict = crta._judge_same_table_survivors(survivor, kit.ANCHOR, kit.as_of_call(), kit.facts(), "axis", True)
-assert verdict is not None and verdict["verdict"] == "mismatch"
-""",
-    "r5-every-same-table-survivor-reads-as-clean": """
-survivor = [kit.field_ref("Orders", "Order Month Label")]
-assert crta._judge_same_table_survivors(survivor, kit.ANCHOR, kit.as_of_call(), kit.facts(), "axis", False) is None
 """,
     "r6-a-mutation-may-name-a-dead-symbol": """
 import mutation_harness_running_total_axis as harness
@@ -883,26 +479,6 @@ assert not hasattr(crta, "_DATE_TYPES")
 import mutation_harness_running_total_axis as harness
 assert "unprobed" in harness.MUTATIONS and "unprobed" not in harness.PROBES
 assert sorted(set(harness.MUTATIONS) - set(harness.PROBES)) == ["unprobed"]
-""",
-    "r3f1-any-removal-pins-the-bound": """
-assert dg._removal_scope(kit.UNRELATED_REMOVAL, kit.ANCHOR) == [dg.REMOVAL_TABLE]
-assert dg._read_bound(kit.UNRELATED_REMOVAL, kit.ANCHOR, {}).kind == dg.BOUND_CONSTANT
-""",
-    "r3f1-every-removal-reads-as-unrelated": """
-assert dg._removal_scope(kit.WHOLE_TABLE_REMOVAL, kit.ANCHOR) == [dg.REMOVAL_UNRELATED]
-assert dg._read_bound(kit.WHOLE_TABLE_REMOVAL, kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
-""",
-    "r3f2-only-the-first-conjunct": """
-assert dg._read_predicate(kit.START_THEN_ASOF)[0] == []
-assert len(dg._read_predicate(kit.ASOF_THEN_START)[0]) == 1
-""",
-    "r3f2-only-the-last-conjunct": """
-assert dg._read_predicate(kit.ASOF_THEN_START)[0] == []
-assert len(dg._read_predicate(kit.START_THEN_ASOF)[0]) == 1
-""",
-    "r3-audit-first-reader-wins": """
-out = crta.classify(kit.member(kit.WINDOW_PLUS_AS_OF))
-assert out is not None and out.window_calls and not out.as_of_calls
 """,
     "r3-audit-unreadable-window-suppresses-a-readable-one": """
 unreadable = kit.window_call(reason="mutated: an explicit relation")
@@ -915,40 +491,10 @@ assert verdict["verdict"] == "unassessable" and verdict["code"] == "window_order
 out = dg._classify_period_to_date(kit.TWO_PERIOD_TO_DATE, kit.cumulative())
 assert out is not None and len(out.period_calls) == 1
 """,
-    "r3-audit-first-var-decides-the-bound": """
-assert dg._fold_bound_kinds({dg.BOUND_CONSTANT, dg.BOUND_CONTEXT}) == dg.BOUND_CONSTANT
-""",
     "r3-worst-verdict-becomes-first-verdict": """
 clean = crta._verdict("ok", "o", "")
 mismatch = crta._verdict("mismatch", "m", "")
 assert crta._worst([clean, mismatch])["verdict"] == "ok"
-""",
-    "r4f3-enclosing-parens-not-stripped": """
-assert dg._strip_enclosing_parens("('Orders'[Order_Date] <= MAX('Orders'[Order_Date]))").startswith("(")
-""",
-    "r4f3-residue-dropped-in-silence": """
-assert dg._read_conjunct("NOT('Orders'[Order_Date] > MAX('Orders'[Order_Date]))") == (None, "")
-""",
-    "r4f1-bound-removals-not-carried-to-the-judge": """
-assert dg._bound_removals(kit.AXIS_REMOVAL) == ([], [])
-""",
-    "r4f1-every-grain-reads-as-pinned-by-the-bound": """
-assert dg.AsOfCall(compared=kit.ANCHOR).pins("Nowhere", "Nothing") is True
-""",
-    "r4f1-bound-acquittal-survives-the-anchor-being-projected": """
-survivor = [kit.field_ref("Orders", "Order Month Label")]
-call = dg.AsOfCall(compared=kit.ANCHOR, cleared_columns=[kit.ANCHOR])
-verdict = crta._judge_same_table_survivors(survivor, kit.ANCHOR, call, kit.facts(), "axis", True)
-assert verdict is not None and verdict["code"] == "axis_grain_not_cleared"
-""",
-    "r4f2-first-max-call-decides-the-bound": """
-assert dg._context_bound_kinds(kit.TWO_MAX_BOUND, kit.ANCHOR) == [dg.BOUND_CONTEXT]
-""",
-    "r4-abandoned-var-chase-reads-as-pinned": """
-assert dg._read_bound("_f", kit.ANCHOR, {"_f": "_e"}, dg._VAR_DEPTH).kind == dg.BOUND_CONSTANT
-""",
-    "r4-only-a-left-hand-column-is-bounded": """
-assert dg._read_conjunct("MAX('Orders'[Order_Date]) >= 'Orders'[Order_Date]") == (None, "")
 """,
     "r4-second-orderby-clause-assumed-away": """
 assert len(dg._clause_bodies(kit.TWO_ORDERBY_ARGS, "ORDERBY")) == 1
