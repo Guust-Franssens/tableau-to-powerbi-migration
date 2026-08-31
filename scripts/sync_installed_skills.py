@@ -73,6 +73,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,6 +117,8 @@ class PublishSource:
     ref: str | None
     commit: str | None
     described: str
+    default_verified: bool = False
+    alternatives: tuple[str, ...] = ()
 
     @property
     def from_worktree(self) -> bool:
@@ -134,20 +137,76 @@ def _git(args: list[str], *, repo: Path | None = None, binary: bool = False) -> 
     )
 
 
-def resolve_publish_ref(explicit: str | None = None, *, repo: Path | None = None) -> PublishSource:
-    """Resolve the merged ref whose bundles are authoritative, or raise.
+def remote_default_ref(repo: Path | None = None) -> str | None:
+    """Ask the REMOTE which branch it advertises as HEAD, mapped to its remote-tracking ref.
+
+    `refs/remotes/origin/HEAD` is a *local* symbolic ref, and `git fetch` does NOT refresh it when
+    the remote's default branch is renamed. Reproduced in review: a bare remote moved `master` ->
+    `main` with different skill content, `git fetch` exited 0, the local marker still said
+    `origin/master`, and the sync published master as if it were the default. `ls-remote --symref`
+    is the one question that cannot go stale - and unlike `git remote set-head --auto` it writes
+    nothing into the repository.
+    """
+    listed = _git(["ls-remote", "--symref", "origin", "HEAD"], repo=repo)
+    if listed.returncode != 0:
+        return None
+    for line in listed.stdout.splitlines():
+        if not line.startswith("ref:"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].startswith("refs/heads/"):
+            return "refs/remotes/origin/" + parts[1][len("refs/heads/") :]
+    return None
+
+
+def _default_alternatives(commit: str, repo: Path | None = None) -> tuple[str, ...]:
+    """Local default-branch refs whose commit DIFFERS from the chosen one - i.e. a possible rename.
+
+    Only differing refs count: on a normal clone `origin/HEAD` and `origin/master` are the same
+    commit, so this stays silent. It speaks up in exactly the shape review reproduced - a stale
+    `origin/HEAD` beside a fresher `origin/main`.
+    """
+    found = []
+    for name in ("refs/remotes/origin/master", "refs/remotes/origin/main"):
+        probe = _git(["rev-parse", "--verify", "--quiet", f"{name}^{{commit}}"], repo=repo)
+        other = probe.stdout.strip()
+        if probe.returncode == 0 and other and other != commit:
+            found.append(name)
+    return tuple(found)
+
+
+def resolve_publish_ref(
+    explicit: str | None = None,
+    *,
+    repo: Path | None = None,
+    verify_remote_default: bool = False,
+) -> PublishSource:
+    """Resolve the merged COMMIT whose bundles are authoritative, or raise.
 
     Refusing to fall back to the working tree is the point. A silent fallback is the exact shape of
     the bug being replaced: it would publish unmerged content on precisely the machines whose git
     layout is unusual, and say nothing about it.
+
+    The commit is what everything downstream uses; the ref name is only a display label. A ref
+    moves - `origin/master` advanced during this PR's own review - so resolving by name and then
+    exporting by name reads two different trees while reporting the first (review finding 3).
     """
-    candidates = [explicit] if explicit else list(PUBLISH_REF_CANDIDATES)
-    for candidate in candidates:
+    advertised = remote_default_ref(repo) if (verify_remote_default and not explicit) else None
+    order: list[str] = [explicit] if explicit else [*([advertised] if advertised else []), *PUBLISH_REF_CANDIDATES]
+    for candidate in order:
         probe = _git(["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"], repo=repo)
         commit = probe.stdout.strip()
         if probe.returncode == 0 and commit:
-            return PublishSource(kind="ref", ref=candidate, commit=commit, described=f"{candidate} @ {commit[:12]}")
-    raise PublishRefError("cannot resolve the merged publish ref (tried: " + ", ".join(map(str, candidates)) + ")")
+            verified = bool(explicit) or candidate == advertised
+            return PublishSource(
+                kind="ref",
+                ref=candidate,
+                commit=commit,
+                described=f"{candidate} @ {commit[:12]}",
+                default_verified=verified,
+                alternatives=() if verified else _default_alternatives(commit, repo),
+            )
+    raise PublishRefError("cannot resolve the merged publish ref (tried: " + ", ".join(map(str, order)) + ")")
 
 
 def fetch_origin(repo: Path | None = None) -> tuple[bool, str]:
@@ -223,8 +282,15 @@ def build_reference_copy(workdir: Path, source_root: Path) -> Path:
     return built[0]
 
 
-def diff_tree(src: Path, dst: Path) -> tuple[list[Path], list[Path]]:
-    """Return (files needing copy, files present in dst but not src), as paths relative to src."""
+def diff_tree(src: Path, dst: Path, scope: Sequence[str] | None = None) -> tuple[list[Path], list[Path]]:
+    """Return (files needing copy, files present in dst but not src), as paths relative to src.
+
+    `scope` bounds the DELETION set to the named top-level bundle directories. Without it, `extra`
+    swept the whole destination, so if discovery ever selected a plugin that also carries bundles of
+    its own, a plain sync would delete them - the data-loss half of review finding 2. Deleting a file
+    the merged tree never owned is never this script's job, so the bound is unconditional rather than
+    a safety net wrapped around discovery.
+    """
     changed: list[Path] = []
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
         rel = path.relative_to(src)
@@ -237,27 +303,37 @@ def diff_tree(src: Path, dst: Path) -> tuple[list[Path], list[Path]]:
 
     extra: list[Path] = []
     if dst.is_dir():
+        owned = set(scope) if scope is not None else None
         src_files = {p.relative_to(src) for p in src.rglob("*") if p.is_file()}
         extra = sorted(
-            p.relative_to(dst) for p in dst.rglob("*") if p.is_file() and p.relative_to(dst) not in src_files
+            rel
+            for rel in (p.relative_to(dst) for p in dst.rglob("*") if p.is_file())
+            if rel not in src_files and (owned is None or (rel.parts and rel.parts[0] in owned))
         )
     return changed, extra
 
 
-def local_skill_edits(ref: str, bundles: list[str], *, repo: Path | None = None) -> list[str]:
-    """Shipped-bundle paths where this working tree differs from `ref`, committed or not.
+def local_divergence(merged_src: Path, workdir: Path) -> tuple[list[str], str | None]:
+    """Paths where a build from THIS working tree would differ from the merged build.
 
     This is the NOTE, not the verdict. It answers the question an operator editing a skill actually
     has - "is what I am looking at what a subagent reads?" - which the drift check deliberately no
     longer conflates with "is the published copy correct?".
+
+    Comparing two BUILDS rather than running `git diff` over the merged bundle directories is what
+    makes it complete. Review measured the narrow version reporting `local_unmerged=[]` for a branch
+    that had added a whole bundle, because a path that does not exist at the merged commit is in no
+    merged bundle's pathspec. Building both sides catches every shape at once - edited content, an
+    added or removed bundle, untracked files, and a change to the generator that decides what ships -
+    and it stays silent about the repo-local bundles this plugin does not publish, which a broad
+    `.github/skills` pathspec would have flagged on every unrelated branch.
     """
-    if not bundles:
-        return []
-    pathspecs = [f".github/skills/{name}" for name in bundles]
-    diff = _git(["diff", "--name-only", ref, "--", *pathspecs], repo=repo)
-    if diff.returncode != 0:
-        return []
-    return [line.strip() for line in diff.stdout.splitlines() if line.strip()]
+    try:
+        mine = build_reference_copy(workdir / "worktree", REPO)
+    except (subprocess.CalledProcessError, SystemExit) as exc:
+        return [], f"this working tree's build_plugin.py did not run, so divergence is unknown: {exc}"
+    changed, extra = diff_tree(merged_src, mine)
+    return sorted({f".github/skills/{rel.as_posix()}" for rel in (*changed, *extra)}), None
 
 
 def worktree_banner() -> list[str]:
@@ -274,7 +350,7 @@ def _resolve_source(args: argparse.Namespace) -> PublishSource:
     """Pick the authoritative content source, honouring --from-worktree / --ref."""
     if args.from_worktree:
         return PublishSource(kind="worktree", ref=None, commit=None, described=f"working tree at {REPO}")
-    return resolve_publish_ref(args.ref)
+    return resolve_publish_ref(args.ref, verify_remote_default=args.fetch)
 
 
 def _emit(args: argparse.Namespace, payload: dict, lines: list[str], exit_code: int) -> int:
@@ -287,12 +363,12 @@ def _emit(args: argparse.Namespace, payload: dict, lines: list[str], exit_code: 
     return exit_code
 
 
-def _discovery_failure(args: argparse.Namespace, discovery) -> int | None:
+def _discovery_failure(args: argparse.Namespace, discovery, base: dict) -> int | None:
     """Return an exit code when the installed plugin cannot be used, else None."""
     if discovery.status == "multiple":
         return _emit(
             args,
-            {"status": "multiple_plugins", "candidates": [str(c) for c in discovery.candidates]},
+            {**base, "status": "multiple_plugins", "candidates": [str(c) for c in discovery.candidates]},
             [
                 "SYNC: ERROR - multiple installed plugins carry these skill bundles",
                 *(f"      {candidate}" for candidate in discovery.candidates),
@@ -303,7 +379,12 @@ def _discovery_failure(args: argparse.Namespace, discovery) -> int | None:
     if not discovery.ok or not discovery.skills_dir:
         return _emit(
             args,
-            {"status": "no_plugin", "detail": discovery.detail},
+            {
+                **base,
+                "status": "no_plugin",
+                "detail": discovery.detail,
+                "install_hint": discovery.install_hint or DEFAULT_INSTALL_HINT,
+            },
             [
                 f"SYNC: ERROR - plugin not installed ({discovery.detail})",
                 f"      {discovery.install_hint or DEFAULT_INSTALL_HINT}",
@@ -311,6 +392,19 @@ def _discovery_failure(args: argparse.Namespace, discovery) -> int | None:
             EXIT_NO_PLUGIN,
         )
     return None
+
+
+def _unverified_default_note(source: PublishSource) -> list[str]:
+    """Warn when the local `origin/HEAD` marker may name a branch the remote no longer defaults to."""
+    if source.default_verified or not source.alternatives:
+        return []
+    return [
+        f"SYNC: NOTE - {source.ref} is a LOCAL marker that `git fetch` does not refresh, and these",
+        "      default-branch refs point somewhere else:",
+        *(f"        {name}" for name in source.alternatives),
+        "      If the remote's default branch was renamed, this is publishing the OLD one. Ask the",
+        "      remote directly with --fetch, or pin it with --ref <ref>.",
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-return-statements
@@ -333,16 +427,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     )
     args = parser.parse_args(argv)
 
-    discovery = discover_skill_plugin(plugin_root_override=args.plugin_root)
-    failed = _discovery_failure(args, discovery)
-    if failed is not None:
-        return failed
-    installed = discovery.skills_dir
-
-    # The fetch happens here, not inside `_resolve_source`, so its outcome survives into the failure
-    # payload too - and so its human line can be suppressed under --json, which preflight PARSES: a
-    # single stray line ahead of the JSON reads to preflight as "did not report", i.e. an unverified
-    # bundle, which is the false green the whole check exists to prevent.
+    # The fetch happens before anything else, so its outcome survives into the failure payload too -
+    # and so its human line can be suppressed under --json, which preflight PARSES: a single stray
+    # line ahead of the JSON reads to preflight as "did not report", i.e. an unverified bundle, which
+    # is the false green the whole check exists to prevent.
     fetch_note: dict | None = None
     if args.fetch and not args.from_worktree:
         ok, detail = fetch_origin()
@@ -365,30 +453,56 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
             EXIT_NO_REF,
         )
 
-    banner = worktree_banner() if source.from_worktree else []
-    if banner and not args.json:
-        for line in banner:
+    if not args.json:
+        for line in [*(worktree_banner() if source.from_worktree else []), *_unverified_default_note(source)]:
             print(line)
 
     build_dir = REPO / "_build"
     build_dir.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="skill-plugin-", dir=build_dir))
     try:
-        source_root = REPO if source.from_worktree else export_ref_tree(str(source.ref), workdir / "ref-src")
+        # Everything below keys on source.COMMIT, never on the ref name (review finding 3).
+        pinned = str(source.commit) if source.commit else ""
+        source_root = REPO if source.from_worktree else export_ref_tree(pinned, workdir / "ref-src")
         src = build_reference_copy(workdir / "reference", source_root)
-        changed, extra = diff_tree(src, installed)
+
+        # The bundle inventory comes from the PINNED build and is then handed to discovery. Without
+        # it, `discover_skill_plugin()` imported the CURRENT WORKING TREE's
+        # `build_plugin.SHIPPED_SKILLS`, so the branch still chose both the destination plugin and
+        # the file list - the same defect one step earlier (review finding 2). Reproduced: an
+        # unmerged bundle name made discovery select an unrelated second plugin, and a plain sync
+        # exited 0 while overwriting it and deleting its own bundle.
         bundles = sorted(p.name for p in src.iterdir() if p.is_dir())
-        unmerged = [] if source.from_worktree else local_skill_edits(str(source.ref), bundles)
+        discovery = discover_skill_plugin(plugin_root_override=args.plugin_root, bundles=bundles)
+        base = {
+            "source": source.kind,
+            "ref": source.ref,
+            "commit": source.commit,
+            "described": source.described,
+            "bundles": bundles,
+            "default_verified": source.default_verified,
+            "default_alternatives": list(source.alternatives),
+            "fetch": fetch_note,
+        }
+        failed = _discovery_failure(args, discovery, base)
+        if failed is not None:
+            return failed
+        installed = discovery.skills_dir
+
+        changed, extra = diff_tree(src, installed, scope=bundles)
+        missing = [name for name in bundles if not (installed / name / "SKILL.md").is_file()]
+        unmerged, unmerged_error = ([], None) if source.from_worktree else local_divergence(src, workdir)
 
         note = (
             [
-                f"SYNC: NOTE - this working tree differs from {source.ref} in {len(unmerged)} shipped skill file(s):",
+                f"SYNC: NOTE - a build from this working tree would differ from {source.described} in "
+                f"{len(unmerged)} shipped file(s):",
                 *(f"        {path}" for path in unmerged),
                 "      Subagents read the MERGED copy, not these edits - deliberately (issue #410).",
                 "      To test them with a subagent: python scripts/sync_installed_skills.py --from-worktree",
             ]
             if unmerged
-            else []
+            else ([f"SYNC: NOTE - {unmerged_error}"] if unmerged_error else [])
         )
         inventory = (
             [f"  in build: {p.relative_to(src).as_posix()}" for p in sorted(src.rglob("*")) if p.is_file()]
@@ -396,17 +510,16 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
             else []
         )
         payload = {
+            **base,
             "status": "in_sync",
-            "source": source.kind,
-            "ref": source.ref,
-            "commit": source.commit,
-            "described": source.described,
             "skills_dir": str(installed),
             "identity": discovery.identity,
+            "plugin_root": str(discovery.plugin_root) if discovery.plugin_root else None,
             "changed": [rel.as_posix() for rel in changed],
             "extra": [rel.as_posix() for rel in extra],
+            "missing": missing,
             "local_unmerged": unmerged,
-            "fetch": fetch_note,
+            "local_unmerged_error": unmerged_error,
         }
 
         if not changed and not extra:
@@ -450,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
 
         # Re-diff rather than trusting the copies. The whole reason this script exists is a lock
         # that makes some filesystem operations fail, so "it did not raise" is not evidence.
-        still, _ = diff_tree(src, installed)
+        still, _ = diff_tree(src, installed, scope=bundles)
         if still:
             return _emit(
                 args,

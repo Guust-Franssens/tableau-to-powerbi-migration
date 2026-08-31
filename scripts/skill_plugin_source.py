@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,20 +77,29 @@ def _skills_dir(plugin_root: Path) -> Path:
     return plugin_root / "skills"
 
 
-def _carries_shipped_skill(skills_dir: Path) -> bool:
-    return any((skills_dir / skill / "SKILL.md").is_file() for skill in SHIPPED_SKILLS)
+def _carries_shipped_skill(skills_dir: Path, bundles: Sequence[str]) -> bool:
+    return any((skills_dir / skill / "SKILL.md").is_file() for skill in bundles)
 
 
 def discover_skill_plugin(
     installed_plugins_root: Path | None = None,
     plugin_root_override: Path | None = None,
     env: dict[str, str] | None = None,
+    bundles: Sequence[str] | None = None,
 ) -> SkillPluginDiscovery:
     """Find the installed plugin root that carries this repo's shipped skill bundles.
 
     Discovery is by content, not by marketplace name: the plugin was previously published under a
     different name, and hard-coding that identity is exactly how stale bundles went unnoticed.
+
+    ``bundles`` names the inventory to look for. Callers that know which bundles are AUTHORITATIVE -
+    `sync_installed_skills.py` derives them from the merged ref - must pass it, because the
+    module-level `SHIPPED_SKILLS` default is read from the CURRENT WORKING TREE. Reproduced in review
+    (#410 finding 2): adding an unmerged bundle name to a branch made discovery select an unrelated
+    second installed plugin that happened to carry it, and a plain sync then overwrote that plugin
+    and deleted its own bundle. The default is kept only so the standalone CLI still works.
     """
+    inventory = tuple(bundles) if bundles is not None else SHIPPED_SKILLS
     environment = os.environ if env is None else env
     override_value = plugin_root_override or (
         Path(environment[PLUGIN_ROOT_ENV]) if environment.get(PLUGIN_ROOT_ENV) else None
@@ -124,7 +134,7 @@ def discover_skill_plugin(
     candidates: list[Path] = []
     if root.is_dir():
         for skills_dir in sorted(root.glob("*/*/skills")):
-            if skills_dir.is_dir() and _carries_shipped_skill(skills_dir):
+            if skills_dir.is_dir() and _carries_shipped_skill(skills_dir, inventory):
                 candidates.append(skills_dir.parent)
 
     if len(candidates) == 1:
