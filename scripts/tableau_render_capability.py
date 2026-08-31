@@ -154,28 +154,66 @@ def _identify(head: bytes) -> str:
     return "unrecognised bytes"
 
 
-def format_matches(kind: str, body: bytes, content_type: str | None) -> tuple[bool, str]:
+# How much of an attacker-influenced value is REDACTED before any of it is quoted, and how much of the
+# redacted result is then shown. The order is the whole point -- see `_quote` below.
+_REDACTION_WINDOW_BYTES = 256
+_DIAGNOSTIC_CHARS = 16
+_CONTENT_TYPE_CHARS = 120
+
+
+def _quote_head(body: bytes, redactor) -> str:
+    """A quotable rendering of a response's first bytes that a redactor can actually cover.
+
+    Three things here are load-bearing, and the previous ``{head[:8]!r}`` got all three wrong:
+
+    1. **Redact BEFORE truncating.** Slicing eight bytes off the front of a longer secret leaves a
+       fragment the literal-matching redactor cannot see, so it survives verbatim. A generous window
+       is decoded and scrubbed first; only the scrubbed text is then cut down.
+    2. **Redact TEXT, not a ``bytes`` repr.** ``repr(b"...")`` escapes quotes, backslashes and every
+       non-ASCII byte, so a secret containing any of them reaches the report in an escaped form that
+       the redactor never matched.
+    3. **Quote with ``ascii()``.** The decode is lossy (``errors="replace"``), and a literal U+FFFD in
+       a message that later prints to a cp1252 console raises ``UnicodeEncodeError``.
+    """
+    text = body.lstrip()[:_REDACTION_WINDOW_BYTES].decode("utf-8", "replace")
+    return ascii((redactor(text) if redactor else text)[:_DIAGNOSTIC_CHARS])
+
+
+def format_matches(kind: str, body: bytes, content_type: str | None, *, redactor=None) -> tuple[bool, str]:
     """Does this payload really carry ``kind``? Returns ``(ok, why_not)``.
 
     Checked in this order on purpose: the **payload** is decisive, because bytes cannot lie about what
     they are. A content-type mismatch alone is only reported when the payload could not settle it,
     since proxies rewrite headers and some servers omit the charset.
 
-    ⚠️ ``why_not`` can quote the received ``Content-Type``, which is attacker-influenced text. Callers
-    MUST pass it through a redactor before reporting it -- see ``classify_probe``.
+    ⚠️ ``why_not`` quotes two attacker-influenced values -- the received ``Content-Type`` and the
+    response's own first bytes -- so ``redactor`` is scrubbing a *credential*, not tidying output.
+    It is applied to each raw value **individually, before** that value is case-folded, split or
+    truncated, because every one of those transforms defeats a literal-matching redactor:
+
+    * ``.lower()`` on the Content-Type is what let ``image/SYNTHETIC_SESSION_TOKEN_123`` reach the
+      report as ``image/synthetic_session_token_123`` -- the caller's redactor ran afterwards and
+      deliberately does not match case-changed secrets;
+    * ``.split(";")[0]`` would cut a secret containing a semicolon; and
+    * slicing the body's first bytes leaves a prefix of a longer secret (see ``_quote_head``).
+
+    Classification itself still reads the RAW values -- the case-insensitive MIME comparison is
+    performed on the unredacted header -- so redaction can never change a verdict.
     """
     head = body.lstrip()[:16]
     if kind == "svg":
         if not looks_like_svg(body):
-            return False, f"expected an <svg> root, got {_identify(head)} ({head[:8]!r})"
+            return False, f"expected an <svg> root, got {_identify(head)} ({_quote_head(body, redactor)})"
     else:
         signatures = FORMAT_SIGNATURES.get(kind, ())
         if signatures and not any(head.startswith(sig) for sig in signatures):
-            return False, f"expected {kind} payload, got {_identify(head)} ({head[:8]!r})"
-    mime = (content_type or "").split(";")[0].strip().lower()
+            return False, f"expected {kind} payload, got {_identify(head)} ({_quote_head(body, redactor)})"
+    raw_type = content_type or ""
+    mime = raw_type.split(";")[0].strip().lower()
     expected = CONTENT_TYPES.get(kind)
     if mime and expected and mime != expected:
-        return False, f"expected Content-Type {expected}, got {mime}"
+        received = (redactor(raw_type) if redactor else raw_type).strip()[:_CONTENT_TYPE_CHARS]
+        return False, f"expected Content-Type {expected}, got {received}"
     return True, ""
 
 
@@ -231,6 +269,17 @@ LADDER: tuple[RenderTier, ...] = (
 def api_tuple(version: str) -> tuple[int, ...]:
     """Comparable form of a REST version. Never compare these as strings: ``"3.9" > "3.10"``."""
     return tuple(int(part) for part in re.findall(r"\d+", version)) or (0,)
+
+
+def tier_priority(name: str | None, tiers: tuple[RenderTier, ...] = LADDER) -> int:
+    """How good a selected tier is, as a comparable number -- **higher is better**, ``0`` = none.
+
+    ``LADDER`` is ordered best-first, so a raw index sorts backwards; a caller that compares indexes
+    directly picks the WORST tier. Derived from the ladder rather than written out, so a new rung
+    cannot be added in one place and forgotten in the comparison.
+    """
+    names = [tier.name for tier in tiers]
+    return len(names) - names.index(name) if name in names else 0
 
 
 def supports(available: str | None, required: str) -> bool | None:
@@ -305,11 +354,15 @@ def classify_probe(
 
     if status == 200:
         if kind:
-            ok, why = format_matches(kind, body, content_type)
+            ok, why = format_matches(kind, body, content_type, redactor=redactor)
             if not ok:
                 # A 200 with the wrong payload is the on-prem trap: an older server ignores an unknown
                 # `format=svg` and hands back its default PNG. Selecting this rung would persist PNG
                 # bytes in a `.svg` and call them vector.
+                #
+                # `why` is ALREADY redacted value-by-value (see `format_matches`): the outer `_scrub`
+                # cannot undo case-folding or truncation that has already happened, which is exactly
+                # how a mixed-case token used to survive this line.
                 return "indeterminate", _scrub(f"HTTP 200 but {why}")[:180]
         return "available", ""
     text = body.decode("utf-8", "replace")
@@ -481,6 +534,127 @@ def _add_pin_warnings(report, verdicts, tiers, versions: ApiVersions) -> None:
                 f"its floor {tier.min_api} was {reprobe['verdict']} ({reprobe['detail'][:80]}), so "
                 f"whether this server (advertises {versions.advertised}) supports it is UNKNOWN"
             )
+
+
+# A capability probe costs metered export calls (Tableau meters ~100/hour/Creator), so it is bounded.
+# More than one is still needed because a single blocked view fails every route and would otherwise be
+# read as "this site cannot render", which is exactly the wrong conclusion.
+MAX_CAPABILITY_PROBE_VIEWS = 3
+
+
+def probe_render_capability(session, env: dict[str, str], views: list[dict[str, Any]]) -> dict[str, Any]:
+    """Ask the SITE what it can render, by probing, and reconcile that with both version strings.
+
+    ``session`` is duck-typed on purpose -- anything exposing ``site_id``, ``raw_get(path, api=...)``
+    and ``redact_text(text)`` will do. That is what lets this orchestration live beside the ladder it
+    drives without importing ``capture_tableau_oracle``, which imports THIS module.
+
+    The probe view matters. A workbook whose data sources are not connected fails every route
+    identically, so probing one would report "no tier available" for a site that is perfectly capable
+    -- so try successive views until one gives a determinate answer, capped at
+    ``MAX_CAPABILITY_PROBE_VIEWS`` because each attempt costs metered export calls.
+    """
+    info = server_info(env["TABLEAU_SERVER_URL"])
+    configured = env.get("TABLEAU_REST_API_VERSION", "3.21")
+    advertised = info.get("rest_api_version")
+    LOG.info(
+        "site reports product=%s build=%s, advertises REST %s; we are asking as %s",
+        info.get("product_version"),
+        info.get("build"),
+        advertised,
+        configured,
+    )
+
+    def fetcher(view_luid: str):
+        def fetch(endpoint: str, query: str, api: str | None = None) -> tuple[int, bytes, str | None]:
+            # Deliberately the RAW request, not `export()`: a version gate is a permanent answer and
+            # must not be run through a retry/re-auth ladder built for transient faults.
+            return session.raw_get(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}", api=api)
+
+        return fetch
+
+    best: dict[str, Any] = {}
+    tried: list[str] = []
+    for view in views[:MAX_CAPABILITY_PROBE_VIEWS]:
+        tried.append(view["id"])
+        report = detect(
+            fetcher(view["id"]),
+            view["id"],
+            ApiVersions(configured=configured, advertised=advertised),
+            # A proxy echoing X-Tableau-Auth puts a LIVE session token in the error body, and this
+            # report is written to disk inside the manifest. Classification still sees raw text.
+            redactor=session.redact_text,
+        )
+        report["probe_view_name"] = view.get("name")
+        if not best or _capability_rank(report) > _capability_rank(best):
+            best = report
+        # Keep going while the answer is UNDETERMINED *or* merely PROVISIONAL: a rung that answered
+        # while a better rung was blocked on this view is not the site's ceiling, and stopping there
+        # is how a capable site gets silently demoted.
+        if report.get("selected_tier") and report.get("capability_complete"):
+            break
+    best["server"] = info
+    # COUNTED, never derived from the cap. `min(len(views), MAX_CAPABILITY_PROBE_VIEWS)` reported how
+    # many views were ELIGIBLE, so a first view that answered completely and broke out of the loop was
+    # written up as "3" -- one probe presented as three independent corroborations. The LUIDs make the
+    # claim auditable rather than merely honest: a reader can go and re-run exactly those views.
+    best["probe_views_tried"] = len(tried)
+    best["probe_view_luids"] = tried
+    LOG.info(
+        "render capability: best tier = %s%s",
+        best.get("selected_tier") or "UNDETERMINED",
+        " (PROVISIONAL)" if best.get("provisional") else "",
+    )
+    return best
+
+
+def _capability_rank(report: dict[str, Any]) -> tuple[int, int, int]:
+    """Order two probe reports: a settled answer beats a provisional one beats no answer at all.
+
+    ⚠️ The third element is not decoration. With only ``(selected, complete)`` two PROVISIONAL reports
+    tie, ``>`` is false, and the FIRST view examined wins **regardless of which tier it found** -- so a
+    view whose SVG and PDF both blew up transiently and fell through to PNG beat a later view that
+    actually proved PDF, and ``--reference-best`` chose a raster reference on a site where vector was
+    demonstrably available.
+
+    Completeness still outranks tier quality: a *complete* report means every rung above the chosen one
+    was **definitively** refused, so its selection is the measured ceiling, whereas a provisional one is
+    only a lower bound. The two can disagree only if one rung came back ``available`` on one view and
+    version-gated on another -- which a version gate, being a property of the server rather than the
+    view, cannot do.
+    """
+    return (
+        1 if report.get("selected_tier") else 0,
+        1 if report.get("capability_complete") else 0,
+        tier_priority(report.get("selected_tier")),
+    )
+
+
+def apply_selected_tier(
+    report: dict[str, Any], wants: set[str], api_overrides: dict[str, str], env: dict[str, str]
+) -> None:
+    """Turn a probe verdict into what the run will actually fetch, INCLUDING the api version.
+
+    Without the version half, a floor re-probe that recovered a tier leaves the run claiming
+    ``selected_tier='svg'`` and then capturing at the configured version, where the very same request
+    is still refused -- measured: floor 3.29 ``available``, configured 3.21 ``unsupported``. The
+    report would promise a tier the capture cannot fetch.
+    """
+    tier = report.get("selected_tier")
+    if not tier:
+        return
+    # The ladder names the PNG rung `png_high` (it is `?resolution=high`, not the plain render); the
+    # capture kinds are keyed by file format. One mapping, stated once.
+    kind = {"png_high": "png"}.get(tier, tier)
+    wants.add(kind)
+    if report.get("selected_api_version"):
+        api_overrides[kind] = report["selected_api_version"]
+        LOG.info(
+            "  capturing '%s' at API %s (recovered by floor re-probe; configured is %s)",
+            kind,
+            api_overrides[kind],
+            env.get("TABLEAU_REST_API_VERSION", "3.21"),
+        )
 
 
 def sign_in(base: str, site: str, pat_name: str, pat_secret_value: str, api: str) -> tuple[str, str]:

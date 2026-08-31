@@ -133,6 +133,15 @@ created**; a name that normalizes onto two folders is **reported ambiguous, not 
 one**. Exit `0` = everything landed, `1` = grouped what it could (details in
 `_oracle/oracle-grouping-report.json`), `2` = the capture could not be read.
 
+⚠️ **A copy that could not happen is a grouping FAILURE, not a warning.** When the capture manifest
+names an artifact that is not on disk, the grouped manifest marks that leg `not_copied` (dropping its
+`path`, and its place in `data_ok` / `image_ok` / `svg_ok` / `pdf_ok`), the workbook is reported
+`incomplete` rather than `grouped`, and the command exits `1`. Carrying the source manifest's
+`status: ok` across instead — which it used to — produces a per-workbook folder asserting evidence
+that was never copied, the same shape as a capture claiming a render it never obtained. `not_copied`
+is deliberately its own status and not `failed`: the **capture** succeeded and only the (free)
+grouping did not, so the fix is to re-group, never to re-capture at 100 metered calls/hr.
+
 ⚠️ **The normalizer drops punctuation and case but never words**, so a workbook carrying Tableau's
 cross-project disambiguation suffix (`"Sales | Project : Finance"`) does **not** match a `sales`
 folder and is reported unmatched. That is the same blind spot as the engine's own `_norm_ds()`, filed
@@ -349,10 +358,17 @@ Three rules keep a probe from producing a confident wrong answer:
 2. **A selection can be PROVISIONAL.** If a rung *above* the winner was indeterminate — a gateway
    blip, a blocked view, a wrong-format 200 — a better tier may exist and simply could not be
    measured. The report carries `provisional` and `capability_complete`, and `--reference-best` keeps
-   trying further views rather than treating the first answer as the site's ceiling.
+   trying further views rather than treating the first answer as the site's ceiling. ⚠️ Two
+   provisional views are then ranked by **ladder position**, not by which was probed first: with only
+   *settled-beats-provisional* they tie, and a first view whose SVG and PDF both failed transiently
+   would hold PNG against a later view that actually proved PDF.
 3. **"No tier available" requires every rung to have been definitively refused.** A mix of version
    gates and blocked routes is **UNDETERMINED**, not negative — the unassessable-collapsing-into-clean
    shape, one level up from where it was first caught.
+4. **The probe reports what it really did.** `probe_views_tried` counts loop iterations and
+   `probe_view_luids` names them, so a probe that settled on its first view says `1` and lists one
+   LUID. It used to report `min(len(views), 3)` — the number of *eligible* views — which presented a
+   single measurement as three independent corroborations.
 
 **A required reference that never arrived is exit code 5, never 0.** With `--reference-best` and an
 UNDETERMINED probe no render kind is requested at all, every view's data still succeeds, and the run
@@ -360,11 +376,31 @@ would otherwise exit 0 having captured **zero** reference images. The manifest r
 `requested_renders`, `reference_required` and `reference_missing` so the gap between what was asked
 for and what arrived is legible rather than inferred.
 
+⚠️ **But a credential-only run is exit 2, never 3 or 5.** All four routes come from the same VizQL
+render, so once a view's `/data` leg returns `source_credential` the render legs are not attempted —
+and counting each unattempted render as an independent `not_captured` failure put the same view in
+`blocked` **and** `failed`, where `failed` wins. A purely credential-blocked run therefore exited
+`3` (or `5` under `--reference-best`) when the only actionable instruction is *"a human must
+reauthorize the source in Tableau"*, which is code `2`. A render skipped because its prerequisite
+failed now inherits that prerequisite's status, so one root cause is counted once. A **partial**
+block still yields `5`: something renderable was reachable and nothing came back, so the absence is
+not explained by the credential.
+
 ⚠️ **Nothing derived from a response body reaches the manifest unredacted.** A proxy or WAF that
 echoes `X-Tableau-Auth` puts a **live session token** in an error body, and the capability report is
 written to disk. Probe details are scrubbed through the session's redactor before they are printed or
 serialised — while classification still reads the **raw** text, because redaction is handed the
 human-chosen PAT *name* and a short one would rewrite Tableau's own error codes.
+
+⚠️ **Redaction happens per value, BEFORE case-folding, splitting or truncation** — every one of those
+transforms defeats the repo redactor, which matches literals and deliberately does not cover
+case-changed forms. Two measured leaks came from getting the order wrong: a reflected
+`Content-Type: image/SYNTHETIC_SESSION_TOKEN_123` was lowercased before the redactor ran and reached
+the report as `image/synthetic_session_token_123`; and the format-mismatch diagnostic quoted the
+response's own **first eight bytes**, so a body beginning `SECRET42` was serialised as `b'SECRET42'`
+— a *prefix* of a longer secret, which a literal redactor could not have matched even had one run.
+The diagnostic now redacts a 256-byte window first and quotes the scrubbed result, and the capture's
+own `format_mismatch` record passes the session redactor rather than none at all.
 
 ### Which rung to default to
 

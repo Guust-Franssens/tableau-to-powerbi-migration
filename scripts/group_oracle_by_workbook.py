@@ -101,9 +101,16 @@ def group_views(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
 
 RENDER_LEGS: tuple[tuple[str, str], ...] = (("data", "data"), ("image", "images"), ("svg", "images"), ("pdf", "images"))
 
+# Status stamped on a leg the SOURCE manifest called `ok` but whose artifact could not be copied.
+# Deliberately not `ok` and not `failed`: the capture succeeded, the *grouping* did not, and a reader
+# has to be able to tell those apart when deciding whether to re-capture (metered) or re-group (free).
+NOT_COPIED_STATUS = "not_copied"
 
-def copy_view_files(view: dict[str, Any], oracle_dir: Path, destination: Path, *, dry_run: bool) -> list[str]:
-    """Copy one view's captured artifacts. Returns the relative paths written.
+
+def copy_view_files(
+    view: dict[str, Any], oracle_dir: Path, destination: Path, *, dry_run: bool
+) -> tuple[list[str], dict[str, Any]]:
+    """Copy one view's captured artifacts. Returns ``(relative paths written, the view AS GROUPED)``.
 
     A view whose capture failed has no `path` key, so nothing is copied and nothing is invented --
     the per-workbook manifest still records its failure status, which is the honest evidence grade.
@@ -112,8 +119,15 @@ def copy_view_files(view: dict[str, Any], oracle_dir: Path, destination: Path, *
     normally yields **SVG** on Cloud, and while this handled only `data` and `image` the grouped
     manifest asserted `svg.path`/`pdf.path` for files that were never copied -- a manifest pointing at
     absent evidence, which is worse than omitting it.
+
+    ⚠️ **A copy that could not happen is returned as a DOWNGRADED leg, not merely warned about.**
+    Skipping a missing artifact while handing the caller the source manifest's own `status: ok` and
+    `path` re-creates that same shape one level up: the grouped folder asserts evidence nothing ever
+    put there. The returned view is a copy -- the capture manifest is never mutated -- whose affected
+    legs carry ``NOT_COPIED_STATUS``, no ``path``, and the reason.
     """
     written: list[str] = []
+    grouped = dict(view)
     for kind, sub in RENDER_LEGS:
         entry = view.get(kind) or {}
         relative = entry.get("path")
@@ -121,18 +135,29 @@ def copy_view_files(view: dict[str, Any], oracle_dir: Path, destination: Path, *
             continue
         source = oracle_dir / relative
         if not source.is_file():
-            LOG.warning("  missing on disk, skipped: %s", relative)
+            LOG.warning("  MISSING on disk, not copied: %s", relative)
+            downgraded = {k: v for k, v in entry.items() if k != "path"}
+            downgraded["status"] = NOT_COPIED_STATUS
+            downgraded["not_copied_reason"] = (
+                f"the capture manifest names {relative}, which is absent from {oracle_dir}"
+            )
+            grouped[kind] = downgraded
             continue
         target = destination / sub / Path(relative).name
         if not dry_run:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
         written.append(f"{sub}/{Path(relative).name}")
-    return written
+    return written, grouped
 
 
 def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[str, Any]]) -> dict[str, Any]:
     """A per-workbook manifest carrying the SAME evidence grade as the capture-wide one.
+
+    ⚠️ ``views`` must be the views **as grouped** -- ``copy_view_files``' second return value, not the
+    capture manifest's own list. The counts below are what a consumer reads instead of listing the
+    folder, so computing them from the capture's statuses claims evidence for artifacts this run may
+    have failed to copy. Passing the raw views is the defect, not a shortcut.
 
     Counts are recomputed over this workbook's views rather than copied, so a folder that holds
     three good captures and one credential-blocked view says exactly that. The capture-wide GRADE
@@ -158,6 +183,7 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
             status not in {"ok", "source_credential"} for status in (status_of(v, "data"), *render_statuses(v, "ok"))
         )
     ]
+    not_copied = sum(1 for v in views for kind, _ in RENDER_LEGS if status_of(v, kind) == NOT_COPIED_STATUS)
     subset = {
         "schema": "tableau-oracle-workbook/1",
         "grouped_from": manifest.get("schema"),
@@ -172,6 +198,9 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "data_empty": len([v for v in ok if (v.get("data") or {}).get("row_count") == 0]),
         "credential_blocked": len(blocked),
         "failed": len(failed),
+        # Legs the CAPTURE obtained but this grouping could not place. Separate from `failed` so a
+        # reader knows to re-run the (free) grouping rather than the (metered) capture.
+        "not_copied": not_copied,
         "views": views,
     }
     for kind in render_kinds:
@@ -216,23 +245,48 @@ def _group_one(
         return "unmatched", {"workbook": workbook, "normalized": normalize(workbook), "views": len(views)}
 
     destination = matches[0] / "reference"
-    files = [f for view in views for f in copy_view_files(view, ctx.oracle_dir, destination, dry_run=ctx.dry_run)]
+    files: list[str] = []
+    grouped_views: list[dict[str, Any]] = []
+    for view in views:
+        written, grouped = copy_view_files(view, ctx.oracle_dir, destination, dry_run=ctx.dry_run)
+        files.extend(written)
+        grouped_views.append(grouped)
+    subset = subset_manifest(ctx.manifest, workbook, grouped_views)
     if not ctx.dry_run:
         destination.mkdir(parents=True, exist_ok=True)
-        (destination / MANIFEST_NAME).write_text(
-            json.dumps(subset_manifest(ctx.manifest, workbook, views), indent=2) + "\n", encoding="utf-8"
-        )
-    LOG.info("ok         %-45s -> %s (%d view(s), %d file(s))", workbook[:45], matches[0].name, len(views), len(files))
-    return "grouped", {
+        (destination / MANIFEST_NAME).write_text(json.dumps(subset, indent=2) + "\n", encoding="utf-8")
+    record = {
         "workbook": workbook,
         "folder": str(matches[0]),
         "views": len(views),
         "files": len(files),
+        "not_copied": subset["not_copied"],
     }
+    if subset["not_copied"]:
+        # NOT "grouped". The folder exists and holds some evidence, but the capture manifest named
+        # artifacts that are not on disk, so this workbook's reference set is incomplete and the
+        # command must not report success for it.
+        LOG.warning(
+            "INCOMPLETE %-45s -> %s (%d view(s), %d file(s), %d artifact(s) missing from the capture)",
+            workbook[:45],
+            matches[0].name,
+            len(views),
+            len(files),
+            subset["not_copied"],
+        )
+        return "incomplete", record
+    LOG.info("ok         %-45s -> %s (%d view(s), %d file(s))", workbook[:45], matches[0].name, len(views), len(files))
+    return "grouped", record
 
 
 def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
-    """Group the capture. Returns 0 when every workbook landed, 1 when some could not."""
+    """Group the capture. Returns 0 when every workbook landed, 1 when some could not.
+
+    "Could not" covers three things, and the third used to be invisible: no destination folder, an
+    ambiguous destination, and a destination that was reached but did **not** receive every artifact
+    the capture manifest named. All three mean the same to a caller gating on the exit code -- the
+    per-workbook copies are partial and the flat capture remains the authoritative one.
+    """
     manifest = load_manifest(oracle_dir)
     destinations, folder_count = index_destinations(migrations_root)
     buckets = group_views(manifest)
@@ -244,7 +298,7 @@ def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
         " [DRY RUN]" if dry_run else "",
     )
 
-    outcomes: dict[str, list[dict[str, Any]]] = {"grouped": [], "unmatched": [], "ambiguous": []}
+    outcomes: dict[str, list[dict[str, Any]]] = {"grouped": [], "incomplete": [], "unmatched": [], "ambiguous": []}
     ctx = _Context(manifest=manifest, destinations=destinations, oracle_dir=oracle_dir, dry_run=dry_run)
     for workbook, views in sorted(buckets.items()):
         bucket, record = _group_one(workbook, views, ctx)
@@ -256,6 +310,7 @@ def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
         "migrations_root": str(migrations_root),
         "dry_run": dry_run,
         "workbooks_grouped": len(outcomes["grouped"]),
+        "workbooks_incomplete": len(outcomes["incomplete"]),
         "workbooks_unmatched": len(outcomes["unmatched"]),
         "workbooks_ambiguous": len(outcomes["ambiguous"]),
         **outcomes,
@@ -264,13 +319,22 @@ def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
         (oracle_dir / UNMATCHED_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     LOG.info(
-        "\n%d grouped, %d without a folder, %d ambiguous%s",
+        "\n%d grouped, %d incomplete, %d without a folder, %d ambiguous%s",
         len(outcomes["grouped"]),
+        len(outcomes["incomplete"]),
         len(outcomes["unmatched"]),
         len(outcomes["ambiguous"]),
         "" if dry_run else f" -> {oracle_dir / UNMATCHED_REPORT}",
     )
-    if outcomes["unmatched"] or outcomes["ambiguous"]:
+    if outcomes["incomplete"]:
+        LOG.warning(
+            "%d workbook(s) are missing artifacts their capture manifest names. The grouped manifests "
+            "mark those legs '%s' rather than claiming them; re-run the grouping if the capture is "
+            "intact, and only re-capture (metered) if it is not.",
+            len(outcomes["incomplete"]),
+            NOT_COPIED_STATUS,
+        )
+    if outcomes["unmatched"] or outcomes["ambiguous"] or outcomes["incomplete"]:
         LOG.warning(
             "the capture in %s remains complete and authoritative - only the per-workbook copies are partial",
             oracle_dir,

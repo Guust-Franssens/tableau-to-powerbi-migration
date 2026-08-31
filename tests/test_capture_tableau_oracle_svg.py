@@ -393,3 +393,195 @@ def test_the_manifest_records_what_was_requested_not_only_what_arrived(tmp_path)
         run_kwargs={"requested_renders": frozenset({"svg", "pdf"}), "reference_required": True},
     )
     assert manifest["requested_renders"] == ["pdf", "svg"]
+
+
+# ------------------------------------ #405 round 3, finding 1: the format-mismatch detail is a leak
+
+REFLECTED_SECRET = "SECRET42-the-rest-of-a-real-pat"
+
+
+def test_a_format_mismatch_detail_is_redacted_before_it_reaches_the_manifest(tmp_path):
+    """`_capture_render` serialised `format_matches`' diagnostic, which quotes the response's own
+    leading bytes, with no redactor at all. A source whose export begins with credential-shaped text
+    -- or a proxy reflecting one -- wrote it into `oracle-manifest.json` verbatim."""
+    body = f"{REFLECTED_SECRET} is what a reflecting export returned".encode()
+    session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (200, body)})
+    session._creds = oracle.SiteCredentials(  # pylint: disable=protected-access
+        base="https://example.online.tableau.com",
+        site="site",
+        pat_name="a-long-enough-pat-name",
+        pat_secret=REFLECTED_SECRET,
+        version="3.29",
+    )
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
+    assert record["svg"]["status"] == "format_mismatch"
+    serialized = json.dumps(record)
+    assert "SECRET42" not in serialized
+    assert "[REDACTED]" in serialized
+
+
+# ---------------------------- #405 round 3, finding 3: a credential block is not a hard failure
+
+
+def _blocked_record(**legs):
+    record = {"view_name": "v", "workbook_name": "w", "data": {"status": "source_credential", "detail": "oauth"}}
+    record.update(legs)
+    return record
+
+
+def test_a_render_never_attempted_because_its_data_leg_was_blocked_inherits_that_status():
+    """`capture_view` returns before any render once data fails -- all four routes share one VizQL
+    render, so re-asking three times costs metered calls to learn the same thing. Inventing an
+    independent `not_captured` for each made ONE credential fault look like a credential fault AND
+    three hard failures."""
+    statuses = oracle._render_statuses(_blocked_record(), frozenset({"svg"}))  # pylint: disable=protected-access
+    assert statuses == ("ok", "source_credential", "ok")
+
+
+def test_a_genuinely_broken_data_leg_still_fails_its_requested_renders():
+    """The other half of the same rule: propagation must not turn every absence into 'blocked'."""
+    record = {"view_name": "v", "data": {"status": "failed", "detail": "boom"}}
+    statuses = oracle._render_statuses(record, frozenset({"svg", "pdf"}))  # pylint: disable=protected-access
+    assert statuses == ("ok", "failed", "failed")
+
+
+def test_a_credential_only_run_exits_2_rather_than_3(tmp_path):
+    """Exit 2 is the human-actionable code -- 'reauthorize the source in Tableau'. Collapsing it into
+    3 sends the operator to debug our capture instead."""
+    code, manifest = _manifest(
+        [_blocked_record()],
+        tmp_path,
+        run_kwargs={"requested_renders": frozenset({"svg"})},
+    )
+    assert code == 2
+    assert (manifest["credential_blocked"], manifest["failed"]) == (1, 0)
+
+
+def test_a_credential_only_run_under_reference_best_exits_2_rather_than_5(tmp_path):
+    """Nothing rendered, but no render COULD have: code 5 would point at our capability probe."""
+    code, manifest = _manifest(
+        [_blocked_record()],
+        tmp_path,
+        run_kwargs={"requested_renders": frozenset({"svg"}), "reference_required": True},
+    )
+    assert code == 2
+    assert manifest["reference_missing"] is False
+
+
+def test_a_partial_block_that_still_rendered_nothing_is_a_missing_reference(tmp_path):
+    """Something renderable was reachable and nothing came back, so the absence is NOT explained by
+    the credential -- code 5 is right here, and must not be swallowed by the guard above."""
+    code, _ = _manifest(
+        [_blocked_record(), _ok_record()],
+        tmp_path,
+        run_kwargs={"requested_renders": frozenset(), "reference_required": True},
+    )
+    assert code == 5
+
+
+def test_a_run_that_is_both_blocked_and_broken_is_still_a_failure(tmp_path):
+    code, manifest = _manifest(
+        [_blocked_record(), _ok_record(svg={"status": "failed", "detail": "boom"})],
+        tmp_path,
+        run_kwargs={"requested_renders": frozenset({"svg"})},
+    )
+    assert code == 3
+    assert (manifest["credential_blocked"], manifest["failed"]) == (1, 1)
+
+
+# ------------------- #405 round 3, findings 4 and 6: cross-view probing must not lie about either
+# which tier it found or how hard it looked
+
+GATEWAY_504 = b"<error><summary>Gateway</summary><detail>gateway timeout</detail></error>"
+
+
+class _ProbeSession(oracle.TableauSession):
+    """Scripted probe layer keyed by ``(view luid, route)``, so views can disagree with each other."""
+
+    def __init__(self, responses: dict[tuple[str, str], tuple[int, bytes]]):
+        super().__init__(
+            oracle.SiteCredentials(
+                base="https://example.online.tableau.com",
+                site="site",
+                pat_name="a-long-enough-pat-name",
+                pat_secret="a-long-enough-secret",
+                version="3.29",
+            )
+        )
+        self.responses = responses
+        self.probed: list[tuple[str, str]] = []
+        self.token, self.site_id = "tok", "sid"
+
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+        luid, route = path.split("/views/")[1].split("/", 1)
+        self.probed.append((luid, route))
+        return (*self.responses[(luid, route)], {})
+
+
+def _probe(monkeypatch, responses, view_count):
+    monkeypatch.setattr(
+        oracle.capability, "server_info", lambda *_a, **_k: {"rest_api_version": "3.30", "product_version": "2026.3.0"}
+    )
+    session = _ProbeSession(responses)
+    env = {"TABLEAU_SERVER_URL": "https://s", "TABLEAU_REST_API_VERSION": "3.29"}
+    views = [{"id": f"v{i}", "name": f"View {i}"} for i in range(1, view_count + 1)]
+    return session, oracle.capability.probe_render_capability(session, env, views)
+
+
+SVG_ROUTE, PDF_ROUTE, PNG_ROUTE = "image?format=svg", "pdf?type=Unspecified", "image?resolution=high"
+
+
+def test_a_later_view_that_proves_a_better_tier_beats_an_earlier_provisional_one(monkeypatch):
+    """Both selections are provisional, so `(selected, complete)` tied and the FIRST view won
+    regardless of tier quality: view 1's transient SVG/PDF failures fell through to PNG, and
+    `--reference-best` then captured a raster reference on a site that had just proved PDF."""
+    _, report = _probe(
+        monkeypatch,
+        {
+            ("v1", SVG_ROUTE): (504, GATEWAY_504),
+            ("v1", PDF_ROUTE): (504, GATEWAY_504),
+            ("v1", PNG_ROUTE): (200, _png(2000, 1600)),
+            ("v2", SVG_ROUTE): (504, GATEWAY_504),
+            ("v2", PDF_ROUTE): (200, PDF_FITTED),
+        },
+        view_count=2,
+    )
+    assert report["selected_tier"] == "pdf"
+    assert report["provisional"] is True
+
+
+def test_a_settled_answer_still_beats_a_provisional_one_at_the_same_tier(monkeypatch):
+    """Tier quality is the TIE-BREAK, not the primary key: completeness still ranks above it."""
+    _, report = _probe(
+        monkeypatch,
+        {
+            ("v1", SVG_ROUTE): (504, GATEWAY_504),
+            ("v1", PDF_ROUTE): (200, PDF_FITTED),
+            ("v2", SVG_ROUTE): (400, SVG_TOO_OLD.encode()),
+            ("v2", PDF_ROUTE): (200, PDF_FITTED),
+        },
+        view_count=2,
+    )
+    assert report["selected_tier"] == "pdf"
+    assert report["capability_complete"] is True
+
+
+def test_probe_views_tried_counts_the_iterations_actually_performed(monkeypatch):
+    """It reported `min(len(views), MAX_CAPABILITY_PROBE_VIEWS)` -- the number of ELIGIBLE views. A
+    first view that answered completely and broke out of the loop was written up as three, making one
+    probe read as three independent corroborations."""
+    session, report = _probe(monkeypatch, {("v1", SVG_ROUTE): (200, HR_SVG)}, view_count=5)
+    assert report["probe_views_tried"] == 1
+    assert report["probe_view_luids"] == ["v1"]
+    assert {luid for luid, _ in session.probed} == {"v1"}
+
+
+def test_probe_views_tried_records_every_view_it_really_walked(monkeypatch):
+    """And is still capped: the probe costs metered export calls."""
+    disconnected = SOURCES_DISCONNECTED.encode()
+    responses = {
+        (f"v{i}", route): (400, disconnected) for i in range(1, 6) for route in (SVG_ROUTE, PDF_ROUTE, PNG_ROUTE)
+    }
+    _, report = _probe(monkeypatch, responses, view_count=5)
+    assert report["probe_views_tried"] == oracle.capability.MAX_CAPABILITY_PROBE_VIEWS
+    assert report["probe_view_luids"] == ["v1", "v2", "v3"]

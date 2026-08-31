@@ -17,7 +17,9 @@ The two rules the tests exist to pin:
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -313,6 +315,54 @@ def test_empty_csv_reports_zero_rows_rather_than_failing():
 
 def test_slug_is_filesystem_safe():
     assert "/" not in oracle.safe_slug("Superstore/sheets/Overview")
+
+
+# ------------------ #405 round 3, finding 2: the api override changed a signature every double copies
+
+
+def test_the_request_contract_carries_the_api_override():
+    """``export``/``raw_get`` pass ``api`` on EVERY call, so it is part of ``_request``'s contract."""
+    parameters = inspect.signature(oracle.TableauSession._request).parameters  # pylint: disable=protected-access
+    assert "api" in parameters
+    assert parameters["api"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+@pytest.mark.parametrize("api", [None, "3.29"])
+def test_export_and_raw_get_forward_the_api_override(api):
+    """Including ``None``. Passing the keyword unconditionally is the deliberate choice: the
+    alternative -- omitting it when there is no override -- lets a stale adapter work for ordinary
+    exports and crash only on the rare floor-re-probe path, which is the failure arriving LATE."""
+    seen: list[str | None] = []
+
+    class _Recording(FakeSession):
+        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+            seen.append(api)
+            return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
+
+    session = _Recording([(200, "a\n1\n", {}), (200, b"x", {})])
+    session.export("/views/x/data", api=api)
+    session.raw_get("/views/x/image?format=svg", api=api)
+    assert seen == [api, api]
+
+
+def test_every_scripted_session_double_in_this_suite_accepts_the_api_override():
+    """The gate that would have caught the red CI without running the file.
+
+    ``TimedSession`` in ``test_capture_tableau_oracle_retry_budget.py`` overrides ``_request`` with
+    the PREVIOUS signature, so five ordinary-export tests died on ``unexpected keyword argument
+    'api'`` -- invisible to a test selection made from the changed *source* files, because that
+    double exercises the same class through a subclass in a differently-named module. The adapter set
+    is closed (three subclasses, all under ``tests/``), so updating them is right; this keeps it
+    closed. Scoped to ``def _request(self`` so module-level ``_request`` fakes for other scripts
+    (``deploy_estate``, ``verify_bindings``) are not swept up.
+    """
+    overrides = []
+    for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
+        for match in re.finditer(r"def _request\(\s*self\s*,([^)]*)\)", path.read_text(encoding="utf-8")):
+            overrides.append((path.name, match.group(1)))
+    assert overrides, "the scan found no session doubles at all -- it has stopped testing anything"
+    stale = [name for name, params in overrides if "api" not in params]
+    assert not stale, f"session double(s) missing the 'api' keyword, so every export through them raises: {stale}"
 
 
 # --------------------------------------------------------------------------- manifest contract

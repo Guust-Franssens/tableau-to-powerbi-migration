@@ -304,3 +304,89 @@ def test_lower_rungs_are_not_probed_once_a_tier_answers_cleanly():
     report = cap.detect(fetch, "l", cap.ApiVersions("3.29", "3.30"))
     assert fetch.calls == [("image", "?format=svg", None)]
     assert [t["verdict"] for t in report["tiers"]] == ["available", "not_probed", "not_probed"]
+
+
+# ------------------------------------------- #405 round 3, finding 1: the redactor must SEE the value
+
+# Deliberately mixed case and 27 characters: longer than the eight bytes the diagnostic used to quote,
+# so a redactor applied after truncation cannot cover it either.
+TOKEN = "SYNTHETIC_SeSSion_TOKEN_123"
+
+
+def _redactor(text: str) -> str:
+    """The repo redactor's defining property, in miniature: literal match, NO case folding.
+
+    ``scripts/tableau_env.py`` says so explicitly -- case-changed forms are "deliberately NOT
+    covered" -- so a diagnostic that lowercases before redacting is not merely untidy, it is a leak.
+    """
+    return text.replace(TOKEN, "[REDACTED]")
+
+
+def test_a_mixed_case_secret_in_the_content_type_is_redacted_before_it_is_case_folded():
+    """The reviewer's exact probe: a reflected token arrives as the Content-Type of an HTTP 200."""
+    ok, why = cap.format_matches("svg", SVG_BODY, f"image/{TOKEN}", redactor=_redactor)
+    assert ok is False
+    assert TOKEN not in why
+    assert TOKEN.lower() not in why
+    assert "[REDACTED]" in why
+
+
+def test_the_same_secret_survives_end_to_end_through_classify_probe():
+    """The path that actually reaches disk: `classify_probe` -> manifest `render_capability`."""
+    verdict, detail = cap.classify_probe(200, SVG_BODY, kind="svg", content_type=f"image/{TOKEN}", redactor=_redactor)
+    assert verdict == "indeterminate"
+    assert TOKEN.lower() not in detail.lower()
+    assert "[REDACTED]" in detail
+
+
+def test_case_folding_still_decides_the_verdict_even_though_the_report_keeps_the_original_case():
+    """Redaction must never change control flow: the MIME comparison stays case-insensitive."""
+    assert cap.format_matches("pdf", PDF_BODY, "APPLICATION/PDF")[0] is True
+    assert cap.format_matches("pdf", PDF_BODY, "Application/Pdf; charset=binary")[0] is True
+
+
+def test_a_secret_at_the_head_of_the_body_is_redacted_before_the_quote_is_truncated():
+    """Slicing first leaves a PREFIX of a longer secret that a literal redactor can no longer match."""
+    body = (TOKEN + "-and-then-some-html").encode()
+    ok, why = cap.format_matches("svg", body, None, redactor=_redactor)
+    assert ok is False
+    assert "[REDACTED]" in why
+    for length in range(6, len(TOKEN) + 1):
+        assert TOKEN[:length] not in why, f"a {length}-character prefix of the token survived"
+
+
+def test_the_quoted_head_is_ascii_so_a_cp1252_console_can_print_it():
+    """The decode is lossy; a literal U+FFFD in a message later printed on Windows raises."""
+    _, why = cap.format_matches("svg", b"\x89PNG\r\n\x1a\n\x00\x00", None)
+    why.encode("cp1252")  # would raise UnicodeEncodeError on a raw replacement character
+    assert "PNG" in why
+
+
+def test_a_secret_containing_a_quote_is_still_redacted():
+    """`repr(bytes)` escapes quotes and backslashes, hiding the literal from the redactor."""
+    secret = "tok'en\\42"
+    body = (secret + "<html>").encode()
+    _, why = cap.format_matches("svg", body, None, redactor=lambda t: t.replace(secret, "[REDACTED]"))
+    assert "[REDACTED]" in why
+    assert "en\\42" not in why
+
+
+def test_no_redactor_means_no_redaction_so_a_caller_cannot_assume_one():
+    """Pins the opt-in: `_capture_render` passing no redactor was the whole of the second leak."""
+    _, why = cap.format_matches("svg", (TOKEN + "<html>").encode(), None)
+    assert TOKEN[:8] in why
+
+
+# ------------------------------------------- #405 round 3, finding 4: the ladder has an ORDER
+
+
+def test_tier_priority_ranks_the_ladder_best_first_and_higher_is_better():
+    assert cap.tier_priority("svg") > cap.tier_priority("pdf") > cap.tier_priority("png_high")
+    assert cap.tier_priority(None) == 0
+    assert cap.tier_priority("not-a-tier") == 0
+
+
+def test_tier_priority_is_derived_from_the_ladder_rather_than_hard_coded():
+    """A new rung must not need a second edit in a comparison function to be ordered correctly."""
+    for better, worse in zip(cap.LADDER, cap.LADDER[1:]):
+        assert cap.tier_priority(better.name) > cap.tier_priority(worse.name)

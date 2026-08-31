@@ -98,10 +98,6 @@ LOG = logging.getLogger("tableau-oracle")
 REST_TIMEOUT_SEC = 180
 SESSION_LOST_CODE = "401002"
 MAX_REAUTH_PER_VIEW = 2
-# A capability probe costs metered export calls (Tableau meters ~100/hour/Creator), so it is bounded.
-# More than one is still needed because a single blocked view fails every route and would otherwise be
-# read as "this site cannot render", which is exactly the wrong conclusion.
-MAX_CAPABILITY_PROBE_VIEWS = 3
 DEFAULT_MAX_ATTEMPTS = 5
 BACKOFF_BASE_SEC = 1.0
 BACKOFF_CAP_SEC = 30.0
@@ -678,12 +674,17 @@ def _capture_render(
     # `format=svg` can ignore the unknown parameter and return its default PNG -- and writing those
     # bytes to a `.svg` labelled `vector: true` manufactures exactly the false evidence this capture
     # exists to prevent. Refuse to persist a mislabelled file at all.
-    matches, why = capability.format_matches(kind, payload, None)
+    #
+    # The redactor is NOT optional here: `why` quotes the response's own leading bytes, and this
+    # record is serialised into `oracle-manifest.json`. A reflecting proxy, or a source whose export
+    # simply begins with credential-shaped text, put those bytes on disk verbatim while this call
+    # passed no redactor at all.
+    matches, why = capability.format_matches(kind, payload, None, redactor=session.redact_text)
     if not matches:
         return {
             "status": "format_mismatch",
             "requested_format": kind,
-            "detail": why,
+            "detail": session.redact_text(why),
             "bytes": len(payload),
             "elapsed_sec": round(elapsed, 2),
             **stats,
@@ -815,13 +816,24 @@ def _render_statuses(record: dict[str, Any], requested: frozenset[str] = frozens
     exactly the exit-0-with-no-reference hole. Returning a tuple keeps the aggregate sets below
     reading the same legs, so adding a fourth output format cannot be counted by one and missed by
     the others.
+
+    ⚠️ A render leg is absent for TWO different reasons and they must not collapse into one.
+    ``capture_view`` returns before attempting any render once the **data** leg has failed -- all four
+    routes come from the same VizQL render, so being refused three more times costs metered calls to
+    learn nothing. Those renders are absent *because of their prerequisite*, and inventing an
+    independent ``not_captured`` failure for each put a purely credential-blocked view into
+    ``blocked`` **and** ``failed`` at once, where ``failed`` wins and the run exits 3 instead of the
+    human-actionable 2. The prerequisite's own status is propagated instead, so one root cause is
+    counted once -- and a genuinely broken data leg still yields failing renders.
     """
+    data_status = (record.get("data") or {}).get("status")
+    absent = "not_captured" if data_status in (None, "ok") else data_status
     statuses = []
     for kind, leg in (("png", "image"), ("svg", "svg"), ("pdf", "pdf")):
         if leg in record:
             statuses.append(record[leg].get("status"))
         elif kind in requested:
-            statuses.append("not_captured")
+            statuses.append(absent)
         else:
             statuses.append("ok")
     return tuple(statuses)
@@ -897,11 +909,20 @@ def write_manifest(
     probe, no render kind is requested at all, every view's data still succeeds, and the run would
     otherwise exit **0 having captured zero reference images** -- a caller gating on the exit code
     would read that as a complete capture.
+
+    ⚠️ Code 5 must NOT swallow code 2. When every selected view is credential-blocked no render could
+    have been produced by anything we control, and the one actionable instruction is "a human must
+    reauthorize the source in Tableau" -- code 2. Code 5 there points the operator at our capability
+    probe instead: the same debug-the-wrong-system cost that made 3 wrong for the same input. A
+    *partial* block still yields 5, because the absence is then not explained by the credential.
     """
     sets = _partition(records, run.requested_renders)
     blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
     rendered = sum(1 for r in records if any(r.get(leg, {}).get("status") == "ok" for leg in ("image", "svg", "pdf")))
-    reference_missing = run.reference_required and rendered == 0
+    # "Nothing rendered, and the credential explains ALL of it" -- the one case where an absent
+    # reference is code 2's problem rather than code 5's.
+    credential_only = rendered == 0 and bool(blocked) and len(blocked) == len(records)
+    reference_missing = run.reference_required and rendered == 0 and not credential_only
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -943,6 +964,38 @@ def write_manifest(
         manifest["elapsed_sec"],
         manifest_path,
     )
+    _log_blocked_and_stale(records, blocked, capability_report)
+    if reference_missing:
+        LOG.error(
+            "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
+            "view(s). The capability probe did not settle on a tier, so nothing was requested. This "
+            "run has data only and must not be treated as a complete capture; re-run once the probe "
+            "can reach a renderable view, or name a tier explicitly with --images/--svg/--pdf.",
+            len(records),
+        )
+    elif run.reference_required and credential_only:
+        # Deliberately NOT code 5: nothing rendered, but the cause is entirely upstream of us and the
+        # blocked list above already names the whole fix.
+        LOG.error(
+            "\nA reference render was REQUIRED (--reference-best) and none was captured, because ALL "
+            "%d selected view(s) are credential-blocked on the Tableau side. That is exit code 2, not "
+            "5: no render route could have succeeded, and re-probing our capability ladder cannot "
+            "help. Reauthorize the source(s) named above in Tableau and re-run.",
+            len(records),
+        )
+    if not records:
+        return 4
+    if reference_missing:
+        return 5
+    if failed:
+        return 1 if complete else 3
+    return 2 if blocked else 0
+
+
+def _log_blocked_and_stale(
+    records: list[dict[str, Any]], blocked: list[dict[str, Any]], capability_report: dict[str, Any] | None
+) -> None:
+    """The two loud, differently-actionable warning classes, plus the probe's own warnings."""
     if blocked:
         LOG.warning(
             "\n%d view(s) need a credential ON THE TABLEAU SIDE - no retry can fix this, a human must "
@@ -950,13 +1003,15 @@ def write_manifest(
             len(blocked),
         )
         for record in blocked:
-            blocked_detail = (
-                record.get("data", {}).get("detail")
-                or record.get("image", {}).get("detail")
-                or record.get("svg", {}).get("detail")
-                or record.get("pdf", {}).get("detail")
+            detail = next(
+                (
+                    record.get(leg, {}).get("detail")
+                    for leg in ("data", "image", "svg", "pdf")
+                    if record.get(leg, {}).get("detail")
+                ),
+                None,
             )
-            LOG.warning("  - %s (%s): %s", record["view_name"], record["workbook_name"], blocked_detail)
+            LOG.warning("  - %s (%s): %s", record["view_name"], record.get("workbook_name"), detail)
     stale_api = [r for r in records if r.get("svg", {}).get("status") == "unsupported_api_version"]
     if stale_api:
         # Loud and separate from `blocked`: this one is fixed by an .env line, not by a human
@@ -972,21 +1027,6 @@ def write_manifest(
         )
     for warning in (capability_report or {}).get("warnings", []):
         LOG.warning("! %s", warning)
-    if reference_missing:
-        LOG.error(
-            "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
-            "view(s). The capability probe did not settle on a tier, so nothing was requested. This "
-            "run has data only and must not be treated as a complete capture; re-run once the probe "
-            "can reach a renderable view, or name a tier explicitly with --images/--svg/--pdf.",
-            len(records),
-        )
-    if not records:
-        return 4
-    if reference_missing:
-        return 5
-    if failed:
-        return 1 if complete else 3
-    return 2 if blocked else 0
 
 
 def build_retry_policy(max_attempts: int, budget_sec: float) -> RetryPolicy:
@@ -1014,95 +1054,6 @@ def build_retry_policy(max_attempts: int, budget_sec: float) -> RetryPolicy:
             REST_TIMEOUT_SEC,
         )
     return RetryPolicy(max_attempts=max_attempts, budget_sec=budget_sec)
-
-
-def probe_render_capability(
-    session: TableauSession, env: dict[str, str], views: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Ask the SITE what it can render, by probing, and reconcile that with both version strings.
-
-    The probe view matters. A workbook whose data sources are not connected fails every route
-    identically, so probing one would report "no tier available" for a site that is perfectly capable
-    -- so try successive views until one gives a determinate answer, capped at
-    ``MAX_CAPABILITY_PROBE_VIEWS`` because each attempt costs metered export calls.
-    """
-    info = capability.server_info(env["TABLEAU_SERVER_URL"])
-    configured = env.get("TABLEAU_REST_API_VERSION", "3.21")
-    advertised = info.get("rest_api_version")
-    LOG.info(
-        "site reports product=%s build=%s, advertises REST %s; we are asking as %s",
-        info.get("product_version"),
-        info.get("build"),
-        advertised,
-        configured,
-    )
-
-    def fetcher(view_luid: str):
-        def fetch(endpoint: str, query: str, api: str | None = None) -> tuple[int, bytes, str | None]:
-            # Deliberately the RAW request, not `export()`: a version gate is a permanent answer and
-            # must not be run through a retry/re-auth ladder built for transient faults.
-            return session.raw_get(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}", api=api)
-
-        return fetch
-
-    best: dict[str, Any] = {}
-    for view in views[:MAX_CAPABILITY_PROBE_VIEWS]:
-        report = capability.detect(
-            fetcher(view["id"]),
-            view["id"],
-            capability.ApiVersions(configured=configured, advertised=advertised),
-            # A proxy echoing X-Tableau-Auth puts a LIVE session token in the error body, and this
-            # report is written to disk inside the manifest. Classification still sees raw text.
-            redactor=session.redact_text,
-        )
-        report["probe_view_name"] = view.get("name")
-        if not best or _capability_rank(report) > _capability_rank(best):
-            best = report
-        # Keep going while the answer is UNDETERMINED *or* merely PROVISIONAL: a rung that answered
-        # while a better rung was blocked on this view is not the site's ceiling, and stopping there
-        # is how a capable site gets silently demoted.
-        if report.get("selected_tier") and report.get("capability_complete"):
-            break
-    best["server"] = info
-    best["probe_views_tried"] = min(len(views), MAX_CAPABILITY_PROBE_VIEWS)
-    LOG.info(
-        "render capability: best tier = %s%s",
-        best.get("selected_tier") or "UNDETERMINED",
-        " (PROVISIONAL)" if best.get("provisional") else "",
-    )
-    return best
-
-
-def _capability_rank(report: dict[str, Any]) -> tuple[int, int]:
-    """Order two probe reports: a settled answer beats a provisional one beats no answer at all."""
-    return (1 if report.get("selected_tier") else 0, 1 if report.get("capability_complete") else 0)
-
-
-def _apply_selected_tier(
-    report: dict[str, Any], wants: set[str], api_overrides: dict[str, str], env: dict[str, str]
-) -> None:
-    """Turn a probe verdict into what the run will actually fetch, INCLUDING the api version.
-
-    Without the version half, a floor re-probe that recovered a tier leaves the run claiming
-    ``selected_tier='svg'`` and then capturing at the configured version, where the very same request
-    is still refused -- measured: floor 3.29 ``available``, configured 3.21 ``unsupported``. The
-    report would promise a tier the capture cannot fetch.
-    """
-    tier = report.get("selected_tier")
-    if not tier:
-        return
-    # The ladder names the PNG rung `png_high` (it is `?resolution=high`, not the plain render); the
-    # capture kinds are keyed by file format. One mapping, stated once.
-    kind = {"png_high": "png"}.get(tier, tier)
-    wants.add(kind)
-    if report.get("selected_api_version"):
-        api_overrides[kind] = report["selected_api_version"]
-        LOG.info(
-            "  capturing '%s' at API %s (recovered by floor re-probe; configured is %s)",
-            kind,
-            api_overrides[kind],
-            env.get("TABLEAU_REST_API_VERSION", "3.21"),
-        )
 
 
 def main() -> int:
@@ -1140,8 +1091,8 @@ def main() -> int:
     wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
     api_overrides: dict[str, str] = {}
     if args.reference_best and views:
-        capability_report = probe_render_capability(session, env, views)
-        _apply_selected_tier(capability_report, wants, api_overrides, env)
+        capability_report = capability.probe_render_capability(session, env, views)
+        capability.apply_selected_tier(capability_report, wants, api_overrides, env)
 
     records, started = [], time.perf_counter()
     for index, view in enumerate(views, 1):

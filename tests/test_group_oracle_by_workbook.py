@@ -150,12 +150,76 @@ def test_the_workbook_manifest_carries_capture_provenance(tmp_path):
     assert subset["workbook_luid"] == "wb-Sales"
 
 
-def test_a_view_whose_file_vanished_is_skipped_without_crashing(tmp_path):
+def test_a_view_whose_file_vanished_is_reported_and_never_claimed_as_copied(tmp_path):
+    """⚠️ This test used to assert exit 0 -- it PINNED the defect. `copy_view_files` warned and moved
+    on while `subset_manifest` kept the source manifest's `status: ok`, its `path`, and its place in
+    the success counts, so the grouped folder asserted evidence that was never copied. That is the
+    exact shape an earlier round of this review had already fixed one level up."""
     oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
     (oracle / "data" / "V__aaa.csv").unlink()
     root = _migrations(tmp_path, "sales")
-    assert grp.run(oracle, root, dry_run=False) == 0
+    assert grp.run(oracle, root, dry_run=False) == 1
+    # What DID copy still copies: partial evidence, honestly labelled, beats nothing.
     assert (root / "sales" / "reference" / "images" / "V__aaa.png").is_file()
+    subset = json.loads((root / "sales" / "reference" / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert subset["data_ok"] == 0
+    assert subset["not_copied"] == 1
+    assert subset["views"][0]["data"]["status"] == grp.NOT_COPIED_STATUS
+    assert "path" not in subset["views"][0]["data"]
+    assert "V__aaa.csv" in subset["views"][0]["data"]["not_copied_reason"]
+
+
+def test_a_missing_render_artifact_is_not_counted_in_its_ok_column(tmp_path):
+    """`--reference-best` normally yields SVG now, so the render legs are where this bites."""
+    view = _view("Sales", "V", "aaa")
+    view["svg"] = {"status": "ok", "path": "images/V__aaa.svg"}
+    oracle = _capture(tmp_path, [view])  # _capture only materialises data + image
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=False) == 1
+    subset = json.loads((root / "sales" / "reference" / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert subset["svg_ok"] == 0
+    assert subset["not_copied"] == 1
+    assert not (root / "sales" / "reference" / "images" / "V__aaa.svg").exists()
+
+
+def test_a_grouping_that_lost_an_artifact_is_not_reported_as_grouped(tmp_path):
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    (oracle / "images" / "V__aaa.png").unlink()
+    root = _migrations(tmp_path, "sales")
+    grp.run(oracle, root, dry_run=False)
+    report = json.loads((oracle / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert report["workbooks_grouped"] == 0
+    assert report["workbooks_incomplete"] == 1
+    assert report["incomplete"][0]["not_copied"] == 1
+
+
+def test_a_complete_grouping_is_still_reported_as_grouped_and_exits_zero(tmp_path):
+    """The clean path must stay clean, or the new non-zero exit is just noise."""
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=False) == 0
+    report = json.loads((oracle / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert (report["workbooks_grouped"], report["workbooks_incomplete"]) == (1, 0)
+    subset = json.loads((root / "sales" / "reference" / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert (subset["data_ok"], subset["image_ok"], subset["not_copied"]) == (1, 1, 0)
+
+
+def test_a_dry_run_still_detects_a_missing_artifact(tmp_path):
+    """A dry run's whole job is to report what WOULD happen; a missing source is exactly that."""
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    (oracle / "data" / "V__aaa.csv").unlink()
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=True) == 1
+    assert not (root / "sales" / "reference").exists()
+
+
+def test_the_capture_manifest_is_never_mutated_by_grouping(tmp_path):
+    """The flat capture stays authoritative -- downgrading a leg must happen on a COPY."""
+    oracle = _capture(tmp_path, [_view("Sales", "V", "aaa")])
+    (oracle / "data" / "V__aaa.csv").unlink()
+    before = (oracle / grp.MANIFEST_NAME).read_text(encoding="utf-8")
+    grp.run(oracle, _migrations(tmp_path, "sales"), dry_run=False)
+    assert (oracle / grp.MANIFEST_NAME).read_text(encoding="utf-8") == before
 
 
 # --------------------------------------------------------------------------- dry run / errors
