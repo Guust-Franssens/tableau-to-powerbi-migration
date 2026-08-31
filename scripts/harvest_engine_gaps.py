@@ -50,10 +50,12 @@ diff. Buckets were chosen by measuring the corpus first; `UNCLASSIFIED` is retai
 
 Axis 0, beneath both - **ONE STATE OF THE BUNDLE.** Provenance is adjudicated before the trees are
 walked, so a bundle that moves in between is described by two reads at once and the difference lands
-on the ENGINE (blind review round 6; see `_snapshot_race`). Adjudication now consumes the harvest's
-own inventory read, and a second read taken after the comparison must agree with it: anything that
-moved forces `incomplete` and has its authorship claim withdrawn. Detection, not prevention - user
-space cannot snapshot a filesystem atomically.
+on the ENGINE (blind review rounds 6-7; see `_observed_race`). Round 6 compared two inventory reads
+and round 7 defeated that with an ABA edit - restore the original bytes and both endpoints agree
+while the scan consumed the changed ones. Provenance is therefore tied to the digests the tree
+comparison ACTUALLY READ: there is no window between the observation and the evidence, because the
+observation *is* the evidence. Anything that disagrees forces `incomplete` and has its authorship
+claim withdrawn, and it costs no extra I/O.
 
 This module does NOT use git, and that is a correctness fix. Measured: of 44 pairs, the mandated
 `git diff --no-index --stat` produced NO stat line for 3 (worst path 261/285/287 vs 259 for the 41 it
@@ -84,7 +86,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -95,7 +96,6 @@ from check_migration_progress import (
     GeneratedArtifactSnapshot,
     UnreadableDeclarations,
     adjudicate_generated_drift,
-    compare_generated_snapshots,
     load_generated_artifact_baseline,
     observe_generated_artifacts,
 )
@@ -114,7 +114,8 @@ from harvest_gap_shapes import (
     bound_model_tables,
     shapes_for_change,
 )
-from migration_bundle import ENGINE_RECEIPT, sha256_file
+from harvest_gap_trees import TreeDelta, compare_trees, safe_text, withdraw
+from migration_bundle import ENGINE_RECEIPT
 
 REPORT_VERSION = 1
 EXIT_OK = 0
@@ -158,10 +159,6 @@ DRIFT_CHANGED = "changed"
 DRIFT_MISSING = "missing"
 DRIFT_ADDED = "added"
 
-# `Path.relative_to` renders a tree's own root as ".", so a traversal failure AT the root carries
-# that as its relative path. It is not a file name; it means "everything here".
-TREE_ROOT = "."
-
 # Layer for an adjudicated working path that belongs to no `.Report`/`.SemanticModel` pair at all -
 # a `.pbip` project file, or anything under a unit the pairing could not reach.
 LAYER_BUNDLE = "bundle"
@@ -187,113 +184,8 @@ class Pair(NamedTuple):
     working: Path | None
 
 
-class TreeDelta(NamedTuple):
-    """The raw content comparison of two trees, with unreadable entries kept apart."""
-
-    added: list[str]
-    removed: list[str]
-    changed: list[str]
-    unassessable: list[dict[str, str]]
-    baseline_files: int
-    working_files: int
-    longest_path: int
-    scoped: bool = True
-
-
 def _utcnow() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _safe(text: str) -> str:
-    """A console/JSON-safe rendering of a path that may carry undecodable bytes."""
-    return text.encode("utf-8", "backslashreplace").decode("ascii", "replace")
-
-
-def hash_tree(root: Path) -> tuple[dict[str, str], list[dict[str, str]], int]:
-    """Hash every file under `root`, returning (by-relative-path, unreadable, longest full path).
-
-    Unreadable entries are returned SEPARATELY and are never given a digest, because a file that
-    cannot be read is not a file that is the same - the single defect shape this repo keeps
-    re-introducing. Each carries `relative` when one could be computed, so the caller can withdraw
-    that path from BOTH sides of a comparison rather than letting it masquerade as an addition.
-    """
-    digests: dict[str, str] = {}
-    unreadable: list[dict[str, str]] = []
-    longest = 0
-    root_str = str(root)
-
-    def on_error(exc: OSError) -> None:
-        failed = str(getattr(exc, "filename", "") or root_str)
-        record = {"path": _safe(failed), "reason": f"{type(exc).__name__}: {exc.strerror or exc}"}
-        try:
-            record["relative"] = Path(failed).relative_to(root).as_posix()
-        except ValueError:
-            pass
-        unreadable.append(record)
-
-    for dirpath, dirnames, filenames in os.walk(root_str, onerror=on_error):
-        for name in list(dirnames) + list(filenames):
-            longest = max(longest, len(os.path.join(dirpath, name)))
-        for name in filenames:
-            full = Path(dirpath) / name
-            relative = None
-            try:
-                relative = full.relative_to(root).as_posix()
-                digests[relative] = sha256_file(full)
-            except (OSError, ValueError) as exc:
-                record = {"path": _safe(str(full)), "reason": f"{type(exc).__name__}: {exc}"}
-                if relative is not None:
-                    record["relative"] = relative
-                unreadable.append(record)
-    return digests, unreadable, longest
-
-
-def _withdraw(keys: set[str], blocked: frozenset[str]) -> set[str]:
-    """Drop every key that IS a blocked path or lives BENEATH one.
-
-    ⚠️ Exact-equality withdrawal is not enough, and that gap fabricated evidence. `os.walk` reports
-    only the DIRECTORY it could not enter, so an unreadable `pages/blocked/` withdrew exactly one
-    key - `pages/blocked` - while every descendant visible on the *other* side (`pages/blocked/
-    visual.json`) stayed in the comparison and was counted as an addition. Measured (blind review of
-    PR #399): an injected `PermissionError` on one baseline directory produced an unassessable record
-    for the directory AND a fabricated `delta.added` entry beneath it.
-
-    ⚠️ A failure at the TREE ROOT relativises to `"."`, which no key is prefixed by, so the same
-    round-2 fix still let a blocked root through: the second review measured `status=incomplete` with
-    both working files nonetheless counted as additions and attributed `engine_internal`. `"."` means
-    the whole tree, and is handled as such.
-    """
-    if TREE_ROOT in blocked:
-        return set()
-    return {key for key in keys if key not in blocked and not any(key.startswith(f"{p}/") for p in blocked)}
-
-
-def compare_trees(baseline: Path, working: Path) -> TreeDelta:
-    """Content-compare two trees without git, so a long path is assessed rather than skipped."""
-    a, a_bad, a_longest = hash_tree(baseline)
-    b, b_bad, b_longest = hash_tree(working)
-    unassessable = a_bad + b_bad
-    # A path that could not be read on EITHER side is withdrawn from BOTH key sets, with everything
-    # beneath it, so it can never masquerade as an addition or a removal. Matching is done on the
-    # POSIX relative path, not the rendered absolute one: `Path(root) / "a/b"` stringifies to
-    # `root\a/b` on Windows and would never match the `root\a\b` that `os.walk` produced.
-    blocked = frozenset(record["relative"] for record in unassessable if "relative" in record)
-    # A failure whose relative path could not be computed at all cannot be scoped, so nothing about
-    # this pair can be trusted: the caller suppresses its difference records entirely rather than
-    # reporting a subset that looks complete.
-    scoped = not any("relative" not in record for record in unassessable)
-    a_keys = _withdraw(set(a), blocked)
-    b_keys = _withdraw(set(b), blocked)
-    return TreeDelta(
-        added=sorted(b_keys - a_keys),
-        removed=sorted(a_keys - b_keys),
-        changed=sorted(k for k in a_keys & b_keys if a[k] != b[k]),
-        unassessable=unassessable,
-        baseline_files=len(a),
-        working_files=len(b),
-        longest_path=max(a_longest, b_longest),
-        scoped=scoped,
-    )
 
 
 class Evidence:
@@ -481,7 +373,7 @@ def _safe_iterdir(directory: Path, failures: list[dict[str, str]]) -> list[Path]
     except OSError as exc:
         failures.append(
             {
-                "path": _safe(str(directory)),
+                "path": safe_text(str(directory)),
                 "reason": f"{type(exc).__name__}: {exc.strerror or exc}",
                 "scope": "discovery",
             }
@@ -897,38 +789,75 @@ class Scan(NamedTuple):
     records: list[dict[str, Any]]
     unassessable: list[dict[str, str]]
     git_blind: list[dict[str, Any]]
+    raced: list[dict[str, Any]]
 
 
-def _snapshot_race(evidence: Evidence) -> list[dict[str, Any]]:
-    """Re-read the inventory AFTER the comparison, and name everything that moved while we read.
+def _observed_race(pair: Pair, delta: TreeDelta, evidence: Evidence, bundle: Path) -> list[dict[str, Any]]:
+    """Every path where what the SCAN READ disagrees with what ADJUDICATION ASSUMED.
 
-    ⚠️ **A report assembled from two filesystem snapshots is not merely partial - it is confidently
-    wrong.** Provenance is adjudicated before the trees are walked, so an artifact edited in between
-    is described by BOTH reads: the comparison sees the new bytes while the stale adjudication still
-    calls that path pristine, so the difference lands on the ENGINE. Measured (blind review round 6
-    of PR #399), one working-visual edit injected between the two produced `status=complete`,
-    `differing_files=1`, `engine_internal=1`, `tier_edits=0` and a clean markdown claim, while
-    `tamper_check()` returned `DRIFT` on the same bundle immediately after. Rounds 1-5 all fixed "the
-    report re-derived trust wrongly"; this is the INPUT to that fix being wrong, and trusting the
-    authoritative status cannot help when the authority is computed across a race.
+    ⚠️ **Equality of two independent re-reads does not prove the bundle held still, and round 6
+    shipped exactly that mistake.** Blind review round 7 defeated it with an ABA edit: change a
+    working visual before `_scan_pairs`, let the scan consume the changed bytes, restore the original
+    before the closing read. Both endpoints matched, so the run reported `snapshot_race.count=0`,
+    `status=complete` and `engine_internal=1` for a real tier edit, and emitted the clean claim.
 
-    DETECTION, not prevention, deliberately: user space cannot snapshot a filesystem atomically - a
-    single `os.walk` is itself a moving read - so "one snapshot" narrows the window without closing
-    it. A bundle CAN legitimately change under a long harvest; the answer is `incomplete` with the
-    paths named, never a verdict. A re-read that FAILS is itself a race (a file that vanished between
-    `is_file()` and the hash), so it is reported as one rather than raised.
+    So provenance is tied to the digests the comparison ACTUALLY CONSUMED rather than to a separate
+    opinion about them. There is no window between the observation and the evidence, because the
+    observation *is* the evidence: `hash_tree` already hashed every file this delta was computed
+    from, and each is checked against the snapshot adjudication was decided on. ABA cannot hide -
+    the scan's own read of B is the thing being compared.
 
-    Cost on `_runs/estate-2.339.0-20260829` (2,548 files / 2,481 recorded), both arms alternated in
-    one process: 12.2s -> 16.4s median, **+4.2s (+35%)**. One extra read, not two - adjudication now
-    consumes the FIRST read instead of taking its own.
+    Three exclusions, each deliberate:
+    * a path the snapshot has NO opinion about (a `.pbi` sidecar, a file created before the harvest
+      but after the engine) is skipped - it is `unrecorded`, hence already `unattributed`, and
+      flagging it would make every bundle with a Desktop sidecar look like a race;
+    * a BLOCKED path (unreadable on either side) is skipped - `hash_tree` gives it no digest, and
+      "could not read" is not "changed"; it is already withdrawn from both sides and reported as
+      unassessable;
+    * a snapshot entry of `None` (recorded but absent) matching a scan that also did not see it is
+      agreement, not a race.
+
+    Cost: **zero extra I/O.** The digests are a by-product of a read the harvest already paid for,
+    which is why this replaced the closing re-observation rather than joining it (that read cost a
+    measured +4.2s / +35% on the estate bundle, and could not see ABA anyway).
     """
-    if not evidence.usable or evidence.snapshot is None:
+    if not evidence.usable or evidence.snapshot is None or pair.baseline is None or pair.working is None:
         return []
-    try:
-        after = observe_generated_artifacts(evidence.bundle, evidence.recorded)
-    except (OSError, ValueError) as exc:
-        return [{"target": str(evidence.bundle), "kind": f"unreadable ({type(exc).__name__})"}]
-    return compare_generated_snapshots(evidence.snapshot, after)
+    if not delta.scoped:
+        # `hash_tree` could not even locate its own failure, so `delta.blocked` cannot scope this
+        # comparison: every recorded path under the unread subtree would read as "missing" and a real
+        # disagreement could hide behind one. Withhold rather than fabricate - `scoped: False` tells
+        # `_withdraw_raced` that the affected paths are unknown, so no claim may stand.
+        return [
+            {
+                "target": pair.working.relative_to(bundle).as_posix(),
+                "kind": "unlocatable_read_failure",
+                "scoped": False,
+            }
+        ]
+    raced = []
+    for root, digests in (
+        (pair.baseline.relative_to(bundle).as_posix(), delta.baseline_digests),
+        (pair.working.relative_to(bundle).as_posix(), delta.working_digests),
+    ):
+        prefix = f"{root}/"
+        opinions = {rel[len(prefix) :] for rel in evidence.snapshot.hashes if rel.startswith(prefix)}
+        for relative in sorted(opinions | set(digests)):
+            if relative not in opinions or not withdraw({relative}, delta.blocked):
+                continue
+            assumed, observed = evidence.snapshot.hashes.get(f"{prefix}{relative}"), digests.get(relative)
+            if assumed == observed:
+                continue
+            kind = DRIFT_ADDED if assumed is None else DRIFT_MISSING if observed is None else DRIFT_CHANGED
+            raced.append(
+                {
+                    "target": f"{prefix}{relative}",
+                    "kind": kind,
+                    "adjudicated_sha256": assumed,
+                    "scanned_sha256": observed,
+                }
+            )
+    return raced
 
 
 def _withdraw_raced(records: list[dict[str, Any]], raced: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -945,15 +874,26 @@ def _withdraw_raced(records: list[dict[str, Any]], raced: list[dict[str, Any]]) 
     `baseline_tampered` is deliberately NOT withdrawn: it rests on a positive observation that a
     baseline path had ALREADY drifted, and withdrawing it would drop the run from `untrustworthy` to
     the weaker `incomplete`.
+
+    ⚠️ **A race entry that cannot name its paths withdraws EVERYTHING.** Blind review round 7: the
+    round-6 detector reported a failed closing read as a race whose `target` was the bundle root,
+    which matched no record at all - exit 3 was correct, and the body still said
+    `engine_internal=2, coverage.complete=true`. Exit code and body must agree. Entries carry
+    `scoped`; anything false means "something moved and I cannot say what", and the only honest
+    response is to withhold every authorship claim rather than the empty set of them.
+
+    Idempotent, because it runs per pair (so `pairs[]` and `records` cannot diverge) and again over
+    the combined record list (so an unpaired record touching a raced path is covered too).
     """
-    targets = {item["target"] for item in raced}
-    if not targets:
+    if not raced:
         return records
+    unscoped = any(not item.get("scoped", True) for item in raced)
+    targets = {item["target"] for item in raced}
     keys = {key for key in (_artifact_key(target) for target in targets) if key is not None}
     withdrawn = []
     for record in records:
         paths = {p for p in (record.get("baseline_path"), record.get("working_path")) if p}
-        touched = (record["artifact"], record["layer"], record["path"]) in keys or bool(paths & targets)
+        touched = unscoped or (record["artifact"], record["layer"], record["path"]) in keys or bool(paths & targets)
         if touched and record["provenance"] in {PROV_ENGINE, PROV_TIER}:
             record = record | {
                 "provenance": PROV_UNATTRIBUTED,
@@ -988,11 +928,14 @@ def _incomplete_reasons(
         reasons.append(f"{len(unreconciled)} adjudicated path(s) could not be placed")
     if raced:
         named = ", ".join(f"{item['target']} ({item['kind']})" for item in raced[:RACE_PATHS_NAMED])
+        scope = (
+            " Their scope is UNKNOWN, so every authorship claim in this run is withdrawn."
+            if any(not item.get("scoped", True) for item in raced)
+            else " Every authorship claim touching them is withdrawn; re-run against a still bundle."
+        )
         reasons.append(
-            f"the bundle MOVED during this harvest: {len(raced)} generated artifact(s) differ between"
-            f" the read that attributed provenance and the read taken after the comparison - {named}."
-            " Every authorship claim touching them is withdrawn; re-run against a bundle nobody is"
-            " writing to."
+            f"the bundle MOVED during this harvest: for {len(raced)} path(s) the bytes the comparison"
+            f" READ are not the bytes provenance was ADJUDICATED from - {named}.{scope}"
         )
     if not evidence.usable:
         reasons.append(f"attribution unavailable ({evidence.unavailable_reason})")
@@ -1026,9 +969,17 @@ def _represented(records: list[dict[str, Any]], baseline_drift: list[dict[str, A
 
 
 def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
-    """Compare every discovered pair, collecting entries, records and access failures."""
+    """Compare every discovered pair, collecting entries, records, access failures and races.
+
+    ⚠️ **The withdrawal happens HERE, before `_pair_entry` builds its row.** Blind review round 7:
+    doing it afterwards in `harvest()` corrected `records` and left the already-constructed `pairs[]`
+    entries carrying the stale attribution, so one report said `unattributed=1, engine_internal=0` at
+    the top and `{"engine_internal": 1}` in the pair row - while `snapshot_race.note` claimed every
+    touching claim had been withdrawn. Withdrawing at the point the records are made keeps the two
+    consistent by CONSTRUCTION rather than by remembering to update a second place.
+    """
     pairs, discovery_failures = discover_pairs(bundle)
-    scan = Scan([], [], list(discovery_failures), [])
+    scan = Scan([], [], list(discovery_failures), [], [])
     for pair in pairs:
         delta = compare_trees(pair.baseline, pair.working) if pair.baseline and pair.working else None
         if delta is not None:
@@ -1042,7 +993,10 @@ def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
                         "longest_path": delta.longest_path,
                     }
                 )
+        raced = _observed_race(pair, delta, evidence, bundle) if delta is not None else []
+        scan.raced.extend(raced)
         pair_records = _difference_records(bundle, pair, delta, evidence) if delta is not None else []
+        pair_records = _withdraw_raced(pair_records, raced)
         scan.records.extend(pair_records)
         scan.entries.append(_pair_entry(pair, delta, _pair_status(pair, delta, pair_records), pair_records))
     return scan
@@ -1060,20 +1014,19 @@ def harvest(bundle: Path) -> dict[str, Any]:
     baseline_drift = evidence.side_drift(BASELINE_ROOTS)
 
     scan = _scan_pairs(bundle, evidence)
-    # Every read this report rests on has now happened. Re-observe the inventory: if it moved while
-    # we were reading it, provenance was adjudicated against a bundle that no longer exists.
-    raced = _snapshot_race(evidence)
 
     # The reconciliation that makes "no adjudicated path silently disappears" structural rather than
     # aspirational: every path the gate found must be named by a record, by `baseline_drift`, or by
     # `unreconciled_drift` - and the last of those forces a non-clean status.
     unpaired, unreconciled = _unmatched_drift_records(evidence, _represented(scan.records, baseline_drift))
-    records = _withdraw_raced(scan.records + unpaired, raced)
+    # Idempotent over the pair-level withdrawal `_scan_pairs` already applied; this pass exists for
+    # the UNPAIRED records, which no pair loop ever saw, and for an unscoped race.
+    records = _withdraw_raced(scan.records + unpaired, scan.raced)
 
     provenance = Counter(record["provenance"] for record in records)
     tampered = [r for r in records if r["provenance"] == PROV_TAMPERED]
     coverage = _coverage(records)
-    reasons = _incomplete_reasons(scan, evidence, coverage, unreconciled, raced)
+    reasons = _incomplete_reasons(scan, evidence, coverage, unreconciled, scan.raced)
     status = _overall_status(tampered or baseline_drift, reasons)
 
     return {
@@ -1103,13 +1056,14 @@ def harvest(bundle: Path) -> dict[str, Any]:
         "unpaired_drift_records": len(unpaired),
         "unreconciled_drift": unreconciled,
         "snapshot_race": {
-            "count": len(raced),
-            "moved": raced,
+            "count": len(scan.raced),
+            "moved": scan.raced,
             "note": (
-                "generated artifacts that differ between the read provenance was adjudicated from and"
-                " a read taken after the comparison. Non-empty means this report describes TWO states"
-                " of the bundle: it is `incomplete`, and every authorship claim touching these paths"
-                " is withdrawn to `unattributed`."
+                "paths where the digests the tree comparison actually READ disagree with the"
+                " inventory snapshot provenance was ADJUDICATED from. Non-empty means this report"
+                " reasons about two states of the bundle: it is `incomplete`, and every authorship"
+                " claim touching these paths - all of them, when a race is unscoped - is withdrawn"
+                " to `unattributed`."
             ),
         },
         "pairs": scan.entries,

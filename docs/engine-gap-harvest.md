@@ -363,7 +363,7 @@ the difference is therefore attributed to the **engine**.
 Measured (blind review round 6), one working-visual edit injected immediately after
 `adjudicate_generated_drift()` returned pristine and before the tree scan began:
 
-| | before | after |
+| | round 5 | round 7 |
 |---|---|---|
 | CLI exit | 0, stdout `complete` | **3** |
 | `status` | `complete`, no reasons | `incomplete`, race named |
@@ -373,21 +373,43 @@ Measured (blind review round 6), one working-visual edit injected immediately af
 | markdown | clean claim emitted | *Undetermined* |
 | `tamper_check()` on the same bundle | `DRIFT` | `DRIFT` |
 
-Two changes close it. Adjudication now consumes the **harvest's own** inventory read
-(`observe_generated_artifacts`) instead of taking a second one, and a **third** read taken after the
-comparison must agree with it; anything that moved is listed in `snapshot_race.moved`, forces
-`incomplete`, and has its authorship claim withdrawn to `unattributed`. `baseline_tampered` is
-deliberately **not** withdrawn — that verdict rests on a positive observation, and withdrawing it
-would drop `untrustworthy` (exit 1) to `incomplete` (exit 3).
+### ⚠️ And comparing two reads of the inventory does not detect it — ABA defeats that
 
-**Detection, not prevention, and that is the honest shape.** User space cannot snapshot a filesystem
-atomically — a single `os.walk` is itself a moving read — so "one snapshot" narrows the window
-without closing it, and a bundle *can* legitimately change under a long harvest.
+Round 6's fix re-read the inventory after the comparison and diffed the endpoints. Blind review
+round 7 broke it in one move: **change a working visual before the scan, let the scan consume the
+changed bytes, restore the original before the closing read.** Both endpoints matched, so the run
+reported `snapshot_race.count = 0`, `status = complete`, `engine_internal = 1` for a real tier edit,
+and emitted the clean claim. Endpoint equality proves that two reads agreed — never that nothing
+happened between them.
 
-**Cost**, on `_runs/estate-2.339.0-20260829` (2,548 files, 2,481 recorded artifacts), both arms
-alternated in one process so they share page cache and machine load: **12.2 s → 16.4 s median, +4.2 s
-(+35 %)**. It buys one extra inventory read rather than two, because adjudication no longer takes its
-own. Every estate figure in §3 is unchanged by it, and `snapshot_race.count` is **0** on that bundle.
+The fix is a different question. Do not ask *"did the bundle change?"*; ask **"are the bytes the
+comparison read the bytes provenance was decided from?"** `hash_tree` already hashes every file the
+delta is computed from, so `TreeDelta` now carries those digests and each is checked against the
+adjudication snapshot. There is no window, because the observation *is* the evidence — the same
+"ask the authority that already has the answer" move that closed rounds 5 and 6.
+
+Consequences, all measured:
+
+* **Cost falls to zero.** Round 6's closing re-read cost +4.2 s (+35 %) on the estate bundle; the
+  digests are a by-product of a read already paid for. The estate harvest is back to its round-5
+  wall clock.
+* **The withdrawal moved into `_scan_pairs`.** Doing it afterwards corrected `records` and left the
+  already-built `pairs[]` rows stale — one report said `unattributed=1, engine_internal=0` at the top
+  and `{"engine_internal": 1}` in the pair row. Withdrawing where the records are made keeps them
+  consistent by construction, and a test asserts the two tallies agree on both a raced and a still
+  bundle.
+* **A race that cannot name its paths withdraws everything.** Round 6 reported a failed closing read
+  as a race targeting the bundle *root*, which matched no record: exit 3, and a body still claiming
+  `engine_internal=2, coverage.complete=true`. There is no closing read any more, and the one
+  remaining unnameable case — a traversal failure `os.walk` cannot locate — is emitted as
+  `scoped: false` and withdraws every non-tamper claim.
+* **Boundary, stated rather than glossed:** a file *created* mid-scan that the engine never recorded
+  has no snapshot assumption to contradict, so it is not a race by this mechanism. It remains
+  fail-safe by a different one — `unrecorded` is never attributed to the engine, so it is
+  `unattributed` and the run is `incomplete`. Round 6 named it; round 7 trades that diagnostic for
+  closing ABA. A file *restored* mid-scan after being deleted **is** caught, because the snapshot
+  does have an opinion about it.
+* Every estate figure in §3 is unchanged, and `snapshot_race.count` is **0** on that bundle.
 
 ---
 

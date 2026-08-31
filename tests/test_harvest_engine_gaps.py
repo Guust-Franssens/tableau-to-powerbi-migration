@@ -37,6 +37,7 @@ import check_migration_progress as cmp_mod  # noqa: E402  # pylint: disable=wron
 import harvest_engine_gaps as heg  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_gap_report as hgr  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_gap_shapes as hgs  # noqa: E402  # pylint: disable=wrong-import-position
+import harvest_gap_trees as hgt  # noqa: E402  # pylint: disable=wrong-import-position
 
 VISUAL = "definition/pages/page-1/visuals/v1/visual.json"
 
@@ -258,14 +259,14 @@ def test_unreadable_file_is_unassessable_and_never_identical(tmp_path, monkeypat
     bundle = _bundle(tmp_path)
     _report(bundle / "reports" / "WB.Report", entity="Orders", model_relative="../Sales.SemanticModel")
     _record_baseline(bundle)
-    real = heg.sha256_file
+    real = hgt.sha256_file
 
     def explode(path: Path) -> str:
         if path.name == "visual.json":
             raise OSError("injected: unreadable")
         return real(path)
 
-    monkeypatch.setattr(heg, "sha256_file", explode)
+    monkeypatch.setattr(hgt, "sha256_file", explode)
     report = heg.harvest(bundle)
 
     entry = _pair(report, "report", "WB")
@@ -279,14 +280,14 @@ def test_unreadable_file_is_not_reported_as_added_or_removed(tmp_path, monkeypat
     bundle = _bundle(tmp_path)
     _report(bundle / "reports" / "WB.Report", entity="Orders", model_relative="../Sales.SemanticModel")
     _record_baseline(bundle)
-    real = heg.sha256_file
+    real = hgt.sha256_file
 
     def explode(path: Path) -> str:
         if path.name == "visual.json" and "reports" in path.parts:
             raise OSError("injected: unreadable")
         return real(path)
 
-    monkeypatch.setattr(heg, "sha256_file", explode)
+    monkeypatch.setattr(hgt, "sha256_file", explode)
     report = heg.harvest(bundle)
 
     entry = _pair(report, "report", "WB")
@@ -938,7 +939,7 @@ def test_an_unusable_evidence_object_attributes_nothing():
 
 def _block_directory(monkeypatch, blocked_name: str, side: str, *, locatable: bool = True) -> None:
     """Make `os.walk` fail on one directory of one side, exactly as a PermissionError would."""
-    real_walk = heg.os.walk
+    real_walk = hgt.os.walk
 
     def walk(top, onerror=None, **kwargs):
         for dirpath, dirnames, filenames in real_walk(top, onerror=onerror, **kwargs):
@@ -950,7 +951,7 @@ def _block_directory(monkeypatch, blocked_name: str, side: str, *, locatable: bo
                 continue
             yield dirpath, dirnames, filenames
 
-    monkeypatch.setattr(heg.os, "walk", walk)
+    monkeypatch.setattr(hgt.os, "walk", walk)
 
 
 def _bundle_with_blocked_dir(tmp_path: Path) -> Path:
@@ -1367,7 +1368,7 @@ def test_a_blocked_tree_root_withdraws_the_whole_tree_from_every_count(tmp_path,
     this module's documented promise that unreadable content is excluded from every count.
     """
     bundle = _identical_bundle(tmp_path)
-    real_walk = heg.os.walk
+    real_walk = hgt.os.walk
 
     def walk(top, onerror=None, **kwargs):
         if Path(top).name == "WB.Report" and "reports" in Path(top).parts:
@@ -1378,7 +1379,7 @@ def test_a_blocked_tree_root_withdraws_the_whole_tree_from_every_count(tmp_path,
             return
         yield from real_walk(top, onerror=onerror, **kwargs)
 
-    monkeypatch.setattr(heg.os, "walk", walk)
+    monkeypatch.setattr(hgt.os, "walk", walk)
     report = heg.harvest(bundle)
     entry = _pair(report, "report", "WB")
 
@@ -1390,8 +1391,8 @@ def test_a_blocked_tree_root_withdraws_the_whole_tree_from_every_count(tmp_path,
 
 
 def test_withdraw_treats_the_tree_root_as_covering_everything():
-    assert heg._withdraw({"a", "a/b", "c"}, frozenset({heg.TREE_ROOT})) == set()  # pylint: disable=protected-access
-    assert heg._withdraw({"a", "a/b", "c"}, frozenset({"a"})) == {"c"}  # pylint: disable=protected-access
+    assert hgt.withdraw({"a", "a/b", "c"}, frozenset({hgt.TREE_ROOT})) == set()
+    assert hgt.withdraw({"a", "a/b", "c"}, frozenset({"a"})) == {"c"}
 
 
 def test_an_unreadable_declaration_ledger_makes_the_harvest_incomplete_not_untrustworthy(tmp_path):
@@ -1635,18 +1636,47 @@ def test_a_deletion_between_adjudication_and_scanning_is_not_attributed_to_the_e
     assert report["snapshot_race"]["moved"][0]["kind"] == "missing"
 
 
-def test_a_mid_scan_creation_is_named_as_a_race_not_merely_left_unattributed(tmp_path, monkeypatch):
-    """An addition was already fail-safe (`unrecorded` -> unattributed); it must still be NAMED.
+def test_a_mid_scan_creation_is_fail_safe_by_being_unrecorded_not_by_race_detection(tmp_path, monkeypatch):
+    """⚠️ The documented BOUNDARY of observed-digest provenance, stated rather than glossed.
 
-    Fail-safe is not the same as diagnosed: without the race entry a reader is told the path is
-    unattributed and never that the bundle was moving underneath the harvest.
+    A file that never existed at adjudication time is absent from the snapshot, so there is no
+    assumption for the scan's digest to contradict - it cannot be a race by this mechanism. It is
+    still fail-safe, by a different one: `unrecorded` never attributes to the engine, so the path is
+    `unattributed`, the run is `incomplete`, and no clean claim is emitted.
+
+    Round 6's endpoint comparison did name this one (a new entry in the inventory set), and round 7
+    trades that naming for closing ABA. Worth stating plainly: the trade costs a diagnostic, not a
+    safety property.
     """
     bundle = _identical_bundle(tmp_path)
 
     report = _harvest_with_an_edit_between_adjudication_and_scanning(monkeypatch, bundle, _mutate_working_file_created)
 
+    assert report["snapshot_race"]["count"] == 0, "no snapshot assumption exists for a brand-new path"
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert CLEAN_CLAIM not in hgr.render_markdown(report)
+
+
+def test_a_file_restored_mid_scan_after_being_deleted_before_it_IS_a_race(tmp_path, monkeypatch):
+    """The neighbouring case that IS caught, so the boundary above is a boundary and not a hole.
+
+    Here the snapshot DOES have an opinion - "recorded, and absent when I looked" - and the scan read
+    a digest for it. Assumption and evidence disagree, so the claim is withdrawn.
+    """
+    bundle = _identical_bundle(tmp_path)
+    payload = (bundle / WORKING_VISUAL).read_bytes()
+    (bundle / WORKING_VISUAL).unlink()
+
+    def restore(bundle_arg: Path) -> None:
+        (bundle_arg / WORKING_VISUAL).write_bytes(payload)
+
+    report = _harvest_with_an_edit_between_adjudication_and_scanning(monkeypatch, bundle, restore)
+
     assert report["snapshot_race"]["count"] == 1
-    assert report["snapshot_race"]["moved"][0]["kind"] == "added"
+    assert report["snapshot_race"]["moved"][0]["kind"] == heg.DRIFT_ADDED
+    assert report["provenance"][heg.PROV_ENGINE] == 0
     assert report["status"] == heg.STATUS_INCOMPLETE
 
 
@@ -1673,25 +1703,23 @@ def test_a_race_does_not_downgrade_a_positively_detected_tampered_baseline(tmp_p
     )
 
 
-def test_an_inventory_that_cannot_be_re_read_is_itself_reported_as_a_race(tmp_path, monkeypatch):
-    """A file that vanishes between `is_file()` and the hash IS the race - not a traceback."""
-    bundle = _identical_bundle(tmp_path)
-    original = heg.observe_generated_artifacts
+def test_the_inventory_is_read_exactly_once_so_there_is_no_second_read_to_fail(tmp_path, monkeypatch):
+    """Round 6 took a closing read; round 7 removed it. Prove there is no longer a second one.
+
+    ⚠️ That closing read was itself a defect source. Blind review round 7: when it FAILED it emitted
+    a race whose target was the bundle ROOT, matching no record, so the run exited 3 while the body
+    still said `engine_internal=2, coverage.complete=true`. Provenance is now tied to the digests the
+    tree scan already consumed, so the failure mode has no code left to live in.
+    """
     calls = []
+    original = heg.observe_generated_artifacts
+    monkeypatch.setattr(heg, "observe_generated_artifacts", lambda b, base: calls.append(b) or original(b, base))
 
-    def observe(bundle_arg, baseline):
-        calls.append(bundle_arg)
-        if len(calls) > 1:
-            raise FileNotFoundError(2, "No such file or directory")
-        return original(bundle_arg, baseline)
+    report = heg.harvest(_differing_bundle(tmp_path))
 
-    monkeypatch.setattr(heg, "observe_generated_artifacts", observe)
-
-    report = heg.harvest(bundle)
-
-    assert len(calls) == 2, "the harvest must re-observe the inventory exactly once after scanning"
-    assert report["snapshot_race"]["moved"][0]["kind"].startswith("unreadable")
-    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert len(calls) == 1, f"the inventory must be read once, not {len(calls)} times"
+    assert report["snapshot_race"]["count"] == 0
+    assert report["status"] == heg.STATUS_COMPLETE
 
 
 def test_a_bundle_nobody_touches_is_never_reported_as_racing(tmp_path):
@@ -1720,11 +1748,11 @@ def test_a_tier_edit_made_before_the_harvest_is_still_reported_as_a_tier_edit(tm
 
 
 def test_adjudication_reads_the_inventory_from_the_snapshot_it_was_given(tmp_path):
-    """The contract that keeps the added cost at ONE extra read rather than two.
+    """A snapshot handed to adjudication is the AUTHORITY, not a hint.
 
-    A snapshot taken before a change is the authority for a caller that passes it: adjudication must
-    report what that snapshot saw, not what the disk says now. Without it, `harvest()` would take a
-    third read of the inventory and STILL adjudicate from a moment the comparison cannot see.
+    Without it the harvest would read the inventory a second time and still adjudicate from a moment
+    its comparison cannot see. With it, adjudication reports what that read saw - which is exactly
+    what `_observed_race` then checks the tree scan's own digests against.
     """
     bundle = _identical_bundle(tmp_path)
     generated = cmp_mod.load_generated_artifact_baseline(bundle)
@@ -1734,5 +1762,220 @@ def test_adjudication_reads_the_inventory_from_the_snapshot_it_was_given(tmp_pat
 
     assert cmp_mod.adjudicate_generated_drift(bundle, generated, before) == []
     assert [i["target"] for i in cmp_mod.adjudicate_generated_drift(bundle, generated)] == [WORKING_VISUAL]
-    moved = cmp_mod.compare_generated_snapshots(before, cmp_mod.observe_generated_artifacts(bundle, generated["files"]))
-    assert [(i["target"], i["kind"]) for i in moved] == [(WORKING_VISUAL, "changed")]
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-7 review: ABA defeats endpoint comparison, and the withdrawal missed `pairs[]`.
+# ---------------------------------------------------------------------------------------------
+
+
+def _harvest_with_an_aba_edit(monkeypatch, bundle: Path) -> dict:
+    """Change a working visual BEFORE the scan and restore it BEFORE anything else can look.
+
+    The reviewer's round-7 reproduction. Both endpoint reads of the inventory see the ORIGINAL bytes,
+    so any before/after comparison reports `count == 0` - while the tree scan in between consumed the
+    CHANGED bytes and built the delta from them.
+    """
+    original = (bundle / WORKING_VISUAL).read_bytes()
+    real_scan = heg._scan_pairs
+    fired = []
+
+    def scan_with_aba(bundle_arg: Path, evidence):
+        _write(bundle_arg / WORKING_VISUAL, _visual("Orders", position=42))
+        result = real_scan(bundle_arg, evidence)
+        (bundle_arg / WORKING_VISUAL).write_bytes(original)
+        fired.append(bundle_arg)
+        return result
+
+    monkeypatch.setattr(heg, "_scan_pairs", scan_with_aba)
+    report = heg.harvest(bundle)
+    assert fired, "the ABA injection never fired - this fixture no longer reproduces the race"
+    assert (bundle / WORKING_VISUAL).read_bytes() == original, "the fixture must leave the bundle restored"
+    return report
+
+
+def test_an_aba_edit_the_scan_consumed_is_caught_though_both_endpoints_agree(tmp_path, monkeypatch):
+    """Measured on df46bad, BEFORE this fix: exit 0, `complete`, race 0, `engine_internal` 1.
+
+    Endpoint equality proves only that two reads matched, never that nothing happened between them.
+    Tying provenance to the digests the comparison ACTUALLY READ removes the window entirely.
+    """
+    bundle = _identical_bundle(tmp_path)
+
+    report = _harvest_with_an_aba_edit(monkeypatch, bundle)
+
+    assert report["snapshot_race"]["count"] == 1, "the scan read bytes adjudication never saw"
+    assert report["snapshot_race"]["moved"][0]["target"] == WORKING_VISUAL
+    assert report["snapshot_race"]["moved"][0]["kind"] == heg.DRIFT_CHANGED
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert CLEAN_CLAIM not in hgr.render_markdown(report)
+    # The bundle is byte-identical to its starting state, so a re-run with no injection must be
+    # clean - the finding is "this run's evidence is mixed", not "this bundle is permanently suspect".
+    monkeypatch.undo()
+    assert heg.harvest(bundle)["status"] == heg.STATUS_COMPLETE
+
+
+def test_the_cli_exits_incomplete_on_an_aba_edit(tmp_path, monkeypatch):
+    bundle = _identical_bundle(tmp_path)
+    original = (bundle / WORKING_VISUAL).read_bytes()
+    real_scan = heg._scan_pairs
+    fired = []
+
+    def scan_with_aba(bundle_arg: Path, evidence):
+        _write(bundle_arg / WORKING_VISUAL, _visual("Orders", position=len(fired) + 42))
+        result = real_scan(bundle_arg, evidence)
+        (bundle_arg / WORKING_VISUAL).write_bytes(original)
+        fired.append(bundle_arg)
+        return result
+
+    monkeypatch.setattr(heg, "_scan_pairs", scan_with_aba)
+
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE
+    assert fired, "the ABA injection never fired"
+
+
+def test_the_pair_row_carries_the_same_attribution_as_the_top_level_counts(tmp_path, monkeypatch):
+    """⚠️ A report may not contradict itself. Measured on df46bad:
+
+        top-level provenance:  {"unattributed": 1, "engine_internal": 0}
+        pairs[] entry:         {"engine_internal": 1}
+
+    `_withdraw_raced` corrected `records` after `_pair_entry` had already frozen its own tally, while
+    `snapshot_race.note` asserted every touching claim was withdrawn. The withdrawal now happens
+    inside `_scan_pairs`, so the two cannot diverge.
+    """
+    bundle = _identical_bundle(tmp_path)
+
+    report = _harvest_with_an_aba_edit(monkeypatch, bundle)
+    entry = _pair(report, "report", "WB")
+
+    assert entry["provenance"] == {heg.PROV_UNATTRIBUTED: 1}
+    assert entry["provenance"].get(heg.PROV_ENGINE, 0) == 0
+    for name, total in report["provenance"].items():
+        if name in heg.PROVENANCES:
+            assert sum(e["provenance"].get(name, 0) for e in report["pairs"]) == total, name
+
+
+def test_every_pair_row_agrees_with_the_top_level_counts_on_a_still_bundle(tmp_path):
+    """The same invariant with no race at all, so the assertion is not vacuous on the clean path."""
+    report = heg.harvest(_differing_bundle(tmp_path))
+
+    assert report["provenance"]["differing_files"] > 0
+    for name in heg.PROVENANCES:
+        assert sum(e["provenance"].get(name, 0) for e in report["pairs"]) == report["provenance"][name], name
+
+
+def test_a_race_whose_scope_is_unknown_withdraws_every_authorship_claim():
+    """⚠️ Exit 3 is not enough when the body still asserts full attribution coverage.
+
+    Measured on df46bad: a failed closing read produced a race targeting the bundle ROOT, which
+    matched no record, so a differing bundle reported `engine_internal=2` and
+    `coverage.complete=true` beneath an exit-3 verdict. An entry that cannot name its paths now means
+    "something moved and I cannot say what", and withdraws everything except a positively detected
+    tamper.
+    """
+    records = [
+        {"artifact": "WB", "layer": "report", "path": "a.json", "provenance": heg.PROV_ENGINE},
+        {"artifact": "WB", "layer": "report", "path": "b.json", "provenance": heg.PROV_TIER},
+        {"artifact": "WB", "layer": "report", "path": "c.json", "provenance": heg.PROV_TAMPERED},
+    ]
+    unscoped = [{"target": "pbip/WB/WB.Report", "kind": "unlocatable_read_failure", "scoped": False}]
+
+    withdrawn = heg._withdraw_raced(records, unscoped)
+
+    assert [r["provenance"] for r in withdrawn] == [
+        heg.PROV_UNATTRIBUTED,
+        heg.PROV_UNATTRIBUTED,
+        heg.PROV_TAMPERED,
+    ]
+    assert all(r["snapshot_race"] for r in withdrawn)
+    # A SCOPED race naming none of them leaves every claim standing - or the rule is just "withdraw".
+    scoped = [{"target": "pbip/Other/Other.Report/z.json", "kind": heg.DRIFT_CHANGED}]
+    assert [r["provenance"] for r in heg._withdraw_raced(records, scoped)] == [
+        heg.PROV_ENGINE,
+        heg.PROV_TIER,
+        heg.PROV_TAMPERED,
+    ]
+
+
+def test_an_unlocatable_read_failure_reaches_the_unscoped_branch_in_a_real_harvest(tmp_path, monkeypatch):
+    """The production path that emits `scoped: False` - proven to enter the branch, not asserted.
+
+    A traversal failure `os.walk` cannot locate leaves `delta.blocked` empty, so a per-path
+    comparison would report every unread recorded file as `missing` - fabricated races. The pair is
+    reported as unscoped instead.
+    """
+    bundle = _bundle_with_blocked_dir(tmp_path)
+    _write(bundle / "pbip/WB/WB.Report/definition/pages/p2/page.json", {"name": "p2"})
+    _block_directory(monkeypatch, "blocked", "reports", locatable=False)
+
+    report = heg.harvest(bundle)
+
+    unscoped = [item for item in report["snapshot_race"]["moved"] if not item.get("scoped", True)]
+    assert unscoped, "the unscoped branch was never reached - this fixture proves nothing"
+    assert unscoped[0]["kind"] == "unlocatable_read_failure"
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert CLEAN_CLAIM not in hgr.render_markdown(report)
+
+
+def test_a_locatable_unreadable_directory_is_not_mistaken_for_a_race(tmp_path, monkeypatch):
+    """The other half of the same branch: "could not read" is not "changed".
+
+    `hash_tree` gives a blocked path no digest, so a naive comparison against the snapshot would
+    report every file beneath it as `missing`. They are withdrawn from both sides and reported as
+    unassessable, which is a different finding with a different remedy.
+    """
+    bundle = _bundle_with_blocked_dir(tmp_path)
+    _block_directory(monkeypatch, "blocked", "reports")
+
+    report = heg.harvest(bundle)
+
+    assert report["unassessable"], "the fixture must actually block a directory"
+    assert report["snapshot_race"]["count"] == 0, report["snapshot_race"]["moved"]
+    assert _pair(report, "report", "WB")["status"] == heg.PAIR_UNASSESSABLE
+
+
+def test_a_failed_inventory_read_on_a_DIFFERING_bundle_claims_no_coverage(tmp_path, monkeypatch):
+    """⚠️ Round 6's version of this test used a ZERO-DIFFERENCE fixture, so it structurally could not
+
+    observe the bug the reviewer found: with nothing to attribute, "nothing was wrongly attributed"
+    is vacuous. On a bundle that DOES differ, a failed inventory read must leave no authorship claim
+    and no completeness claim standing - exit 3 alone is not enough when the body still says
+    `engine_internal=2, coverage.complete=true`.
+    """
+    bundle = _differing_bundle(tmp_path)
+    monkeypatch.setattr(heg, "observe_generated_artifacts", _explode)
+
+    report = heg.harvest(bundle)
+
+    assert report["provenance"]["differing_files"] == 2, "the fixture must produce differences to mis-attribute"
+    assert report["attribution"]["usable"] is False
+    assert report["attribution"]["unavailable_reason"], "the failure must be named, not swallowed"
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 2
+    assert report["attribution"]["coverage"]["complete"] is False
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert CLEAN_CLAIM not in hgr.render_markdown(report)
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE
+
+
+def _explode(_bundle: Path, _baseline: dict) -> None:
+    raise PermissionError(13, "injected: inventory unreadable")
+
+
+def test_a_desktop_sidecar_the_snapshot_never_recorded_is_not_a_race(tmp_path):
+    """`.pbi/` is excluded from the generated inventory, so the snapshot has NO opinion about it.
+
+    Treating "the scan saw a file the snapshot does not list" as a race would flag every bundle a
+    human has opened in Desktop. It stays `unattributed`, which is what it is.
+    """
+    bundle = _identical_bundle(tmp_path)
+    _write(bundle / "pbip" / "WB" / "WB.Report" / ".pbi" / "localSettings.json", {"version": "1.0"})
+
+    report = heg.harvest(bundle)
+
+    assert report["snapshot_race"]["count"] == 0
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1

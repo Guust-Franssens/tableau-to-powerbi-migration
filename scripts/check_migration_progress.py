@@ -239,6 +239,11 @@ class GeneratedArtifactSnapshot(NamedTuple):
     carries a digest too; the value is ``None`` for a path that is not a file. ``current`` is kept
     rather than derived from ``hashes`` because "is this a generated artifact" is a classification
     question (:func:`_is_generated_artifact`), not a "does it hash" one.
+
+    ⚠️ Round 6 also compared two of these end to end and called the difference a race. Round 7 killed
+    that: an ABA edit restores the original bytes, both endpoints match, and the consumer's own read
+    of the changed bytes goes unnoticed. A snapshot is an AUTHORITY to check evidence against - never
+    evidence in its own right that nothing happened.
     """
 
     hashes: dict[str, str | None]
@@ -253,31 +258,6 @@ def observe_generated_artifacts(bundle: Path, baseline: dict[str, str]) -> Gener
         path = bundle / Path(relative)
         hashes[relative] = sha256_file(path) if path.is_file() else None
     return GeneratedArtifactSnapshot(hashes, current)
-
-
-def compare_generated_snapshots(
-    before: GeneratedArtifactSnapshot,
-    after: GeneratedArtifactSnapshot,
-) -> list[dict[str, Any]]:
-    """Every inventory path whose two reads disagree - i.e. that moved between them.
-
-    An empty list is the only thing that licenses a caller to present one verdict over both reads.
-    Both the digests AND the inventory membership are compared, because a path can leave the
-    generated set without its bytes changing.
-    """
-    moved: list[dict[str, Any]] = []
-    for relative in sorted(set(before.hashes) | set(after.hashes)):
-        was, now = before.hashes.get(relative), after.hashes.get(relative)
-        if was == now and (relative in before.current) == (relative in after.current):
-            continue
-        if was is None:
-            kind = "added"
-        elif now is None:
-            kind = "missing"
-        else:
-            kind = "changed"
-        moved.append({"target": relative, "kind": kind, "before_sha256": was, "after_sha256": now})
-    return moved
 
 
 def _artifact_drift(
