@@ -2501,6 +2501,7 @@ if ($PayloadJson) {
     accepted = $accepted
     complete = $(if ($accepted) { [bool]$result.Complete } else { $false })
     items    = $(if ($accepted) { @($result.Items).Count } else { 0 })
+    reason   = $(if ($accepted) { [string]$result.Reason } else { $null })
   }
   Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $shaped -Compress -Depth 4))
   return
@@ -2516,6 +2517,7 @@ $payload = [ordered]@{
   exit_code  = $(if ($null -eq $verdict) { 0 } else { [int]$verdict.ExitCode })
   evidence   = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Evidence })
   candidates = @(Select-DialogCandidate -Windows $windows).Count
+  line       = $(if ($null -eq $verdict) { $null } else { [string](Format-DialogEvidence -Window $verdict.Window) })
 }
 Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $payload -Compress -Depth 4))
 """
@@ -2550,6 +2552,9 @@ def _window(**overrides) -> dict:
         # no pattern read that threw. Defaults true here because most fixtures model a complete read;
         # the fail-safe treatment of every non-Boolean value is pinned by its own test.
         "HarvestComplete": True,
+        # WHY a harvest was not complete. ⚠️ DIAGNOSTIC ONLY - no verdict may branch on it, which is
+        # pinned by `test_the_harvest_reason_is_diagnostic_and_cannot_change_a_verdict`.
+        "HarvestReason": "complete",
     }
     window.update(overrides)
     return window
@@ -3065,6 +3070,89 @@ def test_a_real_boolean_true_does_authorise_suppression(tmp_path: Path) -> None:
     assert classify(tmp_path, [window], refresh_in_flight=True)["verdict"] is None
 
 
+@pytest.mark.parametrize(
+    "reason",
+    ["complete", "truncated", "patterns-incomplete", "no-payload", "bad-schema", "not-attempted", "", "nonsense"],
+)
+def test_the_harvest_reason_is_diagnostic_and_cannot_change_a_verdict(tmp_path: Path, reason: str) -> None:
+    """`HarvestReason` exists so an operator (and a test) can tell WHY a harvest stopped - nothing more.
+
+    It was added because one token, `INCOMPLETE`, covered a cap truncation and a killed provider alike,
+    and those need opposite responses. But a reason string must never become the fourth proxy in this
+    script's history: `HarvestComplete` - a strict Boolean, read only by `Test-HarvestComplete` -
+    remains the sole authority over suppression.
+
+    So the reason is varied across every value the production code can emit plus two it cannot, against
+    a window whose completeness is pinned BOTH ways, and the verdict must depend only on the Boolean.
+    `complete` against `HarvestComplete=False` is the adversarial pair: a reason that contradicts the
+    flag must not be believed.
+    """
+    texts = ["Refresh", "1,204 rows loaded"]
+    incomplete = _window(Title="Refresh", Texts=texts, OwnerEnabled=False, HarvestComplete=False, HarvestReason=reason)
+    complete = _window(Title="Refresh", Texts=texts, OwnerEnabled=False, HarvestComplete=True, HarvestReason=reason)
+
+    assert classify(tmp_path, [incomplete], refresh_in_flight=True)["verdict"] == "DIALOG_UNREADABLE"
+    assert classify(tmp_path, [complete], refresh_in_flight=True)["verdict"] is None, (
+        f"HarvestReason={reason!r} changed a verdict - it is diagnostic only"
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        pytest.param({"Items": [], "Truncated": False, "PatternsIncomplete": False}, "complete", id="complete"),
+        pytest.param({"Items": [], "Truncated": True, "PatternsIncomplete": False}, "truncated", id="truncated"),
+        pytest.param({"Items": [], "Truncated": False, "PatternsIncomplete": True}, "patterns-incomplete", id="pat"),
+        pytest.param(
+            {"Items": [], "Truncated": True, "PatternsIncomplete": True}, "truncated+patterns-incomplete", id="both"
+        ),
+        pytest.param({"Items": [], "Truncated": 0, "PatternsIncomplete": 0}, "bad-schema", id="int-flags"),
+        pytest.param({"Items": []}, "bad-schema", id="flags-missing"),
+    ],
+)
+def test_the_harvest_reason_names_the_actual_payload_shape(tmp_path: Path, payload: dict, reason: str) -> None:
+    """The reason has to be TRUE, not merely present - a lying diagnostic is worse than none.
+
+    `ConvertTo-HarvestResult` is a pure function, so this is checkable offline against every shape the
+    child can emit. A mutation that hard-codes `complete` passes every synthesised-window test in this
+    file (they set the field directly) and only this one can see it.
+
+    `bad-schema` deliberately outranks the flag values: if the schema is not trustworthy then neither
+    is anything read from it, and that is the round-3 lesson this validator already exists for.
+    """
+    result = harvest_result(tmp_path, payload)
+
+    assert result["reason"] == reason
+    assert result["complete"] is (reason == "complete"), "the reason and the Boolean must not disagree"
+
+
+def test_the_evidence_line_names_why_a_harvest_stopped(tmp_path: Path) -> None:
+    """The other half: the reason has to actually REACH the operator, or surfacing it bought nothing.
+
+    Measured 2026-08-31 on the shipped probe, same fixture, only the harvest budget differing::
+
+        harvest=truncated items=400   the element cap cut the read off
+        harvest=no-payload items=1    the harvest child was killed; only the Win32 caption survived
+
+    Before this, both printed `harvest=INCOMPLETE` and were indistinguishable - see
+    `test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it` for why that
+    ambiguity was load-bearing.
+    """
+    truncated = _window(Title="Refresh", Texts=["Refresh", "row 0"], OwnerEnabled=False, HarvestComplete=False)
+    truncated["HarvestReason"] = "truncated"
+    killed = _window(Title="Refresh", Texts=["Refresh"], OwnerEnabled=False, HarvestComplete=False)
+    killed["HarvestReason"] = "no-payload"
+
+    truncated_line = classify(tmp_path, [truncated])["line"]
+    killed_line = classify(tmp_path, [killed])["line"]
+
+    assert "harvest=truncated" in truncated_line and "items=2" in truncated_line, truncated_line
+    assert "harvest=no-payload" in killed_line and "items=1" in killed_line, killed_line
+    assert truncated_line != killed_line, "the two incomplete shapes must not print identically"
+    complete_line = classify(tmp_path, [_window(Title="Whoops", Texts=["Whoops", "Eh?"], OwnerEnabled=False)])["line"]
+    assert "harvest=complete" in complete_line, complete_line
+
+
 def test_reading_only_a_button_does_not_authorise_a_benign_caption(tmp_path: Path) -> None:
     """Round 2's defect: "we harvested SOME text" was a proxy for "we read the credential content".
 
@@ -3350,7 +3438,9 @@ $script:timer.Add_Tick({
 """
 
 
-def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: list[str] | None = None):
+def _run_probe_against_wpf_modal(
+    tmp_path: Path, modal_body: str, extra_args: list[str] | None = None, *, require_refresh_invoked: bool = True
+):
     """Launch the fake-Desktop app with ``modal_body``, run the probe, return the completed process.
 
     ⚠️ **These live tests are CONTENTION-SENSITIVE, and that is not flakiness.** They drive a real GUI
@@ -3387,7 +3477,7 @@ def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: li
         started = time.monotonic()
         done = subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False)
         done.elapsed = time.monotonic() - started  # type: ignore[attr-defined]
-        if "refresh invoked: True" not in done.stdout:
+        if require_refresh_invoked and "refresh invoked: True" not in done.stdout:
             pytest.skip(f"the fixture app exposed no invokable Refresh to UI Automation:\n{done.stdout}")
         return done
     finally:
@@ -3395,13 +3485,61 @@ def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: li
         app.wait(timeout=30)
 
 
+def _assert_convicts_once_the_window_is_readable(
+    tmp_path: Path, modal_body: str, extra_args: list[str] | None = None, forbidden_reasons: tuple[str, ...] = ()
+) -> None:
+    """Assert a hard stop, but only on an attempt that actually READ the window.
+
+    ⚠️ **The defect class this exists to remove, found three times in this file.** A test asserting
+    `VERDICT: CREDENTIAL_MISSING` is asserting an outcome that is only reachable when the UIA harvest
+    COMPLETES - and none of them established that precondition. Under load the harvest child is killed,
+    the probe correctly reports `DIALOG_UNREADABLE` (it found the window and refused to assert either
+    "credential wall" or "no modal appeared"), and the test fails for a reason that has nothing to do
+    with its subject. Measured 2026-08-31, in one 21-minute run, two separate tests hit it.
+
+    ⛔ **Loosening the assertion to accept `DIALOG_UNREADABLE` would be worse than the flake** - the
+    test would then be unable to fail for its subject while still being credited as coverage. So this
+    judges the reason instead:
+
+    * convicted -> assert exit 1 and return. Subject proven.
+    * `harvest=complete` and NOT convicted -> **fail**. It read everything and still missed the
+      credential text; that is a real recall defect, which is exactly what these tests are for.
+    * a reason in ``forbidden_reasons`` -> **fail**. Caller-specific regressions, e.g. `truncated` at
+      the shipped cap of 2000 against a 451-element window, which cannot happen honestly.
+    * anything else (`no-payload`, `patterns-incomplete`, `bad-schema`) -> the harvest never delivered,
+      so the subject was not reachable. Retry once, then SKIP saying so.
+
+    What is never conditional: `CREDENTIAL_PRESENT` / exit 0 is asserted against on EVERY attempt,
+    before any skip. A harvest that missed the credential text being reported clean is the one outcome
+    that must never happen, so it can never be excused as contention.
+    """
+    reason = "the probe never observed a dialog"
+    for _ in range(2):
+        done = _run_probe_against_wpf_modal(tmp_path, modal_body, extra_args)
+
+        assert "CREDENTIAL_PRESENT" not in done.stdout, (
+            f"a harvest that missed the credential text was reported CLEAN:\n{done.stdout}"
+        )
+        assert done.returncode != 0, f"exit 0 means 'no modal appeared', which was not established:\n{done.stdout}"
+        if "VERDICT: CREDENTIAL_MISSING" in done.stdout:
+            assert done.returncode == 1, done.stdout
+            return
+
+        match = re.search(r"harvest=(\S+) items=(\d+)", done.stdout)
+        assert match, f"the probe must report WHY it could not finish, or this test cannot judge:\n{done.stdout}"
+        reason = match.group(1)
+        assert reason != "complete", (
+            f"the harvest COMPLETED and still did not convict - that is a recall defect, not contention:\n{done.stdout}"
+        )
+        assert reason not in forbidden_reasons, f"forbidden harvest reason {reason!r} - a regression:\n{done.stdout}"
+
+    pytest.skip(f"could not reach the subject: the UIA harvest never delivered ({reason}) in 2 attempts")
+
+
 @pytest.mark.serial
 def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_path: Path) -> None:
     """Exploit 1. `Name` + `ValuePattern` alone miss a read-only RichTextBox's content entirely."""
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY)
-
-    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
-    assert done.returncode == 1
+    _assert_convicts_once_the_window_is_readable(tmp_path, _MODAL_TEXTPATTERN_ONLY)
 
 
 @pytest.mark.serial
@@ -3419,20 +3557,96 @@ def test_credential_text_beyond_the_element_cap_never_reads_as_clean(tmp_path: P
 
 @pytest.mark.serial
 def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(tmp_path: Path) -> None:
-    """The same window with the shipped cap: read in full, and convicted."""
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PAST_THE_ELEMENT_CAP)
+    """The same window with the shipped cap: read in full, and convicted.
 
-    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
-    assert done.returncode == 1
+    ⚠️ **This test used to assert a verdict it had not established was REACHABLE.** It failed inside a
+    30-minute full-suite run with six agents on the machine, and passed in 15.5 s alone, reporting
+    `DIALOG_UNREADABLE` with `harvest=INCOMPLETE`. The PRODUCT was right: it found the window, could
+    not fully harvest it under contention, and refused to assert either "credential wall" or "no modal
+    appeared". The TEST was wrong - `CREDENTIAL_MISSING` is only reachable when the harvest COMPLETES,
+    and it never checked that precondition, so it could not tell "the element-cap logic is broken" (its
+    actual subject) from "the machine was busy".
+
+    ⚠️ **And the obvious repair - skip whenever the harvest is incomplete - would have been WORSE than
+    the flake**, which is why the reason is now reported. Measured 2026-08-31 against this fixture:
+
+        forced cap truncation      -> harvest=INCOMPLETE  VERDICT: DIALOG_UNREADABLE  exit 3
+        contention-killed provider -> harvest=INCOMPLETE  VERDICT: DIALOG_UNREADABLE  exit 3
+
+    Byte-identical. A cap truncation at the SHIPPED cap is exactly the regression this test exists to
+    catch (451 elements against a cap of 2000 can never truncate honestly), so skipping on
+    `INCOMPLETE` would have made the test structurally unable to fail for its own subject while still
+    being credited as coverage. With the reason surfaced they separate cleanly:
+
+        harvest=truncated items=400   <- the cap cut it off      -> REGRESSION, fail
+        harvest=no-payload items=1    <- the child never answered -> could not reach the subject, skip
+
+    Note what is NOT conditional: exit 0 / `CREDENTIAL_PRESENT` is asserted against on EVERY attempt,
+    before any skip. A partial harvest reported as "no modal appeared" is the one outcome that must
+    never happen, so it can never be excused as contention.
+    """
+    _assert_convicts_once_the_window_is_readable(
+        tmp_path, _MODAL_PAST_THE_ELEMENT_CAP, forbidden_reasons=("truncated", "truncated+patterns-incomplete")
+    )
+
+
+@pytest.mark.serial
+def test_a_partial_harvest_is_never_reported_as_no_modal_appeared(tmp_path: Path) -> None:
+    """The invariant behind the test above, isolated so it cannot be skipped away.
+
+    Three-way outcome, and the third must be distinguishable IN THE EXIT CODE: credential wall (1),
+    nothing found (0), could not establish either (3). A wedged UIA provider is the cheapest way to
+    force the third state deterministically - the fixture sleeps 120 s on its own UI thread, so the
+    harvest child is always killed - and the assertion is that this can never be exit 0.
+
+    It also pins the reason, because `ConvertTo-ProbeWindow` sits BELOW the `-LoadDetectorsOnly` seam
+    and is therefore invisible to every offline test in this file: a mutation deleting the
+    `no-payload` assignment survived the whole offline suite. `not-attempted` (we never enriched this
+    window) and `no-payload` (we enriched it and the child delivered nothing) are different facts, and
+    only the second can appear on a verdict window, because verdicts only ever come from candidates -
+    which are always enriched. Measured 2026-08-31: `harvest=no-payload items=1`, the lone survivor
+    being the Win32 caption.
+
+    ⚠️ **This fixture races in BOTH directions, and neither is a product defect.** Measured
+    2026-08-31 under load: with `-TimeoutSec 1` the modal had not become visible by the probe's single
+    poll, so it correctly reported `CREDENTIAL_PRESENT` at exit 0 (a 1-second deadline is a nonsense
+    deadline; the header says to use >= 60 s). With the 12 s default the modal was sometimes ALREADY up
+    at t=0, so the probe took its t=0 branch and never invoked a Refresh at all. So this test judges
+    only the attempts where the probe actually SAW the window - evidenced by a `harvest=` line - and
+    says plainly when it could not reach its subject. What is never excused is the forbidden outcome:
+    on any attempt that did see the window, exit 0 is a failure.
+    """
+    seen = "no attempt observed the window"
+    for _ in range(3):
+        done = _run_probe_against_wpf_modal(
+            tmp_path, _MODAL_WEDGED_UI_THREAD, ["-HarvestTimeoutSec", "2"], require_refresh_invoked=False
+        )
+        if "harvest=" not in done.stdout:
+            seen = done.stdout.strip().replace("\n", " | ")
+            continue
+
+        assert "CREDENTIAL_PRESENT" not in done.stdout, f"a window it could not read was cleared:\n{done.stdout}"
+        assert done.returncode == 3, f"an unestablished read must land in the indeterminate band:\n{done.stdout}"
+        assert "harvest=complete" not in done.stdout, "a killed harvest child must not report itself complete"
+        assert "harvest=no-payload" in done.stdout, (
+            f"a killed harvest child must say the child delivered nothing:\n{done.stdout}"
+        )
+        assert "harvest=not-attempted" not in done.stdout, (
+            f"a verdict window is always a candidate, so it was always enriched:\n{done.stdout}"
+        )
+        return
+
+    pytest.skip(f"could not reach the subject: the probe never observed the wedged modal ({seen})")
 
 
 @pytest.mark.serial
 def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path) -> None:
-    """Exploit 3. The prose join must skip interactive elements, or `Cancel` breaks the sentence."""
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_INTERPOSED_SPLIT)
+    """Exploit 3. The prose join must skip interactive elements, or `Cancel` breaks the sentence.
 
-    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
-    assert done.returncode == 1
+    Same precondition discipline as its two siblings: the join can only be exercised on an attempt
+    that actually read the window.
+    """
+    _assert_convicts_once_the_window_is_readable(tmp_path, _MODAL_INTERPOSED_SPLIT)
 
 
 @pytest.mark.serial
@@ -3455,6 +3669,17 @@ def test_a_wedged_uia_provider_still_produces_a_verdict(tmp_path: Path) -> None:
     done = _run_probe_against_wpf_modal(
         tmp_path, _MODAL_WEDGED_UI_THREAD, ["-TimeoutSec", "1", "-HarvestTimeoutSec", "2"]
     )
+
+    # ⚠️ PRE-EXISTING RACE, found 2026-08-31 while measuring #406's follow-up. `-TimeoutSec 1` gives the
+    # poll loop ONE iteration ~2s after the invoke, and the modal's `ContentRendered` handler may not
+    # have made the window visible by then - measured under load, the probe reported
+    # `CREDENTIAL_PRESENT` at exit 0. That is correct behaviour for a 1-second deadline (the header
+    # says use >= 60s), not a defect, but it is not this test's subject either: with no dialog observed
+    # the wedge was never exercised, so there is no bound to check. The deadline is deliberately NOT
+    # raised - the `elapsed < 25` discriminator below is calibrated against it (6.2s bounded vs 70.5s
+    # unbounded), and widening the deadline would erode that margin.
+    if "harvest=" not in done.stdout:
+        pytest.skip(f"the probe never observed the wedged modal, so the bound was not exercised:\n{done.stdout}")
 
     assert "VERDICT:" in done.stdout, f"a wedged provider must not swallow the verdict:\n{done.stdout}"
     assert "CREDENTIAL_PRESENT" not in done.stdout, "an unreadable window is not a clean bill of health"

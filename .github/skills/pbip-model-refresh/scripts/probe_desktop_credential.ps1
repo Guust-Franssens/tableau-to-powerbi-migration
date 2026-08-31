@@ -81,7 +81,11 @@
                                  all, or only a reassuring CAPTION, or benign-looking content read
                                  from an INCOMPLETE harvest. "We could not establish it" is a weaker
                                  state of knowledge than "we read it and it did not match", and the
-                                 two must not collapse into one verdict.
+                                 two must not collapse into one verdict. The evidence line names WHY
+                                 the harvest stopped (`truncated` / `patterns-incomplete` /
+                                 `no-payload` / `bad-schema`) and how many texts were read - measured,
+                                 a cap truncation and a killed provider were otherwise indis-
+                                 tinguishable, and they need opposite responses.
 
   ⚠️ `BLOCKED_BY_DIALOG` is deliberately NOT emitted here any more (issue #367). It used to be, on a
   size-only test - ANY visible non-main window >=100x100 - which a Power BI Refresh progress dialog
@@ -365,6 +369,19 @@ function ConvertTo-HarvestResult {
   merged when they are present and the flags are not - unread text lowers credential recall, so
   keeping it costs nothing and can only help - but `Complete` stays `$false`, so a malformed payload
   can never authorise suppression.
+
+  `Reason` names WHY a harvest was not complete, and it exists because the single token `INCOMPLETE`
+  was measured to be ambiguous in a way that hid a real regression (issue #406 follow-up). Forcing a
+  cap truncation (`-HarvestMaxElements 400` against a 451-element modal) printed output BYTE-IDENTICAL
+  to a contention-killed harvest: same `harvest=INCOMPLETE`, same `VERDICT: DIALOG_UNREADABLE`, same
+  exit 3. Those two need opposite responses - one is a defect in the element-cap logic, the other is a
+  busy machine - so a test that skips on `INCOMPLETE` would silently stop being able to fail for its
+  own subject.
+
+  ⚠️ `Reason` is DIAGNOSTIC ONLY. Nothing may branch a verdict on it: `Complete` remains the single
+  strict Boolean that governs suppression, and `Test-HarvestComplete` remains its only reader. A
+  reason that could grant the right to suppress would be the fourth instance of the proxy mistake this
+  script has already made three times.
   #>
   param([object]$Payload, [int]$ExitCode)
 
@@ -378,16 +395,32 @@ function ConvertTo-HarvestResult {
   $items = @()
   if ($null -ne $properties['Items'] -and $null -ne $Payload.Items) { $items = @($Payload.Items) }
   $complete = $schemaOk -and (-not $truncated) -and (-not $patterns)
-  return [pscustomobject]@{ Items = $items; Complete = [bool]$complete }
+  $reason = 'complete'
+  if (-not $schemaOk) { $reason = 'bad-schema' }
+  elseif ($truncated -and $patterns) { $reason = 'truncated+patterns-incomplete' }
+  elseif ($truncated) { $reason = 'truncated' }
+  elseif ($patterns) { $reason = 'patterns-incomplete' }
+  return [pscustomobject]@{ Items = $items; Complete = [bool]$complete; Reason = $reason }
 }
 
 function Format-DialogEvidence {
-  <# One-line window description for a verdict line. #>
+  <# One-line window description for a verdict line.
+
+  `harvest=` carries the REASON, not just the fact, and `items=` the count actually read. Measured
+  2026-08-31: with only `complete|INCOMPLETE`, a cap truncation and a contention-killed provider were
+  indistinguishable in this line, and both are real runtime states on a loaded machine. An operator
+  reading `harvest=no-payload items=0` knows the UIA provider never answered; `harvest=truncated
+  items=400` says it answered and was cut off. Diagnostic only - see `ConvertTo-HarvestResult`.
+  #>
   param([object]$Window)
   $title = if ($Window.Title) { $Window.Title } else { '(empty title)' }
-  $harvest = if (Test-HarvestComplete -Value $Window.HarvestComplete) { 'complete' } else { 'INCOMPLETE' }
-  return ("class={0} title='{1}' size={2}x{3} harvest={4}" -f
-    $Window.ClassName, $title, $Window.Width, $Window.Height, $harvest)
+  $harvest = if (Test-HarvestComplete -Value $Window.HarvestComplete) {
+    'complete'
+  }
+  elseif ($Window.HarvestReason) { [string]$Window.HarvestReason }
+  else { 'INCOMPLETE' }
+  return ("class={0} title='{1}' size={2}x{3} harvest={4} items={5}" -f
+    $Window.ClassName, $title, $Window.Width, $Window.Height, $harvest, @($Window.Texts).Count)
 }
 
 function Get-DialogVerdict {
@@ -658,7 +691,13 @@ function ConvertTo-ProbeWindow {
   foreach ($t in $Window.Texts) { if ($t) { $texts += [string]$t } }
   $interactive = @()
   $complete = $false
+  # Distinct from every payload-level reason: `$null` back from the bounded harvest means the child
+  # never delivered a believable payload at all - killed on timeout, crashed, or unparseable - so no
+  # UIA text reached this window and only its Win32 caption survives. A loaded machine produces this,
+  # and it must not read the same as "we read it and it was cut off" (issue #406 follow-up).
+  $reason = 'not-attempted'
   if ($Enrich) {
+    $reason = 'no-payload'
     $hwnd = if ($Window.Hwnd -is [IntPtr]) { $Window.Hwnd.ToInt64() } else { [long]$Window.Hwnd }
     $harvested = Get-BoundedAutomationHarvest -Hwnd $hwnd -TimeoutSec $TimeoutSec -MaxElements $MaxElements
     if ($null -ne $harvested) {
@@ -668,6 +707,7 @@ function ConvertTo-ProbeWindow {
         if ($item.Interactive) { $interactive += [string]$item.Text }
       }
       $complete = [bool]$harvested.Complete
+      $reason = [string]$harvested.Reason
     }
   }
   return [pscustomobject]@{
@@ -681,6 +721,7 @@ function ConvertTo-ProbeWindow {
     Texts            = $texts
     InteractiveTexts = $interactive
     HarvestComplete  = [bool]$complete
+    HarvestReason    = $reason
   }
 }
 

@@ -280,6 +280,64 @@ stay byte-identical.
 > first benign element standing in for the whole window; a missing JSON property standing in for a
 > completed harvest. If you extend this probe — or write any other detector whose output can stop a
 > pipeline — that is the failure to look for first.
+
+> ⚠️ **`harvest=INCOMPLETE` is a real runtime state, and one token was not enough to act on it.**
+> Field report 2026-08-31: `test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it`
+> **failed** inside a 30-minute full-suite run with six agents on the machine, and **passed in 15.5 s
+> alone**, reporting `DIALOG_UNREADABLE` / `harvest=INCOMPLETE`. **The product was right** — it found
+> the window, could not fully harvest it, and refused to assert either "credential wall" or "no modal
+> appeared". The *test* was wrong: it asserted a verdict only reachable on a COMPLETE harvest without
+> ever establishing that precondition, so it could not tell its own subject from a busy machine.
+>
+> ⛔ **The obvious repair — skip whenever the harvest is incomplete — would have been worse than the
+> flake.** Measured on this fixture, both shapes printed *byte-identical* lines:
+>
+> | forced condition | before |
+> |---|---|
+> | cap truncation (`-HarvestMaxElements 400`) | `harvest=INCOMPLETE` → `DIALOG_UNREADABLE`, exit 3 |
+> | contention-killed provider (wedged UI thread) | `harvest=INCOMPLETE` → `DIALOG_UNREADABLE`, exit 3 |
+>
+> A truncation at the **shipped** cap is precisely the regression that test exists to catch (451
+> elements against a cap of 2000 cannot truncate honestly), so skipping on `INCOMPLETE` would have made
+> it structurally unable to fail for its subject — while still being credited as coverage. The evidence
+> line now names the reason and the count, and they separate cleanly:
+>
+> | after | means |
+> |---|---|
+> | `harvest=truncated items=400` | the element cap cut the read off — a REGRESSION, fail |
+> | `harvest=no-payload items=1` | the child never delivered; only the Win32 caption survived — could not reach the subject, retry then skip |
+> | `harvest=patterns-incomplete` / `bad-schema` | it answered but not trustworthily |
+>
+> ⚠️ **The reason is DIAGNOSTIC ONLY.** `HarvestComplete` — a strict Boolean, read only by
+> `Test-HarvestComplete` — remains the sole authority over suppression, gated by
+> `test_the_harvest_reason_is_diagnostic_and_cannot_change_a_verdict`. A reason that could grant the
+> right to suppress would be the fourth instance of the proxy mistake above.
+>
+> ⚠️ **The margin is thin even on an idle machine, so this is not purely a load story.** The same
+> command against the same 451-element fixture produced both `no-payload` (child killed) and a complete
+> read that convicted, with no six-agent load involved — the derived harvest budget (clamped 2..8 s
+> from `-TimeoutSec`) sits close to what an element-dense WPF window costs. Expect `DIALOG_UNREADABLE`
+> more often than the happy path suggests on a dense customer dialog. Not tuned here: the budget is a
+> separate decision with its own trade (a longer budget is a longer poll).
+>
+> ⚠️ **A separate, PRE-EXISTING fixture race, found while measuring the above.**
+> `test_a_wedged_uia_provider_still_produces_a_verdict` passes `-TimeoutSec 1`, which gives the poll
+> loop a single iteration ~2 s after the invoke. Measured under load, the modal had not become visible
+> by then and the probe reported **`CREDENTIAL_PRESENT`, exit 0** — correct behaviour for a 1-second
+> deadline (the header says use >= 60 s), but it means the test could fail for a reason unrelated to
+> its subject. The deadline is deliberately **not** raised: the `elapsed < 25` discriminator is
+> calibrated against it (6.2 s bounded vs 70.5 s unbounded). Instead the test skips when no dialog was
+> observed at all, because with no dialog the wedge was never exercised and there is no bound to check.
+>
+> ⚠️ **The same defect class was in THREE shipped tests, not one.** All of
+> `test_credential_text_reachable_only_through_textpattern_is_a_hard_stop`,
+> `test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it` and
+> `test_a_signature_split_by_an_interposed_button_is_a_hard_stop` asserted `CREDENTIAL_MISSING`, which
+> is only reachable on a COMPLETE harvest, without establishing that precondition; two of the three
+> were observed failing on unmutated builds in one 21-minute run. They now share
+> `_assert_convicts_once_the_window_is_readable`, which convicts, **fails** on a complete-but-
+> unconvicted harvest or a forbidden reason, and skips — saying why — only when the harvest never
+> delivered. `CREDENTIAL_PRESENT` at exit 0 is asserted against on every attempt and is never excused.
 >
 > ✅ **The Python fast check now classifies too (issue #376).** `_credential_modal` had the same
 > size-only defect on a **more dangerous** path: `inspect_credential_modal` returned the first visible
@@ -466,6 +524,23 @@ stay byte-identical.
 > `-LoadDetectorsOnly` seam exists precisely to be dependency-free, and its poll loop classifies every
 > 2 s for up to 75 s — ~37 interpreter spawns inside a loop whose job is to bound time.
 > `test_the_arbiter_and_the_python_detector_share_one_vocabulary` fails if either half leaves that seam.
+>
+> **Does harvest completeness change that verdict? No — it sharpens it.** A fair challenge: two
+> detectors that disagreed about whether a harvest was complete would be worse than either alone, so if
+> both had a completeness notion with different rules, that would argue for sharing. They do not.
+> Completeness exists **only** in the arbiter, by construction: `classify_dialog` takes no completeness
+> input at all, and on the Python side a text read that throws fails the WHOLE enumeration
+> (`Win32EnumerationError` → `unknown_reason`), so a partial read cannot reach its classifier in the
+> first place. There is nothing to keep aligned; sharing would mean *adding* a concept to Python that
+> only PowerShell can produce, and inventing a second place for it to be wrong.
+>
+> What must be identical is weaker, and it is testable on both sides: **an unestablished read never
+> reaches the clean state.** Arbiter — `test_only_a_real_boolean_true_can_authorise_suppression` (nine
+> coercion shapes, asserted under `-RefreshInFlight` where suppression actually happens) plus, at the
+> process level, `test_a_partial_harvest_is_never_reported_as_no_modal_appeared` (a real wedged UIA
+> provider, exit 3, never exit 0). Python — the raise-the-whole-enumeration path above, routed to
+> `unknown_reason`, also exit 3. Same invariant, different mechanism, neither able to produce a silent
+> clear.
 >
 > ⚠️ **The reachability cost, stated rather than hidden — this reverses a reviewed decision.**
 > `test_short_data_labels_beside_progress_text_do_not_block_suppression` existed to keep
