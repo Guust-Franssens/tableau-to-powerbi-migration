@@ -99,7 +99,8 @@ while preflight still reported "Ready to migrate".
 It cannot update the **skill bundles**: `copilot plugin update` hits a file lock while any Copilot
 session is running. That lock is narrower than it looks, though — it blocks renaming the plugin
 directory, not writing inside it — so a *content* refresh needs no restart:
-`python scripts/sync_installed_skills.py`.
+`python scripts/sync_installed_skills.py`. That publishes the **merged** bundles (`origin/master`),
+not your working tree — see the skill-bundle bullet under *Required Copilot setup* below.
 
 ---
 
@@ -138,6 +139,17 @@ Keep only the judgement the gate cannot carry:
   Copilot session keeps the old in-memory copy, but new sessions and newly spawned subagents see the
   refreshed files. A real `copilot plugin update` still belongs between sessions because the plugin
   directory is file-locked for rename/swap while Copilot is running.
+- **The authoritative bundle is the MERGED one, never your worktree (issue #410).**
+  `sync_installed_skills.py` compares and publishes from `origin/HEAD` → `origin/master` →
+  `origin/main` (local refs; no network unless you pass `--fetch`), so the verdict is the same from
+  every worktree, including a detached HEAD, and **an unmerged skill edit on your branch does not
+  fail preflight** — it is reported as an `optional` note instead. It used to publish whichever
+  working tree ran it: measured 2026-08-30, four versions of one shipped file existed at once and the
+  installed copy — what every newly spawned subagent reads — was `master + 79 lines`, content on no
+  merged branch. A *stale* bundle silently invalidates a measurement; a *too-new* one is worse,
+  because a measurement taken against unmerged guidance is reproducible from no commit at all. To
+  test unmerged guidance with a subagent on purpose, `--from-worktree` says loudly what it is doing;
+  a plain sync restores the merged copy.
 - **PBIR theme-version location is report-authoring knowledge, not setup.** The rule
   (`reportVersionAtImport` required inside each `themeCollection` entry and forbidden at the top
   level of `report.json`) lives in `powerbi-report-gotchas` so the report owner sees it when authoring

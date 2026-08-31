@@ -31,7 +31,9 @@ readiness matrix. Session start is the **only safe moment** to change them.
   [`/AGENTS.md`](../AGENTS.md).
 - It cannot update the **skill bundles** — `copilot plugin update` hits a file lock while any Copilot
   session is running. That lock only blocks renaming the plugin directory, not writing inside it, so a
-  *content* refresh needs no restart: `python scripts/sync_installed_skills.py`.
+  *content* refresh needs no restart: `python scripts/sync_installed_skills.py`. It publishes what is
+  **merged** (`origin/master`), not your worktree, so an unmerged skill edit on your branch does not
+  fail preflight — see [`/AGENTS.md`](../AGENTS.md) and issue #410.
 - It **blocks** if the deterministic conversion engine is installed more than once. The installed
   `tableau-fabric-skills@tableau-collection` plugin is its **single canonical source**; a sibling
   clone or any other checkout is a `MISS`, not a warning, because two engine versions silently built

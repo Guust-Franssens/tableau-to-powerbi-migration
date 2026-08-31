@@ -305,12 +305,8 @@ else {
         'Discovered by scanning installed-plugins for this repo''s shipped skill bundles.'
 
     $missing = @()
-    $drift = @()
     foreach ($name in @($skillPlugin.shipped_skills)) {
-        $mine = Join-Path $repoRoot ".github\skills\$name\SKILL.md"
-        $theirs = Join-Path $skillPlugin.skills_dir "$name\SKILL.md"
-        if (-not (Test-Path $theirs)) { $missing += $name; continue }
-        if ((Test-Path $mine) -and ((Get-FileHash $mine).Hash -ne (Get-FileHash $theirs).Hash)) { $drift += $name }
+        if (-not (Test-Path (Join-Path $skillPlugin.skills_dir "$name\SKILL.md"))) { $missing += $name }
     }
 
     # Severity decision (2026-08-13): a completely missing plugin is warning-only in this repo because
@@ -321,9 +317,49 @@ else {
     Add-Check 'skill bundles installed' 'critical' ($missing.Count -eq 0) $detail `
         'Refresh the installed copy in place: python scripts\sync_installed_skills.py. If the bundle is new, install/update the plugin BETWEEN sessions.'
 
-    Add-Check 'skill bundles match published plugin' 'critical' ($drift.Count -eq 0) `
-        $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
-        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.'
+    # Drift is asked of sync_installed_skills.py rather than recomputed here (issue #410). This block
+    # used to hash $repoRoot\.github\skills\<name>\SKILL.md against the install - i.e. it had its OWN
+    # notion of which version is authoritative, and that notion was "whichever worktree ran preflight".
+    # With several worktrees carrying unmerged edits to one bundle, that made this CRITICAL check
+    # branch-dependent: an in-flight skill PR blocked every migration in every other checkout, which
+    # is precisely the tension the issue describes. One authority, one implementation - and it now
+    # compares every file in the bundle, not only SKILL.md.
+    $syncRaw = $null
+    $syncCode = $null
+    if ($py) {
+        $syncRaw = & python (Join-Path $repoRoot 'scripts\sync_installed_skills.py') --check --json 2>$null
+        $syncCode = $LASTEXITCODE
+    }
+    $sync = $null
+    try { $sync = (($syncRaw | Out-String) | ConvertFrom-Json) } catch { $sync = $null }
+
+    if (-not $sync) {
+        Add-Check 'skill bundles match published plugin' 'critical' $false `
+            'not verified (sync_installed_skills.py --check --json did not report)' `
+            'Run python scripts\sync_installed_skills.py --check --json and read the error. Until it reports, the installed bundles that SHADOW .github/skills are unverified.'
+    }
+    elseif ($sync.status -eq 'no_ref') {
+        # Distinct from drift on purpose: with no resolvable merged ref there is no authority to
+        # compare against, so the installed copy is UNVERIFIED, not stale. Reporting that as
+        # "in sync with <blank>" while failing the check is the confusing shape this branch removes.
+        Add-Check 'skill bundles match published plugin' 'critical' $false `
+            "cannot resolve the merged ref: $($sync.detail)" `
+            'The installed bundles SHADOW .github/skills and could not be checked against what is merged. Add the origin remote and fetch, or pass --ref <ref> to python scripts\sync_installed_skills.py --check.'
+    }
+    else {
+        $stale = @($sync.changed) + @($sync.extra) | Where-Object { $_ }
+        Add-Check 'skill bundles match published plugin' 'critical' ($syncCode -eq 0) `
+            $(if ($stale.Count) { "STALE in plugin vs $($sync.described): $($stale -join ', ')" } else { "in sync with $($sync.described)" }) `
+            'The plugin copy SHADOWS .github/skills, so agents run bytes that differ from the MERGED repo. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.'
+
+        # Informational, deliberately NOT a failure. Your unmerged skill edits are not what a subagent
+        # reads - that is the design, not a fault - but you still need to know, because a measurement
+        # taken while assuming otherwise is wrong in the same way a stale bundle makes one wrong.
+        $localEdits = @($sync.local_unmerged) | Where-Object { $_ }
+        Add-Check 'skill bundles: local edits vs merged' 'optional' ($localEdits.Count -eq 0) `
+            $(if ($localEdits.Count) { "$($localEdits.Count) unmerged local edit(s): $($localEdits -join ', ')" } else { 'none' }) `
+            'Subagents read the MERGED copy, so these edits are NOT live. To test them deliberately: python scripts/sync_installed_skills.py --from-worktree (it serves unreviewed guidance, and says so). Restore with a plain sync.'
+    }
 }
 
 # Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
