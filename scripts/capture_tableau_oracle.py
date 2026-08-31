@@ -91,7 +91,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import pat_secret, redact, redacted_note, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-oracle")
 
@@ -144,7 +144,7 @@ class ExportFailed(RuntimeError):
         self.detail = detail
 
 
-def classify_export_error(status: int, text: str) -> tuple[str, str]:
+def classify_export_error(status: int, text: str, *, redactor=None) -> tuple[str, str]:
     """Map a Tableau failure to an actionable class. The distinction drives whether we retry.
 
     Order matters. ``401002`` is our session dying and is fixed by re-authenticating. A transient
@@ -154,12 +154,23 @@ def classify_export_error(status: int, text: str) -> tuple[str, str]:
     is not transient**, so retrying burns time and still cannot succeed; only a human can fix it.
     Transient is checked *before* the credential markers so a 503 whose body happens to mention
     authentication is still retried rather than misfiled as a permanent credential block.
+
+    ``redactor`` splits the two jobs this function does. **Classification reads ``text`` raw**, because
+    redaction is handed the human-chosen PAT *name* and a short one rewrites Tableau's own error codes
+    -- a ``401002`` mangled mid-string reads as a permanent credential failure instead of the
+    recoverable session loss it is. **The reported detail is built from ``safe``**, the fully redacted
+    copy, so every slice, regex and ``split`` below runs on text a secret has already left.
+
+    That replaces the previous two-call dance (``classify(raw)[0]`` for the kind, ``classify(text)[1]``
+    for the detail), which was correct only because the raw call's detail happened to be discarded --
+    one keystroke from a leak, and unprovable from this function alone.
     """
+    safe = redactor(text) if redactor is not None else text
     if SESSION_LOST_CODE in text:
         return "session_lost", ""
     if status in TRANSIENT_STATUSES:
         label = "network error" if status == NETWORK_ERROR_STATUS else f"HTTP {status}"
-        return "transient", f"{label}: {text[:150]}"
+        return "transient", f"{label}: {safe[:150]}"
     credential_markers = (
         "FederatedDataSourceException",
         "OAuth refresh token",
@@ -169,10 +180,10 @@ def classify_export_error(status: int, text: str) -> tuple[str, str]:
         "authentication",
     )
     if any(marker.lower() in text.lower() for marker in credential_markers):
-        match = re.search(r"([\w.-]+\.(?:com|net|io|azuredatabricks\.net)[^:\s]*):\s*(Tableau[^<\n]{0,180})", text)
-        detail = f"{match.group(1)}: {match.group(2).strip()}" if match else text[:200]
+        match = re.search(r"([\w.-]+\.(?:com|net|io|azuredatabricks\.net)[^:\s]*):\s*(Tableau[^<\n]{0,180})", safe)
+        detail = f"{match.group(1)}: {match.group(2).strip()}" if match else safe[:200]
         return "source_credential", detail.split("tableau_error_source=")[0].strip()
-    return "failed", f"HTTP {status}: {text[:200]}"
+    return "failed", f"HTTP {status}: {safe[:200]}"
 
 
 def backoff_delay(attempt: int, retry_after: str | None = None, *, jitter: bool = True) -> float:
@@ -318,8 +329,9 @@ class TableauSession:
             # Redact the response body before it becomes an exception message: this is a sign-in
             # POST whose request body CONTAINS the PAT, so any reflecting proxy, WAF or debug
             # endpoint echoes it straight back. Measured with a local echo server during review of
-            # #97. Redact first, truncate second -- slicing first can leave a secret suffix.
-            last = self._redact_response(payload.decode("utf-8", "replace"))[:200]
+            # #97. `redacted_note` is what guarantees redaction precedes the 200-character cut --
+            # slicing first can leave a secret's tail, or its head, in the retained window.
+            last = redacted_note(payload, self._redact_response, limit=200)
             if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
                 break
             self.retry_count += 1
@@ -364,7 +376,7 @@ class TableauSession:
                 return json.loads(payload)
             if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
                 raise RuntimeError(
-                    f"GET {path} -> HTTP {status}: {self._redact_response(payload.decode('utf-8', 'replace'))[:200]}"
+                    f"GET {path} -> HTTP {status}: {redacted_note(payload, self._redact_response, limit=200)}"
                 )
             self.retry_count += 1
             time.sleep(backoff_delay(attempt))
@@ -399,17 +411,13 @@ class TableauSession:
             if status == 200:
                 return payload, elapsed, {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
             raw = payload.decode("utf-8", "replace")
-            text = self._redact_response(raw)
-            # CLASSIFY the raw body, REPORT the redacted one. `_redact_response` is handed the PAT
-            # NAME, which is human-chosen: a short one rewrites Tableau's own error codes, and a
-            # `401002` mangled into `4[REDACTED]1[REDACTED][REDACTED]2` is read as a permanent
-            # source-credential failure instead of the recoverable session loss it is, so the view
-            # is abandoned and never re-authenticated. Redaction must never mutate syntax that
-            # control flow depends on. `detail` still comes from the redacted copy because
-            # `classify_export_error` truncates, and slicing an unredacted body can leave a secret's
-            # tail in the retained window.
-            kind = classify_export_error(status, raw)[0]
-            detail = classify_export_error(status, text)[1]
+            # ONE call, with the redactor inside. `classify_export_error` classifies on the raw text
+            # -- redaction is handed the human-chosen PAT NAME, and a short one mangles `401002` into
+            # something read as a permanent credential failure rather than the recoverable session
+            # loss it is -- while building every reported detail from the redacted copy. The previous
+            # shape called it twice and threw away the raw call's detail, which was safe only by
+            # convention: one keystroke (`kind, detail = classify(status, raw)`) reinstated the leak.
+            kind, detail = classify_export_error(status, raw, redactor=self._redact_response)
             if kind == "session_lost" and reauths < MAX_REAUTH_PER_VIEW:
                 # Re-auth is a SEPARATE recovery path from transient retry, and is deliberately NOT
                 # gated by the admission deadline. It is bounded instead by MAX_REAUTH_PER_VIEW (and
@@ -438,7 +446,11 @@ class TableauSession:
                 time.sleep(delay)
                 continue
 
-            raise ExportFailed(f"GET {path} -> HTTP {status}", kind, detail or text[:200])
+            raise ExportFailed(
+                f"GET {path} -> HTTP {status}",
+                kind,
+                detail or redacted_note(payload, self._redact_response, limit=200),
+            )
         raise ExportFailed(f"GET {path} -> exhausted {self.retry.max_attempts} attempts", "transient", "")
 
 
@@ -681,10 +693,15 @@ def _capture_render(
     # passed no redactor at all.
     matches, why = capability.format_matches(kind, payload, None, redactor=session.redact_text)
     if not matches:
+        # `why` is FULLY redacted by `format_matches`' chokepoint, and a second `session.redact_text`
+        # here was deleted rather than kept as defence in depth: it received only the already
+        # TRANSFORMED 16-character fragment, so it could not match a secret that truncation or
+        # stripping had already rewritten -- which is precisely how the round-4 leak survived a guard
+        # that looked like one. A guard that cannot guard invites the confidence that hid it.
         return {
             "status": "format_mismatch",
             "requested_format": kind,
-            "detail": session.redact_text(why),
+            "detail": why,
             "bytes": len(payload),
             "elapsed_sec": round(elapsed, 2),
             **stats,

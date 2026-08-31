@@ -392,15 +392,39 @@ written to disk. Probe details are scrubbed through the session's redactor befor
 serialised — while classification still reads the **raw** text, because redaction is handed the
 human-chosen PAT *name* and a short one would rewrite Tableau's own error codes.
 
-⚠️ **Redaction happens per value, BEFORE case-folding, splitting or truncation** — every one of those
-transforms defeats the repo redactor, which matches literals and deliberately does not cover
-case-changed forms. Two measured leaks came from getting the order wrong: a reflected
-`Content-Type: image/SYNTHETIC_SESSION_TOKEN_123` was lowercased before the redactor ran and reached
-the report as `image/synthetic_session_token_123`; and the format-mismatch diagnostic quoted the
-response's own **first eight bytes**, so a body beginning `SECRET42` was serialised as `b'SECRET42'`
-— a *prefix* of a longer secret, which a literal redactor could not have matched even had one run.
-The diagnostic now redacts a 256-byte window first and quotes the scrubbed result, and the capture's
-own `format_mismatch` record passes the session redactor rather than none at all.
+⚠️ **Redaction happens per value, BEFORE case-folding, splitting, stripping or truncation** — every
+one of those transforms defeats the repo redactor, which matches literals. Four review rounds each
+found one call site that had done them in the other order, so this is no longer a call-site rule but
+a **chokepoint**: `tableau_env.redacted_note()` takes the value *untransformed*, redacts the whole of
+it, and only then truncates/strips/quotes. The wrong order is not expressible there — a caller cannot
+truncate first, because truncation lives inside the function, after the redactor.
+
+| round | escape | what ran before the redactor |
+|---|---|---|
+| 2 | `raw_get()` error bodies | *nothing* — the redactor was simply absent |
+| 3 | the HTTP-200 wrong-format diagnostic | the message was built and **returned** first |
+| 3 | `format_matches` Content-Type | `.lower()` |
+| 4 | `format_matches` body head | `.lstrip()`, a 256-byte window, `[:8]` |
+| 4 | `classify_probe`'s `<detail>` extraction | the capture group was pulled from the **raw** body, splitting a secret that straddled `</detail>` |
+
+The last row was found by writing the gate, not by a reviewer. `tests/test_diagnostic_redaction.py`
+holds the whole inventory of diagnostic-producing sites and runs each against a battery of secret
+shapes (leading/trailing whitespace, longer-than-any-window, mixed case, embedded `</detail>`, quote
+and backslash, non-ASCII, semicolon), asserting on the **written `oracle-manifest.json`** where one
+exists. A second gate fails on any f-string interpolation in these two modules that is not on a
+hand-certified list, so a *fifth* site cannot be added silently — only certified deliberately, with a
+one-line reason it cannot carry a credential.
+
+⚠️ **What `redact()` still does NOT cover, and why that is deliberate.** Percent-encoded, base64,
+NFD-normalised and case-changed copies of a secret survive it. Every one of those requires a **third
+party** to re-encode our credential before echoing it, and none has been observed on this path; the
+one transport we do measure (ElementTree's numeric character references, from `tableauserverclient`)
+*is* covered, by `_wire_forms`. Making the redactor case-insensitive was measured rather than
+assumed and rejected: a plausible PAT name — `DataSource` — then falsely redacts inside Tableau's own
+`FederatedDataSourceException` (10 characters per hit in a 476-character error body), degrading
+exactly the credential-block message that is the most actionable output the capture produces. What
+would change this answer is an observed reflection of a **re-encoded** credential, not another
+hypothetical.
 
 ### Which rung to default to
 

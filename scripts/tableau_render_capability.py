@@ -49,6 +49,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# `redacted_note` is the chokepoint every attacker-influenced diagnostic in this module goes through,
+# so it is a hard module-level dependency rather than one of the lazy imports below.
+from tableau_env import redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
+
 LOG = logging.getLogger("tableau-render-capability")
 
 SERVERINFO_TIMEOUT_SEC = 30
@@ -154,29 +159,15 @@ def _identify(head: bytes) -> str:
     return "unrecognised bytes"
 
 
-# How much of an attacker-influenced value is REDACTED before any of it is quoted, and how much of the
-# redacted result is then shown. The order is the whole point -- see `_quote` below.
-_REDACTION_WINDOW_BYTES = 256
+# How much of the REDACTED result each diagnostic shows. These bound the OUTPUT only: nothing is cut
+# before the redactor has seen the whole value -- see `tableau_env.redacted_note`, which is the only
+# sanctioned way to put attacker-influenced text into a message this module prints or persists.
 _DIAGNOSTIC_CHARS = 16
 _CONTENT_TYPE_CHARS = 120
-
-
-def _quote_head(body: bytes, redactor) -> str:
-    """A quotable rendering of a response's first bytes that a redactor can actually cover.
-
-    Three things here are load-bearing, and the previous ``{head[:8]!r}`` got all three wrong:
-
-    1. **Redact BEFORE truncating.** Slicing eight bytes off the front of a longer secret leaves a
-       fragment the literal-matching redactor cannot see, so it survives verbatim. A generous window
-       is decoded and scrubbed first; only the scrubbed text is then cut down.
-    2. **Redact TEXT, not a ``bytes`` repr.** ``repr(b"...")`` escapes quotes, backslashes and every
-       non-ASCII byte, so a secret containing any of them reaches the report in an escaped form that
-       the redactor never matched.
-    3. **Quote with ``ascii()``.** The decode is lossy (``errors="replace"``), and a literal U+FFFD in
-       a message that later prints to a cp1252 console raises ``UnicodeEncodeError``.
-    """
-    text = body.lstrip()[:_REDACTION_WINDOW_BYTES].decode("utf-8", "replace")
-    return ascii((redactor(text) if redactor else text)[:_DIAGNOSTIC_CHARS])
+# Room for a Tableau error body's `<detail>` element to survive redaction intact. Tableau's error
+# bodies are well under 1 KB, so this only ever cuts a pathological one -- and cutting it loses
+# diagnostic text, never a secret, because it applies to the redacted copy.
+_ERROR_BODY_CHARS = 4000
 
 
 def format_matches(kind: str, body: bytes, content_type: str | None, *, redactor=None) -> tuple[bool, str]:
@@ -187,32 +178,30 @@ def format_matches(kind: str, body: bytes, content_type: str | None, *, redactor
     since proxies rewrite headers and some servers omit the charset.
 
     ⚠️ ``why_not`` quotes two attacker-influenced values -- the received ``Content-Type`` and the
-    response's own first bytes -- so ``redactor`` is scrubbing a *credential*, not tidying output.
-    It is applied to each raw value **individually, before** that value is case-folded, split or
-    truncated, because every one of those transforms defeats a literal-matching redactor:
+    response's own leading bytes -- so ``redactor`` is scrubbing a *credential*, not tidying output.
+    Both go through :func:`tableau_env.redacted_note`, which redacts the whole value before anything
+    truncates, strips, folds or quotes it. Four review rounds each found one call site that had done
+    those in the other order; the chokepoint exists so the order cannot be expressed here at all.
 
-    * ``.lower()`` on the Content-Type is what let ``image/SYNTHETIC_SESSION_TOKEN_123`` reach the
-      report as ``image/synthetic_session_token_123`` -- the caller's redactor ran afterwards and
-      deliberately does not match case-changed secrets;
-    * ``.split(";")[0]`` would cut a secret containing a semicolon; and
-    * slicing the body's first bytes leaves a prefix of a longer secret (see ``_quote_head``).
-
-    Classification itself still reads the RAW values -- the case-insensitive MIME comparison is
-    performed on the unredacted header -- so redaction can never change a verdict.
+    Classification still reads the RAW values. ``head`` below and the case-folded ``mime`` are used
+    ONLY to decide the verdict and are never interpolated into the message, so redaction cannot change
+    an answer and a transformation cannot leak a credential.
     """
     head = body.lstrip()[:16]
     if kind == "svg":
         if not looks_like_svg(body):
-            return False, f"expected an <svg> root, got {_identify(head)} ({_quote_head(body, redactor)})"
+            note = redacted_note(body, redactor, limit=_DIAGNOSTIC_CHARS, quote=True)
+            return False, f"expected an <svg> root, got {_identify(head)} ({note})"
     else:
         signatures = FORMAT_SIGNATURES.get(kind, ())
         if signatures and not any(head.startswith(sig) for sig in signatures):
-            return False, f"expected {kind} payload, got {_identify(head)} ({_quote_head(body, redactor)})"
+            note = redacted_note(body, redactor, limit=_DIAGNOSTIC_CHARS, quote=True)
+            return False, f"expected {kind} payload, got {_identify(head)} ({note})"
     raw_type = content_type or ""
     mime = raw_type.split(";")[0].strip().lower()
     expected = CONTENT_TYPES.get(kind)
     if mime and expected and mime != expected:
-        received = (redactor(raw_type) if redactor else raw_type).strip()[:_CONTENT_TYPE_CHARS]
+        received = redacted_note(raw_type, redactor, limit=_CONTENT_TYPE_CHARS)
         return False, f"expected Content-Type {expected}, got {received}"
     return True, ""
 
@@ -343,15 +332,13 @@ def classify_probe(
     one rewrites Tableau's own error codes, so a ``401002`` mangled mid-string stops being recognisable.
     Redaction must never mutate syntax that control flow depends on.
 
-    **Every** returned ``detail`` passes through ``_scrub`` -- including the HTTP 200 wrong-format
-    diagnostic, which quotes the received ``Content-Type``. That header is attacker-influenced and a
-    reflecting proxy can put a live token in it; the first version of this check returned that string
-    before any redaction ran.
+    **Every** attacker-influenced value in a returned ``detail`` comes from
+    :func:`tableau_env.redacted_note`, which redacts the whole value before anything truncates,
+    strips, folds or extracts from it. The ``<detail>`` extraction below is why that matters here and
+    not only in ``format_matches``: pulling a capture group out of the RAW body is a transformation
+    like any other, and a secret straddling ``</detail>`` would be split by it, leaving each half
+    unmatched by a literal redactor. The regex now runs on the redacted copy.
     """
-
-    def _scrub(text: str) -> str:
-        return redactor(text) if redactor else text
-
     if status == 200:
         if kind:
             ok, why = format_matches(kind, body, content_type, redactor=redactor)
@@ -360,14 +347,18 @@ def classify_probe(
                 # `format=svg` and hands back its default PNG. Selecting this rung would persist PNG
                 # bytes in a `.svg` and call them vector.
                 #
-                # `why` is ALREADY redacted value-by-value (see `format_matches`): the outer `_scrub`
-                # cannot undo case-folding or truncation that has already happened, which is exactly
-                # how a mixed-case token used to survive this line.
-                return "indeterminate", _scrub(f"HTTP 200 but {why}")[:180]
+                # `why` arrives FULLY redacted from `format_matches`, so the bound below is an output
+                # cap, not a guard. A second redactor call here was deleted rather than kept as
+                # defence in depth: it would only ever see already-transformed text, which is exactly
+                # the shape that made the previous outer guard incapable of guarding.
+                return "indeterminate", f"HTTP 200 but {why}"[:180]
         return "available", ""
     text = body.decode("utf-8", "replace")
-    raw_detail = (re.findall(r"<detail>(.*?)</detail>", text, re.S) or [text])[0]
-    detail = _scrub(raw_detail)[:180].strip()
+    # `_ERROR_BODY_CHARS` bounds the OUTPUT of redaction, not its input. Cutting it can only lose
+    # diagnostic text (Tableau's error bodies are well under 1 KB); it can never leave a secret behind,
+    # because the redactor has already seen the whole body by the time it applies.
+    safe = redacted_note(body, redactor, limit=_ERROR_BODY_CHARS)
+    detail = (re.findall(r"<detail>(.*?)</detail>", safe, re.S) or [safe])[0][:180].strip()
     if VERSION_GATE_MARKER in text:
         return "unsupported", detail
     if UNRENDERABLE_MARKER in text:

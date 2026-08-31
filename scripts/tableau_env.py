@@ -380,6 +380,53 @@ def redact(text: str, *secrets: str) -> str:
     return "".join(out)
 
 
+def redacted_note(value: str | bytes | None, redactor=None, *, limit: int, quote: bool = False) -> str:
+    """THE ONE WAY attacker-influenced text may enter a diagnostic that is printed, raised or persisted.
+
+    Every leak of a Tableau credential found in review of #405 was the same mistake in a different
+    place, and it is a mistake of ORDER, not of omission:
+
+    ==================================================  ==========================================
+    what ran before the redactor                        what the redactor then failed to find
+    ==================================================  ==========================================
+    ``.lower()`` on a reflected ``Content-Type``         ``image/SYNTHETIC_TOKEN`` -> lowercase
+    ``[:8]`` on the response's first bytes               a *prefix* of a longer secret
+    ``.lstrip()`` on the body                            a secret whose literal begins with a space
+    ``[:256]`` window before decoding                    a secret longer than the window
+    ==================================================  ==========================================
+
+    ``redact`` matches LITERALS. Case-folding, stripping, slicing and splitting each rewrite the
+    needle out of the haystack, so redaction afterwards is looking for a string that is no longer
+    there. The fix cannot be another careful call site -- four rounds of careful call sites is what
+    produced the table above. It has to be impossible to express the wrong order, which is what this
+    function is: the caller hands over the value **untransformed** and receives a finished string. It
+    cannot truncate first, because truncation lives in here, after the redactor.
+
+    ``limit`` and ``quote`` therefore describe the OUTPUT, never the input. Nothing shortens the text
+    before ``redactor`` sees all of it -- deliberately including very large bodies, because any bound
+    that could cut a secret is the defect this replaces, and this path only runs on a failure.
+
+    ``quote`` wraps the result in :func:`ascii`, which is ASCII-safe on purpose: the decode below is
+    lossy, and a literal U+FFFD in a message later printed to a cp1252 console raises
+    ``UnicodeEncodeError``. Quoting AFTER redaction also fixes the reason ``repr(bytes)`` was wrong --
+    it escapes quotes, backslashes and non-ASCII bytes, so a secret containing any of them arrived in
+    an escaped form the redactor had never been shown.
+
+    ⚠️ **Decoding is the one transformation that must precede redaction**, because ``redact`` takes
+    ``str``. It is lossless for any secret that is valid UTF-8 on the wire -- which is every secret
+    this repository handles, since a PAT is what we ourselves sent. A credential re-encoded in
+    transit (base64, percent-encoding, NFD, a non-UTF-8 charset) survives this, exactly as
+    :func:`redact` already documents; that residual is a property of the REDACTOR, and is unchanged.
+    """
+    text = value.decode("utf-8", "replace") if isinstance(value, (bytes, bytearray)) else (value or "")
+    # Redaction first, on the WHOLE value. Every line below this one is a transformation, and every
+    # line above it must remain incapable of shortening or rewriting the text.
+    if redactor is not None:
+        text = redactor(text)
+    text = text.strip()[:limit]
+    return ascii(text) if quote else text
+
+
 def engine_child_env(env: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:
     """Build the child process environment for invoking an ENGINE script (e.g. ``fetch_tds.py``).
 
