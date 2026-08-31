@@ -926,7 +926,7 @@ def test_evidence_verdict_requires_every_present_side_to_be_accounted_for(
 
 
 def test_an_unusable_evidence_object_attributes_nothing():
-    evidence = heg.Evidence(Path("bundle"), {"reports/a": "hash"}, {}, [], unavailable_reason="empty_inventory")
+    evidence = heg.Evidence.unavailable(Path("bundle"), "empty_inventory", "no usable baseline")
     assert evidence.usable is False
     assert evidence.verdict("reports/a", "pbip/a") == heg.PROV_UNATTRIBUTED
 
@@ -1523,3 +1523,216 @@ def test_markdown_does_not_claim_cleanliness_when_the_baseline_drifted(tmp_path)
 
     assert report["status"] == heg.STATUS_UNTRUSTWORTHY
     assert CLEAN_CLAIM not in markdown
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-6 review: the STATUS ITSELF was assembled from two filesystem snapshots.
+#
+# The four rounds above all fixed "the report re-derived trust wrongly", and the answer each time
+# was to stop re-deriving and ask the harvest's authoritative `status`. That fix stands. This is one
+# level beneath it: provenance is adjudicated BEFORE the trees are read, so an artifact edited in
+# between is described by both reads at once - and the difference lands on the ENGINE.
+# ---------------------------------------------------------------------------------------------
+
+
+def _harvest_with_an_edit_between_adjudication_and_scanning(monkeypatch, bundle: Path, mutate, run=None) -> dict:
+    """Run the harvest with `mutate` applied in the exact window the blind review reproduced.
+
+    `harvest()` adjudicates provenance inside `_load_evidence()` and only then reads the trees in
+    `_scan_pairs()`. Wrapping the module-level `_scan_pairs` places the edit precisely between the
+    two - a deterministic stand-in for a fix script, a Desktop autosave, or a sibling agent writing
+    into the bundle while the harvest walks it.
+
+    The `fired` assertion is not decoration: a fixture that silently stops injecting would make every
+    test below pass for the wrong reason.
+    """
+    original = heg._scan_pairs
+    fired = []
+
+    def scan_after_the_edit(bundle_arg: Path, evidence):
+        fired.append(bundle_arg)
+        mutate(bundle_arg)
+        return original(bundle_arg, evidence)
+
+    monkeypatch.setattr(heg, "_scan_pairs", scan_after_the_edit)
+    result = (run or heg.harvest)(bundle)
+    assert fired, "the injection point never fired - this fixture no longer reproduces the race"
+    return result
+
+
+def test_an_edit_between_adjudication_and_scanning_is_never_attributed_to_the_engine(tmp_path, monkeypatch):
+    """The reviewer's reproduction, as a fixture. Measured on 1bdd2e1, BEFORE this fix:
+
+        CLI exit           0, stdout says "complete"
+        status             complete, no incomplete reasons
+        differing_files    1
+        engine_internal    1        <- a TIER edit attributed to the ENGINE
+        tier_edits         0
+        markdown           clean claim emitted
+        tamper_check()     DRIFT    <- on the same bundle, immediately after
+
+    Every one of those numbers is asserted here, so the regression cannot come back as a subset.
+    """
+    bundle = _identical_bundle(tmp_path)
+
+    report = _harvest_with_an_edit_between_adjudication_and_scanning(monkeypatch, bundle, _mutate_working_file_changed)
+
+    assert cmp_mod.tamper_check(bundle)[0] == "DRIFT", "the fixture must leave the bundle visibly drifted"
+    assert report["provenance"]["differing_files"] == 1
+    assert report["provenance"][heg.PROV_ENGINE] == 0, "a mid-scan edit is not the engine's byte"
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert report["snapshot_race"]["count"] == 1
+    assert report["snapshot_race"]["moved"][0]["target"] == WORKING_VISUAL
+    assert report["snapshot_race"]["moved"][0]["kind"] == "changed"
+    assert any("MOVED during this harvest" in reason for reason in report["incomplete_reasons"])
+    assert CLEAN_CLAIM not in hgr.render_markdown(report)
+
+
+def _repeated_working_edit():
+    """A mutation that writes DIFFERENT bytes every time, so each run it fires on is a real race.
+
+    ⚠️ Needed because a fixed payload is a race exactly ONCE. Re-running the harvest over a bundle
+    whose edit has already landed is a plain, correctly-reported tier edit - the second run's write
+    is a no-op, nothing moves under it, and the run is `complete`. That is right, and it is why the
+    CLI exit code cannot be asserted from a second call on the same bundle.
+    """
+    fired: list[int] = []
+
+    def mutate(bundle: Path) -> None:
+        fired.append(len(fired))
+        _write(bundle / WORKING_VISUAL, _visual("Orders", position=40 + len(fired)))
+
+    return mutate
+
+
+def test_the_cli_exits_incomplete_when_the_bundle_moves_mid_harvest(tmp_path, monkeypatch):
+    """Exit 3, and stdout that does not say `complete`. Measured before the fix: exit 0."""
+    bundle = _identical_bundle(tmp_path)
+
+    exit_code = _harvest_with_an_edit_between_adjudication_and_scanning(
+        monkeypatch, bundle, _repeated_working_edit(), run=lambda b: heg.main([str(b), "--quiet"])
+    )
+
+    assert exit_code == heg.EXIT_INCOMPLETE
+
+
+def test_a_deletion_between_adjudication_and_scanning_is_not_attributed_to_the_engine(tmp_path, monkeypatch):
+    """The shape that literal path matching CANNOT see, and the reason the match is by artifact key.
+
+    A working file deleted mid-scan is recorded with `working_path=None` - the "engine's own
+    reference-only emission" reading - so the raced `pbip/...` path appears nowhere in the record.
+    Matching only the literal paths left this one labelled `engine_internal`.
+    """
+    bundle = _identical_bundle(tmp_path)
+
+    report = _harvest_with_an_edit_between_adjudication_and_scanning(monkeypatch, bundle, _mutate_working_file_deleted)
+
+    removed = [r for r in report["shapes"] if r["files"]]
+    assert removed, "the deletion must still be reported as a difference"
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert report["snapshot_race"]["moved"][0]["kind"] == "missing"
+
+
+def test_a_mid_scan_creation_is_named_as_a_race_not_merely_left_unattributed(tmp_path, monkeypatch):
+    """An addition was already fail-safe (`unrecorded` -> unattributed); it must still be NAMED.
+
+    Fail-safe is not the same as diagnosed: without the race entry a reader is told the path is
+    unattributed and never that the bundle was moving underneath the harvest.
+    """
+    bundle = _identical_bundle(tmp_path)
+
+    report = _harvest_with_an_edit_between_adjudication_and_scanning(monkeypatch, bundle, _mutate_working_file_created)
+
+    assert report["snapshot_race"]["count"] == 1
+    assert report["snapshot_race"]["moved"][0]["kind"] == "added"
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+def test_a_race_does_not_downgrade_a_positively_detected_tampered_baseline(tmp_path, monkeypatch):
+    """Withdrawing authorship must never turn `untrustworthy` (exit 1) into `incomplete` (exit 3).
+
+    A tampered baseline rests on a POSITIVE observation - that path had already drifted when
+    provenance was adjudicated - and a later movement does not unmake it.
+    """
+    bundle = _identical_bundle(tmp_path)
+    _mutate_baseline_file_added(bundle)
+    racing = _repeated_working_edit()
+
+    report = _harvest_with_an_edit_between_adjudication_and_scanning(monkeypatch, bundle, racing)
+
+    assert report["snapshot_race"]["count"] == 1
+    assert report["baseline_drift"], "the pre-existing baseline drift must survive the withdrawal"
+    assert report["status"] == heg.STATUS_UNTRUSTWORTHY
+    assert (
+        _harvest_with_an_edit_between_adjudication_and_scanning(
+            monkeypatch, bundle, racing, run=lambda b: heg.main([str(b), "--quiet"])
+        )
+        == heg.EXIT_UNTRUSTWORTHY
+    )
+
+
+def test_an_inventory_that_cannot_be_re_read_is_itself_reported_as_a_race(tmp_path, monkeypatch):
+    """A file that vanishes between `is_file()` and the hash IS the race - not a traceback."""
+    bundle = _identical_bundle(tmp_path)
+    original = heg.observe_generated_artifacts
+    calls = []
+
+    def observe(bundle_arg, baseline):
+        calls.append(bundle_arg)
+        if len(calls) > 1:
+            raise FileNotFoundError(2, "No such file or directory")
+        return original(bundle_arg, baseline)
+
+    monkeypatch.setattr(heg, "observe_generated_artifacts", observe)
+
+    report = heg.harvest(bundle)
+
+    assert len(calls) == 2, "the harvest must re-observe the inventory exactly once after scanning"
+    assert report["snapshot_race"]["moved"][0]["kind"].startswith("unreadable")
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+def test_a_bundle_nobody_touches_is_never_reported_as_racing(tmp_path):
+    """No overshoot. A still bundle keeps every verdict it had before this check existed."""
+    identical = heg.harvest(_identical_bundle(tmp_path / "still"))
+    differing = heg.harvest(_differing_bundle(tmp_path / "moving"))
+
+    for report in (identical, differing):
+        assert report["snapshot_race"]["count"] == 0
+        assert report["snapshot_race"]["moved"] == []
+        assert report["status"] == heg.STATUS_COMPLETE
+        assert not report["incomplete_reasons"]
+    assert differing["provenance"][heg.PROV_ENGINE] == differing["provenance"]["differing_files"] > 0
+    assert CLEAN_CLAIM in hgr.render_markdown(differing)
+
+
+def test_a_tier_edit_made_before_the_harvest_is_still_reported_as_a_tier_edit(tmp_path):
+    """The evidence this module exists for must survive the withdrawal rule."""
+    bundle = _identical_bundle(tmp_path)
+    _mutate_working_file_changed(bundle)
+
+    report = heg.harvest(bundle)
+
+    assert report["snapshot_race"]["count"] == 0, "an edit made BEFORE the harvest is not a race"
+    assert [r["path"] for r in report["tier_edits"]] == [VISUAL]
+
+
+def test_adjudication_reads_the_inventory_from_the_snapshot_it_was_given(tmp_path):
+    """The contract that keeps the added cost at ONE extra read rather than two.
+
+    A snapshot taken before a change is the authority for a caller that passes it: adjudication must
+    report what that snapshot saw, not what the disk says now. Without it, `harvest()` would take a
+    third read of the inventory and STILL adjudicate from a moment the comparison cannot see.
+    """
+    bundle = _identical_bundle(tmp_path)
+    generated = cmp_mod.load_generated_artifact_baseline(bundle)
+    before = cmp_mod.observe_generated_artifacts(bundle, generated["files"])
+
+    _mutate_working_file_changed(bundle)
+
+    assert cmp_mod.adjudicate_generated_drift(bundle, generated, before) == []
+    assert [i["target"] for i in cmp_mod.adjudicate_generated_drift(bundle, generated)] == [WORKING_VISUAL]
+    moved = cmp_mod.compare_generated_snapshots(before, cmp_mod.observe_generated_artifacts(bundle, generated["files"]))
+    assert [(i["target"], i["kind"]) for i in moved] == [(WORKING_VISUAL, "changed")]

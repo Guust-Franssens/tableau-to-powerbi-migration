@@ -351,6 +351,44 @@ attributed/unattributed counts, and lists `incomplete_reasons` verbatim.
 > every differing byte matched the engine on a bundle whose status was `untrustworthy`. Same class,
 > one layer down: **an empty count reading as a clean result.**
 
+### The status itself was assembled from two filesystem snapshots
+
+⚠️ Four review rounds fixed *"the report re-derived trust wrongly"*, and the answer each time was to
+stop re-deriving and ask the harvest's authoritative `status`. That fix stands — and it does nothing
+here, because **the authority itself was computed across a race.** Provenance is adjudicated before
+the trees are walked, so an artifact edited between the two operations is described by *both* reads:
+the comparison sees the new bytes while the stale adjudication still calls that path pristine, and
+the difference is therefore attributed to the **engine**.
+
+Measured (blind review round 6), one working-visual edit injected immediately after
+`adjudicate_generated_drift()` returned pristine and before the tree scan began:
+
+| | before | after |
+|---|---|---|
+| CLI exit | 0, stdout `complete` | **3** |
+| `status` | `complete`, no reasons | `incomplete`, race named |
+| `differing_files` | 1 | 1 |
+| `engine_internal` | **1** (a tier edit, on the engine) | **0** |
+| `unattributed` | 0 | 1 |
+| markdown | clean claim emitted | *Undetermined* |
+| `tamper_check()` on the same bundle | `DRIFT` | `DRIFT` |
+
+Two changes close it. Adjudication now consumes the **harvest's own** inventory read
+(`observe_generated_artifacts`) instead of taking a second one, and a **third** read taken after the
+comparison must agree with it; anything that moved is listed in `snapshot_race.moved`, forces
+`incomplete`, and has its authorship claim withdrawn to `unattributed`. `baseline_tampered` is
+deliberately **not** withdrawn — that verdict rests on a positive observation, and withdrawing it
+would drop `untrustworthy` (exit 1) to `incomplete` (exit 3).
+
+**Detection, not prevention, and that is the honest shape.** User space cannot snapshot a filesystem
+atomically — a single `os.walk` is itself a moving read — so "one snapshot" narrows the window
+without closing it, and a bundle *can* legitimately change under a long harvest.
+
+**Cost**, on `_runs/estate-2.339.0-20260829` (2,548 files, 2,481 recorded artifacts), both arms
+alternated in one process so they share page cache and machine load: **12.2 s → 16.4 s median, +4.2 s
+(+35 %)**. It buys one extra inventory read rather than two, because adjudication no longer takes its
+own. Every estate figure in §3 is unchanged by it, and `snapshot_race.count` is **0** on that bundle.
+
 ---
 
 ## 6. Why it is standalone and not a `run_estate.py` phase

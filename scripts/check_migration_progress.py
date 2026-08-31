@@ -43,7 +43,7 @@ import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 try:
     from generated_edit_declarations import load_generated_edit_declarations as _load_generated_edit_declarations
@@ -224,22 +224,90 @@ def load_generated_edit_declarations(bundle: Path) -> list[dict[str, Any]]:
     return _load_generated_edit_declarations(bundle)
 
 
-def _artifact_drift(bundle: Path, baseline: dict[str, str]) -> list[tuple[str, str]]:
-    """Changed, missing, or newly-added generated artifacts."""
+class GeneratedArtifactSnapshot(NamedTuple):
+    """ONE read of the generated-artifact inventory, so two consumers can share one filesystem state.
+
+    ⚠️ Exists because reading the disk twice is not the same as reading it once. Measured (blind
+    review round 6 of PR #399): ``harvest_engine_gaps.py`` adjudicated provenance here and only THEN
+    walked the bundle's trees, so an edit landing between the two operations was described by both at
+    once - the comparison saw the NEW bytes while the stale adjudication still called that path
+    pristine. One injected working-visual edit produced ``status=complete``, ``differing_files=1`` and
+    ``engine_internal=1`` (a TIER edit attributed to the ENGINE) while :func:`tamper_check` returned
+    ``DRIFT`` on the same bundle a second later.
+
+    ``hashes`` covers the recorded inventory UNION whatever is on disk now, so a newly added artifact
+    carries a digest too; the value is ``None`` for a path that is not a file. ``current`` is kept
+    rather than derived from ``hashes`` because "is this a generated artifact" is a classification
+    question (:func:`_is_generated_artifact`), not a "does it hash" one.
+    """
+
+    hashes: dict[str, str | None]
+    current: frozenset[str]
+
+
+def observe_generated_artifacts(bundle: Path, baseline: dict[str, str]) -> GeneratedArtifactSnapshot:
+    """Read the whole generated-artifact inventory once, for a caller that must not read it twice."""
+    current = frozenset(current_generated_artifacts(bundle))
+    hashes: dict[str, str | None] = {}
+    for relative in sorted(set(baseline) | current):
+        path = bundle / Path(relative)
+        hashes[relative] = sha256_file(path) if path.is_file() else None
+    return GeneratedArtifactSnapshot(hashes, current)
+
+
+def compare_generated_snapshots(
+    before: GeneratedArtifactSnapshot,
+    after: GeneratedArtifactSnapshot,
+) -> list[dict[str, Any]]:
+    """Every inventory path whose two reads disagree - i.e. that moved between them.
+
+    An empty list is the only thing that licenses a caller to present one verdict over both reads.
+    Both the digests AND the inventory membership are compared, because a path can leave the
+    generated set without its bytes changing.
+    """
+    moved: list[dict[str, Any]] = []
+    for relative in sorted(set(before.hashes) | set(after.hashes)):
+        was, now = before.hashes.get(relative), after.hashes.get(relative)
+        if was == now and (relative in before.current) == (relative in after.current):
+            continue
+        if was is None:
+            kind = "added"
+        elif now is None:
+            kind = "missing"
+        else:
+            kind = "changed"
+        moved.append({"target": relative, "kind": kind, "before_sha256": was, "after_sha256": now})
+    return moved
+
+
+def _artifact_drift(
+    bundle: Path,
+    baseline: dict[str, str],
+    snapshot: GeneratedArtifactSnapshot | None = None,
+) -> list[tuple[str, str]]:
+    """Changed, missing, or newly-added generated artifacts.
+
+    ``snapshot`` lets a caller that has ALREADY read the inventory adjudicate against that exact
+    read instead of taking a second, later one. Omit it and the behaviour is unchanged: this reads
+    the disk itself.
+    """
+    seen = observe_generated_artifacts(bundle, baseline) if snapshot is None else snapshot
     drift = []
     for relative, expected in sorted(baseline.items()):
-        path = bundle / Path(relative)
-        if not path.is_file():
+        actual = seen.hashes.get(relative)
+        if actual is None:
             drift.append((relative, "missing"))
-        elif sha256_file(path) != expected:
+        elif actual != expected:
             drift.append((relative, "changed"))
-    for relative in sorted(current_generated_artifacts(bundle) - set(baseline)):
+    for relative in sorted(seen.current - set(baseline)):
         drift.append((relative, "added"))
     return drift
 
 
-def _current_hash(bundle: Path, relative: str) -> str | None:
+def _current_hash(bundle: Path, relative: str, snapshot: GeneratedArtifactSnapshot | None = None) -> str | None:
     """Hash the current target, or ``None`` when the declared outcome is deletion."""
+    if snapshot is not None and relative in snapshot.hashes:
+        return snapshot.hashes[relative]
     path = bundle / Path(relative)
     return sha256_file(path) if path.is_file() else None
 
@@ -290,7 +358,11 @@ class UnreadableDeclarations(RuntimeError):
     """
 
 
-def adjudicate_generated_drift(bundle: Path, generated: dict[str, Any]) -> list[dict[str, Any]]:
+def adjudicate_generated_drift(
+    bundle: Path,
+    generated: dict[str, Any],
+    snapshot: GeneratedArtifactSnapshot | None = None,
+) -> list[dict[str, Any]]:
     """Every generated artifact that moved since the engine ran, with its declaration verdict.
 
     The structured core of :func:`tamper_check`, exposed as a PUBLIC contract so a second consumer
@@ -311,8 +383,12 @@ def adjudicate_generated_drift(bundle: Path, generated: dict[str, Any]) -> list[
     supported declaration location turned a `CLEAN` verdict into an uncaught ``UnicodeDecodeError``
     and a CLI traceback exiting 1 - the same numeric code as a real ``DRIFT``. Declarations are
     evidence ABOUT drift; with no drift there is nothing for them to be evidence about.
+
+    ``snapshot`` is an already-taken :class:`GeneratedArtifactSnapshot`. Pass one when the verdict
+    must describe the SAME filesystem state as some other read the caller made; omit it and this
+    reads the inventory itself, exactly as before.
     """
-    drift = _artifact_drift(bundle, generated["files"])
+    drift = _artifact_drift(bundle, generated["files"], snapshot)
     if not drift:
         return []
     try:
@@ -330,7 +406,7 @@ def adjudicate_generated_drift(bundle: Path, generated: dict[str, Any]) -> list[
             generated,
             relative,
             kind,
-            _current_hash(bundle, relative),
+            _current_hash(bundle, relative, snapshot),
         )
         adjudicated.append(
             {

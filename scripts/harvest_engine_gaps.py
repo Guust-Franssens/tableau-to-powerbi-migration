@@ -48,6 +48,13 @@ Two policy divergences from the tamper gate, both stricter, both deliberate:
 Axis 2 - SHAPE lives in `harvest_gap_shapes.py`: a structural JSON-pointer diff plus a TMDL line
 diff. Buckets were chosen by measuring the corpus first; `UNCLASSIFIED` is retained and reported.
 
+Axis 0, beneath both - **ONE STATE OF THE BUNDLE.** Provenance is adjudicated before the trees are
+walked, so a bundle that moves in between is described by two reads at once and the difference lands
+on the ENGINE (blind review round 6; see `_snapshot_race`). Adjudication now consumes the harvest's
+own inventory read, and a second read taken after the comparison must agree with it: anything that
+moved forces `incomplete` and has its authorship claim withdrawn. Detection, not prevention - user
+space cannot snapshot a filesystem atomically.
+
 This module does NOT use git, and that is a correctness fix. Measured: of 44 pairs, the mandated
 `git diff --no-index --stat` produced NO stat line for 3 (worst path 261/285/287 vs 259 for the 41 it
 could read), while agreeing with this module on 41 of 41 that it could. A Python content comparison
@@ -85,9 +92,12 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from check_migration_progress import (
+    GeneratedArtifactSnapshot,
     UnreadableDeclarations,
     adjudicate_generated_drift,
+    compare_generated_snapshots,
     load_generated_artifact_baseline,
+    observe_generated_artifacts,
 )
 from harvest_gap_report import (
     DEFAULT_TOP,
@@ -155,6 +165,9 @@ TREE_ROOT = "."
 # Layer for an adjudicated working path that belongs to no `.Report`/`.SemanticModel` pair at all -
 # a `.pbip` project file, or anything under a unit the pairing could not reach.
 LAYER_BUNDLE = "bundle"
+
+# Raced paths named inline in the incomplete reason. The full list is always in `snapshot_race.moved`.
+RACE_PATHS_NAMED = 3
 
 
 class Pair(NamedTuple):
@@ -301,14 +314,25 @@ class Evidence:
         recorded: dict[str, str] | None,
         drift: dict[str, dict[str, Any]] | None,
         notes: list[str],
-        unavailable_reason: str | None = None,
+        snapshot: GeneratedArtifactSnapshot | None = None,
     ) -> None:
         self.bundle = bundle
         self.recorded = recorded or {}
         self.drift = drift or {}
         self.notes = notes
-        self.unavailable_reason = unavailable_reason
-        self.usable = unavailable_reason is None
+        self.unavailable_reason: str | None = None
+        self.usable = True
+        # The exact inventory read `drift` was adjudicated from. Kept so the caller can prove, AFTER
+        # the trees have been compared, that the two operations describe one state of the bundle.
+        self.snapshot = snapshot
+
+    @classmethod
+    def unavailable(cls, bundle: Path, reason: str, note: str) -> Evidence:
+        """Evidence that cannot attribute anything, and says why."""
+        evidence = cls(bundle, None, None, [note])
+        evidence.unavailable_reason = reason
+        evidence.usable = False
+        return evidence
 
     def state(self, relative: str) -> str:
         """`match`, `drift_<kind>`, `unrecorded` or `unavailable` for one bundle-relative path."""
@@ -361,7 +385,7 @@ class Evidence:
 
 
 def _unavailable(bundle: Path, reason: str, note: str) -> Evidence:
-    return Evidence(bundle, None, None, [note], unavailable_reason=reason)
+    return Evidence.unavailable(bundle, reason, note)
 
 
 def _unusable_baseline(generated: dict[str, Any] | None) -> tuple[str, str] | None:
@@ -418,7 +442,8 @@ def _load_evidence(bundle: Path) -> Evidence:
     if unusable is not None:
         return _unavailable(bundle, *unusable)
     try:
-        adjudicated = adjudicate_generated_drift(bundle, generated)
+        snapshot = observe_generated_artifacts(bundle, generated["files"])
+        adjudicated = adjudicate_generated_drift(bundle, generated, snapshot)
     except UnreadableDeclarations as exc:
         return _unavailable(
             bundle,
@@ -440,13 +465,7 @@ def _load_evidence(bundle: Path) -> Evidence:
             f"{len(drift)} generated artifact(s) moved after the engine ran, adjudicated by "
             "`check_migration_progress.adjudicate_generated_drift` - the same machinery `--tamper` uses."
         )
-    return Evidence(bundle, dict(generated["files"]), drift, notes)
-
-
-def _unit_names(directory: Path, suffix: str) -> dict[str, Path]:
-    if not directory.is_dir():
-        return {}
-    return {p.name[: -len(suffix)]: p for p in directory.iterdir() if p.is_dir() and p.name.endswith(suffix)}
+    return Evidence(bundle, dict(generated["files"]), drift, notes, snapshot=snapshot)
 
 
 def _safe_iterdir(directory: Path, failures: list[dict[str, str]]) -> list[Path]:
@@ -662,7 +681,17 @@ def _post_engine_records(
     return records
 
 
-def _unpaired_pair(target: str) -> Pair:
+def _artifact_key(target: str) -> tuple[str, str, str] | None:
+    """(artifact, layer, artifact-relative path) for a bundle path, from EITHER side of the bundle."""
+    parts = target.split("/")
+    for index, part in enumerate(parts):
+        for suffix, layer in ((".Report", LAYER_REPORT), (".SemanticModel", LAYER_MODEL)):
+            if part.endswith(suffix):
+                return part[: -len(suffix)], layer, "/".join(parts[index + 1 :])
+    return None
+
+
+def _unpaired_pair(target: str) -> tuple[Pair, str]:
     """Describe an adjudicated `pbip/` path that belongs to no discovered pair.
 
     `pbip/<unit>/<artifact>.Report/<rest>` still yields a usable unit/artifact/layer; a bare
@@ -671,10 +700,10 @@ def _unpaired_pair(target: str) -> Pair:
     """
     parts = target.split("/")
     unit = parts[1] if len(parts) > 2 else ""
-    for index, part in enumerate(parts):
-        for suffix, layer in ((".Report", LAYER_REPORT), (".SemanticModel", LAYER_MODEL)):
-            if part.endswith(suffix):
-                return Pair(part[: -len(suffix)], unit, layer, None, None), "/".join(parts[index + 1 :])
+    key = _artifact_key(target)
+    if key is not None:
+        artifact, layer, relative = key
+        return Pair(artifact, unit, layer, None, None), relative
     return Pair(parts[-1], unit, LAYER_BUNDLE, None, None), "/".join(parts[2:]) or parts[-1]
 
 
@@ -870,12 +899,80 @@ class Scan(NamedTuple):
     git_blind: list[dict[str, Any]]
 
 
+def _snapshot_race(evidence: Evidence) -> list[dict[str, Any]]:
+    """Re-read the inventory AFTER the comparison, and name everything that moved while we read.
+
+    ⚠️ **A report assembled from two filesystem snapshots is not merely partial - it is confidently
+    wrong.** Provenance is adjudicated before the trees are walked, so an artifact edited in between
+    is described by BOTH reads: the comparison sees the new bytes while the stale adjudication still
+    calls that path pristine, so the difference lands on the ENGINE. Measured (blind review round 6
+    of PR #399), one working-visual edit injected between the two produced `status=complete`,
+    `differing_files=1`, `engine_internal=1`, `tier_edits=0` and a clean markdown claim, while
+    `tamper_check()` returned `DRIFT` on the same bundle immediately after. Rounds 1-5 all fixed "the
+    report re-derived trust wrongly"; this is the INPUT to that fix being wrong, and trusting the
+    authoritative status cannot help when the authority is computed across a race.
+
+    DETECTION, not prevention, deliberately: user space cannot snapshot a filesystem atomically - a
+    single `os.walk` is itself a moving read - so "one snapshot" narrows the window without closing
+    it. A bundle CAN legitimately change under a long harvest; the answer is `incomplete` with the
+    paths named, never a verdict. A re-read that FAILS is itself a race (a file that vanished between
+    `is_file()` and the hash), so it is reported as one rather than raised.
+
+    Cost on `_runs/estate-2.339.0-20260829` (2,548 files / 2,481 recorded), both arms alternated in
+    one process: 12.2s -> 16.4s median, **+4.2s (+35%)**. One extra read, not two - adjudication now
+    consumes the FIRST read instead of taking its own.
+    """
+    if not evidence.usable or evidence.snapshot is None:
+        return []
+    try:
+        after = observe_generated_artifacts(evidence.bundle, evidence.recorded)
+    except (OSError, ValueError) as exc:
+        return [{"target": str(evidence.bundle), "kind": f"unreadable ({type(exc).__name__})"}]
+    return compare_generated_snapshots(evidence.snapshot, after)
+
+
+def _withdraw_raced(records: list[dict[str, Any]], raced: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Withdraw every AUTHORSHIP claim about a path whose two reads disagree.
+
+    `incomplete` alone is not enough: the defect is not a missing caveat but a positively wrong
+    attribution, so the claim itself is withdrawn to `unattributed` - the standing idiom, "the delta
+    is real; authorship is withheld, not guessed".
+
+    Matched on the artifact-relative triple as well as the literal paths, because a working file
+    DELETED mid-scan is recorded with `working_path=None` (read as the engine's own reference-only
+    emission) and would otherwise keep an `engine_internal` label the raced set cannot see. A shared
+    model copied into several units matches in all of them; over-withdrawal is the safe direction.
+    `baseline_tampered` is deliberately NOT withdrawn: it rests on a positive observation that a
+    baseline path had ALREADY drifted, and withdrawing it would drop the run from `untrustworthy` to
+    the weaker `incomplete`.
+    """
+    targets = {item["target"] for item in raced}
+    if not targets:
+        return records
+    keys = {key for key in (_artifact_key(target) for target in targets) if key is not None}
+    withdrawn = []
+    for record in records:
+        paths = {p for p in (record.get("baseline_path"), record.get("working_path")) if p}
+        touched = (record["artifact"], record["layer"], record["path"]) in keys or bool(paths & targets)
+        if touched and record["provenance"] in {PROV_ENGINE, PROV_TIER}:
+            record = record | {
+                "provenance": PROV_UNATTRIBUTED,
+                "post_engine": None,
+                "declared_by": None,
+                "snapshot_race": True,
+            }
+        elif touched:
+            record = record | {"snapshot_race": True}
+        withdrawn.append(record)
+    return withdrawn
+
+
 def _incomplete_reasons(
-    entries: list[dict[str, Any]],
-    unassessable: list[dict[str, str]],
+    scan: Scan,
     evidence: Evidence,
     coverage: dict[str, Any],
     unreconciled: list[dict[str, Any]],
+    raced: list[dict[str, Any]],
 ) -> list[str]:
     """Every reason this harvest does not cover the estate - NAMED, not collapsed into a boolean.
 
@@ -883,18 +980,26 @@ def _incomplete_reasons(
     consumer reading `incomplete` had to re-derive the cause from the rest of the payload.
     """
     reasons = []
-    if not entries:
+    if not scan.entries:
         reasons.append("no baseline/working pair was discovered at all")
-    if unassessable:
-        reasons.append(f"{len(unassessable)} path(s) could not be read or enumerated")
+    if scan.unassessable:
+        reasons.append(f"{len(scan.unassessable)} path(s) could not be read or enumerated")
     if unreconciled:
         reasons.append(f"{len(unreconciled)} adjudicated path(s) could not be placed")
+    if raced:
+        named = ", ".join(f"{item['target']} ({item['kind']})" for item in raced[:RACE_PATHS_NAMED])
+        reasons.append(
+            f"the bundle MOVED during this harvest: {len(raced)} generated artifact(s) differ between"
+            f" the read that attributed provenance and the read taken after the comparison - {named}."
+            " Every authorship claim touching them is withdrawn; re-run against a bundle nobody is"
+            " writing to."
+        )
     if not evidence.usable:
         reasons.append(f"attribution unavailable ({evidence.unavailable_reason})")
     if not coverage["complete"]:
         reasons.append(f"{coverage['paths_unattributed']} compared path(s) are unattributed")
     partial = sorted(
-        {e["status"] for e in entries if e["status"] in {PAIR_NO_BASELINE, PAIR_NO_WORKING, PAIR_UNASSESSABLE}}
+        {e["status"] for e in scan.entries if e["status"] in {PAIR_NO_BASELINE, PAIR_NO_WORKING, PAIR_UNASSESSABLE}}
     )
     if partial:
         reasons.append(f"partial pairing: {', '.join(partial)}")
@@ -955,18 +1060,20 @@ def harvest(bundle: Path) -> dict[str, Any]:
     baseline_drift = evidence.side_drift(BASELINE_ROOTS)
 
     scan = _scan_pairs(bundle, evidence)
-    entries, records, unassessable, git_blind = scan
+    # Every read this report rests on has now happened. Re-observe the inventory: if it moved while
+    # we were reading it, provenance was adjudicated against a bundle that no longer exists.
+    raced = _snapshot_race(evidence)
 
     # The reconciliation that makes "no adjudicated path silently disappears" structural rather than
     # aspirational: every path the gate found must be named by a record, by `baseline_drift`, or by
     # `unreconciled_drift` - and the last of those forces a non-clean status.
-    unpaired_records, unreconciled = _unmatched_drift_records(evidence, _represented(records, baseline_drift))
-    records = records + unpaired_records
+    unpaired, unreconciled = _unmatched_drift_records(evidence, _represented(scan.records, baseline_drift))
+    records = _withdraw_raced(scan.records + unpaired, raced)
 
     provenance = Counter(record["provenance"] for record in records)
     tampered = [r for r in records if r["provenance"] == PROV_TAMPERED]
     coverage = _coverage(records)
-    reasons = _incomplete_reasons(entries, unassessable, evidence, coverage, unreconciled)
+    reasons = _incomplete_reasons(scan, evidence, coverage, unreconciled, raced)
     status = _overall_status(tampered or baseline_drift, reasons)
 
     return {
@@ -984,7 +1091,8 @@ def harvest(bundle: Path) -> dict[str, Any]:
             "notes": evidence.notes,
         },
         "layers": {
-            layer: _layer_summary([e for e in entries if e["layer"] == layer]) for layer in (LAYER_REPORT, LAYER_MODEL)
+            layer: _layer_summary([e for e in scan.entries if e["layer"] == layer])
+            for layer in (LAYER_REPORT, LAYER_MODEL)
         },
         "provenance": {name: provenance.get(name, 0) for name in PROVENANCES} | {"differing_files": len(records)},
         "shapes": _shape_rows(records, len(records)),
@@ -992,14 +1100,24 @@ def harvest(bundle: Path) -> dict[str, Any]:
         "baseline_tampered": tampered,
         "baseline_drift": baseline_drift,
         "baseline_roots": list(BASELINE_ROOTS),
-        "unpaired_drift_records": len(unpaired_records),
+        "unpaired_drift_records": len(unpaired),
         "unreconciled_drift": unreconciled,
-        "pairs": entries,
-        "unassessable": unassessable,
+        "snapshot_race": {
+            "count": len(raced),
+            "moved": raced,
+            "note": (
+                "generated artifacts that differ between the read provenance was adjudicated from and"
+                " a read taken after the comparison. Non-empty means this report describes TWO states"
+                " of the bundle: it is `incomplete`, and every authorship claim touching these paths"
+                " is withdrawn to `unattributed`."
+            ),
+        },
+        "pairs": scan.entries,
+        "unassessable": scan.unassessable,
         "git_blind_spot": {
-            "count": len(git_blind),
+            "count": len(scan.git_blind),
             "path_max": GIT_READABLE_PATH_MAX,
-            "pairs": git_blind,
+            "pairs": scan.git_blind,
             "note": (
                 "these pairs exceed the longest path git read on the measured corpus; the command"
                 " AGENTS.md mandates returns exit 1 with NO stat line for them. They ARE assessed"
