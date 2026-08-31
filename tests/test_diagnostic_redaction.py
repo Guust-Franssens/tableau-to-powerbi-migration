@@ -869,6 +869,105 @@ def test_the_declared_seeds_all_exist(module):
         assert not missing, f"{module}:{func}() declared seed parameters that do not exist: {missing}"
 
 
+def _star_arg_functions(tree: ast.AST) -> list[str]:
+    """Functions the taint analyser cannot follow into, because it maps args onto named parameters."""
+    return [f.name for f in _functions(tree) if f.args.vararg or f.args.kwarg]
+
+
+def test_the_star_arg_detector_actually_detects():
+    """⚠️ Positive control, because the gate below SURVIVED a mutation that disabled it.
+
+    It survived for an honest reason -- the guarded modules contain no `*args`, so switching the check
+    off changes nothing today. But an assertion that cannot fail is not coverage, and this project has
+    already shipped one unkillable guard. So the DETECTOR is tested here against a module that does use
+    the construct, and the gate below is left as the forward-looking guard it is.
+    """
+    assert _star_arg_functions(ast.parse("def f(*args):\n    pass\n")) == ["f"]
+    assert _star_arg_functions(ast.parse("def f(**kw):\n    pass\n")) == ["f"]
+    assert _star_arg_functions(ast.parse("def f(a, b=1, *, c=2):\n    pass\n")) == []
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_the_analyser_cannot_follow_star_args_so_the_guarded_modules_may_not_use_them(module):
+    """The boundary, enforced rather than documented.
+
+    `taint_module` maps a call's positional arguments onto the callee's declared parameters, so a
+    `*args`/`**kwargs` forwarder is a hole it cannot see through (measured: a `def helper(*args)`
+    forwarder produces an empty finding list). Rather than teach the analyser a construct these
+    modules do not use, the construct is forbidden here -- the same closed-allowlist move that
+    replaced `safe_slug`.
+    """
+    offenders = _star_arg_functions(ast.parse((REPO / module).read_text(encoding="utf-8")))
+    assert not offenders, (
+        f"{module}: {offenders} use *args/**kwargs, which the taint analyser cannot follow. "
+        "Name the parameters, or extend `taint_module` and delete this test."
+    )
+
+
+def _guarded_imports(tree: ast.AST) -> dict[str, str]:
+    """name-used-in-this-module -> the guarded module it came from (aliased or `from X import y`)."""
+    stems = {Path(m).stem: m for m in MODULES}
+    found: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in stems:
+                    found[alias.asname or alias.name] = stems[alias.name]
+        elif isinstance(node, ast.ImportFrom) and node.module in stems:
+            for alias in node.names:
+                found[alias.asname or alias.name] = stems[node.module]
+    return found
+
+
+@pytest.mark.parametrize("module", MODULES)
+def test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed(module):
+    """Taint propagation is INTRA-module, so a call into another guarded module is the boundary.
+
+    That boundary is crossed exactly once today -- `capability.format_matches(kind, payload, ...)` --
+    and `format_matches` declares `{"body", "content_type"}` in TAINT_SEEDS, so the value is re-seeded
+    on arrival. This test is what stops the next such call being added without one, which would let
+    tainted data enter a module with no seed and therefore no findings at all.
+
+    ⚠️ It covers calls whose callee is IMPORTED from a guarded module, in either spelling
+    (`capability.format_matches(...)` and a bare `summarise_csv(...)`). It cannot see a callee reached
+    through a variable or a dispatch table; no such call exists in these modules.
+    """
+    source = (REPO / module).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = _guarded_imports(tree)
+    tainted = taint_module(source, module)
+    targets = {m: ast.parse((REPO / m).read_text(encoding="utf-8")) for m in set(imported.values())}
+    undeclared = []
+    for func in _functions(tree):
+        local = tainted.get(func.name, set())
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+            owner = None
+            if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                owner = imported.get(node.func.value.id)
+            elif isinstance(node.func, ast.Name):
+                owner = imported.get(node.func.id)
+            if owner is None or name is None:
+                continue
+            callee = next((f for f in _functions(targets[owner]) if f.name == name), None)
+            if callee is None:
+                continue
+            params = _param_names(callee)
+            declared = TAINT_SEEDS.get((owner, name), set())
+            for index, arg in enumerate(node.args):
+                if _roots(arg) & local and index < len(params) and params[index] not in declared:
+                    undeclared.append(f"{func.name}() -> {owner}:{name}() parameter {params[index]!r}")
+            for keyword in node.keywords:
+                if keyword.arg and _roots(keyword.value) & local and keyword.arg not in declared:
+                    undeclared.append(f"{func.name}() -> {owner}:{name}() keyword {keyword.arg!r}")
+    assert not sorted(set(undeclared)), (
+        f"{module} passes response-derived data across a module boundary into a parameter with no "
+        f"declared taint seed, so it arrives untracked: {sorted(set(undeclared))}. Add it to TAINT_SEEDS."
+    )
+
+
 @pytest.mark.parametrize("module", MODULES)
 def test_the_certification_list_has_no_stale_entries(module):
     """A certification for an expression that no longer reaches an exit is a claim about nothing."""

@@ -339,6 +339,22 @@ def test_a_view_whose_identifier_is_not_a_luid_is_refused_not_named(tmp_path):
     assert not list(tmp_path.rglob("*.csv"))
 
 
+def test_a_luid_that_IS_one_of_our_credentials_is_refused_too(tmp_path):
+    """Closes the one residual the LUID allowlist leaves on its own.
+
+    The shape check alone says "this is a UUID", not "this is not a credential". Measured against the
+    live site, none of ours could pass it -- PAT secret, PAT name and session token are 57/20/92
+    characters and none is hex-and-dash-only -- so this is belt and braces. It is what makes the claim
+    unconditional rather than true-of-today's-credentials.
+    """
+    luid = "eb00995d-1ff1-4a42-9ac9-28846f861d31"
+    session = FakeSession([(200, "a\n1\n", {})])
+    session.token = luid
+    record = oracle.capture_view(session, {"id": luid, "name": "V"}, tmp_path, frozenset())
+    assert record["data"]["status"] == oracle.CREDENTIAL_REFLECTED
+    assert not list(tmp_path.rglob("*.csv"))
+
+
 # ------------------ #405 round 3, finding 2: the api override changed a signature every double copies
 
 

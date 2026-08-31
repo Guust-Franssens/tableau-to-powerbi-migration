@@ -571,6 +571,19 @@ def capture_view(
         # candidate string on this record came out of a Tableau response.
         record["data"] = {"status": "failed", "error": str(exc), "detail": "unusable view identifier"}
         return record
+    if session.reflected_credential(stem.encode("utf-8")):
+        # Closes the ONE residual the LUID allowlist leaves: a credential that is itself UUID-shaped
+        # AND returned as a view id. Measured against the live site, none of ours is close -- the PAT
+        # secret, PAT name and session token are 57/20/92 characters and none is hex-and-dash-only --
+        # so this is belt and braces. It is worth the two lines because it turns "no credential we
+        # happen to hold can pass the allowlist" into "no credential can", which is the difference
+        # between a claim that is true today and one that is true by construction.
+        record["data"] = {
+            "status": CREDENTIAL_REFLECTED,
+            "error": "the view identifier IS one of our own credentials",
+            "detail": "refusing to build an artifact path from it; investigate what is reflecting request data",
+        }
+        return record
 
     record["data"] = _capture_data(session, view_luid, out_dir / "data" / f"{stem}.csv", out_dir)
     if record["data"]["status"] != "ok":
