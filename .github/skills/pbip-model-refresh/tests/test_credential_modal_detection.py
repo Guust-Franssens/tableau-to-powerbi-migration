@@ -3507,15 +3507,25 @@ def _assert_convicts_once_the_window_is_readable(
     * a reason in ``forbidden_reasons`` -> **fail**. Caller-specific regressions, e.g. `truncated` at
       the shipped cap of 2000 against a 451-element window, which cannot happen honestly.
     * anything else (`no-payload`, `patterns-incomplete`, `bad-schema`) -> the harvest never delivered,
-      so the subject was not reachable. Retry once, then SKIP saying so.
+      so the subject was not reachable. Retry, then SKIP saying so.
+    * no `harvest=` line at all -> the probe never observed a dialog (the fixture app had not shown its
+      window yet). Also not reachable, and also a retry rather than a verdict.
+
+    ⚠️ **`require_refresh_invoked=False` is load-bearing, not tidying.** The helper's own
+    `pytest.skip` fires the moment the fixture exposes no invokable `Refresh`, and a skip inside a
+    retry loop ABORTS the test rather than continuing it - so with the helper's default this function
+    got ONE attempt, not three. Measured 2026-08-31 against a simulated cap regression
+    (`$HarvestMaxElements` defaulted to 400): 1 of 3 runs failed correctly and the other 2 skipped on
+    fixture startup, before ever reaching the subject. Owning that skip here is what makes the retry
+    real.
 
     What is never conditional: `CREDENTIAL_PRESENT` / exit 0 is asserted against on EVERY attempt,
     before any skip. A harvest that missed the credential text being reported clean is the one outcome
     that must never happen, so it can never be excused as contention.
     """
     reason = "the probe never observed a dialog"
-    for _ in range(2):
-        done = _run_probe_against_wpf_modal(tmp_path, modal_body, extra_args)
+    for _ in range(3):
+        done = _run_probe_against_wpf_modal(tmp_path, modal_body, extra_args, require_refresh_invoked=False)
 
         assert "CREDENTIAL_PRESENT" not in done.stdout, (
             f"a harvest that missed the credential text was reported CLEAN:\n{done.stdout}"
@@ -3526,14 +3536,16 @@ def _assert_convicts_once_the_window_is_readable(
             return
 
         match = re.search(r"harvest=(\S+) items=(\d+)", done.stdout)
-        assert match, f"the probe must report WHY it could not finish, or this test cannot judge:\n{done.stdout}"
+        if not match:
+            reason = "the probe never observed a dialog"
+            continue
         reason = match.group(1)
         assert reason != "complete", (
             f"the harvest COMPLETED and still did not convict - that is a recall defect, not contention:\n{done.stdout}"
         )
         assert reason not in forbidden_reasons, f"forbidden harvest reason {reason!r} - a regression:\n{done.stdout}"
 
-    pytest.skip(f"could not reach the subject: the UIA harvest never delivered ({reason}) in 2 attempts")
+    pytest.skip(f"could not reach the subject in 3 attempts ({reason})")
 
 
 @pytest.mark.serial

@@ -339,6 +339,27 @@ stay byte-identical.
 > unconvicted harvest or a forbidden reason, and skips — saying why — only when the harvest never
 > delivered. `CREDENTIAL_PRESENT` at exit 0 is asserted against on every attempt and is never excused.
 >
+> ⛔ **"Assert only the BAND" is the right default and the WRONG fix for this one test**, and the
+> distinction is measurable rather than a matter of taste. The helper's own docstring advises band
+> assertions, and for its siblings that is correct. But this test's subject *is* the element cap, so a
+> band assertion cannot tell "the cap works" from "the harvest timed out" — it would be credited as
+> coverage while testing nothing. Nor can the simpler precondition *"incomplete → skip"*: a `truncated`
+> harvest at the shipped cap **is** the regression, so that rule skips on the exact signature of the
+> defect. Proven by simulating the regression (`$HarvestMaxElements` defaulted to 400):
+>
+> | test shape | detects a real cap regression |
+> |---|---|
+> | assert the band only | never — `DIALOG_UNREADABLE` is in the band |
+> | skip on any `INCOMPLETE` | never — it skips on `truncated` |
+> | **reason-aware, retry ×3** | **3 / 3 runs failed, named** |
+>
+> ⚠️ **The retry count is load-bearing and the first version got it wrong.** With the helper's default
+> `require_refresh_invoked=True`, its internal `pytest.skip` fires on fixture-startup lag and a skip
+> *aborts* the test rather than continuing the loop — so the first implementation got one attempt, not
+> three, and detected the simulated regression in only **1 of 3** runs. Owning that skip
+> (`require_refresh_invoked=False`) took it to **3 of 3**, and took the unmutated serial suite from
+> 5 passed / 3 skipped to **8 passed / 0 skipped**.
+>
 > ✅ **The Python fast check now classifies too (issue #376).** `_credential_modal` had the same
 > size-only defect on a **more dangerous** path: `inspect_credential_modal` returned the first visible
 > non-main window >= 100x100 as a `blocking_dialog`, and `refresh_pbip_model.py` /
