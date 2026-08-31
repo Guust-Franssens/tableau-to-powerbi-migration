@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from ctypes import wintypes
 from pathlib import Path
 
@@ -3581,16 +3582,25 @@ def _run_probe_against_wpf_modal(
 
 
 def _assert_convicts_once_the_window_is_readable(
-    tmp_path: Path, modal_body: str, extra_args: list[str] | None = None, forbidden_reasons: tuple[str, ...] = ()
+    run: Callable[[], subprocess.CompletedProcess], forbidden_reasons: tuple[str, ...] = ()
 ) -> None:
     """Assert a hard stop, but only on an attempt that actually READ the window.
 
+    ⚠️ **``run`` is a zero-argument closure, and that shape is load-bearing.**
+    ``tests/test_parallel_test_loop.py`` derives which tests drive live UI by AST-walking each test
+    function for a call to ``_run_probe_against_wpf_modal`` (or the ``-ReadyFile`` constant) - and it is
+    right to derive rather than keep a name list. An earlier version of this helper took the fixture
+    body and called the runner ITSELF, one level of indirection the gate cannot follow, which silently
+    dropped three genuinely-live tests out of the serial tier: measured, ``5 >= 7`` failed and the
+    deselect count fell from 14 to 11. Keeping the live call inside each test's own body fixes that
+    without touching the gate; the helper only decides how many times to invoke it and how to judge the
+    result.
+
     ⚠️ **The defect class this exists to remove, found three times in this file.** A test asserting
-    `VERDICT: CREDENTIAL_MISSING` is asserting an outcome that is only reachable when the UIA harvest
+    `VERDICT: CREDENTIAL_MISSING` is asserting an outcome only reachable when the UIA harvest
     COMPLETES - and none of them established that precondition. Under load the harvest child is killed,
-    the probe correctly reports `DIALOG_UNREADABLE` (it found the window and refused to assert either
-    "credential wall" or "no modal appeared"), and the test fails for a reason that has nothing to do
-    with its subject. Measured 2026-08-31, in one 21-minute run, two separate tests hit it.
+    the probe correctly reports `DIALOG_UNREADABLE`, and the test fails for a reason unrelated to its
+    subject.
 
     ⛔ **Loosening the assertion to accept `DIALOG_UNREADABLE` would be worse than the flake** - the
     test would then be unable to fail for its subject while still being credited as coverage. So this
@@ -3601,18 +3611,7 @@ def _assert_convicts_once_the_window_is_readable(
       credential text; that is a real recall defect, which is exactly what these tests are for.
     * a reason in ``forbidden_reasons`` -> **fail**. Caller-specific regressions, e.g. `truncated` at
       the shipped cap of 2000 against a 451-element window, which cannot happen honestly.
-    * anything else (`no-payload`, `patterns-incomplete`, `bad-schema`) -> the harvest never delivered,
-      so the subject was not reachable. Retry, then SKIP saying so.
-    * no `harvest=` line at all -> the probe never observed a dialog (the fixture app had not shown its
-      window yet). Also not reachable, and also a retry rather than a verdict.
-
-    ⚠️ **`require_refresh_invoked=False` is load-bearing, not tidying.** The helper's own
-    `pytest.skip` fires the moment the fixture exposes no invokable `Refresh`, and a skip inside a
-    retry loop ABORTS the test rather than continuing it - so with the helper's default this function
-    got ONE attempt, not three. Measured 2026-08-31 against a simulated cap regression
-    (`$HarvestMaxElements` defaulted to 400): 1 of 3 runs failed correctly and the other 2 skipped on
-    fixture startup, before ever reaching the subject. Owning that skip here is what makes the retry
-    real.
+    * anything else, or no `harvest=` line at all -> the subject was not reachable. Retry, then SKIP.
 
     What is never conditional: `CREDENTIAL_PRESENT` / exit 0 is asserted against on EVERY attempt,
     before any skip. A harvest that missed the credential text being reported clean is the one outcome
@@ -3620,7 +3619,7 @@ def _assert_convicts_once_the_window_is_readable(
     """
     reason = "the probe never observed a dialog"
     for _ in range(3):
-        done = _run_probe_against_wpf_modal(tmp_path, modal_body, extra_args, require_refresh_invoked=False)
+        done = run()
 
         assert "CREDENTIAL_PRESENT" not in done.stdout, (
             f"a harvest that missed the credential text was reported CLEAN:\n{done.stdout}"
@@ -3646,7 +3645,9 @@ def _assert_convicts_once_the_window_is_readable(
 @pytest.mark.serial
 def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_path: Path) -> None:
     """Exploit 1. `Name` + `ValuePattern` alone miss a read-only RichTextBox's content entirely."""
-    _assert_convicts_once_the_window_is_readable(tmp_path, _MODAL_TEXTPATTERN_ONLY)
+    _assert_convicts_once_the_window_is_readable(
+        lambda: _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY, require_refresh_invoked=False)
+    )
 
 
 @pytest.mark.serial
@@ -3693,7 +3694,8 @@ def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(
     never happen, so it can never be excused as contention.
     """
     _assert_convicts_once_the_window_is_readable(
-        tmp_path, _MODAL_PAST_THE_ELEMENT_CAP, forbidden_reasons=("truncated", "truncated+patterns-incomplete")
+        lambda: _run_probe_against_wpf_modal(tmp_path, _MODAL_PAST_THE_ELEMENT_CAP, require_refresh_invoked=False),
+        forbidden_reasons=("truncated", "truncated+patterns-incomplete"),
     )
 
 
@@ -3753,7 +3755,9 @@ def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path
     Same precondition discipline as its two siblings: the join can only be exercised on an attempt
     that actually read the window.
     """
-    _assert_convicts_once_the_window_is_readable(tmp_path, _MODAL_INTERPOSED_SPLIT)
+    _assert_convicts_once_the_window_is_readable(
+        lambda: _run_probe_against_wpf_modal(tmp_path, _MODAL_INTERPOSED_SPLIT, require_refresh_invoked=False)
+    )
 
 
 @pytest.mark.serial
