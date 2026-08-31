@@ -205,11 +205,7 @@ from bundle_corpus import shipping_reports
 from check_field_bindings import FieldRef, _source_scope, _walk, model_for_report
 from check_stub_measures import parse_model
 from dax_grain import (
-    GRAIN_DATE,
-    GRAIN_DERIVED,
-    GRAIN_SUSPECT,
     GRAIN_UNRELATED,
-    AsOfCall,
     ColumnRef,
     Cumulative,
     ModelFacts,
@@ -420,107 +416,6 @@ def _judge_one_window(call: WindowCall, visual: VisualBinding) -> dict[str, Any]
     )
 
 
-def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-    survivors: list[FieldRef],
-    compared: ColumnRef,
-    call: AsOfCall,
-    facts: ModelFacts,
-    axis: str,
-    anchor_projected: bool,
-) -> dict[str, Any] | None:
-    """Grade the survivors that sit on the anchor's own table, or None when none of them decide it.
-
-    The verdict turns on TWO further questions, both of which used to be skipped.
-
-    **Is the addressed date itself on the visual?**
-
-    * It is NOT -> a coarser-only axis. `MAX(t[c])` then evaluates to the end of the bucket, the
-      accumulation spans the whole bucket, and the "running total" is that bucket's own total.
-      Mismatch - this is the measured S14 defect.
-    * It IS -> the survivor PARTITIONS the accumulation instead of collapsing it. Measured on the
-      estate's unmarked fact model: the canonical as-of on `Orders.csv[Order_Date]` with
-      `Order Date (Year)` as the series accumulates `10 -> 30`, resets, `100 -> 300`. Calling that
-      "each bucket's own total" is simply false, and it blocked a correct report (review finding 5).
-      It is also not provably RIGHT - a year-restarting running total is a deliberate Tableau shape,
-      and an accidental legend produces identical bytes - so it is `unassessable`, never a pass.
-
-    **Does the BOUND ITSELF clear this grouping column?** (round 4 finding 1) If it does, the cutoff
-    cannot move from one of that column's buckets to the next, so the measure is an ordinary
-    fixed-cutoff bucket measure and this gate has no standing over it - exactly as it has none over
-    `<= DATE(2024,12,31)`. Whether the bound moves is therefore NOT a property of the DAX alone; it
-    is decided here, against the visual, which is why `AsOfCall` carries the removed references.
-    That acquittal is itself conditional on the FIRST question: with the addressed date projected,
-    the bound is already pinned to one day and the removal changes nothing, so the partition reading
-    wins. Found by auditing the fix rather than by the reviewer - measured, it was a silent `ok`.
-    """
-    same_table = [ref for ref in survivors if ref.entity.casefold() == (compared.table or "").casefold()]
-    # Keyed by the casefolded (table, column) tuple, NOT by the FieldRef: `check_field_bindings`'
-    # dataclass is mutable and therefore unhashable, and using it as a dict key raised TypeError at
-    # runtime - which exits 1, i.e. indistinguishable from a mismatch to any caller reading only the
-    # exit code. Caught because the crashing run printed nothing on stdout.
-    graded = {
-        ColumnRef(ref.entity, ref.prop).key(): facts.grain_of(ColumnRef(ref.entity, ref.prop), compared)
-        for ref in same_table
-    }
-    proven = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] in (GRAIN_DATE, GRAIN_DERIVED)]
-    # A bound removal only acquits when the addressed date is NOT itself projected. When it IS, the
-    # bound is still the current row's date - removing the coarser column's filter cannot change a
-    # MAX already pinned to one day - so the accumulation runs inside each bucket and the partition
-    # reading below is the right one, whatever the bound removes.
-    pinned = [] if anchor_projected else [r for r in proven if call.pins(r.entity, r.prop)]
-    pinned_keys = {ColumnRef(r.entity, r.prop).key() for r in pinned}
-    moving = [r for r in proven if ColumnRef(r.entity, r.prop).key() not in pinned_keys]
-    if moving:
-        named = ", ".join(f"'{r.entity}'[{r.prop}] ({graded[ColumnRef(r.entity, r.prop).key()]})" for r in moving)
-        if anchor_projected:
-            return _verdict(
-                "unassessable",
-                "axis_partitions_accumulation",
-                f"grouping column(s) {named} sit on {compared.qualified()}'s table and are NOT cleared, "
-                f"but {compared.qualified()} is itself projected, so the accumulation still runs along it "
-                "and RESTARTS at each bucket boundary. That is a legitimate period-partitioned running "
-                "total when it was asked for and a defect when it was not, and nothing in the artifacts "
-                "says which - compare the values against Tableau, or probe with EVALUATE",
-                compared=compared.qualified(),
-                cleared=[ref.qualified() for ref in call.cleared_columns],
-                axis=axis,
-            )
-        return _verdict(
-            "mismatch",
-            "axis_grain_not_cleared",
-            f"grouping column(s) {named} sit on {compared.qualified()}'s table and are NOT cleared, and "
-            f"{compared.qualified()} is not projected either, so the surviving filter restricts the rows "
-            "to that bucket and the running total becomes the bucket's own total",
-            compared=compared.qualified(),
-            cleared=[ref.qualified() for ref in call.cleared_columns],
-            axis=axis,
-        )
-    suspect = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] == GRAIN_SUSPECT]
-    if suspect:
-        return _verdict(
-            "unassessable",
-            "axis_grain_unresolved",
-            "grouping column(s) "
-            + ", ".join(f"'{r.entity}'[{r.prop}]" for r in suspect)
-            + f" sit on {compared.qualified()}'s table and are named like a date grain, but nothing in "
-            "the model proves it - no declared date type and no calculated lineage back to the anchor. "
-            "Probe it with EVALUATE",
-        )
-    if pinned:
-        return _verdict(
-            "ok",
-            "bound_pinned_across_axis",
-            "the as-of bound removes the filter from grouping column(s) "
-            + ", ".join(f"'{r.entity}'[{r.prop}]" for r in pinned)
-            + ", so the cutoff cannot move from one of their buckets to the next; this is an ordinary "
-            "fixed-cutoff measure whose per-bucket totals are its point, not a collapsed accumulation",
-            compared=compared.qualified(),
-            bound_removes=[ref.qualified() for ref in call.bound_removed_columns],
-            axis=axis,
-        )
-    return None
-
-
 _VERDICT_PRECEDENCE = ("mismatch", "unassessable", "ok")
 
 
@@ -543,65 +438,31 @@ def _worst(verdicts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
-    """As-of filter: judge EVERY as-of call in the measure independently, worst verdict wins.
+    """As-of restrictions are DISCLOSED, never judged. Always `unassessable`, one per detection.
 
-    Independently is the load-bearing word. Reading only the first call - or, equivalently, judging
-    a UNION of every call's cleared columns - lets a term that clears `Order_Date` AND
-    `Order Date (Month)` supply the month clearance for a second term that clears neither, and the
-    second term is the one that degenerates (round 2 finding 3).
+    Round 5 deleted `_judge_same_table_survivors` and everything it consumed - the cleared-set
+    arithmetic, the grain grading of each survivor, the `anchor_projected` partition reading, and
+    the `AsOfCall.pins` acquittal. All of it rested on `dax_grain` having decided whether the bound
+    MOVES with the visual, and that decision is not derivable from DAX text: measured,
+    `IF(TRUE(), MAX(d), CALCULATE(MAX(d), REMOVEFILTERS(<the axis>)))` returned **OK** on a broken
+    measure, because the removal in the UNREACHABLE branch was unioned into the acquittal.
+
+    `visual` and `facts` stay in the signature because `_judge` calls all three mechanisms
+    uniformly, and because the reason text names the axis the reader has to probe.
     """
-    grouping, blocked = _grouping_or_reason(visual)
-    if blocked is not None:
-        return blocked
-    return _worst([_judge_one_as_of(call, grouping, visual, facts) for call in cumulative.as_of_calls])
-
-
-def _judge_one_as_of(
-    call: AsOfCall, grouping: list[FieldRef], visual: VisualBinding, facts: ModelFacts
-) -> dict[str, Any]:
-    """One as-of restriction against one visual: does a grouping column survive its `ALL(...)`?
-
-    "Surviving" is decided from EVERY grouping column, not from a curated axis-role list, and
-    "is it a date grain" is decided from lineage as well as declared type. Both of those used to be
-    proxies, and both let real defects through - see `AXIS_ROLES` and `dax_grain.ModelFacts`.
-    """
-    if not call.assessable:
-        return _verdict("unassessable", "as_of_filter", call.reason)
-    compared = call.compared
-    if compared is None:
-        return _verdict("unassessable", "as_of_filter", "the as-of restriction names no compared column")
-    cleared = {ref.key() for ref in call.cleared_columns} | {compared.key()}
-    cleared_tables = {name.casefold() for name in call.cleared_tables}
-    survivors = [
-        ref
-        for ref in grouping
-        if ColumnRef(ref.entity, ref.prop).key() not in cleared and ref.entity.casefold() not in cleared_tables
-    ]
-    caveat = _hierarchy_caveat(visual)
-    if not survivors:
-        return caveat or _verdict(
-            "ok", "axis_cleared", "every grouping column is cleared by the as-of filter or is the compared column"
-        )
-    anchor_projected = any(ColumnRef(ref.entity, ref.prop).key() == compared.key() for ref in grouping)
-    decided = _judge_same_table_survivors(survivors, compared, call, facts, _axis_text(visual), anchor_projected)
-    if decided is not None:
-        return decided
-    cross_table = [ref for ref in survivors if ref.entity.casefold() != (compared.table or "").casefold()]
-    if cross_table:
-        return _verdict(
-            "unassessable",
-            "cross_table_axis",
-            "grouping column(s) "
-            + ", ".join(f"'{r.entity}'[{r.prop}]" for r in cross_table)
-            + f" are on another table than {compared.qualified()}; whether their filter reaches the "
-            "aggregated rows depends on the relationship graph - probe it with EVALUATE",
-        )
-    return caveat or _verdict(
-        "ok",
-        "axis_not_a_date_grain",
-        "the surviving grouping column(s) are neither date-typed nor derived from "
-        f"{compared.qualified()}; a running total partitioned by a non-date column is a legitimate shape",
-        not_flagged=[f"'{r.entity}'[{r.prop}]" for r in survivors],
+    del facts  # model facts cannot answer a question about DAX branch reachability
+    axis = _axis_text(visual)
+    return _worst(
+        [
+            _verdict(
+                "unassessable",
+                "as_of_filter",
+                f"{call.reason}. Axis is {axis}",
+                predicate=call.predicate,
+                axis=axis,
+            )
+            for call in cumulative.as_of_calls
+        ]
     )
 
 
