@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
+import re
 import sys
 from pathlib import Path
 
@@ -47,7 +49,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as cap  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import redacted_note, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 # --------------------------------------------------------------------------- the adversarial battery
 
@@ -364,6 +366,48 @@ def site_successful_csv_reflecting_the_session_token(secret, tmp_path, _mp):
     return _capture_and_read_everything(secret, tmp_path, (200, b""), frozenset(), session=session)
 
 
+def site_reflected_view_name(secret, tmp_path, _mp):
+    """⚠️ ROUND 6, finding 1. A view NAME comes from an authenticated `get_json`, which the export
+    seam never sees. It was slugged and truncated into the artifact FILENAME, so the prefix on disk was
+    no longer the literal any redactor could match -- and the same prefix reached the manifest.
+
+    Covers all three artifacts at once: the filename, the manifest, and (via caplog in the dedicated
+    test below) the console line, which also truncated the name before redacting it.
+    """
+    session = _Session("an-unrelated-long-pat-secret", (200, b""), data_reply=(200, b"a\n1\n"))
+    session.token = secret
+    view = {"id": "eb00995d-1ff1-4a42-9ac9-28846f861d31", "name": secret, "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset())
+    record["workbook_name"] = secret
+    counter = _Counter()
+    counter._redact = session.redact_text  # pylint: disable=protected-access
+    oracle.write_manifest([record], oracle.CaptureRun(counter, ENV, tmp_path, 0.0, frozenset()))
+    names = "\n".join(str(p) for p in sorted(tmp_path.rglob("*")))
+    return "\n".join([(tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"), names])
+
+
+def site_reflected_csv_column(secret, tmp_path, _mp):
+    """⚠️ ROUND 6, finding 2. A CSV column becomes a dict KEY in `format_hints` once the column has a
+    detected format, and a values-only sink walk left it in the manifest while redacting the identical
+    string one field over in `columns`.
+
+    ⚠️ Scoped to the MANIFEST on purpose, unlike its sibling sites, which also read the files. The
+    planted value here is the PAT **name**, and its presence in `data/<luid>.csv` is the residual this
+    project deliberately accepts -- refusing a capture because a column heading matches a human-chosen
+    PAT name would kill legitimate estates. That residual is pinned by
+    `test_the_pat_name_is_KNOWN_to_survive_in_the_csv_on_disk`, so it is a stated decision with its own
+    failing test rather than a hole this site quietly steps around.
+    """
+    session = _Session("an-unrelated-long-pat-secret", (200, b""), pat_name=secret)
+    session.data_reply = (200, f"{secret}\n19.5%\n".encode(), {})
+    record = oracle.capture_view(session, VIEW, tmp_path, frozenset())
+    record["workbook_name"] = "W"
+    counter = _Counter()
+    counter._redact = session.redact_text  # pylint: disable=protected-access
+    oracle.write_manifest([record], oracle.CaptureRun(counter, ENV, tmp_path, 0.0, frozenset()))
+    return (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+
+
 def site_capability_report(secret, _tmp, monkeypatch):
     """`render_capability` is serialised into the manifest, warnings and per-tier details included."""
     monkeypatch.setattr(cap, "server_info", lambda *_a, **_k: {"rest_api_version": "3.30"})
@@ -401,6 +445,8 @@ SITES = {
     "written artifacts (successful /data)": site_successful_csv,
     "written artifacts (successful svg)": site_successful_svg,
     "written artifacts (session token reflected)": site_successful_csv_reflecting_the_session_token,
+    "written artifacts (reflected view NAME)": site_reflected_view_name,
+    "written artifacts (reflected CSV column)": site_reflected_csv_column,
     "render_capability report": site_capability_report,
     "pin warning": site_pin_warning,
 }
@@ -895,6 +941,62 @@ def test_a_clean_capture_reports_no_sink_redactions(tmp_path):
     _capture_and_read_everything("an-unrelated-long-pat-secret", tmp_path, (200, b""), frozenset())
     manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
     assert manifest["credential_scrubbed_at_sink"] == []
+
+
+# ---------------------------------------------------------- round 6: the CONSOLE is the third artifact
+
+
+def test_the_progress_line_redacts_a_view_name_before_it_truncates_it(caplog):
+    """`log_progress` sliced the name to 34 characters first, which is round 4's defect at a boundary
+    round 4 never considered. CI keeps its logs, so "only the terminal" is not a mitigation."""
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH_TO_BE_TRUNCATED"
+    session = _Session("an-unrelated-long-pat-secret")
+    session.token = token
+    record = {"view_name": token, "data": {"status": "ok", "row_count": 1, "elapsed_sec": 0.1}}
+    with caplog.at_level(logging.INFO, logger="tableau-oracle"):
+        oracle.log_progress(1, 1, record, session.redact_text)
+    assert longest_surviving_run(token, caplog.text) == ""
+    assert "[REDACTED]" in caplog.text
+
+
+def test_the_blocked_list_redacts_the_names_it_prints(caplog):
+    """`_log_blocked_and_stale` runs on the UNSCRUBBED records -- `scrub_tree` returns a copy -- so the
+    console would otherwise print exactly what the manifest was careful not to."""
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
+    session = _Session("an-unrelated-long-pat-secret")
+    session.token = token
+    blocked = [{"view_name": token, "workbook_name": token, "data": {"status": "source_credential", "detail": token}}]
+    with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
+        oracle._log_blocked_and_stale(blocked, blocked, None, session.redact_text)  # pylint: disable=protected-access
+    assert longest_surviving_run(token, caplog.text) == ""
+    assert "[REDACTED]" in caplog.text
+
+
+# --------------------------------------------- round 6: key scrubbing, collisions, and hit paths
+
+
+def test_scrub_tree_scrubs_dict_KEYS_not_only_values():
+    tree = {"format_hints": {"SECRET_COLUMN_42": "percent"}}
+    scrubbed, hits = scrub_tree(tree, lambda t: t.replace("SECRET_COLUMN_42", "[R]"))
+    assert scrubbed == {"format_hints": {"[R]": "percent"}}
+    assert hits == ["format_hints.[R] (key)"]
+
+
+def test_a_redaction_induced_key_collision_is_disambiguated_never_dropped():
+    """Two distinct keys can scrub to the same string; `dict` would keep the last and lose the rest,
+    turning a redaction into silent data loss."""
+    tree = {"SECRET_A": 1, "SECRET_B": 2, "kept": 3}
+    scrubbed, hits = scrub_tree(tree, lambda t: re.sub(r"SECRET_[AB]", "[R]", t))
+    assert scrubbed == {"[R]": 1, "[R]#2": 2, "kept": 3}, "no field may vanish into a collision"
+    assert len(hits) == 2
+
+
+def test_a_recorded_hit_path_never_contains_the_unsanitised_key():
+    """Otherwise the guard re-emits, in `credential_scrubbed_at_sink`, exactly what it just caught."""
+    tree = {"views": [{"format_hints": {"SECRET_COLUMN_42": "percent"}}]}
+    _scrubbed, hits = scrub_tree(tree, lambda t: t.replace("SECRET_COLUMN_42", "[R]"))
+    assert hits == ["views[0].format_hints.[R] (key)"]
+    assert "SECRET_COLUMN_42" not in " ".join(hits)
 
 
 def test_the_pat_name_is_KNOWN_to_survive_in_the_csv_on_disk(tmp_path):
