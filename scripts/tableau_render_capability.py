@@ -681,7 +681,9 @@ def sign_in(base: str, site: str, pat_name: str, pat_secret_value: str, api: str
         # added for the #403 probe, did not -- the one leak in this PR that master does not have.
         # Both the reason phrase and the body go through the chokepoint, which redacts each whole
         # value before anything truncates it.
-        redactor = lambda text: redact(text, pat_secret_value, pat_name)  # noqa: E731
+        def redactor(text: str) -> str:
+            return redact(text, pat_secret_value, pat_name)
+
         raise RuntimeError(
             f"Tableau sign-in failed: HTTP {exc.code} "
             f"{redacted_note(exc.reason, redactor, limit=120)} "
@@ -737,7 +739,7 @@ def _log_versions(info: dict[str, Any], configured: str) -> None:
 def _build_report(env, args, info) -> dict[str, Any]:
     """Sign in, probe, and return the capability report. Split out so ``main`` stays a thin shell."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from tableau_env import pat_secret, redact  # pylint: disable=import-outside-toplevel
+    from tableau_env import pat_secret  # pylint: disable=import-outside-toplevel
 
     base = env["TABLEAU_SERVER_URL"]
     configured = env.get("TABLEAU_REST_API_VERSION", "3.21")
